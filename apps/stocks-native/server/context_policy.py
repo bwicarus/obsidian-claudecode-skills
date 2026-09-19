@@ -59,25 +59,47 @@ def snapshot(context, now=None):
 def sections(context, audience):
     view = {key: context.get(key) for key in
             ('screen', 'selectedCode', 'selectedName', 'chartPeriod', 'chartPeriodID', 'viewState')}
+    state = context.get('viewState') or {}
+    card_ids = state.get('visibleCardIDs')
+    has_card_visibility = card_ids is not None
+    cards = {value for value in card_ids if isinstance(value, str)} if isinstance(card_ids, list) else set()
+    if has_card_visibility:
+        chart_visible = bool(cards.intersection({'chart', 'kline', 'intraday', 'klineChips'}))
+        allowed_metrics = set()
+        if 'quote' in cards or chart_visible:
+            allowed_metrics.update({'open', 'high', 'low', 'close', 'volume', 'turnover', 'turnoverRate'})
+        if 'macd' in cards:
+            allowed_metrics.add('macdHist')
+        if 'fund' in cards:
+            allowed_metrics.add('mainInflow')
+        order_book_visible = 'orderBook' in cards
+        if not chart_visible and state.get('chartViewport') is not None:
+            # A stale range summary must not survive a move to a page without a
+            # chart. Do not mutate the cached App snapshot while projecting it.
+            view['viewState'] = {**state, 'chartViewport': None}
+    else:
+        # Older clients describe fixed tabs and do not publish card IDs.
+        research_visible = (not state or state.get('detailTab') == 'research'
+                            or bool({'技术指标', '资金动向'}.intersection(context.get('visiblePanels') or [])))
+        chart_visible = not state or state.get('detailTab') == 'chart'
+        allowed_metrics = set(context.get('metrics') or {}) if research_visible else set()
+        order_book_visible = True
     metrics = context.get('metrics') or {}
     quote = {key: context.get(key) for key in ('quoteAsOf', 'quoteTime', 'quoteSource', 'latestPointTime')}
     quote['metrics'] = {key: metrics[key] for key in ('price', 'changePct') if key in metrics}
     chart = context.get('chart') or {}
-    selection = chart.get('selectedPoint') if chart.get('selectionSource') == 'cursor' else None
+    selection_visible = chart_visible if has_card_visibility else True
+    selection = chart.get('selectedPoint') if selection_visible and chart.get('selectionSource') == 'cursor' else None
     result = {'view': view, 'quote': quote, 'selection': selection or {},
               'requested': context.get('requestedData') or {},
               'actions': (context.get('recentActions') or [])[-(1 if audience == 'voice' else 3):]}
     if audience == 'backend':
-        state = context.get('viewState') or {}
-        research_visible = (not state or state.get('detailTab') == 'research'
-                            or bool({'技术指标', '资金动向'}.intersection(context.get('visiblePanels') or [])))
-        chart_visible = not state or state.get('detailTab') == 'chart'
         view['visiblePanels'] = context.get('visiblePanels') or []
         result.update(metrics={key: value for key, value in metrics.items()
-                               if key not in ('price', 'changePct') and research_visible},
+                               if key not in ('price', 'changePct') and key in allowed_metrics},
                       chart=chart if chart_visible else {},
                       annotations=(context.get('annotations') or {}) if chart_visible else {},
-                      orderBook=context.get('orderBook') or {})
+                      orderBook=(context.get('orderBook') or {}) if order_book_visible else {})
     return result
 
 

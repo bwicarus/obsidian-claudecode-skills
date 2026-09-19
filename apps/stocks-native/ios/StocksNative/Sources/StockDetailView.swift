@@ -3,7 +3,6 @@ import SwiftUI
 
 struct StockDetailView: View {
     @ObservedObject var model: AppModel
-    @State private var selectedTab: StockWorkspaceTab = .chart
 
     var body: some View {
         Group {
@@ -17,11 +16,9 @@ struct StockDetailView: View {
                             .padding(.horizontal, 22).padding(.bottom, 8)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    QuoteMetricGrid(stock: currentStock)
                     Divider()
-                    workspaceContent(detail: detail)
+                    StockWorkspaceView(model: model, detail: detail)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    workspaceDock
                 }
             } else if model.isLoadingDetail {
                 ProgressView("读取股票信息…").frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -38,34 +35,6 @@ struct StockDetailView: View {
             }
         }
         .background(AppStyle.canvas)
-        .onChange(of: model.selectedCode) { _, _ in selectedTab = .chart }
-        .onAppear { model.selectDetailTab(selectedTab.rawValue) }
-    }
-
-    @ViewBuilder
-    private func workspaceContent(detail: StockResponse) -> some View {
-        switch selectedTab {
-        case .chart:
-            GeometryReader { geometry in
-                ScrollView {
-                    StockMarketWorkspace(model: model, detail: detail, availableWidth: geometry.size.width - 36)
-                        .padding(18)
-                }
-                .refreshable { await refreshDetail() }
-            }
-        case .research:
-            ScrollView {
-                StockAnalyticsSections(model: model, detail: detail)
-                    .padding(22)
-            }
-            .refreshable { await refreshDetail() }
-        case .announcements:
-            ScrollView {
-                StockAnnouncementsSection(detail: detail)
-                    .padding(22)
-            }
-            .refreshable { await refreshDetail() }
-        }
     }
 
     private func quoteHeader(_ stock: Stock, sector: String?, asOf: String?) -> some View {
@@ -134,52 +103,10 @@ struct StockDetailView: View {
         }
     }
 
-    private var workspaceDock: some View {
-        HStack(spacing: 6) {
-            ForEach(StockWorkspaceTab.allCases) { tab in
-                Button {
-                    model.selectDetailTab(tab.rawValue)
-                    withAnimation(.easeInOut(duration: 0.16)) { selectedTab = tab }
-                } label: {
-                    Label(tab.title, systemImage: tab.symbol)
-                        .font(.subheadline.weight(.medium))
-                        .frame(maxWidth: .infinity).padding(.vertical, 7)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(selectedTab == tab ? AppStyle.accent : .secondary)
-                .background(selectedTab == tab ? AppStyle.accent.opacity(0.10) : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 10))
-                .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 9)
-        .background(.white)
-        .overlay(alignment: .top) { Divider() }
-    }
-
     private func refreshDetail() async {
         await model.loadDetail()
         await model.loadRealtime()
         await model.loadChart()
-    }
-}
-
-private enum StockWorkspaceTab: String, CaseIterable, Identifiable, Hashable {
-    case chart, research, announcements
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .chart: return "走势"
-        case .research: return "研究"
-        case .announcements: return "公告"
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .chart: return "chart.xyaxis.line"
-        case .research: return "waveform.path.ecg"
-        case .announcements: return "doc.text"
-        }
     }
 }
 
@@ -224,6 +151,11 @@ struct CandleChart: View {
     @ObservedObject var annotations: AnnotationStore
     let onContextChange: (VoiceChartSnapshot) async -> Void
     let onRangeChange: (Int) async -> Void
+    var chipDistribution: ChipDistributionResponse? = nil
+    var showsChips = false
+    var externalContext: VoiceChartContext? = nil
+    var currentPrice: Double? = nil
+    @State private var pricePlotFrame: CGRect = .zero
     @State private var window: Range<Int>?
     @State private var selectedTime: String?
     @State private var annotationMode = false
@@ -244,9 +176,15 @@ struct CandleChart: View {
     private var visible: [IndexedCandle] {
         visibleRange.map { IndexedCandle(id: $0, candle: candles[$0]) }
     }
+    private var indicators: [NativeIndicatorPoint] { NativeChartIndicators.calculate(candles) }
+    private var visibleIndicators: [NativeIndicatorPoint] { indicators.filter { visibleRange.contains($0.id) } }
+    private var inspectedIndicator: NativeIndicatorPoint? {
+        indicators.first { $0.id == inspected?.id }
+    }
     private var priceDomain: ClosedRange<Double> {
-        let minimum = visible.map(\.candle.low).min() ?? 0
-        let maximum = visible.map(\.candle.high).max() ?? 1
+        let averages = visibleIndicators.flatMap { [$0.ma5, $0.ma10, $0.ma20].compactMap { $0 } }
+        let minimum = (visible.map(\.candle.low) + averages).min() ?? 0
+        let maximum = (visible.map(\.candle.high) + averages).max() ?? 1
         let padding = max(max((maximum - minimum) * 0.10, maximum * 0.005), 0.01)
         return (minimum - padding)...(maximum + padding)
     }
@@ -306,10 +244,87 @@ struct CandleChart: View {
                     .frame(height: 300)
             } else {
                 if let item = inspected { candleSummary(item.candle) }
+                movingAverageLegend
+                HStack(alignment: .top, spacing: 12) {
+                    priceAndVolumeCharts.frame(maxWidth: .infinity)
+                    if showsChips {
+                        ChipDistributionPlot(data: chipDistribution, currentPrice: currentPrice ?? chipDistribution?.currentPrice ?? candles.last?.close,
+                                             priceDomain: priceDomain, compact: true)
+                            .frame(width: 130, height: pricePlotFrame.height > 0 ? pricePlotFrame.height : 268)
+                            .padding(.top, pricePlotFrame.minY)
+                    }
+                }
+                if showsChips, let chipDistribution, !chipDistribution.rows.isEmpty {
+                    ChipDistributionSummary(data: chipDistribution, currentPrice: currentPrice ?? chipDistribution.currentPrice ?? candles.last?.close)
+                }
+                rangeNavigator
+                if annotations.legacyAnnotationCount(for: stockCode) > 0 {
+                    Text("旧版笔迹仍保留在本机；因缺少行情坐标，暂不叠加显示。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Text(annotationMode ? "使用手指或 Apple Pencil 绘制；新标注随行情缩放和平移。" : "拖动图表查看单根数据；拖动下方范围条调整视野。")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(22)
+        .background(.white, in: RoundedRectangle(cornerRadius: 22))
+        .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
+        .onChange(of: externalContext) { _, context in
+            guard let context, context.stockCode == stockCode, context.period == period.rawValue,
+                  let first = context.firstVisibleTime, let last = context.lastVisibleTime,
+                  let lower = candles.firstIndex(where: { $0.time == first }),
+                  let upper = candles.firstIndex(where: { $0.time == last }), lower <= upper else { return }
+            let nextWindow = lower..<(upper + 1)
+            if nextWindow != visibleRange { window = nextWindow }
+            let nextSelection = context.selectionSource == "cursor" ? context.selectedPoint?.time : nil
+            if selectedTime != nextSelection { selectedTime = nextSelection }
+        }
+        .onChange(of: candles.map(\.time)) { oldTimes, newTimes in
+            reconcileWindow(oldTimes: oldTimes, newTimes: newTimes)
+        }
+        .onChange(of: visible.map(\.candle.time)) { _, times in
+            if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
+        }
+        .onChange(of: stockCode) { _, _ in annotationMode = false; selectedTime = nil }
+        .confirmationDialog("清除此股票的全部标注？", isPresented: $confirmingClear, titleVisibility: .visible) {
+            Button("清除全部", role: .destructive) { _ = annotations.clear(stockCode: stockCode) }
+            Button("取消", role: .cancel) { }
+        }
+    }
+
+    private var movingAverageLegend: some View {
+        HStack(spacing: 16) {
+            averageValue("MA5", inspectedIndicator?.ma5, color: .orange)
+            averageValue("MA10", inspectedIndicator?.ma10, color: .blue)
+            averageValue("MA20", inspectedIndicator?.ma20, color: .purple)
+        }
+        .font(.caption).monospacedDigit()
+    }
+
+    private func averageValue(_ title: String, _ value: Double?, color: Color) -> some View {
+        Text("\(title) \(AppStyle.price(value))").foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.7)
+    }
+
+    private var priceAndVolumeCharts: some View {
+        VStack(alignment: .leading, spacing: 14) {
                 ZStack {
                     Chart {
                         ForEach(visible) { item in
                             CandlePriceMarks(item: item)
+                        }
+                        ForEach(visibleIndicators) { point in
+                            if let ma5 = point.ma5 {
+                                LineMark(x: .value("时间", Double(point.id)), y: .value("MA5", ma5), series: .value("均线", "MA5"))
+                                    .foregroundStyle(Color.orange).lineStyle(StrokeStyle(lineWidth: 1.2))
+                            }
+                            if let ma10 = point.ma10 {
+                                LineMark(x: .value("时间", Double(point.id)), y: .value("MA10", ma10), series: .value("均线", "MA10"))
+                                    .foregroundStyle(Color.blue).lineStyle(StrokeStyle(lineWidth: 1.2))
+                            }
+                            if let ma20 = point.ma20 {
+                                LineMark(x: .value("时间", Double(point.id)), y: .value("MA20", ma20), series: .value("均线", "MA20"))
+                                    .foregroundStyle(Color.purple).lineStyle(StrokeStyle(lineWidth: 1.2))
+                            }
                         }
                         if let selectedCandle {
                             RuleMark(x: .value("选中", selectedCandle.x))
@@ -319,6 +334,7 @@ struct CandleChart: View {
                     }
                     .chartXScale(domain: xDomain, range: .plotDimension(padding: 0))
                     .chartYScale(domain: priceDomain)
+                    .chartPlotStyle { $0.clipped() }.chartLegend(.hidden)
                     .chartXSelection(value: selection)
                     .chartYAxis {
                         AxisMarks(position: .trailing, values: .automatic(desiredCount: 5)) { value in
@@ -344,6 +360,8 @@ struct CandleChart: View {
                         GeometryReader { geometry in
                             if let plotFrame = proxy.plotFrame {
                                 let frame = geometry[plotFrame]
+                                Color.clear.onAppear { pricePlotFrame = frame }
+                                    .onChange(of: frame) { _, updated in pricePlotFrame = updated }
                                 NativeAnnotationCanvas(store: annotations, stockCode: stockCode,
                                                        tool: annotationTool, color: annotationColor,
                                                        isEditing: annotationMode, viewport: annotationViewport)
@@ -386,28 +404,6 @@ struct CandleChart: View {
                     }
                 }
                 .frame(height: 85)
-                rangeNavigator
-                if annotations.legacyAnnotationCount(for: stockCode) > 0 {
-                    Text("旧版笔迹仍保留在本机；因缺少行情坐标，暂不叠加显示。")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                Text(annotationMode ? "使用手指或 Apple Pencil 绘制；新标注随行情缩放和平移。" : "拖动图表查看单根数据；拖动下方范围条调整视野。")
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
-        }
-        .padding(22)
-        .background(.white, in: RoundedRectangle(cornerRadius: 22))
-        .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
-        .onChange(of: candles.map(\.time)) { oldTimes, newTimes in
-            reconcileWindow(oldTimes: oldTimes, newTimes: newTimes)
-        }
-        .onChange(of: visible.map(\.candle.time)) { _, times in
-            if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
-        }
-        .onChange(of: stockCode) { _, _ in annotationMode = false; selectedTime = nil }
-        .confirmationDialog("清除此股票的全部标注？", isPresented: $confirmingClear, titleVisibility: .visible) {
-            Button("清除全部", role: .destructive) { _ = annotations.clear(stockCode: stockCode) }
-            Button("取消", role: .cancel) { }
         }
     }
 

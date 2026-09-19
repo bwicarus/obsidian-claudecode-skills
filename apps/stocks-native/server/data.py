@@ -14,7 +14,7 @@ import re
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -364,3 +364,34 @@ class StockDataStore:
         return {"technical": technical, "fund": fund, "chips": chips,
                 "peers": peers, "concepts": concepts, "announcements": announcements,
                 "signals": signals, "warnings": warnings}
+
+    def chip_history(self, code: str, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+        if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
+            raise ValueError("code must contain six digits")
+        for value in (start, end):
+            if value is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                raise ValueError("chip range must use YYYY-MM-DD")
+        today = datetime.now(timezone(timedelta(hours=8))).date()
+        last = date.fromisoformat(end) if end else today
+        first = date.fromisoformat(start) if start else last - timedelta(days=549)
+        if last > today or first > last or (last - first).days > 549:
+            raise ValueError("chip range must be at most 550 days and not in the future")
+        snapshot = self._read_snapshot()
+        if code not in snapshot['byCode']:
+            raise StockNotFound(code)
+        history = []
+        warning = None
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT trade_date, open, high, low, price AS close, volume, turnover_rate "
+                    "FROM daily_quotes WHERE code = ? AND trade_date BETWEEN ? AND ? "
+                    "ORDER BY trade_date DESC LIMIT ?",
+                    (code, first.isoformat(), last.isoformat(), 550 if start else 90),
+                ).fetchall()
+                history = [dict(row) for row in reversed(rows)]
+        except sqlite3.Error:
+            warning = 'chip_history_unavailable'
+        return {'code': code, 'start': first.isoformat() if start else (
+                    history[0]['trade_date'] if history else (last - timedelta(days=89)).isoformat()),
+                'end': last.isoformat(), 'history': history, 'warning': warning}

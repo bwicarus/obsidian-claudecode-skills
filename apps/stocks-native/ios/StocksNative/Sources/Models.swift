@@ -184,13 +184,74 @@ struct FundHistory: Codable, Identifiable {
     let tradeDate: String
     let latestMainInflow: Double?
     let latestMainRatio: Double?
+    let buySmallAmount: Double?
+    let sellSmallAmount: Double?
+    let buyMediumAmount: Double?
+    let sellMediumAmount: Double?
+    let buyLargeAmount: Double?
+    let sellLargeAmount: Double?
+    let buyExtraLargeAmount: Double?
+    let sellExtraLargeAmount: Double?
     var id: String { tradeDate }
 
     enum CodingKeys: String, CodingKey {
         case tradeDate
         case latestMainInflow = "latest_main_inflow"
         case latestMainRatio = "latest_main_ratio"
+        case buySmallAmount = "buy_sm_amount"
+        case sellSmallAmount = "sell_sm_amount"
+        case buyMediumAmount = "buy_md_amount"
+        case sellMediumAmount = "sell_md_amount"
+        case buyLargeAmount = "buy_lg_amount"
+        case sellLargeAmount = "sell_lg_amount"
+        case buyExtraLargeAmount = "buy_elg_amount"
+        case sellExtraLargeAmount = "sell_elg_amount"
     }
+}
+
+struct ChipDistributionRow: Codable, Identifiable {
+    let price: Double
+    let percent: Double
+    var id: Double { price }
+}
+
+struct ChipDistributionResponse: Codable {
+    let code: String
+    let start: String?
+    let end: String?
+    let rows: [ChipDistributionRow]
+    let currentPrice: Double?
+    let averageCost: Double?
+    let winnerRate: Double?
+    let cost5: Double?
+    let cost95: Double?
+    let concentration: Double?
+    let source: String?
+    let warning: String?
+}
+
+struct StockSignal: Codable, Identifiable {
+    let tradeDate: String?
+    let reason: String?
+    let netAmount: Double?
+    let netRate: Double?
+    let rank: Int?
+    let amount: Double?
+    let buy: Double?
+    let sell: Double?
+    let upLimit: Double?
+    let downLimit: Double?
+    var id: String { "\(tradeDate ?? "")-\(reason ?? "")-\(rank ?? 0)" }
+    enum CodingKeys: String, CodingKey {
+        case tradeDate = "trade_date", reason, netAmount = "net_amount", netRate = "net_rate"
+        case rank, amount, buy, sell, upLimit = "up_limit", downLimit = "down_limit"
+    }
+}
+
+struct StockSignals: Codable {
+    let topList: [StockSignal]?
+    let northbound: [StockSignal]?
+    let limits: [StockSignal]?
 }
 
 struct FundPanel: Codable {
@@ -245,6 +306,7 @@ struct StockResponse: Codable {
     let peers: [PeerStock]?
     let concepts: [String]?
     let announcements: [Announcement]?
+    let signals: StockSignals?
 }
 
 struct RealtimeResponse: Codable {
@@ -307,6 +369,9 @@ struct VoiceViewState: Codable, Hashable {
     // This describes the active tab, not individual cards hidden below its scroll viewport.
     var visibilityScope = "active_tab"
     var chartViewport: VoiceChartViewport?
+    var workspacePageID: String?
+    var workspacePageTitle: String?
+    var visibleCardIDs: [String]?
 }
 
 struct VoiceChartViewport: Codable, Hashable {

@@ -12,6 +12,7 @@ from aiohttp import web, WSMsgType, ClientError
 from apple_auth import AppleIdentityVerifier
 from auth import AuthStore, AuthError
 from data import StockDataStore, DataUnavailable, StockNotFound
+from chips import build_chips
 from live import LiveMarketSource
 from voice import VoiceSession, closes_voice_connection, safe_error
 
@@ -152,7 +153,36 @@ async def kline(request):
 
 
 async def health(request):
-    return web.json_response({'status': 'ok', 'version': '0.2.0', 'contextProtocol': 2})
+    return web.json_response({'status': 'ok', 'version': '0.2.0', 'contextProtocol': 2,
+                              'chartDataProtocol': 1})
+
+
+async def chips(request):
+    await identity(request)
+    code = request.match_info['code']
+    start, end = request.query.get('start'), request.query.get('end')
+    key = (code, start, end)
+    cache = request.app['chip_cache']
+    cached = cache.get(key)
+    if cached and time.monotonic() - cached[0] < 30:
+        return web.json_response(cached[1])
+    async def load():
+        payload = await asyncio.to_thread(request.app['data'].chip_history, code, start, end)
+        quote, warning = None, None
+        try:
+            quotes = await asyncio.wait_for(request.app['live'].quotes([code]), timeout=4)
+            quote = quotes.get(code)
+            if quote is None:
+                warning = 'live_quote_unavailable'
+        except (ClientError, asyncio.TimeoutError, OSError):
+            warning = 'live_quote_unavailable'
+        return await asyncio.to_thread(build_chips, payload, quote, warning)
+    result = await asyncio.wait_for(load(), timeout=8)
+    cache[key] = (time.monotonic(), result)
+    if len(cache) > 128:
+        for old_key in list(cache)[:32]:
+            cache.pop(old_key, None)
+    return web.json_response(result)
 
 
 async def voice(request):
@@ -280,6 +310,7 @@ def create_app():
     app['live'] = LiveMarketSource()
     app['pair_attempts'] = defaultdict(deque)
     app['voices'] = {}
+    app['chip_cache'] = {}
     app.add_routes([web.get('/api/health', health), web.post('/api/pair', pair),
                     web.post('/api/auth/apple', apple_login),
                     web.get('/api/market/overview', market_overview),
@@ -287,6 +318,7 @@ def create_app():
                     web.get('/api/stocks', stocks),
                     web.get('/api/stocks/{code}/intraday', intraday),
                     web.get('/api/stocks/{code}/kline', kline),
+                    web.get('/api/stocks/{code}/chips', chips),
                     web.get('/api/stocks/{code}', detail),
                     web.get('/voice', voice)])
     app.on_shutdown.append(shutdown)

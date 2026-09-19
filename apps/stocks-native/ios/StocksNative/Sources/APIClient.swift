@@ -47,6 +47,13 @@ struct APIClient {
         try await request("api/stocks/\(code)/intraday")
     }
 
+    func chips(code: String, start: String? = nil, end: String? = nil) async throws -> ChipDistributionResponse {
+        var query: [URLQueryItem] = []
+        if let start { query.append(URLQueryItem(name: "start", value: start)) }
+        if let end { query.append(URLQueryItem(name: "end", value: end)) }
+        return try await request("api/stocks/\(code)/chips", query: query)
+    }
+
     func kline(code: String, period: ChartPeriod, count: Int = 180) async throws -> KLineResponse {
         try await request("api/stocks/\(code)/kline", query: [
             URLQueryItem(name: "period", value: period.rawValue),

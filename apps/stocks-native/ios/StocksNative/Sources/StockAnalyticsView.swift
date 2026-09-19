@@ -81,7 +81,7 @@ struct StockMarketWorkspace: View {
     }
 }
 
-private struct OrderBookPanel: View {
+struct OrderBookPanel: View {
     let stock: Stock
     let compact: Bool
 
@@ -144,7 +144,7 @@ private struct OrderBookPanel: View {
     }
 }
 
-private struct StockValuationCard: View {
+struct StockValuationCard: View {
     let detail: StockResponse
 
     var body: some View {
@@ -162,14 +162,22 @@ private struct StockValuationCard: View {
     }
 }
 
+enum WorkspaceChartMode: Hashable { case adaptive, kline, intraday, withChips }
+
 struct MarketChartSection: View {
     @ObservedObject var model: AppModel
     let stockCode: String
+    var mode: WorkspaceChartMode = .adaptive
     @State private var lastCandlePeriod: ChartPeriod = .day
+
+    private var isIntraday: Bool { mode == .intraday || (mode == .adaptive && model.chartPeriod == .intraday) }
+    private var candlePeriod: ChartPeriod { model.klinePeriod }
+    private var candles: [Candle] { model.displayedKlineCandles }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
+                if mode == .adaptive {
                 Picker("图表类型", selection: Binding(get: { model.chartPeriod == .intraday }, set: {
                     model.chartPeriod = $0 ? .intraday : lastCandlePeriod
                 })) {
@@ -177,50 +185,59 @@ struct MarketChartSection: View {
                     Text("K 线").tag(false)
                 }
                 .pickerStyle(.segmented).frame(maxWidth: 260)
+                } else {
+                    Text(isIntraday ? "分时走势" : (mode == .withChips ? "K 线与筹码峰" : "K 线走势")).font(.headline)
+                }
                 Spacer(minLength: 0)
-                if model.chartPeriod != .intraday {
+                if !isIntraday {
                     Menu {
                         ForEach(ChartPeriod.allCases.filter { $0 != .intraday }) { period in
                             Button {
                                 lastCandlePeriod = period
-                                model.chartPeriod = period
+                                if mode == .adaptive { model.chartPeriod = period }
+                                else { model.klinePeriod = period }
                             } label: {
-                                if period == model.chartPeriod {
+                                if period == candlePeriod {
                                     Label(candleIntervalTitle(period), systemImage: "checkmark")
                                 } else { Text(candleIntervalTitle(period)) }
                             }
                         }
                     } label: {
                         HStack(spacing: 5) {
-                            Text(candleIntervalTitle(model.chartPeriod))
+                            Text(candleIntervalTitle(candlePeriod))
                             Image(systemName: "chevron.down").font(.caption2)
                         }
                         .font(.caption.weight(.medium)).padding(.vertical, 12)
                     }
-                    .accessibilityLabel("K 线精度，\(candleIntervalTitle(model.chartPeriod))")
+                    .accessibilityLabel("K 线精度，\(candleIntervalTitle(candlePeriod))")
                 }
             }
             if let error = model.chartError {
                 Label(error, systemImage: "wifi.exclamationmark")
                     .font(.caption).foregroundStyle(.red)
             }
-            if model.chartPeriod == .intraday {
+            if isIntraday {
                 if let intraday = model.displayedIntraday, !intraday.rows.isEmpty {
                     IntradayChart(data: intraday, stockCode: stockCode, annotations: model.annotations,
-                                  onContextChange: model.updateChartContext)
+                                  onContextChange: { snapshot in
+                                      await model.updateChartContext(snapshot, sourceID: "\(mode):intraday")
+                                  })
                         .id(stockCode)
                 } else if model.isLoadingChart {
                     chartLoading
                 } else {
                     emptyChart("当天暂无分时数据")
                 }
-            } else if !model.displayedCandles.isEmpty {
-                CandleChart(candles: model.displayedCandles, stockCode: stockCode, period: model.chartPeriod,
-                            annotations: model.annotations, onContextChange: model.updateChartContext,
+            } else if !candles.isEmpty {
+                CandleChart(candles: candles, stockCode: stockCode, period: candlePeriod,
+                            annotations: model.annotations, onContextChange: { snapshot in
+                                await model.updateChartContext(snapshot, sourceID: "\(mode):kline")
+                            },
                             onRangeChange: { count in
                                 await model.publishVoiceContext(action: "调整图表可见区间：\(count) 根", kind: "chart_range")
-                            })
-                    .id("\(stockCode):\(model.chartPeriod.rawValue)")
+                            }, chipDistribution: model.chipDistribution, showsChips: mode == .withChips,
+                            externalContext: model.chartSnapshotForKline, currentPrice: model.displayedStock?.price)
+                    .id("\(stockCode):\(candlePeriod.rawValue):\(mode)")
             } else if model.isLoadingChart {
                 chartLoading
             } else {
@@ -278,7 +295,7 @@ private struct SessionIntradayPoint: Identifiable {
     }
 }
 
-private struct IntradayChart: View {
+struct IntradayChart: View {
     let data: IntradayResponse
     let stockCode: String
     @ObservedObject var annotations: AnnotationStore
@@ -545,115 +562,430 @@ struct StockAnnouncementsSection: View {
     }
 }
 
-private struct TechnicalCard: View {
-    let panel: TechnicalPanel
-    var body: some View {
-        card(title: "MACD", subtitle: "技术 · \(panel.asOf ?? "最新资料")") {
-            Chart {
-                ForEach(panel.history) { point in
-                    if let histogram = point.macdHist {
-                        BarMark(x: .value("日期", point.tradeDate), y: .value("MACD", histogram))
-                            .foregroundStyle(AppStyle.movement(histogram).opacity(0.42))
-                    }
-                    if let dif = point.macdDif {
-                        LineMark(x: .value("日期", point.tradeDate), y: .value("DIF", dif))
-                            .foregroundStyle(by: .value("指标", "DIF"))
-                    }
-                    if let dea = point.macdDea {
-                        LineMark(x: .value("日期", point.tradeDate), y: .value("DEA", dea))
-                            .foregroundStyle(by: .value("指标", "DEA"))
-                    }
-                }
-            }
-            .chartForegroundStyleScale(["DIF": AppStyle.accent, "DEA": Color.orange])
-            .chartXAxis(.hidden).frame(height: 110)
-            metricLine("MA5", panel.metrics.ma5, "MA10", panel.metrics.ma10)
-            metricLine("MA20", panel.metrics.ma20, "MA60", panel.metrics.ma60)
-        }
+struct TechnicalCard: View {
+    var panel: TechnicalPanel? = nil
+    var candles: [Candle] = []
+    var visibleContext: VoiceChartContext? = nil
+    var period: ChartPeriod = .day
+
+    private var points: [NativeIndicatorPoint] {
+        NativeChartIndicators.visible(NativeChartIndicators.series(candles: candles, panel: period == .day ? panel : nil), context: visibleContext)
     }
-}
-
-private struct KDJCard: View {
-    let panel: TechnicalPanel
+    private var inspected: NativeIndicatorPoint? { NativeChartIndicators.inspected(points, context: visibleContext) }
+    private var xDomain: ClosedRange<Double> { indicatorDomain(points) }
 
     var body: some View {
-        card(title: "KDJ", subtitle: "技术 · \(panel.asOf ?? "最新资料")") {
-            Chart {
-                ForEach(panel.history) { point in
-                    if let k = point.kdjK {
-                        LineMark(x: .value("日期", point.tradeDate), y: .value("数值", k))
-                            .foregroundStyle(by: .value("指标", "K"))
-                    }
-                    if let d = point.kdjD {
-                        LineMark(x: .value("日期", point.tradeDate), y: .value("数值", d))
-                            .foregroundStyle(by: .value("指标", "D"))
-                    }
-                    if let k = point.kdjK, let d = point.kdjD {
-                        LineMark(x: .value("日期", point.tradeDate), y: .value("数值", 3 * k - 2 * d))
-                            .foregroundStyle(by: .value("指标", "J"))
+        card(title: "MACD", subtitle: "\(period.title) · 12 / 26 / 9") {
+            if points.isEmpty { indicatorEmpty }
+            else {
+                HStack(spacing: 12) {
+                    indicatorValue("DIF", inspected?.dif, color: AppStyle.accent)
+                    indicatorValue("DEA", inspected?.dea, color: .orange)
+                    indicatorValue("MACD", inspected?.histogram, color: AppStyle.movement(inspected?.histogram))
+                }
+                Chart {
+                    RuleMark(y: .value("零轴", 0)).foregroundStyle(.secondary.opacity(0.3))
+                    ForEach(points) { point in
+                        if let histogram = point.histogram {
+                            BarMark(x: .value("时间", Double(point.id)), y: .value("MACD", histogram), width: .ratio(0.6))
+                                .foregroundStyle(AppStyle.movement(histogram).opacity(0.55))
+                        }
+                        if let dif = point.dif {
+                            LineMark(x: .value("时间", Double(point.id)), y: .value("DIF", dif), series: .value("指标", "DIF"))
+                                .foregroundStyle(AppStyle.accent).lineStyle(StrokeStyle(lineWidth: 1.4))
+                        }
+                        if let dea = point.dea {
+                            LineMark(x: .value("时间", Double(point.id)), y: .value("DEA", dea), series: .value("指标", "DEA"))
+                                .foregroundStyle(.orange).lineStyle(StrokeStyle(lineWidth: 1.4))
+                        }
+                        if point.time == inspected?.time {
+                            RuleMark(x: .value("查看", Double(point.id)))
+                                .foregroundStyle(.secondary.opacity(0.2)).lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        }
                     }
                 }
-            }
-            .chartForegroundStyleScale(["K": AppStyle.accent, "D": Color.orange, "J": Color.purple])
-            .chartXAxis(.hidden).frame(height: 110)
-            metricLine("K", panel.metrics.kdjK, "D", panel.metrics.kdjD)
-            if let k = panel.metrics.kdjK, let d = panel.metrics.kdjD {
-                valueLine("J", 3 * k - 2 * d, color: AppStyle.ink)
+                .chartXScale(domain: xDomain, range: .plotDimension(padding: 0))
+                .chartXAxis(.hidden).chartYAxis { indicatorAxis }.chartLegend(.hidden)
+                .frame(height: 130)
+                indicatorDate(inspected?.time)
             }
         }
     }
 }
 
-private struct FundCard: View {
+struct KDJCard: View {
+    var panel: TechnicalPanel? = nil
+    var candles: [Candle] = []
+    var visibleContext: VoiceChartContext? = nil
+    var period: ChartPeriod = .day
+
+    private var points: [NativeIndicatorPoint] {
+        NativeChartIndicators.visible(NativeChartIndicators.series(candles: candles, panel: period == .day ? panel : nil), context: visibleContext)
+    }
+    private var inspected: NativeIndicatorPoint? { NativeChartIndicators.inspected(points, context: visibleContext) }
+    private var yDomain: ClosedRange<Double> {
+        let values = points.flatMap { [$0.k, $0.d, $0.j].compactMap { $0 } }
+        return min(0, (values.min() ?? 0) - 5)...max(100, (values.max() ?? 100) + 5)
+    }
+
+    var body: some View {
+        card(title: "KDJ", subtitle: "\(period.title) · 9 / 3 / 3") {
+            if points.isEmpty { indicatorEmpty }
+            else {
+                HStack(spacing: 18) {
+                    indicatorValue("K", inspected?.k, color: AppStyle.accent)
+                    indicatorValue("D", inspected?.d, color: .orange)
+                    indicatorValue("J", inspected?.j, color: .purple)
+                }
+                Chart {
+                    ForEach([20.0, 80.0], id: \.self) { value in
+                        RuleMark(y: .value("参考", value)).foregroundStyle(.secondary.opacity(0.3))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    }
+                    ForEach(points) { point in
+                        if let k = point.k {
+                            LineMark(x: .value("时间", Double(point.id)), y: .value("K", k), series: .value("指标", "K"))
+                                .foregroundStyle(AppStyle.accent).lineStyle(StrokeStyle(lineWidth: 1.4))
+                        }
+                        if let d = point.d {
+                            LineMark(x: .value("时间", Double(point.id)), y: .value("D", d), series: .value("指标", "D"))
+                                .foregroundStyle(.orange).lineStyle(StrokeStyle(lineWidth: 1.4))
+                        }
+                        if let j = point.j {
+                            LineMark(x: .value("时间", Double(point.id)), y: .value("J", j), series: .value("指标", "J"))
+                                .foregroundStyle(.purple).lineStyle(StrokeStyle(lineWidth: 1.2))
+                        }
+                    }
+                    if let inspected {
+                        RuleMark(x: .value("查看", Double(inspected.id))).foregroundStyle(.secondary.opacity(0.2))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    }
+                }
+                .chartXScale(domain: indicatorDomain(points), range: .plotDimension(padding: 0))
+                .chartYScale(domain: yDomain).chartXAxis(.hidden).chartYAxis { indicatorAxis }.chartLegend(.hidden)
+                .frame(height: 130)
+                indicatorDate(inspected?.time)
+            }
+        }
+    }
+}
+
+private func indicatorDomain(_ points: [NativeIndicatorPoint]) -> ClosedRange<Double> {
+    (Double(points.first?.id ?? 0) - 0.6)...(Double(points.last?.id ?? 1) + 0.6)
+}
+
+private var indicatorAxis: some AxisContent {
+    AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
+        AxisGridLine().foregroundStyle(.secondary.opacity(0.1))
+        AxisValueLabel {
+            if let value = value.as(Double.self) {
+                Text(value.formatted(.number.precision(.fractionLength(0...2))))
+                    .font(.caption2).monospacedDigit().frame(width: 52, alignment: .trailing)
+            }
+        }
+    }
+}
+
+private var indicatorEmpty: some View {
+    Text("暂无指标数据").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 140)
+}
+
+private func indicatorValue(_ title: String, _ value: Double?, color: Color) -> some View {
+    Text("\(title) \(value.map { String(format: "%.3f", $0) } ?? "—")")
+        .font(.caption).monospacedDigit().foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.7)
+}
+
+private func indicatorDate(_ time: String?) -> some View {
+    Text(time ?? "最新数据").font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+}
+
+private struct FundSizeFlow: Identifiable {
+    let name: String
+    let buy: Double?
+    let sell: Double?
+    let color: Color
+    var id: String { name }
+    var net: Double? {
+        guard let buy, let sell else { return nil }
+        return buy - sell
+    }
+}
+
+private struct FundSlice: Identifiable {
+    let name: String
+    let amount: Double
+    let color: Color
+    var id: String { name }
+}
+
+struct FundCard: View {
     let panel: FundPanel
+    @State private var selectedDate: String?
+    private var selected: FundHistory? { panel.history.first { $0.tradeDate == selectedDate } }
+    private var selectedFlows: [FundSizeFlow] {
+        if let selected { return flows(selected) }
+        let m = panel.metrics
+        return flowValues(m.buyExtraLargeAmount, m.sellExtraLargeAmount, m.buyLargeAmount, m.sellLargeAmount,
+                          m.buyMediumAmount, m.sellMediumAmount, m.buySmallAmount, m.sellSmallAmount)
+    }
+    private var slices: [FundSlice] {
+        let buyColors: [Color] = [AppStyle.up, .orange, .yellow, .yellow.opacity(0.5)]
+        let sellColors: [Color] = [AppStyle.down, .green, .mint, .mint.opacity(0.5)]
+        let buys = selectedFlows.enumerated().compactMap { index, flow in
+            flow.buy.map { FundSlice(name: "\(flow.name)买入", amount: max(0, $0), color: buyColors[index]) }
+        }
+        let sells = selectedFlows.enumerated().compactMap { index, flow in
+            flow.sell.map { FundSlice(name: "\(flow.name)卖出", amount: max(0, $0), color: sellColors[index]) }
+        }
+        return (buys + sells).filter { $0.amount > 0 }
+    }
+    private var total: Double { slices.reduce(0) { $0 + $1.amount } }
+    private var hasHistoryFlows: Bool { panel.history.contains { flows($0).contains { $0.net != nil } } }
+
     var body: some View {
-        card(title: "资金动向", subtitle: panel.asOf ?? "主力净流入") {
-            Chart(panel.history) { point in
-                if let value = point.latestMainInflow {
-                    BarMark(x: .value("日期", point.tradeDate), y: .value("净流入", value))
-                        .foregroundStyle(AppStyle.movement(value).opacity(0.7))
+        card(title: "资金动向", subtitle: selectedDate ?? panel.asOf ?? "最新资料") {
+            if hasHistoryFlows {
+                Chart {
+                    RuleMark(y: .value("零轴", 0)).foregroundStyle(.secondary.opacity(0.3))
+                    ForEach(panel.history) { point in
+                        ForEach(flows(point)) { flow in
+                            if let value = flow.net {
+                                BarMark(x: .value("日期", point.tradeDate), y: .value("净流入", value), stacking: .standard)
+                                    .foregroundStyle(flow.color)
+                            }
+                        }
+                    }
                 }
+                .chartXAxis(.hidden).chartXSelection(value: $selectedDate)
+                .chartYAxis {
+                    AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
+                        AxisGridLine().foregroundStyle(.secondary.opacity(0.1))
+                        AxisValueLabel {
+                            if let value = value.as(Double.self) { Text(AppStyle.compact(value)).font(.caption2) }
+                        }
+                    }
+                }.frame(height: 125)
+                HStack(spacing: 12) {
+                    ForEach(selectedFlows) { flow in
+                        Label(flow.name, systemImage: "circle.fill").font(.caption2).foregroundStyle(flow.color)
+                    }
+                }
+                Text("拖动柱状图选择交易日").font(.caption2).foregroundStyle(.secondary)
+            } else {
+                Text("暂无分档资金历史").font(.caption).foregroundStyle(.secondary)
             }
-            .chartXAxis(.hidden).frame(height: 110)
+            if !slices.isEmpty {
+                HStack(alignment: .center, spacing: 14) {
+                    Chart(slices) { slice in
+                        SectorMark(angle: .value("金额", slice.amount), innerRadius: .ratio(0.68), angularInset: 1)
+                            .foregroundStyle(slice.color)
+                    }
+                    .chartLegend(.hidden).frame(width: 108, height: 108)
+                    VStack(spacing: 5) {
+                        ForEach(slices) { slice in
+                            HStack(spacing: 5) {
+                                Circle().fill(slice.color).frame(width: 5, height: 5)
+                                Text(slice.name)
+                                Spacer(minLength: 3)
+                                Text(AppStyle.compact(slice.amount))
+                                Text(String(format: "%.1f%%", total > 0 ? slice.amount / total * 100 : 0))
+                                    .frame(width: 38, alignment: .trailing)
+                            }
+                            .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } else {
+                Text("所选日期暂无分档买卖数据").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(selectedFlows) { flow in valueLine("\(flow.name)净流入", flow.net, compact: true) }
+            Divider()
             valueLine("今日主力", panel.metrics.latestMainInflow, compact: true)
             valueLine("五日主力", panel.metrics.mainInflow5d, compact: true)
             valueLine("主力占比", panel.metrics.latestMainRatio, suffix: "%")
         }
     }
+
+    private func flows(_ point: FundHistory) -> [FundSizeFlow] {
+        flowValues(point.buyExtraLargeAmount, point.sellExtraLargeAmount, point.buyLargeAmount, point.sellLargeAmount,
+                   point.buyMediumAmount, point.sellMediumAmount, point.buySmallAmount, point.sellSmallAmount)
+    }
+    private func flowValues(_ extraBuy: Double?, _ extraSell: Double?, _ largeBuy: Double?, _ largeSell: Double?,
+                            _ mediumBuy: Double?, _ mediumSell: Double?, _ smallBuy: Double?, _ smallSell: Double?) -> [FundSizeFlow] {
+        [FundSizeFlow(name: "超大单", buy: extraBuy, sell: extraSell, color: AppStyle.up),
+         FundSizeFlow(name: "大单", buy: largeBuy, sell: largeSell, color: .orange),
+         FundSizeFlow(name: "中单", buy: mediumBuy, sell: mediumSell, color: AppStyle.down),
+         FundSizeFlow(name: "小单", buy: smallBuy, sell: smallSell, color: .blue)]
+    }
 }
 
-private struct ChipCard: View {
+struct ChipCard: View {
     let panel: ChipPanel
-    private var levels: [(String, Double?)] {
-        [("5%", panel.cost5), ("15%", panel.cost15), ("50%", panel.cost50),
-         ("85%", panel.cost85), ("95%", panel.cost95)]
+    private var levels: [ChipCostLevel] {
+        [ChipCostLevel(title: "5% 深获利", value: panel.cost5, color: AppStyle.up),
+         ChipCostLevel(title: "15% 浅获利", value: panel.cost15, color: AppStyle.up.opacity(0.65)),
+         ChipCostLevel(title: "50% 主力区", value: panel.cost50, color: .blue),
+         ChipCostLevel(title: "85% 浅套牢", value: panel.cost85, color: AppStyle.down.opacity(0.65)),
+         ChipCostLevel(title: "95% 套牢线", value: panel.cost95, color: AppStyle.down)]
     }
     var body: some View {
-        card(title: "筹码分布", subtitle: panel.asOf ?? "最新") {
-            Chart(Array(levels.enumerated()), id: \.offset) { pair in
-                let index = pair.offset
-                let item = pair.element
-                if let value = item.1 {
-                    PointMark(x: .value("成本", value), y: .value("分位", index))
-                        .foregroundStyle(AppStyle.accent).symbolSize(85)
-                    RuleMark(x: .value("成本", value), yStart: .value("起", Double(index) - 0.28),
-                             yEnd: .value("止", Double(index) + 0.28))
-                        .foregroundStyle(AppStyle.accent.opacity(0.55))
+        card(title: "筹码成本", subtitle: panel.asOf ?? "最新") {
+            Chart(levels) { level in
+                if let value = level.value {
+                    BarMark(x: .value("成本", value), y: .value("成本分位", level.title), height: .fixed(12))
+                        .foregroundStyle(level.color)
+                        .annotation(position: .trailing) {
+                            Text(AppStyle.price(value)).font(.caption2).monospacedDigit()
+                        }
                 }
             }
-            .chartYAxis {
-                AxisMarks(values: Array(0..<levels.count)) { value in
-                    AxisValueLabel { if let index = value.as(Int.self) { Text(levels[index].0) } }
-                }
-            }
-            .frame(height: 150)
+            .chartXAxis(.hidden).frame(height: 150)
             valueLine("平均成本", panel.average, color: AppStyle.ink)
-            valueLine("获利比例", panel.winnerRate.map { $0 * 100 }, suffix: "%", color: AppStyle.ink)
+            valueLine("获利比例", panel.winnerRate.map { $0 * 100 }, suffix: "%", color: AppStyle.up)
         }
     }
 }
 
-private struct PeersCard: View {
+private struct ChipCostLevel: Identifiable {
+    let title: String
+    let value: Double?
+    let color: Color
+    var id: String { title }
+}
+
+struct ChipDistributionCard: View {
+    let data: ChipDistributionResponse?
+    let currentPrice: Double?
+    var body: some View {
+        card(title: "筹码峰", subtitle: data?.end ?? "最新分布") {
+            ChipDistributionPlot(data: data, currentPrice: currentPrice).frame(height: 240)
+            if let data, !data.rows.isEmpty {
+                ChipDistributionSummary(data: data, currentPrice: currentPrice)
+            }
+        }
+    }
+}
+
+struct ChipDistributionPlot: View {
+    let data: ChipDistributionResponse?
+    let currentPrice: Double?
+    var priceDomain: ClosedRange<Double>? = nil
+    var compact = false
+    private var rows: [ChipDistributionRow] {
+        (data?.rows ?? []).filter { $0.price.isFinite && $0.percent.isFinite && $0.percent > 0 }.sorted { $0.price < $1.price }
+    }
+    private var domain: ClosedRange<Double> {
+        if let priceDomain { return priceDomain }
+        let low = rows.first?.price ?? 0
+        let high = rows.last?.price ?? 1
+        let padding = max((high - low) * 0.05, abs(high) * 0.001, 0.01)
+        return (low - padding)...(high + padding)
+    }
+    private var barHalfStep: Double {
+        let diffs = zip(rows.dropFirst(), rows).map { $0.price - $1.price }.filter { $0 > 0 }
+        return (diffs.min() ?? max((domain.upperBound - domain.lowerBound) / 60, 0.01)) * 0.45
+    }
+    private var barGradient: LinearGradient {
+        guard let profit = chipProfit(data, price: currentPrice) else {
+            return LinearGradient(colors: [.secondary], startPoint: .leading, endPoint: .trailing)
+        }
+        let ratio = min(max(profit, 0), 1)
+        if ratio == 0 { return LinearGradient(colors: [AppStyle.down], startPoint: .leading, endPoint: .trailing) }
+        if ratio == 1 { return LinearGradient(colors: [AppStyle.up], startPoint: .leading, endPoint: .trailing) }
+        return LinearGradient(stops: [.init(color: AppStyle.up, location: 0),
+                                      .init(color: AppStyle.up, location: max(0, ratio - 0.04)),
+                                      .init(color: AppStyle.down, location: min(1, ratio + 0.04)),
+                                      .init(color: AppStyle.down, location: 1)], startPoint: .leading, endPoint: .trailing)
+    }
+    var body: some View {
+        let renderedRows = rows
+        let halfStep = barHalfStep
+        let gradient = barGradient
+        let resolvedDomain = domain
+        return Group {
+            if renderedRows.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "chart.bar.xaxis").foregroundStyle(.tertiary)
+                    Text(data?.warning.map(chipWarningText) ?? "暂无筹码分布数据").font(.caption).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Chart {
+                    ForEach(Array(renderedRows.enumerated()), id: \.offset) { pair in
+                        RectangleMark(xStart: .value("起点", 0), xEnd: .value("占比", pair.element.percent),
+                                      yStart: .value("价格下界", pair.element.price - halfStep),
+                                      yEnd: .value("价格上界", pair.element.price + halfStep))
+                            .foregroundStyle(gradient)
+                            .alignsMarkStylesWithPlotArea(false)
+                    }
+                    if let price = currentPrice ?? data?.currentPrice {
+                        RuleMark(y: .value("现价", price)).foregroundStyle(Color.yellow.opacity(0.9))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    }
+                    if let average = data?.averageCost {
+                        RuleMark(y: .value("平均成本", average)).foregroundStyle(.orange)
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 3]))
+                    }
+                }
+                .chartYScale(domain: resolvedDomain).chartXScale(domain: 0...max(renderedRows.map(\.percent).max() ?? 1, 0.001))
+                .chartPlotStyle { $0.clipped() }
+                .chartXAxis(.hidden)
+                .chartYAxis {
+                    if !compact {
+                        AxisMarks(position: .trailing, values: .automatic(desiredCount: 5)) { value in
+                            AxisGridLine().foregroundStyle(.secondary.opacity(0.1))
+                            AxisValueLabel {
+                                if let price = value.as(Double.self) { Text(AppStyle.price(price)).font(.caption2) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ChipDistributionSummary: View {
+    let data: ChipDistributionResponse
+    let currentPrice: Double?
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("获利 \(AppStyle.percent(chipProfit(data, price: currentPrice).map { $0 * 100 }))").foregroundStyle(AppStyle.up)
+                Spacer()
+                Text("套牢 \(AppStyle.percent(chipProfit(data, price: currentPrice).map { (1 - $0) * 100 }))").foregroundStyle(AppStyle.down)
+            }
+            HStack {
+                Text("现价 \(AppStyle.price(currentPrice ?? data.currentPrice))")
+                Spacer()
+                Text("平均成本 \(AppStyle.price(data.averageCost))").foregroundStyle(.orange)
+            }
+            HStack {
+                Text("90% 区间 \(AppStyle.price(data.cost5))–\(AppStyle.price(data.cost95))")
+                Spacer()
+                Text("集中度 \(AppStyle.percent(data.concentration.map { $0 * 100 }))")
+            }.foregroundStyle(.secondary)
+            if let warning = data.warning { Text(chipWarningText(warning)).foregroundStyle(.secondary) }
+        }.font(.caption2).monospacedDigit()
+    }
+}
+
+private func chipWarningText(_ warning: String) -> String {
+    if warning.contains("live_quote") { return "实时行情暂缺，显示已保存数据" }
+    if warning.contains("insufficient") { return "区间内历史数据不足" }
+    return "部分筹码数据暂缺"
+}
+
+private func chipProfit(_ data: ChipDistributionResponse?, price: Double?) -> Double? {
+    guard let data else { return nil }
+    if let price = price ?? data.currentPrice {
+        let total = data.rows.reduce(0) { $0 + max(0, $1.percent) }
+        if total > 0 { return data.rows.filter { $0.price <= price }.reduce(0) { $0 + max(0, $1.percent) } / total }
+    }
+    return data.winnerRate
+}
+
+struct PeersCard: View {
     let peers: [PeerStock]
     @ObservedObject var model: AppModel
     var body: some View {
@@ -678,7 +1010,7 @@ private struct PeersCard: View {
     }
 }
 
-private struct ConceptsCard: View {
+struct ConceptsCard: View {
     let concepts: [String]
     var body: some View {
         card(title: "行业与概念", subtitle: "所属板块") {

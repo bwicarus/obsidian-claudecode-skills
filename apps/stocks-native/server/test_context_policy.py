@@ -47,6 +47,61 @@ class ContextPolicyTests(unittest.TestCase):
         self.assertNotIn('history', result['selection'])
         self.assertEqual(result['selection']['close'], 998)
 
+    def test_workspace_metrics_require_their_visible_card_not_a_display_label(self):
+        context = screen()
+        context['metrics'].update(open='999', high='1001', low='997', volume='123',
+                                  turnoverRate='2.5', macdHist='0.17', mainInflow='456', unknown='hidden')
+        context['visiblePanels'] = ['技术指标', '资金动向']
+        cases = [(['macd'], {'macdHist'}), (['fund'], {'mainInflow'}),
+                 (['kdj'], set()), (['quote'], {'open', 'high', 'low', 'volume', 'turnover', 'turnoverRate'}),
+                 ([], set()), (['macd', 'fund'], {'macdHist', 'mainInflow'})]
+        for cards, expected in cases:
+            with self.subTest(cards=cards):
+                context['viewState']['visibleCardIDs'] = cards
+                projected = sections(context, 'backend')
+                self.assertEqual(set(projected['metrics']), expected)
+                self.assertEqual(set(projected['quote']['metrics']), {'price', 'changePct'})
+        for card in ('chart', 'kline', 'intraday', 'klineChips'):
+            context['viewState']['visibleCardIDs'] = [card]
+            self.assertEqual(set(sections(context, 'backend')['metrics']),
+                             {'open', 'high', 'low', 'volume', 'turnover', 'turnoverRate'})
+
+    def test_workspace_without_chart_clears_stale_chart_selection_ink_and_book(self):
+        initial = screen()
+        initial['viewState'].update(visibleCardIDs=['chart', 'orderBook'], workspacePageID='analysis',
+                                    workspacePageTitle='分析', chartViewport={'firstVisibleTime': '2026-09-17'})
+        initial['orderBook'] = {'bids': [{'price': 999, 'volume': 50}]}
+        hidden = copy.deepcopy(initial)
+        hidden['viewState'].update(visibleCardIDs=['announcements'], workspacePageID='news', workspacePageTitle='公告')
+        for audience in ('voice', 'backend'):
+            patch, _ = prepare_patch(hidden, audience, self.baseline(initial, audience), True, now=101)
+            self.assertEqual(patch['sections']['selection'], {})
+            self.assertIsNone(patch['sections']['view']['viewState']['chartViewport'])
+            self.assertEqual(patch['sections']['view']['viewState']['workspacePageTitle'], '公告')
+            if audience == 'backend':
+                for key in ('chart', 'annotations', 'orderBook'):
+                    self.assertEqual(patch['sections'][key], {})
+        self.assertIsNotNone(hidden['viewState']['chartViewport'])
+        hidden['viewState']['visibleCardIDs'] = ['orderBook']
+        self.assertEqual(sections(hidden, 'backend')['orderBook'], initial['orderBook'])
+        self.assertEqual(sections(hidden, 'backend')['chart'], {})
+
+    def test_legacy_tab_clients_keep_original_panel_mapping(self):
+        context = screen()
+        context['orderBook'] = {'asks': [{'price': 1001, 'volume': 50}]}
+        context['visiblePanels'] = ['技术指标', '资金动向']
+        result = sections(context, 'backend')
+        self.assertEqual(result['metrics'], {'macd': '0.17', 'turnover': '123456'})
+        self.assertEqual(result['chart'], context['chart'])
+        self.assertEqual(result['annotations'], context['annotations'])
+        self.assertEqual(result['orderBook'], context['orderBook'])
+        context['viewState'] = {'detailTab': 'research', 'visibleCardIDs': None}
+        context['visiblePanels'] = []
+        result = sections(context, 'backend')
+        self.assertEqual(result['metrics'], {'macd': '0.17', 'turnover': '123456'})
+        self.assertEqual(result['chart'], {})
+        self.assertEqual(result['annotations'], {})
+
     def test_small_moves_compare_last_accepted_value_and_accumulate(self):
         initial = screen()
         ledger = self.baseline(initial)

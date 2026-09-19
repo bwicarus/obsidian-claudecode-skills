@@ -110,8 +110,8 @@ struct StocksRootView: View {
             }
             await model.loadDetail()
         }
-        .task(id: "\(model.selectedCode ?? ""):\(model.chartPeriod.rawValue)") {
-            await model.publishVoiceContext(action: "切换图表：\(model.chartPeriod.title)")
+        .task(id: "\(model.selectedCode ?? ""):\(model.chartPeriod.rawValue):\(model.klinePeriod.rawValue)") {
+            await model.publishVoiceContext(action: "切换图表：\(model.chartPeriod.title)，独立 K 线：\(model.klinePeriod.title)")
             await model.loadChart()
         }
         .task(id: scenePhase) {
