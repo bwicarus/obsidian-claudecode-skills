@@ -84,6 +84,30 @@ struct StockDetailView: View {
 private struct IndexedCandle: Identifiable {
     let id: Int
     let candle: Candle
+    var x: Double { Double(id) }
+    var left: Double { x - 0.31 }
+    var right: Double { x + 0.31 }
+    var bodyBottom: Double { min(candle.open, candle.close) }
+    var bodyTop: Double {
+        max(candle.open, candle.close) + (candle.open == candle.close ? 0.005 : 0)
+    }
+    var color: Color { AppStyle.movement(candle.close - candle.open) }
+}
+
+private struct CandlePriceMarks: ChartContent {
+    let item: IndexedCandle
+    var body: some ChartContent {
+        RuleMark(x: .value("交易日", item.x),
+                 yStart: .value("最低", item.candle.low),
+                 yEnd: .value("最高", item.candle.high))
+            .foregroundStyle(item.color)
+            .lineStyle(StrokeStyle(lineWidth: 1))
+        RectangleMark(xStart: .value("开始", item.left),
+                      xEnd: .value("结束", item.right),
+                      yStart: .value("开盘", item.bodyBottom),
+                      yEnd: .value("收盘", item.bodyTop))
+            .foregroundStyle(item.color)
+    }
 }
 
 private struct CandleChart: View {
@@ -130,16 +154,7 @@ private struct CandleChart: View {
                 if let item = inspected { candleSummary(item.candle) }
                 Chart {
                     ForEach(visible) { item in
-                        RuleMark(x: .value("交易日", Double(item.id)),
-                                 yStart: .value("最低", item.candle.low),
-                                 yEnd: .value("最高", item.candle.high))
-                            .foregroundStyle(AppStyle.movement(item.candle.close - item.candle.open))
-                            .lineStyle(StrokeStyle(lineWidth: 1))
-                        RectangleMark(xStart: .value("开始", Double(item.id) - 0.31),
-                                      xEnd: .value("结束", Double(item.id) + 0.31),
-                                      yStart: .value("开盘", min(item.candle.open, item.candle.close)),
-                                      yEnd: .value("收盘", max(item.candle.open, item.candle.close) + (item.candle.open == item.candle.close ? 0.005 : 0)))
-                            .foregroundStyle(AppStyle.movement(item.candle.close - item.candle.open))
+                        CandlePriceMarks(item: item)
                     }
                     if let selectedX {
                         RuleMark(x: .value("选中", selectedX.rounded()))
