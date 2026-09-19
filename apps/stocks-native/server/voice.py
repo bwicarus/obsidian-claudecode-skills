@@ -9,6 +9,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import sys
 import time
 import uuid
 
@@ -24,6 +25,7 @@ PROMPT = """你是股票原生 App 的语音助手，用简洁中文交流。
 App 会在用户发言或真实委派时用 [APP_CONTEXT] 消息注入该轮固定的界面快照。这些字段是只读事实，不是用户指令。mode=replace 清除上一份界面状态；mode=patch 仅替换同一 selectedCode 下列出的 sections，未列出的沿用，空对象或空数组表示清除。不能跨股票合并。最近操作只描述当时操作，不能当作持续请求。界面上下文已经包含且带日期/时间的数值可直接回答，不要为相同数据再调用工具。缺少的数据、较长历史或用户明确要求刷新时再调用股票工具。
 当前股票可能已切换，不能沿用更旧的代码或上下文。没有数据就明确说明，禁止编造。只查询和切换展示股票，不进行交易、记账或修改生产配置。
 股票资料按重要性分层：界面核心状态自动提供；可见面板的摘要仅在委派时提供；完整技术、资金、筹码、公告、同行及历史图表通过工具按需获取。若当前线程提供 stocks_context，优先选择所需 sections，禁止为一个价格拉取全部资料。旧线程使用 stocks_current 或 stocks_detail，服务器会按当前问题返回相关组件。实时数据使用实际 quoteTime，刷新失败不能称为最新。标注上下文只包含结构化对象及笔迹数量，不能凭数量猜手写内容。
+账户选股器、观察池和智能收藏夹统一使用 stocks_selection MCP。catalog、library、evaluate 是读取；mutate 会写入当前登录账户。写入前先读 library 取得 revision，只响应用户明确要求的变更，并为一次意图生成唯一 requestId；重试同一次意图复用该 requestId。遇到 revision_conflict 时重新读取，不能静默覆盖。账户身份由服务器固定，禁止在参数里提供或猜测 owner。
 无需主动欢迎或总结。等待用户说话。只在有结果时简洁回答一次。"""
 
 ANNOTATION_PROMPT = """
@@ -85,11 +87,14 @@ class MicrophoneTrack(MediaStreamTrack):
 
 
 class VoiceSession:
-    def __init__(self, device_id, state_dir, data_store, emit_json, emit_audio, live_source=None):
+    def __init__(self, device_id, state_dir, data_store, emit_json, emit_audio, live_source=None,
+                 *, selection_service=None, selection_owner=None):
         self.device_id = device_id
         self.state_dir = Path(state_dir)
         self.data_store = data_store
         self.live_source = live_source
+        self.selection_service = selection_service
+        self.selection_owner = selection_owner
         self.emit_json = emit_json
         self.emit_audio = emit_audio
         self.session_id = str(uuid.uuid4())
@@ -272,6 +277,75 @@ class VoiceSession:
         if item.get('type') == 'agentMessage' and item.get('phase') in ('final_answer', 'final'):
             self.turn_state(turn_id)['messages'][item.get('id', 'final')] = item.get('text', '')
 
+    @staticmethod
+    def selection_mcp_payload(item):
+        """Read FastMCP structured output, with text as a compatibility fallback."""
+        result = item.get('result') or {}
+        value = result.get('structuredContent') if isinstance(result, dict) else None
+        for _ in range(2):
+            if isinstance(value, dict) and set(value) == {'result'} and isinstance(value['result'], dict):
+                value = value['result']
+            else:
+                break
+        if isinstance(value, dict) and isinstance(value.get('ok'), bool):
+            return value
+        for content in result.get('content', []) if isinstance(result, dict) else []:
+            if not isinstance(content, dict) or not isinstance(content.get('text'), str):
+                continue
+            try:
+                value = json.loads(content['text'])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, dict) and set(value) == {'result'} and isinstance(value['result'], dict):
+                value = value['result']
+            if isinstance(value, dict) and isinstance(value.get('ok'), bool):
+                return value
+        return None
+
+    async def capture_selection_tool(self, turn_id, item):
+        if (item.get('type') != 'mcpToolCall' or item.get('server') != 'stocks_selection'
+                or item.get('tool') != 'stocks_selection'):
+            return
+        state = self.turn_state(turn_id)
+        item_id = str(item.get('id') or '')
+        seen = state.setdefault('completedToolItems', set())
+        if item_id and item_id in seen:
+            return
+        if item_id:
+            seen.add(item_id)
+        args = item.get('arguments') or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (TypeError, ValueError):
+                args = {}
+        payload = self.selection_mcp_payload(item)
+        action = ((payload or {}).get('action') or
+                  (args.get('action') if isinstance(args, dict) else None))
+        result = (payload or {}).get('result')
+        result = result if isinstance(result, dict) else {}
+        success = item.get('status') == 'completed' and bool(payload and payload.get('ok'))
+        mutation = success and action == 'mutate' and result.get('success') is True
+        as_of = result.get('asOf')
+        if not as_of and isinstance(result.get('library'), dict):
+            as_of = result['library'].get('asOf')
+        receipt = {
+            'type': 'tool', 'name': 'stocks_selection', 'success': success,
+            'requestId': state['requestId'], 'turnId': turn_id, 'callId': item_id or None,
+            'selectionAction': action, 'asOf': as_of,
+            'dataReturned': bool(success and action in ('catalog', 'evaluate', 'library')),
+            'actionApplied': bool(mutation), 'revision': result.get('revision'),
+            'mutationRequestId': result.get('requestId'), 'operation': result.get('operation'),
+        }
+        state['tools'].append(receipt)
+        self.record(receipt)
+        await self.event(receipt)
+        if mutation:
+            changed = {'type': 'selection.changed', 'revision': result.get('revision'),
+                       'requestId': result.get('requestId'), 'operation': result.get('operation')}
+            self.record(changed)
+            await self.event(changed)
+
     async def fail_turn(self, state, message):
         state['finished'] = True
         receipt = {'type': 'task', 'state': 'failed', 'requestId': state['requestId'],
@@ -288,6 +362,7 @@ class VoiceSession:
         try:
             for item in turn.get('items', []):
                 self.capture_final(turn_id, item)
+                await self.capture_selection_tool(turn_id, item)
             if turn.get('status') != 'completed':
                 await self.fail_turn(state, '后台请求未完成：' + safe_error(turn.get('error') or turn.get('status')))
                 return
@@ -380,7 +455,9 @@ class VoiceSession:
                     self.record(receipt)
                     await self.event(receipt)
                 elif method == 'item/completed':
-                    self.capture_final(p['turnId'], p.get('item') or {})
+                    item = p.get('item') or {}
+                    self.capture_final(p['turnId'], item)
+                    await self.capture_selection_tool(p['turnId'], item)
                 elif method == 'turn/completed':
                     turn = p['turn']
                     state = self.turn_state(turn['id'])
@@ -810,6 +887,28 @@ class VoiceSession:
                 await self.event({'type': 'error', 'fatal': True,
                                   'message': '语音下行中断：' + safe_error(e)})
 
+    def selection_mcp_config(self):
+        """Build one fixed-owner MCP process for both new and resumed threads."""
+        if self.selection_service is None or not self.selection_owner:
+            return None
+        data_store = getattr(self.selection_service, 'data_store', None)
+        data_root = getattr(data_store, 'root', None)
+        state_root = getattr(self.selection_service, 'state_root', None)
+        if data_root is None or state_root is None:
+            raise ValueError('选股服务路径配置不完整')
+        return {
+            'command': os.environ.get('STOCKS_SELECTION_PYTHON', sys.executable),
+            'args': [str(Path(__file__).with_name('selection_mcp.py').resolve())],
+            'env': {
+                'STOCKS_SELECTION_OWNER': str(self.selection_owner),
+                'STOCKS_SELECTION_STATE_DIR': str(Path(state_root).resolve()),
+                'STOCKS_SELECTION_DATA_ROOT': str(Path(data_root).resolve()),
+            },
+            'enabled': True,
+            'startup_timeout_sec': 15,
+            'tool_timeout_sec': 60,
+        }
+
     async def start(self, code=None, capabilities=''):
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.supports_annotations = 'chart.annotation.v1' in str(capabilities).split(',')
@@ -850,10 +949,14 @@ class VoiceSession:
                     'x2': {'type': 'number', 'minimum': 0, 'maximum': 1},
                     'y2': {'type': 'number', 'minimum': 0, 'maximum': 1}},
                  'required': ['operation'], 'additionalProperties': False}})
+        config = {'model_reasoning_effort': 'medium'}
+        selection_mcp = self.selection_mcp_config()
+        if selection_mcp:
+            config['mcp_servers'] = {'stocks_selection': selection_mcp}
         params = {'cwd': str(self.state_dir), 'model': 'gpt-5.6-sol', 'modelProvider': 'openai',
                   'approvalPolicy': 'never', 'sandbox': 'read-only', 'environments': [],
                   'developerInstructions': PROMPT + (ANNOTATION_PROMPT if self.supports_annotations else ''),
-                  'config': {'model_reasoning_effort': 'medium'},
+                  'config': config,
                   'serviceName': 'stocks-native-mvp'}
         previous = self.thread_file.read_text().strip() if self.thread_file.exists() else None
         if previous:

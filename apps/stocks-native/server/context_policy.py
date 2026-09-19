@@ -63,6 +63,9 @@ def sections(context, audience):
     card_ids = state.get('visibleCardIDs')
     has_card_visibility = card_ids is not None
     cards = {value for value in card_ids if isinstance(value, str)} if isinstance(card_ids, list) else set()
+    if state.get('selectionEditorPresented') or state.get('settingsPresented'):
+        has_card_visibility, cards = True, set()
+        view['viewState'] = {**state, 'visibleCardIDs': [], 'chartViewport': None}
     if has_card_visibility:
         chart_visible = bool(cards.intersection({'chart', 'kline', 'intraday', 'klineChips'}))
         allowed_metrics = set()
@@ -76,7 +79,7 @@ def sections(context, audience):
         if not chart_visible and state.get('chartViewport') is not None:
             # A stale range summary must not survive a move to a page without a
             # chart. Do not mutate the cached App snapshot while projecting it.
-            view['viewState'] = {**state, 'chartViewport': None}
+            view['viewState'] = {**view['viewState'], 'chartViewport': None}
     else:
         # Older clients describe fixed tabs and do not publish card IDs.
         research_visible = (not state or state.get('detailTab') == 'research'

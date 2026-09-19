@@ -81,6 +81,19 @@ class AuthStore:
             """)
             self._ensure_column(connection, "pairing_codes", "access", "TEXT NOT NULL DEFAULT 'full'")
             self._ensure_column(connection, "device_tokens", "access", "TEXT NOT NULL DEFAULT 'full'")
+            self._ensure_column(connection, "device_tokens", "owner_id", "TEXT")
+            # Earlier Apple logins wrote both records with the same timestamp but
+            # omitted their relation. Recover only a unique, exact recorded match;
+            # never assign all devices to the first/only account.
+            connection.execute("""
+                UPDATE device_tokens SET owner_id = (
+                    SELECT 'apple:' || MIN(subject_hash) FROM apple_accounts
+                    WHERE device_tokens.created_at IN (created_at, last_login_at)
+                ) WHERE owner_id IS NULL AND (
+                    SELECT COUNT(*) FROM apple_accounts
+                    WHERE device_tokens.created_at IN (created_at, last_login_at)
+                ) = 1
+            """)
         if os.name != "nt":
             self.db_path.chmod(0o600)
 
@@ -152,12 +165,13 @@ class AuthStore:
                 raise AuthError("Invalid or expired pairing code")
             connection.execute("UPDATE pairing_codes SET used_at=? WHERE code_hash=?", (now, _digest(normalized)))
             connection.execute(
-                "INSERT INTO device_tokens(token_hash,device_id,name,created_at,expires_at,access) VALUES(?,?,?,?,?,?)",
-                (_digest(token), device_id, name.strip(), now, now + self._token_ttl, row["access"]),
+                "INSERT INTO device_tokens(token_hash,device_id,name,created_at,expires_at,access,owner_id) VALUES(?,?,?,?,?,?,?)",
+                (_digest(token), device_id, name.strip(), now, now + self._token_ttl, row["access"],
+                 "device:" + _digest(device_id)),
             )
         return {"token": token, "deviceId": device_id, "aiEnabled": row["access"] == "full"}
 
-    def apple_login(self, subject: str, device_id: str, name: str) -> dict[str, object]:
+    def apple_login(self, subject: str, device_id: str, name: str, previous_token: str | None = None) -> dict[str, object]:
         """Issue an app token after a caller has cryptographically verified Apple identity."""
         device_id = self._device_id(device_id)
         if not isinstance(subject, str) or not 6 <= len(subject) <= 255:
@@ -167,8 +181,19 @@ class AuthStore:
         now = self._clock()
         token = secrets.token_urlsafe(32)
         subject_hash = _digest("apple:" + subject)
+        previous_owner = None
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if previous_token:
+                previous = connection.execute(
+                    "SELECT device_id,owner_id,expires_at,revoked_at FROM device_tokens WHERE token_hash=?",
+                    (_digest(previous_token),),
+                ).fetchone()
+                if previous and previous["device_id"] == device_id and previous["revoked_at"] is None \
+                        and previous["expires_at"] > now:
+                    candidate = previous["owner_id"] or "device:" + _digest(device_id)
+                    if candidate.startswith("device:"):
+                        previous_owner = candidate
             account = connection.execute(
                 "SELECT access FROM apple_accounts WHERE subject_hash=?", (subject_hash,)
             ).fetchone()
@@ -179,10 +204,14 @@ class AuthStore:
                 (subject_hash, now, now, access),
             )
             connection.execute(
-                "INSERT INTO device_tokens(token_hash,device_id,name,created_at,expires_at,access) VALUES(?,?,?,?,?,?)",
-                (_digest(token), device_id, name.strip(), now, now + self._token_ttl, access),
+                "INSERT INTO device_tokens(token_hash,device_id,name,created_at,expires_at,access,owner_id) VALUES(?,?,?,?,?,?,?)",
+                (_digest(token), device_id, name.strip(), now, now + self._token_ttl, access, "apple:" + subject_hash),
             )
-        return {"token": token, "deviceId": device_id, "aiEnabled": access == "full"}
+        result = {"token": token, "deviceId": device_id, "aiEnabled": access == "full",
+                  "ownerId": "apple:" + subject_hash}
+        if previous_owner:
+            result["previousOwnerId"] = previous_owner
+        return result
 
     def authenticate(self, token: str, device_id: str | None = None) -> dict[str, object]:
         if not isinstance(token, str) or not 32 <= len(token) <= 128:
@@ -191,13 +220,14 @@ class AuthStore:
             device_id = self._device_id(device_id)
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT device_id,name,created_at,expires_at,revoked_at,access FROM device_tokens WHERE token_hash=?",
+                "SELECT device_id,name,created_at,expires_at,revoked_at,access,owner_id FROM device_tokens WHERE token_hash=?",
                 (_digest(token),),
             ).fetchone()
         if row is None or row["revoked_at"] is not None or row["expires_at"] <= self._clock() \
                 or (device_id is not None and not secrets.compare_digest(device_id, row["device_id"])):
             raise AuthError("Invalid or expired device token")
         return {"deviceId": row["device_id"], "name": row["name"],
+                "ownerId": row["owner_id"] or "device:" + _digest(row["device_id"]),
                 "createdAt": _iso(row["created_at"]), "expiresAt": _iso(row["expires_at"]),
                 "aiEnabled": row["access"] == "full"}
 

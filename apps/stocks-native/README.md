@@ -18,6 +18,15 @@ includes market breadth, quotes and five-level order books, intraday data,
 5/15/30/60-minute and daily/weekly/monthly K-lines, technical indicators, capital
 flow, chips, concepts, peers and announcements. No trading operations are exposed.
 
+The native left sidebar separates market search, observation groups and the
+screener. Screening restores the original 25 conditions with OR between groups,
+AND/NOT within each group, numeric thresholds, per-condition switches and removal
+impact counts. Missing data remains unknown and cannot satisfy a NOT rule. Saved
+schemes, manual groups and smart groups share one account-scoped service with AI.
+Smart groups support hot-sector membership and filter definitions; holding,
+historical holding and old AI-rating attributes explicitly require migration.
+They are not silently ignored and do not trigger background AI calls.
+
 ## Gateway
 
 Base URL: `https://bwicarus.space/stocks-native`.
@@ -29,6 +38,12 @@ Base URL: `https://bwicarus.space/stocks-native`.
 - `GET /api/realtime?codes=...`: live quotes and five-level order books.
 - `GET /api/stocks`: stock search; `GET /api/stocks/{code}`: quote and analytics.
 - `GET /api/stocks/{code}/intraday` and `/kline?period=...`: native chart data.
+- `GET /api/selection/catalog` and `/library`: conditions, thresholds and the
+  authenticated account's saved schemes/groups.
+- `POST /api/selection/evaluate`: snapshot screening, paging and condition impacts.
+- `POST /api/selection/mutate`: explicit group/scheme operations, requiring
+  `requestId` and `expectedRevision`. Retries reuse the same request; stale edits
+  return HTTP 409 instead of overwriting another device or AI change.
 - `GET /voice?deviceId=...`: WebSocket carrying JSON events and 20 ms PCM16LE mono
   48 kHz audio frames. The bearer token is passed only in an authorization header.
 - `GET /api/health`: unauthenticated minimal version/liveness response.
@@ -79,6 +94,22 @@ threads keep their original tools/history and their current/detail queries use
 the same targeted reader when the question identifies a component. No extra model
 classifies each UI event. UI actions retain request/receipt verification before
 the assistant can claim a mark was applied.
+
+Account selection operations use a session-scoped `stocks_selection` stdio MCP
+configured at both thread start and resume. The authenticated owner is fixed by
+the gateway, never supplied by the model. Existing threads retain their ID and
+history. Successful mutation receipts refresh the native library. Install
+`requirements-selection.txt` together with `requirements.txt` in a candidate
+release's isolated virtual environment; `STOCKS_SELECTION_PYTHON` can override
+the MCP interpreter. Never upgrade the serving environment in place.
+
+Apple logins link devices to one account library. Pairing-only devices remain
+isolated. Legacy pre-owner tokens are linked only when one exact recorded Apple
+login timestamp establishes the association. Selection state lives separately in
+`selection.sqlite3`; revisioned writes are atomic. A private administrative import
+can append old schemes/groups and retains originals, including unsupported rules.
+The import is not an HTTP or AI operation. Device-to-account adoption copies only
+into an empty account library and preserves the device source.
 
 The native workspace is a twelve-column two-dimensional canvas. Cards move from
 their own grab handles, snap to adjacent card edges or the canvas boundary, and

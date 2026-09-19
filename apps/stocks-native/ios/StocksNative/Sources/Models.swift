@@ -372,6 +372,9 @@ struct VoiceViewState: Codable, Hashable {
     var workspacePageID: String?
     var workspacePageTitle: String?
     var visibleCardIDs: [String]?
+    var navigationSection: String?
+    var selectionSummary: String?
+    var selectionEditorPresented = false
 }
 
 struct VoiceChartViewport: Codable, Hashable {
@@ -437,6 +440,7 @@ struct PairResponse: Decodable {
     let token: String
     let deviceId: String
     let aiEnabled: Bool?
+    let libraryMigrationWarning: String?
 }
 
 struct VoiceEvent: Decodable {

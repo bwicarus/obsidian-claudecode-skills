@@ -1,0 +1,3 @@
+# Installed in the isolated selection MCP venv.  The running voice service
+# keeps its existing aiortc/aiohttp environment untouched.
+mcp==1.27.0

@@ -1,0 +1,181 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from selection import SelectionError
+from selection_tools import dispatch_selection, dispatch_selection_safe
+from voice import VoiceSession
+
+
+class FakeSelectionService:
+    def __init__(self, root=None):
+        root = Path(root or ".").resolve()
+        self.data_store = type("Store", (), {"root": root / "market"})()
+        self.state_root = root / "state"
+        self.calls = []
+
+    def catalog(self):
+        self.calls.append(("catalog",))
+        return {"criteria": [{"id": "price_below_limit"}]}
+
+    def load_library(self, owner):
+        self.calls.append(("library", owner))
+        return {"revision": 4, "groups": [{"id": "g", "codes": [f"{i:06d}" for i in range(80)],
+                                             "legacySource": "old", "legacyDefinition": {"codes": ["secret"]}}],
+                "presets": [{"id": "p", "definition": {"groups": []},
+                             "legacySource": "old", "legacyDefinition": {"private": True}}]}
+
+    def evaluate(self, owner, request):
+        self.calls.append(("evaluate", owner, request))
+        return {"revision": 4, "asOf": "2026-09-19", "matched": 60,
+                "items": [{"code": f"{i:06d}"} for i in range(50)]}
+
+    def mutate(self, owner, request):
+        self.calls.append(("mutate", owner, request))
+        return {"success": True, "revision": 5, "requestId": request["requestId"],
+                "operation": request["operation"], "library": {"revision": 5, "groups": [], "presets": []}}
+
+
+class SelectionDispatchTests(unittest.TestCase):
+    def setUp(self):
+        self.service = FakeSelectionService()
+
+    def test_reads_and_mutation_use_only_trusted_owner(self):
+        dispatch_selection(self.service, "apple-owner", "catalog")
+        dispatch_selection(self.service, "apple-owner", "library")
+        evaluated = dispatch_selection(self.service, "apple-owner", "evaluate", {"groups": []})
+        mutated = dispatch_selection(self.service, "apple-owner", "mutate", {
+            "requestId": "intent-1", "expectedRevision": 4,
+            "operation": "group.create", "payload": {"name": "关注"},
+        })
+
+        self.assertEqual(self.service.calls[1], ("library", "apple-owner"))
+        self.assertEqual(self.service.calls[2][1], "apple-owner")
+        self.assertEqual(self.service.calls[2][2]["limit"], 30)
+        self.assertEqual(len(evaluated["result"]["items"]), 30)
+        self.assertTrue(evaluated["result"]["itemsTruncated"])
+        self.assertEqual(self.service.calls[3][1], "apple-owner")
+        self.assertEqual(mutated["result"]["requestId"], "intent-1")
+
+    def test_ai_cannot_supply_owner_at_any_depth(self):
+        with self.assertRaises(SelectionError) as failure:
+            dispatch_selection(self.service, "real-owner", "mutate", {
+                "requestId": "intent-1", "expectedRevision": 0,
+                "operation": "group.create", "payload": {"ownerId": "other", "name": "越权"},
+            })
+        self.assertEqual(failure.exception.code, "owner_not_allowed")
+        self.assertEqual(self.service.calls, [])
+
+    def test_library_codes_are_bounded_but_count_is_preserved(self):
+        value = dispatch_selection(self.service, "apple-owner", "library")
+        group = value["result"]["groups"][0]
+        self.assertEqual(len(group["codes"]), 50)
+        self.assertEqual(group["codeCount"], 80)
+        self.assertTrue(group["codesTruncated"])
+        self.assertNotIn("legacySource", group)
+        self.assertNotIn("legacyDefinition", group)
+        self.assertNotIn("legacySource", value["result"]["presets"][0])
+        self.assertNotIn("legacyDefinition", value["result"]["presets"][0])
+
+    def test_business_error_is_structured(self):
+        class Conflict(FakeSelectionService):
+            def mutate(self, owner, request):
+                raise SelectionError("revision_conflict", "资料已更新", 409, {"currentRevision": 8})
+
+        value = dispatch_selection_safe(Conflict(), "apple-owner", "mutate", {
+            "requestId": "intent-1", "expectedRevision": 4,
+            "operation": "group.create", "payload": {"name": "关注"},
+        })
+        self.assertFalse(value["ok"])
+        self.assertEqual(value["error"], {"code": "revision_conflict", "message": "资料已更新",
+                                           "status": 409, "detail": {"currentRevision": 8}})
+
+
+class VoiceSelectionToolTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.events = []
+
+        async def emit_json(value):
+            self.events.append(value)
+
+        async def emit_audio(_):
+            return None
+
+        self.service = FakeSelectionService(self.directory.name)
+        self.session = VoiceSession("device", self.directory.name, None, emit_json, emit_audio,
+                                    selection_service=self.service, selection_owner="apple-owner")
+
+    async def asyncTearDown(self):
+        await self.session.pc.close()
+        self.directory.cleanup()
+
+    def test_mcp_config_keeps_owner_out_of_model_arguments(self):
+        config = self.session.selection_mcp_config()
+        self.assertEqual(config["env"]["STOCKS_SELECTION_OWNER"], "apple-owner")
+        self.assertNotIn("apple-owner", " ".join(config["args"]))
+        self.assertTrue(config["args"][0].endswith("selection_mcp.py"))
+
+    def test_mcp_config_can_use_isolated_python(self):
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"STOCKS_SELECTION_PYTHON": "/opt/selection/bin/python"}):
+            self.assertEqual(self.session.selection_mcp_config()["command"],
+                             "/opt/selection/bin/python")
+
+    async def test_successful_mutation_emits_receipt_and_refresh_event_once(self):
+        self.session.turn_state("turn-1")["requestId"] = "turn-request"
+        item = {
+            "id": "mcp-call-1", "type": "mcpToolCall", "server": "stocks_selection",
+            "tool": "stocks_selection", "status": "completed",
+            "arguments": {"action": "mutate"},
+            "result": {"content": [], "structuredContent": {"result": {
+                "ok": True, "action": "mutate", "result": {
+                    "success": True, "revision": 5, "requestId": "intent-1",
+                    "operation": "group.create", "library": {"revision": 5},
+                },
+            }}},
+        }
+        await self.session.capture_selection_tool("turn-1", item)
+        await self.session.capture_selection_tool("turn-1", item)
+
+        tools = self.session.turn_state("turn-1")["tools"]
+        self.assertEqual(len(tools), 1)
+        self.assertTrue(tools[0]["actionApplied"])
+        self.assertEqual(tools[0]["requestId"], "turn-request")
+        changed = [event for event in self.events if event.get("type") == "selection.changed"]
+        self.assertEqual(changed, [{"type": "selection.changed", "revision": 5,
+                                    "requestId": "intent-1", "operation": "group.create"}])
+
+    async def test_failed_mutation_never_emits_change(self):
+        item = {
+            "id": "mcp-call-2", "type": "mcpToolCall", "server": "stocks_selection",
+            "tool": "stocks_selection", "status": "completed",
+            "arguments": {"action": "mutate"},
+            "result": {"content": [], "structuredContent": {"result": {
+                "ok": False, "action": "mutate", "error": {"code": "revision_conflict"},
+            }}},
+        }
+        await self.session.capture_selection_tool("turn-2", item)
+        tool = self.session.turn_state("turn-2")["tools"][0]
+        self.assertFalse(tool["success"])
+        self.assertFalse(tool["actionApplied"])
+        self.assertFalse(any(event.get("type") == "selection.changed" for event in self.events))
+
+    async def test_selection_read_counts_as_verified_tool_data(self):
+        item = {
+            "id": "mcp-call-3", "type": "mcpToolCall", "server": "stocks_selection",
+            "tool": "stocks_selection", "status": "completed",
+            "arguments": '{"action":"evaluate"}',
+            "result": {"content": [{"type": "text", "text":
+                '{"ok":true,"action":"evaluate","result":{"asOf":"2026-09-19","items":[]}}'}]},
+        }
+        await self.session.capture_selection_tool("turn-3", item)
+        tool = self.session.turn_state("turn-3")["tools"][0]
+        self.assertTrue(tool["success"])
+        self.assertTrue(tool["dataReturned"])
+        self.assertFalse(tool["actionApplied"])
+
+
+if __name__ == "__main__":
+    unittest.main()

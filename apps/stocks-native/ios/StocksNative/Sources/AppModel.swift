@@ -175,7 +175,7 @@ final class AppModel: ObservableObject {
 
     func signInWithApple(base: String, identityToken: String, rawNonce: String) async throws {
         let normalized = try APIClient.normalizedBase(base)
-        let loginClient = APIClient(baseURL: normalized, token: nil)
+        let loginClient = APIClient(baseURL: normalized, token: Credentials.token(baseURL: normalized.absoluteString))
         let result = try await loginClient.appleLogin(identityToken: identityToken, rawNonce: rawNonce,
                                                       deviceID: deviceID, name: UIDevice.current.name)
         guard result.deviceId == deviceID, !result.token.isEmpty else {
@@ -197,6 +197,7 @@ final class AppModel: ObservableObject {
         liveStock = nil
         await loadOverview()
         await loadStocks()
+        if let warning = result.libraryMigrationWarning { error = warning }
     }
 
     func unpair() async {
@@ -485,6 +486,16 @@ final class AppModel: ObservableObject {
         await publishVoiceContext(action: action, kind: "panel")
     }
 
+    func updateSelectionContext(section: String, summary: String?, editorPresented: Bool) async {
+        var next = voiceViewState
+        next.navigationSection = section
+        next.selectionSummary = summary.map { String($0.prefix(240)) }
+        next.selectionEditorPresented = editorPresented
+        guard next != voiceViewState else { return }
+        voiceViewState = next
+        await publishVoiceContext(action: summary, kind: "selection_workspace")
+    }
+
     func updateChartContext(_ snapshot: VoiceChartSnapshot, sourceID: String = "primary") async {
         guard snapshot.chart.stockCode == selectedCode, chartIsVisible(period: snapshot.chart.period) else { return }
         if snapshot.chart.period == klinePeriod.rawValue {
@@ -517,7 +528,8 @@ final class AppModel: ObservableObject {
 
     func publishVoiceContext(action: String? = nil, kind: String? = nil) async {
         let kinds = visibleWorkspaceKinds
-        let snapshot = !voiceViewState.settingsPresented
+        let detailObscured = voiceViewState.settingsPresented || voiceViewState.selectionEditorPresented
+        let snapshot = !detailObscured
             && latestChartSnapshot?.chart.stockCode == selectedCode
             && latestChartSnapshot.map({ chartIsVisible(period: $0.chart.period) }) == true ? latestChartSnapshot : nil
         let contextPeriod = snapshot.flatMap { ChartPeriod(rawValue: $0.chart.period) } ?? chartPeriod
@@ -568,12 +580,18 @@ final class AppModel: ObservableObject {
         var panels: [String] = []
         if voiceViewState.settingsPresented {
             panels = ["连接设置"]
+        } else if voiceViewState.selectionEditorPresented {
+            panels = ["选股与观察池编辑"]
         } else {
             if activeDetail != nil {
                 panels = ["价格摘要"] + (workspace.layout.selectedPage?.visibleCards.map { $0.kind.title } ?? [])
             }
             if voiceViewState.inspectorVisible, let mode = voiceViewState.inspectorMode {
                 panels.append(["orderBook": "盘口", "analysis": "分析摘要", "assistant": "AI 对话"][mode] ?? mode)
+            }
+            if let section = voiceViewState.navigationSection {
+                panels.append(["market": "市场股票列表", "watchlist": "观察池", "screener": "选股器",
+                               "selection_library": "筛选方案库"][section] ?? section)
             }
         }
         let latestTime = contextPeriod == .intraday
@@ -584,7 +602,7 @@ final class AppModel: ObservableObject {
         contextViewState.detailTab = "chart"
         contextViewState.workspacePageID = workspace.layout.selectedPage?.id
         contextViewState.workspacePageTitle = workspace.layout.selectedPage?.title
-        contextViewState.visibleCardIDs = voiceViewState.settingsPresented ? [] : (workspace.layout.selectedPage?.visibleCards.map { $0.kind.rawValue } ?? [])
+        contextViewState.visibleCardIDs = detailObscured ? [] : (workspace.layout.selectedPage?.visibleCards.map { $0.kind.rawValue } ?? [])
         contextViewState.chartViewport = snapshot.map {
             VoiceChartViewport(firstVisibleTime: $0.chart.firstVisibleTime,
                                lastVisibleTime: $0.chart.lastVisibleTime,
@@ -592,11 +610,13 @@ final class AppModel: ObservableObject {
                                historicalSummary: $0.chart.selectionSource == "visible_end" ? $0.chart.selectedPoint : nil)
         }
         let orderBook = kinds.contains(.orderBook) && activeDetail != nil
-            && !voiceViewState.settingsPresented && stock != nil
+            && !detailObscured && stock != nil
             ? VoiceOrderBookContext(bids: Array((stock?.bids ?? []).prefix(5)), asks: Array((stock?.asks ?? []).prefix(5))) : nil
         let quoteDate = stock?.quoteTime.map { String($0.prefix(10)) }
             ?? (activeIntraday?.tradeDate.isEmpty == false ? activeIntraday?.tradeDate : activeDetail?.asOf)
-        let context = VoiceUIContext(screen: voiceViewState.settingsPresented ? "settings" : (selectedCode == nil ? "market_overview" : "stock_detail"),
+        let context = VoiceUIContext(screen: voiceViewState.settingsPresented ? "settings" :
+                                     (voiceViewState.selectionEditorPresented ? "selection_editor" :
+                                      (selectedCode == nil ? "market_overview" : "stock_detail")),
                                      selectedCode: selectedCode, selectedName: stock?.name,
                                      quoteAsOf: quoteDate, quoteTime: stock?.quoteTime, quoteSource: stock?.quoteSource,
                                      observedAtUtc: Date().ISO8601Format(),

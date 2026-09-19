@@ -22,19 +22,25 @@ enum AppStyle {
     }
 }
 
+@MainActor
 struct StocksRootView: View {
     @ObservedObject var model: AppModel
+    @StateObject private var selectionModel = StockSelectionModel()
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
     @State private var showingCompactInspector = false
     @State private var showingWideInspector = false
     @State private var detailWidth: CGFloat = 0
+    @State private var selectionSection: StockSelectionSection = .market
+    @State private var selectionEditorPresented = false
+    @State private var selectionOverlayPresented = false
+    @State private var addingMarketCodes: [String]?
 
     var body: some View {
         NavigationSplitView {
             stockList
-                .navigationTitle("自选")
+                .navigationTitle(selectionSection.title)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 290, max: 340)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
@@ -42,7 +48,12 @@ struct StocksRootView: View {
                             .accessibilityLabel("设置与设备配对")
                     }
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button { Task { await model.loadStocks() } } label: { Image(systemName: "arrow.clockwise") }
+                        Button {
+                            Task {
+                                if selectionSection == .market { await model.loadStocks() }
+                                else { await selectionModel.refreshFromExternalChange() }
+                            }
+                        } label: { Image(systemName: "arrow.clockwise") }
                             .disabled(!model.isPaired || model.isLoadingList)
                             .accessibilityLabel("刷新股票列表")
                     }
@@ -77,6 +88,9 @@ struct StocksRootView: View {
         }
         .tint(AppStyle.accent)
         .sheet(isPresented: $showingSettings) { PairingView(model: model) }
+        .sheet(isPresented: Binding(get: { addingMarketCodes != nil }, set: { if !$0 { addingMarketCodes = nil } })) {
+            SelectionAddToGroupSheet(model: selectionModel, codes: addingMarketCodes ?? [])
+        }
         .sheet(isPresented: $showingCompactInspector) {
             StockAssistantInspector(
                 model: model,
@@ -90,6 +104,24 @@ struct StocksRootView: View {
                                                mode: "assistant",
                                                presentation: showingCompactInspector ? "sheet" : "sidebar",
                                                settingsPresented: showingSettings)
+        }
+        .task(id: selectionScopeID) {
+            selectionModel.onContextChange = { section, summary in
+                Task { await model.updateSelectionContext(section: selectionSection.rawValue,
+                                                          summary: section == selectionSection.rawValue || section == "selection_library" ? summary : nil,
+                                                          editorPresented: selectionOverlayPresented || addingMarketCodes != nil) }
+            }
+            await selectionModel.connect(client: model.isPaired ? model.client : nil)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .stocksSelectionDidChange)) { _ in
+            Task { await selectionModel.refreshFromExternalChange() }
+        }
+        .onChange(of: selectionSection) { _, section in
+            Task { await model.updateSelectionContext(section: section.rawValue, summary: nil,
+                                                      editorPresented: selectionOverlayPresented || addingMarketCodes != nil) }
+        }
+        .onChange(of: selectionOverlayPresented || addingMarketCodes != nil) { _, visible in
+            Task { await model.updateSelectionContext(section: selectionSection.rawValue, summary: nil, editorPresented: visible) }
         }
         .task {
             await model.maintainCache()
@@ -121,6 +153,21 @@ struct StocksRootView: View {
                 await model.refreshLiveData()
             }
         }
+        .task(id: "\(scenePhase):\(selectionSection.rawValue):\(selectionModel.selectedGroupID ?? "")") {
+            guard scenePhase == .active, model.isPaired, selectionSection == .watchlist else { return }
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(selectionModel.selectedGroup?.refreshInterval ?? 60)) } catch { return }
+                await selectionModel.refreshVisibleGroup()
+            }
+        }
+        .task(id: "quotes:\(scenePhase):\(selectionSection.rawValue):\(selectionModel.selectedGroupID ?? ""):\(selectionModel.selectedGroup?.realtimeEnabled ?? false)") {
+            guard scenePhase == .active, model.isPaired, selectionSection == .watchlist else { return }
+            while !Task.isCancelled {
+                guard selectionModel.selectedGroup?.realtimeEnabled == true else { return }
+                do { try await Task.sleep(for: .seconds(selectionModel.selectedGroup?.realtimeInterval ?? 5)) } catch { return }
+                await selectionModel.refreshVisibleQuotes()
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             // MVP does not promise background audio; explicitly release its session when backgrounded.
             if phase == .background, model.voice.isStarted { Task { await model.voice.stop() } }
@@ -130,6 +177,10 @@ struct StocksRootView: View {
     private var contextInspectorIsVisible: Bool {
         !showingSettings && (showingCompactInspector
             || (sizeClass == .regular && detailWidth >= 900 && showingWideInspector))
+    }
+
+    private var selectionScopeID: String {
+        StockSelectionModel.scopeID(client: model.isPaired ? model.client : nil)
     }
 
     private var inspectorContextID: String {
@@ -160,6 +211,24 @@ struct StocksRootView: View {
 
     private var stockList: some View {
         VStack(spacing: 0) {
+            if model.isPaired {
+                Picker("股票范围", selection: $selectionSection) {
+                    ForEach(StockSelectionSection.allCases) { section in Text(section.title).tag(section) }
+                }
+                .pickerStyle(.segmented).padding(10)
+            }
+            if model.isPaired && selectionSection != .market {
+                StockSelectionSidebar(model: selectionModel, section: selectionSection,
+                                      selectedStockCode: $model.selectedCode,
+                                      editorPresented: $selectionEditorPresented,
+                                      onOpenStock: { model.selectedCode = $0 },
+                                      onOverlayChange: { selectionOverlayPresented = $0 })
+            } else { marketStockList }
+        }
+    }
+
+    private var marketStockList: some View {
+        VStack(spacing: 0) {
             if !model.isPaired {
                 ContentUnavailableView {
                     Label("连接你的市场", systemImage: "chart.xyaxis.line")
@@ -175,6 +244,10 @@ struct StocksRootView: View {
                 }
                 List(model.stocks, selection: $model.selectedCode) { stock in
                     StockRow(stock: stock).tag(stock.code)
+                        .contextMenu {
+                            Button("加入观察组", systemImage: "folder.badge.plus") { addingMarketCodes = [stock.code] }
+                                .disabled(!selectionModel.canWrite)
+                        }
                 }
                 .listStyle(.sidebar)
                 .overlay {

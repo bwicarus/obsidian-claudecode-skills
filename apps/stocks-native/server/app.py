@@ -14,6 +14,7 @@ from auth import AuthStore, AuthError
 from data import StockDataStore, DataUnavailable, StockNotFound
 from chips import build_chips
 from live import LiveMarketSource
+from selection import SelectionService, SelectionError, SelectionConflict
 from voice import VoiceSession, closes_voice_connection, safe_error
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,11 @@ async def errors(request, handler):
         response = web.json_response({'error': '未找到该股票'}, status=404)
     except DataUnavailable:
         response = web.json_response({'error': '行情数据暂不可用，请稍后重试'}, status=503)
+    except SelectionError as exc:
+        result = {'error': str(exc), 'message': str(exc), 'code': exc.code, **exc.detail}
+        if isinstance(exc, SelectionConflict):
+            result['revision'] = exc.revision
+        response = web.json_response(result, status=exc.status)
     except (ValueError, TypeError, KeyError):
         response = web.json_response({'error': '请求格式不正确'}, status=400)
     except web.HTTPException:
@@ -73,8 +79,52 @@ async def apple_login(request):
     bucket.append(now)
     data = await request.json()
     claims = await request.app['apple'].verify(data['identityToken'], data['rawNonce'])
+    header = request.headers.get('Authorization', '')
+    previous_token = header[7:] if header.startswith('Bearer ') else None
     result = await asyncio.to_thread(request.app['auth'].apple_login, claims['sub'],
-                                     data['deviceId'], data['name'])
+                                     data['deviceId'], data['name'], previous_token)
+    previous_owner = result.pop('previousOwnerId', None)
+    owner = result.pop('ownerId')
+    if previous_owner:
+        try:
+            await asyncio.to_thread(request.app['selection'].move_library, previous_owner, owner)
+        except SelectionConflict:
+            result['libraryMigrationWarning'] = '账号已有观察池；原设备资料已保留，需要手动合并。'
+        except Exception as exc:
+            log.warning('Device library adoption failed: %s', safe_error(exc))
+            result['libraryMigrationWarning'] = '登录成功，原设备观察池暂未迁移；原资料仍然保留。'
+    return web.json_response(result)
+
+
+async def selection_catalog(request):
+    await identity(request)
+    return web.json_response(request.app['selection'].catalog())
+
+
+async def selection_library(request):
+    caller = await identity(request)
+    result = await asyncio.to_thread(request.app['selection'].load_library, caller['ownerId'])
+    return web.json_response(result)
+
+
+async def selection_evaluate(request):
+    caller = await identity(request)
+    payload = await request.json()
+    result = await asyncio.to_thread(request.app['selection'].evaluate, caller['ownerId'], payload)
+    return web.json_response(result)
+
+
+async def selection_mutate(request):
+    caller = await identity(request)
+    payload = await request.json()
+    result = await asyncio.to_thread(request.app['selection'].mutate, caller['ownerId'], payload)
+    if result.get('success') and not result.get('replayed'):
+        event = {'type': 'selection.changed', 'revision': result['revision'],
+                 'requestId': result['requestId'], 'operation': payload.get('operation')}
+        for entry in list(request.app['voices'].values()):
+            if entry and getattr(entry[1], 'selection_owner', None) == caller['ownerId']:
+                with contextlib.suppress(ConnectionError, RuntimeError):
+                    await entry[1].emit_json(event)
     return web.json_response(result)
 
 
@@ -154,7 +204,7 @@ async def kline(request):
 
 async def health(request):
     return web.json_response({'status': 'ok', 'version': '0.2.0', 'contextProtocol': 2,
-                              'chartDataProtocol': 1})
+                              'chartDataProtocol': 1, 'selectionProtocol': 1})
 
 
 async def chips(request):
@@ -242,7 +292,8 @@ async def voice(request):
     try:
         await ws.prepare(request)
         session = VoiceSession(device_id, request.app['state'], request.app['data'], emit_json, emit_audio,
-                               live_source=request.app['live'])
+                               live_source=request.app['live'],
+                               selection_service=request.app['selection'], selection_owner=caller['ownerId'])
         active[device_id] = (ws, session)
         watch_task = asyncio.create_task(watch())
         async for msg in ws:
@@ -302,17 +353,22 @@ async def shutdown(app):
 
 def create_app():
     state = Path(os.environ.get('STOCKS_MVP_STATE_DIR', '/var/lib/stocks-native')).resolve()
-    app = web.Application(middlewares=[errors], client_max_size=16384)
+    app = web.Application(middlewares=[errors], client_max_size=128000)
     app['state'] = state
     app['auth'] = AuthStore(state)
     app['apple'] = AppleIdentityVerifier(os.environ.get('APPLE_CLIENT_ID', 'space.bwicarus.stocksnative'))
     app['data'] = StockDataStore(os.environ.get('STOCKS_DATA_ROOT', '/root/webapp/data/stocks'))
+    app['selection'] = SelectionService(app['data'], state)
     app['live'] = LiveMarketSource()
     app['pair_attempts'] = defaultdict(deque)
     app['voices'] = {}
     app['chip_cache'] = {}
     app.add_routes([web.get('/api/health', health), web.post('/api/pair', pair),
                     web.post('/api/auth/apple', apple_login),
+                    web.get('/api/selection/catalog', selection_catalog),
+                    web.get('/api/selection/library', selection_library),
+                    web.post('/api/selection/evaluate', selection_evaluate),
+                    web.post('/api/selection/mutate', selection_mutate),
                     web.get('/api/market/overview', market_overview),
                     web.get('/api/realtime', realtime),
                     web.get('/api/stocks', stocks),

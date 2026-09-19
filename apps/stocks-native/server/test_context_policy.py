@@ -20,6 +20,18 @@ def screen(price='1000', change='1.00%', code='000001'):
 
 
 class ContextPolicyTests(unittest.TestCase):
+    def test_selection_editor_hides_the_chart_behind_it(self):
+        context = screen()
+        context['viewState'].update(selectionEditorPresented=True, navigationSection='screener',
+                                    selectionSummary='编辑低价放量方案', visibleCardIDs=['chart', 'fund', 'orderBook'],
+                                    chartViewport={'firstVisibleTime': '2026-09-17'})
+        result = sections(context, 'backend')
+        for key in ('chart', 'selection', 'annotations', 'orderBook', 'metrics'):
+            self.assertEqual(result[key], {})
+        self.assertEqual(result['view']['viewState']['visibleCardIDs'], [])
+        self.assertEqual(result['view']['viewState']['selectionSummary'], '编辑低价放量方案')
+        self.assertEqual(context['viewState']['visibleCardIDs'], ['chart', 'fund', 'orderBook'])
+
     def baseline(self, context=None, audience='voice', now=100):
         context = context or screen()
         _, ledger = prepare_patch(context, audience, {}, False, now=now)

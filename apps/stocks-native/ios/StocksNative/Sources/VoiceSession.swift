@@ -1,6 +1,10 @@
 import Combine
 import Foundation
 
+extension Notification.Name {
+    static let stocksSelectionDidChange = Notification.Name("stocksNative.selectionDidChange")
+}
+
 @MainActor
 final class VoiceSession: ObservableObject {
     enum State: String {
@@ -359,6 +363,8 @@ final class VoiceSession: ObservableObject {
                                               role: role, text: text, isFinal: event.final ?? true))
             }
             trimTranscripts()
+        case "selection.changed":
+            NotificationCenter.default.post(name: .stocksSelectionDidChange, object: nil)
         case "stock.selected":
             if let code = event.code {
                 stockCode = code

@@ -61,6 +61,22 @@ struct APIClient {
         ])
     }
 
+    func selectionCatalog() async throws -> SelectionCatalog {
+        try await request("api/selection/catalog")
+    }
+
+    func selectionLibrary() async throws -> SelectionLibrary {
+        try await request("api/selection/library")
+    }
+
+    func evaluateSelection(_ definition: SelectionEvaluateRequest) async throws -> SelectionEvaluation {
+        try await request("api/selection/evaluate", method: "POST", body: JSONEncoder().encode(definition))
+    }
+
+    func mutateSelection(_ mutation: SelectionMutation) async throws -> SelectionMutationReceipt {
+        try await request("api/selection/mutate", method: "POST", body: JSONEncoder().encode(mutation))
+    }
+
     func webSocketURL(deviceID: String) throws -> URL {
         var components = URLComponents(url: baseURL.appendingPathComponent("voice"), resolvingAgainstBaseURL: false)!
         components.scheme = "wss"
@@ -83,6 +99,13 @@ struct APIClient {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw AppError.message("服务器未返回 HTTP 响应。") }
         guard (200..<300).contains(response.statusCode) else {
+            if path.hasPrefix("api/selection/") {
+                let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                throw SelectionAPIError(status: response.statusCode, code: payload?["code"] as? String,
+                                        message: payload?["message"] as? String ?? payload?["error"] as? String
+                                            ?? "请求失败（HTTP \(response.statusCode)）。",
+                                        revision: payload?["revision"] as? Int)
+            }
             if response.statusCode == 401 { throw AppError.message("设备凭证无效或已过期，请重新配对。") }
             if response.statusCode == 403 { throw AppError.message("配对码不正确或设备访问被拒绝。") }
             let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
