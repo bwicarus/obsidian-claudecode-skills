@@ -197,7 +197,7 @@ final class AppModel: ObservableObject {
         liveStock = nil
         await loadOverview()
         await loadStocks()
-        if let warning = result.libraryMigrationWarning { error = warning }
+        if let warning = result.libraryMigrationWarning { listError = warning }
     }
 
     func unpair() async {
