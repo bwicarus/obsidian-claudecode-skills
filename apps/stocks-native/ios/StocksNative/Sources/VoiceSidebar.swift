@@ -5,7 +5,6 @@ struct VoiceSidebar: View {
     @ObservedObject var model: AppModel
     @State private var draft = ""
     @State private var sendingText = false
-    @State private var showDiagnostics = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -14,14 +13,14 @@ struct VoiceSidebar: View {
                     Image(systemName: "waveform").font(.title3).foregroundStyle(AppStyle.accent)
                     Text("股票助手").font(.headline)
                     Spacer()
-                    Button { showDiagnostics.toggle() } label: { Image(systemName: "info.circle").foregroundStyle(.secondary) }
-                        .accessibilityLabel("语音连接详情")
                 }
                 HStack(spacing: 7) {
                     Circle().fill(voice.isConnected ? AppStyle.accent : Color.secondary.opacity(0.5)).frame(width: 6, height: 6)
                     Text(voice.state.rawValue).font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    if voice.state == .connecting || voice.state == .preparing { ProgressView().controlSize(.mini) }
+                    if voice.state == .connecting || voice.state == .reconnecting || voice.state == .preparing {
+                        ProgressView().controlSize(.mini)
+                    }
                 }
                 if let error = voice.error {
                     Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
@@ -33,30 +32,31 @@ struct VoiceSidebar: View {
                 if let code = voice.stockCode, voice.isStarted {
                     Text("当前股票 · \(code)").font(.caption).foregroundStyle(.secondary)
                 }
-                Button {
-                    Task {
-                        if voice.isStarted { await voice.stop() }
-                        else {
-                            await voice.start(client: model.client, deviceID: model.deviceID, stockCode: model.selectedCode)
-                            await model.publishVoiceContext(action: "开始语音对话")
+                HStack(spacing: 10) {
+                    Button {
+                        Task {
+                            if voice.isStarted { await voice.stop() }
+                            else {
+                                await voice.start(client: model.client, deviceID: model.deviceID, stockCode: model.selectedCode)
+                                await model.publishVoiceContext(action: "开始语音对话")
+                            }
                         }
+                    } label: {
+                        Label(voice.isStarted ? "关闭" : "开始", systemImage: voice.isStarted ? "stop.fill" : "mic.fill")
+                            .font(.subheadline.weight(.medium)).frame(maxWidth: .infinity).padding(.vertical, 6)
                     }
-                } label: {
-                    Label(voice.isStarted ? "结束通话" : "开始语音", systemImage: voice.isStarted ? "stop.fill" : "mic.fill")
-                        .font(.subheadline.weight(.medium)).frame(maxWidth: .infinity).padding(.vertical, 6)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(voice.isStarted ? Color.secondary : AppStyle.accent)
-                .disabled(!model.isPaired || !model.isAIEnabled)
-                if showDiagnostics {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("上行 \(voice.sentPackets) 包 · 下行 \(voice.receivedPackets) 包")
-                        if let sessionID = voice.sessionID { Text("会话 \(sessionID)") }
-                        if let threadID = voice.threadID { Text("线程 \(threadID)") }
-                        Text("48 kHz · PCM16 · 单声道")
+                    .buttonStyle(.borderedProminent)
+                    .tint(voice.isStarted ? Color.secondary : AppStyle.accent)
+                    .disabled(!model.isPaired || !model.isAIEnabled)
+
+                    Button {
+                        Task { await voice.newConversation() }
+                    } label: {
+                        Label("新对话", systemImage: "square.and.pencil")
+                            .font(.subheadline.weight(.medium)).padding(.vertical, 6)
                     }
-                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                    .buttonStyle(.bordered)
+                    .disabled(!voice.isConnected)
                 }
             }
             .padding(20)

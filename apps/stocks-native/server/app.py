@@ -13,11 +13,9 @@ from apple_auth import AppleIdentityVerifier
 from auth import AuthStore, AuthError
 from data import StockDataStore, DataUnavailable, StockNotFound
 from live import LiveMarketSource
-from voice import VoiceSession, safe_error
+from voice import VoiceSession, closes_voice_connection, safe_error
 
 log = logging.getLogger(__name__)
-
-
 @web.middleware
 async def errors(request, handler):
     try:
@@ -180,7 +178,7 @@ async def voice(request):
         async with writes:
             if not ws.closed:
                 await ws.send_json(event)
-        if event.get('type') == 'error' or (event.get('type') == 'state' and event.get('state') == 'closed'):
+        if closes_voice_connection(event):
             # Keep Codex's reader available to answer the stop RPC during cleanup.
             asyncio.create_task(ws.close())
     async def emit_audio(data):
@@ -194,13 +192,22 @@ async def voice(request):
             raise
         except Exception as exc:
             log.warning('Voice start failed: %s', safe_error(exc))
-            await emit_json({'type': 'error', 'message': '语音连接失败：' + safe_error(exc)})
+            await emit_json({'type': 'error', 'fatal': True,
+                             'message': '语音连接失败：' + safe_error(exc)})
     async def watch():
         started = time.monotonic()
+        idle_seconds = max(60, int(os.environ.get('STOCKS_VOICE_IDLE_SECONDS', '1200')))
         while not ws.closed:
             await asyncio.sleep(10)
             now = time.monotonic()
-            if (not start_task and now - started > 30) or (session and now - session.last_activity > 600):
+            delegation_busy = (session and session.delegation_pending and
+                               now - session.delegation_pending < 30)
+            busy = session and (session.active_turn_id or session.text_pending or delegation_busy or
+                                session.user_speaking or session.assistant_speaking)
+            if busy:
+                session.last_activity = now
+                continue
+            if (not start_task and now - started > 30) or (session and now - session.last_activity > idle_seconds):
                 await emit_json({'type': 'state', 'state': 'closed', 'reason': 'idle'})
     try:
         await ws.prepare(request)
@@ -218,7 +225,11 @@ async def voice(request):
                     if kind == 'start' and start_task is None:
                         start_task = asyncio.create_task(start(obj.get('stockCode'), obj.get('capabilities', '')))
                     elif kind == 'stop':
-                        await ws.send_json({'type': 'state', 'state': 'closed'})
+                        await ws.send_json({'type': 'state', 'state': 'closed', 'reason': 'manual'})
+                        break
+                    elif kind == 'thread.new':
+                        session.reset_thread()
+                        await emit_json({'type': 'state', 'state': 'closed', 'reason': 'new_thread'})
                         break
                     elif kind == 'text' and session.ready.is_set():
                         await session.text(str(obj.get('text', '')))
@@ -235,7 +246,7 @@ async def voice(request):
                 elif msg.type == WSMsgType.ERROR:
                     break
             except (ValueError, KeyError, StockNotFound) as exc:
-                await emit_json({'type': 'error', 'message': safe_error(exc)})
+                await emit_json({'type': 'error', 'fatal': False, 'message': safe_error(exc)})
     finally:
         for task in (start_task, watch_task):
             if task and not task.done():

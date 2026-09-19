@@ -41,6 +41,12 @@ def safe_error(exc):
     return value[:600]
 
 
+def closes_voice_connection(event):
+    """Only terminal lifecycle events should tear down the WebSocket."""
+    return ((event.get('type') == 'error' and event.get('fatal') is True) or
+            (event.get('type') == 'state' and event.get('state') == 'closed'))
+
+
 class MicrophoneTrack(MediaStreamTrack):
     kind = 'audio'
 
@@ -101,6 +107,8 @@ class VoiceSession:
         self.text_pending = None
         self.voice_request = None
         self.delegation_pending = False
+        self.user_speaking = False
+        self.assistant_speaking = False
         self.reply_lock = asyncio.Lock()
         self.speech_receipts = []
         self.pending_capabilities = {}
@@ -126,6 +134,79 @@ class VoiceSession:
     def record(self, event):
         with self.journal.open('a', encoding='utf-8') as f:
             f.write(json.dumps({'at': time.time(), **event}, ensure_ascii=False) + '\n')
+
+    @staticmethod
+    def transcript_message_id(event, raw_line=None):
+        existing = event.get('messageId')
+        if existing:
+            return str(existing)
+        role = str(event.get('role') or 'unknown')
+        source = event.get('requestId') or event.get('turnId')
+        if source:
+            return f'{source}:{role}'
+        material = raw_line if isinstance(raw_line, bytes) else json.dumps(
+            event, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+        return hashlib.sha256(material).hexdigest()[:24] + ':' + role
+
+    def recent_transcripts(self, limit=8):
+        """Read the newest transcript records by scanning the journal backwards."""
+        if limit <= 0 or not self.journal.exists():
+            return []
+        found = []
+        with self.journal.open('rb') as journal:
+            position = journal.seek(0, os.SEEK_END)
+            remainder = b''
+            reset_boundary = False
+            while position > 0 and len(found) < limit and not reset_boundary:
+                size = min(65536, position)
+                position -= size
+                journal.seek(position)
+                parts = (journal.read(size) + remainder).split(b'\n')
+                remainder = parts[0]
+                for raw in reversed(parts[1:]):
+                    if not raw:
+                        continue
+                    try:
+                        event = json.loads(raw.decode('utf-8', errors='replace'))
+                    except (ValueError, TypeError):
+                        continue
+                    if event.get('type') == 'conversation.reset':
+                        reset_boundary = True
+                        break
+                    if (event.get('type') != 'transcript' or
+                            event.get('role') not in ('user', 'assistant') or
+                            not str(event.get('text') or '').strip()):
+                        continue
+                    found.append({
+                        'id': self.transcript_message_id(event, raw),
+                        'role': event['role'],
+                        'text': str(event['text'])[:500],
+                    })
+                    if len(found) >= limit:
+                        break
+            if position == 0 and len(found) < limit and remainder and not reset_boundary:
+                try:
+                    event = json.loads(remainder.decode('utf-8', errors='replace'))
+                except (ValueError, TypeError):
+                    event = {}
+                if (event.get('type') == 'transcript' and
+                        event.get('role') in ('user', 'assistant') and
+                        str(event.get('text') or '').strip()):
+                    found.append({
+                        'id': self.transcript_message_id(event, remainder),
+                        'role': event['role'],
+                        'text': str(event['text'])[:500],
+                    })
+        return list(reversed(found[:limit]))
+
+    def reset_thread(self):
+        """Place a history boundary and discard every saved thread variant."""
+        self.record({'type': 'conversation.reset', 'sessionId': self.session_id})
+        try:
+            for suffix in ('.thread', '.thread-v2'):
+                self.journal.with_suffix(suffix).unlink(missing_ok=True)
+        except OSError as exc:
+            raise ValueError('无法新建对话：' + safe_error(exc)) from exc
 
     async def event(self, event):
         if not self.closed:
@@ -185,7 +266,8 @@ class VoiceSession:
                    'dataVerified': False, 'message': message}
         self.record(receipt)
         await self.event(receipt)
-        await self.event({'type': 'error', 'message': message, 'requestId': state['requestId']})
+        await self.event({'type': 'error', 'fatal': False, 'message': message,
+                          'requestId': state['requestId']})
 
     async def finish_turn(self, turn):
         turn_id = turn['id']
@@ -269,7 +351,7 @@ class VoiceSession:
                 if method == 'thread/realtime/sdp' and not self.sdp.done():
                     self.sdp.set_result(p['sdp'])
                 elif method == 'thread/realtime/error':
-                    await self.event({'type': 'error', 'message': safe_error(p)})
+                    await self.event({'type': 'error', 'fatal': True, 'message': safe_error(p)})
                 elif method == 'thread/realtime/closed' and not self.closed:
                     await self.event({'type': 'state', 'state': 'closed', 'reason': p.get('reason')})
                 elif method == 'turn/started':
@@ -308,7 +390,8 @@ class VoiceSession:
                 if not f.done():
                     f.set_exception(RuntimeError('Codex 连接已关闭'))
             if not self.closed:
-                await self.event({'type': 'error', 'message': 'Codex 进程已退出，请重新连接'})
+                await self.event({'type': 'error', 'fatal': True,
+                                  'message': 'Codex 进程已退出，请重新连接'})
 
     async def stderr(self):
         while line := await self.proc.stderr.readline():
@@ -556,21 +639,32 @@ class VoiceSession:
             self.ready.set()
         elif kind == 'turn.created':
             turn = obj.get('turn') or {}
-            if turn.get('role') == 'user':
+            self.last_activity = time.monotonic()
+            role = turn.get('role')
+            if role == 'user':
+                self.user_speaking = True
                 pinned = self.pin_voice_turn_context()
                 self.task(self.inject_voice_context(pinned))
+            elif role == 'assistant':
+                self.assistant_speaking = True
         elif kind == 'delegation.created':
+            self.last_activity = time.monotonic()
             if self.active_turn_id is None:
                 self.delegation_pending = time.monotonic()
             self.record({'type': 'voice.delegation', 'sessionId': self.session_id})
             self.task(self.inject_delegation_context(self.voice_turn_context))
         elif kind == 'turn.done':
             turn = obj.get('turn') or {}
+            role = turn.get('role')
+            if role == 'user':
+                self.user_speaking = False
+            elif role == 'assistant':
+                self.assistant_speaking = False
             text = turn.get('transcript')
             if text:
                 self.last_activity = time.monotonic()
-                event = {'type': 'transcript', 'role': turn.get('role'), 'text': text, 'final': True}
-                if turn.get('role') == 'user':
+                event = {'type': 'transcript', 'role': role, 'text': text, 'final': True}
+                if role == 'user':
                     if self.voice_turn_context is None:
                         self.pin_voice_turn_context()
                     active = self.turns.get(self.active_turn_id)
@@ -581,17 +675,22 @@ class VoiceSession:
                         active['inputText'] = text
                     else:
                         self.voice_request = {'requestId': request_id, 'text': text}
-                elif turn.get('role') == 'assistant':
+                elif role == 'assistant':
                     normalized = re.sub(r'\W+', '', text).casefold()
                     for receipt in self.speech_receipts:
                         if re.sub(r'\W+', '', receipt['text']).casefold() == normalized:
                             event.update(requestId=receipt['requestId'], turnId=receipt['turnId'])
                             self.speech_receipts.remove(receipt)
                             break
+                if turn.get('id'):
+                    event['messageId'] = f"{turn['id']}:{role}"
+                else:
+                    event['messageId'] = self.transcript_message_id(event)
                 self.record(event)
                 self.task(self.event(event))
         elif kind == 'error':
-            self.task(self.event({'type': 'error', 'message': safe_error(obj.get('error'))}))
+            self.task(self.event({'type': 'error', 'fatal': True,
+                                  'message': safe_error(obj.get('error'))}))
 
     async def consume_audio(self, track):
         resampler = AudioResampler(format='s16', layout='mono', rate=48000)
@@ -608,7 +707,8 @@ class VoiceSession:
                         self.sent_frames += 1
         except Exception as e:
             if not self.closed:
-                await self.event({'type': 'error', 'message': '语音下行中断：' + safe_error(e)})
+                await self.event({'type': 'error', 'fatal': True,
+                                  'message': '语音下行中断：' + safe_error(e)})
 
     async def start(self, code=None, capabilities=''):
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -676,25 +776,18 @@ class VoiceSession:
                 self.task(self.consume_audio(track))
         await self.pc.setLocalDescription(await self.pc.createOffer())
         voice_rules = VOICE_RULES + (ANNOTATION_VOICE_RULES if self.supports_annotations else '')
+        history = self.recent_transcripts(8)
         initial = [{'role': 'developer', 'text': voice_rules + '\n当前选中代码：' + (self.stock_code or '尚未选择')}]
-        if self.journal.exists():
-            with self.journal.open('rb') as f:
-                f.seek(max(0, self.journal.stat().st_size - 24000))
-                rows = f.read().decode('utf-8', errors='replace').splitlines()
-            for line in rows[-20:]:
-                with contextlib.suppress(ValueError):
-                    e = json.loads(line)
-                    if e.get('type') == 'transcript' and e.get('role') in ('user', 'assistant'):
-                        initial.append({'role': e['role'], 'text': e['text'][:500]})
-            initial = initial[:1] + initial[1:][-8:]
+        initial.extend({'role': item['role'], 'text': item['text']} for item in history)
         await self.call('thread/realtime/start', {'threadId': self.thread_id, 'version': 'v3',
             'voice': 'sol', 'outputModality': 'audio', 'includeStartupContext': False,
             'initialItems': initial, 'clientManagedHandoffs': True, 'codexResponseHandoffMode': 'thinking',
-            'codexResponsesAsItems': False, 'flushTranscriptTailOnSessionEnd': False,
+            'codexResponsesAsItems': False, 'flushTranscriptTailOnSessionEnd': True,
             'transport': {'type': 'webrtc', 'sdp': self.pc.localDescription.sdp}})
         sdp = await asyncio.wait_for(self.sdp, 40)
         await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type='answer'))
         await asyncio.wait_for(self.ready.wait(), 30)
+        await self.event({'type': 'history', 'items': history})
         await self.event({'type': 'state', 'state': 'active', 'sessionId': self.session_id, 'threadId': self.thread_id})
 
     async def text(self, text):
@@ -709,8 +802,10 @@ class VoiceSession:
                        'message': '当前查询仍在处理，请稍后再问。'}
             self.record(receipt)
             self.task(self.event(receipt))
-            self.task(self.event({'type': 'transcript', 'role': 'assistant', 'final': True,
-                                 'text': receipt['message'], 'requestId': request_id, 'source': 'control'}))
+            control = {'type': 'transcript', 'role': 'assistant', 'final': True,
+                       'text': receipt['message'], 'requestId': request_id, 'source': 'control'}
+            control['messageId'] = self.transcript_message_id(control)
+            self.task(self.event(control))
             return
         if self.closed or not self.ready.is_set():
             raise ValueError('语音连接尚未就绪')
@@ -720,6 +815,7 @@ class VoiceSession:
         # packets throughout the model turn. The pending slot is reserved now.
         event = {'type': 'transcript', 'role': 'user', 'text': value, 'final': True,
                  'requestId': request_id, 'source': 'text'}
+        event['messageId'] = self.transcript_message_id(event)
         self.record(event)
         self.task(self.submit_text(request, event))
 

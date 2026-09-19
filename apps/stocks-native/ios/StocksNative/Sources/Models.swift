@@ -298,11 +298,15 @@ struct PairResponse: Decodable {
 struct VoiceEvent: Decodable {
     let type: String
     let state: String?
+    let reason: String?
+    let fatal: Bool?
     let sessionId: String?
     let threadId: String?
     let role: String?
     let text: String?
     let final: Bool?
+    let messageId: String?
+    let items: [VoiceHistoryItem]?
     let code: String?
     let message: String?
     let actionId: String?
@@ -315,11 +319,24 @@ struct VoiceEvent: Decodable {
     let y2: Double?
 }
 
+struct VoiceHistoryItem: Decodable {
+    let id: String
+    let role: String
+    let text: String
+}
+
 struct Transcript: Identifiable {
-    let id = UUID()
+    var id: String
     let role: String
     var text: String
     var isFinal: Bool
+
+    init(id: String = UUID().uuidString, role: String, text: String, isFinal: Bool) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.isFinal = isFinal
+    }
 }
 
 enum AppError: LocalizedError {
