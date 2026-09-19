@@ -200,8 +200,12 @@ private struct CandleChart: View {
                 .chartXScale(domain: -1...Double(visible.count))
                 .chartXAxis(.hidden)
                 .chartYAxis {
-                    AxisMarks(position: .trailing, values: .automatic(desiredCount: 2)) { _ in
-                        AxisValueLabel(format: .number.notation(.compactName))
+                    AxisMarks(position: .trailing, values: .automatic(desiredCount: 2)) { axisValue in
+                        AxisValueLabel {
+                            if let value = axisValue.as(Double.self) {
+                                Text(value.formatted(.number.notation(.compactName)))
+                            }
+                        }
                     }
                 }
                 .frame(height: 85)
