@@ -794,7 +794,13 @@
       if (supplied != null) supplied = integer(supplied, label, 0, false);
       var actual = Number(record && record.rev || 0);
       if (supplied != null && supplied !== actual) {
-        throw new CardRepositoryError(label + ' 与当前版本不一致', 'BW_CARD_REPOSITORY_CONFLICT', {
+        // ⚠ 当前版本号要写进 **message**，不能只放在 detail 里。
+        //   2026-09-19 实录：AI 改卡拿到的是 「ifEntityRev 与当前版本不一致」这一句，
+        //   detail 在转成工具回执时被削掉了 —— 它知道自己过期了，却不知道该用几，
+        //   于是只能放弃。带上当前值它下一轮就能直接重试。
+        throw new CardRepositoryError(
+          label + ' 与当前版本不一致（当前 ' + actual + '，你给的 ' + supplied + '）',
+          'BW_CARD_REPOSITORY_CONFLICT', {
           expectedRev: supplied,
           actualRev: actual
         });

@@ -101,10 +101,27 @@ test("unsaved drafts render ruby through the same safe face projection while kee
   const rendererStart = FLASHCARD.indexOf("function cardHtml(st, c, i)");
   const rendererEnd = FLASHCARD.indexOf("function bindSlide", rendererStart);
   const renderer = FLASHCARD.slice(rendererStart, rendererEnd);
-  assert.match(renderer, /c\._st === 'draft'[\s\S]*?draftFieldHtml\(st, c, '正面', 'front', 'front'\)/);
-  assert.match(renderer, /draftFieldHtml\(st, c, '背面', 'back', 'back'\)/);
+  // 2026-09-19 用户拿掉了「正面/背面」这两个标签（哪个是正面一眼就看得出，
+  // 占一行反而把定高卡片撑得更满）。钉的应该是**两面都经同一个字段渲染器**，
+  // 不是那两个字面量 —— 原来的写法把一个纯外观决定锁成了契约。
+  assert.match(renderer, /c\._st === 'draft'[\s\S]*?draftFieldHtml\(st, c, '[^']*', 'front', 'front'\)/);
+  assert.match(renderer, /draftFieldHtml\(st, c, '[^']*', 'back', 'back'\)/);
   assert.match(renderer, /fc-del[\s\S]*?fc-add/,
     "rich preview must not remove draft delete/save actions");
+  // 删除/保存钉在卡片底部：它必须在 .fc-draft-body **之外**。在里面就会跟正文
+  // 一起滚走，用户 2026-09-19 报的正是这个（要拉到最下面才看得见）。
+  const draftCard = renderer.slice(renderer.indexOf("fc-card fc-draftcard"));
+  const bodyEnd = draftCard.indexOf("</div>' +");
+  assert.ok(bodyEnd > 0, "草稿卡要有一个单独的滚动正文容器");
+  assert.doesNotMatch(draftCard.slice(0, bodyEnd), /fc-btns/,
+    "按钮行不能落在滚动正文里");
+  // 折叠式「编辑源文」已去掉，改成双击预览就地编辑。
+  // ⚠ 钉**结构**（helper 里不再产生 <details>），不要钉那四个字 ——
+  //   第一版写成全文 doesNotMatch(/编辑源文/)，结果被解释这次改动的注释自己撞红。
+  assert.doesNotMatch(helper, /<details|<summary|fc-draft-editor/,
+    "折叠式源文编辑器已废弃");
+  assert.match(FLASHCARD, /addEventListener\('dblclick'/,
+    "双击预览要能进编辑");
 
   const editBinding = FLASHCARD.slice(
     FLASHCARD.indexOf("slide.querySelectorAll('.fc-ed')"),

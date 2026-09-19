@@ -251,15 +251,22 @@ if (window.__bwPwaProviderOnly) return;
       : md(side === 'back' ? card.back : card.front);
     return safeHtml(html);
   }
+  // 草稿字段：预览与源文**同一块地方**，双击切到编辑，失焦切回（用户 2026-09-19）。
+  //
+  // 原来是「正面/背面」标签 + 一个 <details>「编辑源文」折叠。三个问题：标签占掉一行
+  // 却没有信息量（哪个是正面一眼就看得出）；折叠展开后预览和源文同时占位，卡片被撑长；
+  // 而卡片是定高滚动的，于是底部的删除/保存被挤出可视区，要拉到底才看得见。
+  // ⚠ 两个节点都留在 DOM 里，只用 class 切显示 —— 输入联动（.fc-ed 的 input →
+  //   重绘 .fc-draft-preview）和落盘 _stateSync 都不动，避免为了换外观改掉数据路径。
   function draftFieldHtml(st, card, label, field, side) {
     var raw = field === 'cloze' ? card.cloze : card[field];
-    return '<div class="fc-lbl">' + esc(label) + '</div>' +
-      '<div class="fc-draft-preview" data-preview="' + esc(field) + '">' +
+    return '<div class="fc-df" data-field="' + esc(field) + '">' +
+      (label ? '<div class="fc-lbl">' + esc(label) + '</div>' : '') +
+      '<div class="fc-draft-preview" data-preview="' + esc(field) + '" title="双击编辑">' +
         faceHtml(st, card, side) +
       '</div>' +
-      '<details class="fc-draft-editor"><summary>编辑源文</summary>' +
-        '<textarea class="fc-ed" data-f="' + esc(field) + '">' + esc(raw) + '</textarea>' +
-      '</details>';
+      '<textarea class="fc-ed" data-f="' + esc(field) + '">' + esc(raw) + '</textarea>' +
+    '</div>';
   }
   var _EASE = [['1', '再来', 'e1'], ['2', '困难', 'e2'], ['3', '良好', 'e3'], ['4', '简单', 'e4']];
   var _groups = {};   // gid → {cards:共享卡对象数组, conts:[渲染实例容器]}:同 gid 多宿主(侧栏/浮层)状态联动
@@ -309,8 +316,18 @@ if (window.__bwPwaProviderOnly) return;
       '.fc-export{border-color:#1e3a8a!important;color:#93c5fd!important}' +
       '.fc-draft-preview{min-height:44px;margin-bottom:7px;padding:10px 12px;border:1px solid rgba(125,211,252,.18);border-radius:8px;background:rgba(10,17,32,.38);font-size:14px;line-height:1.65;overflow-wrap:anywhere}' +
       '.fc-draft-preview ruby{ruby-align:center}.fc-draft-preview rt{font-size:.56em;color:#a8c7ff}' +
-      '.fc-draft-editor{margin:0 0 9px}.fc-draft-editor summary{width:max-content;max-width:100%;padding:3px 2px;color:#8a9bb4;font-size:12px;cursor:pointer;list-style-position:inside;-webkit-tap-highlight-color:transparent}' +
-      '.fc-draft-editor[open] summary{margin-bottom:5px;color:#bae6fd}' +
+      // 就地编辑：预览与源文同位置二选一。touch-action:manipulation 是必需的 ——
+      // 没有它 iOS 上双击先被当成双击缩放，dblclick 不一定到得了。
+      '.fc-df{margin:0 0 9px}' +
+      '.fc-df .fc-draft-preview{cursor:text;touch-action:manipulation}' +
+      '.fc-df .fc-ed{display:none}' +
+      '.fc-df.editing .fc-draft-preview{display:none}' +
+      '.fc-df.editing .fc-ed{display:block;margin-bottom:0}' +
+      // 草稿卡：外层不滚、正文滚、按钮行钉底。min-height:0 不能省，
+      // 否则 flex 子项按内容撑开，overflow 永远不生效。
+      '.fc-card.fc-draftcard{display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}' +
+      '.fc-draft-body{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}' +
+      '.fc-card.fc-draftcard .fc-btns{flex:0 0 auto;margin-top:0;padding:10px 0 12px;border-top:1px solid rgba(125,211,252,.14)}' +
       '.fc-face{cursor:pointer;min-height:44px}.fc-face .fc-hint{font-size:12px;color:var(--rc-text-muted,#8a9bb4);margin-top:10px}' +
       '.fc-back{border-top:1px solid rgba(255,255,255,.10);margin-top:12px;padding-top:12px}' +
       '.fc-eases{display:flex;gap:6px;margin-top:12px}' +
@@ -353,10 +370,16 @@ if (window.__bwPwaProviderOnly) return;
     if (c._st === 'draft') {
       var b = c.type === 'cloze'
         ? draftFieldHtml(st, c, '填空（答案用 {{c1::…}} 包住）', 'cloze', 'back')
-        : draftFieldHtml(st, c, '正面', 'front', 'front') +
-          draftFieldHtml(st, c, '背面', 'back', 'back');
-      b += '<div class="fc-btns"><button class="fc-del" data-fc="del">🗑 删除</button><button class="fc-add" data-fc="add">✓ 保存到 Reader 卡库</button></div>';
-      return '<div class="fc-card">' + b + '</div>';
+        : draftFieldHtml(st, c, '', 'front', 'front') +
+          draftFieldHtml(st, c, '', 'back', 'back');
+      // 删除/保存钉在卡片底部，正文在上面自己滚（用户 2026-09-19：
+      // 「不而是现在这样拉到最下面才能看到」）。所以草稿卡不再整卡滚动：
+      // 外层不滚、内层 .fc-draft-body 滚，按钮行在 flex 里是不缩的那一项。
+      return '<div class="fc-card fc-draftcard">' +
+        '<div class="fc-draft-body">' + b + '</div>' +
+        '<div class="fc-btns"><button class="fc-del" data-fc="del">🗑 删除</button>' +
+        '<button class="fc-add" data-fc="add">✓ 保存到 Reader 卡库</button></div>' +
+      '</div>';
     }
     if (c._st === 'preview') {
       var pf = faceHtml(st, c, 'front');
@@ -523,6 +546,42 @@ if (window.__bwPwaProviderOnly) return;
             }
           } catch (_) {}
         }
+      });
+    });
+    // 双击预览 → 就地编辑；失焦 / Esc → 回预览（用户 2026-09-19）。
+    // ⚠ iOS 的双击还会被浏览器当成缩放手势，光靠 dblclick 不稳，所以同时按
+    //   两次 touchend 的间隔自己判一次；两条路都只做同一件事，重复触发无害。
+    // ⚠ 进编辑后把光标放到末尾，不要 select() —— 选中全文时随手一打就全没了。
+    function _enterEdit(df) {
+      if (!df || df.classList.contains('editing')) return;
+      df.classList.add('editing');
+      var ta = df.querySelector('.fc-ed');
+      if (!ta) return;
+      try {
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      } catch (_) {}
+    }
+    slide.querySelectorAll('.fc-df').forEach(function (df) {
+      var pv = df.querySelector('.fc-draft-preview');
+      var ta = df.querySelector('.fc-ed');
+      if (!pv || !ta) return;
+      pv.addEventListener('dblclick', function () { _enterEdit(df); });
+      var lastTap = 0;
+      pv.addEventListener('touchend', function (ev) {
+        var now = Date.now();
+        if (now - lastTap < 320) {
+          // 已经确认是双击，阻止后续的合成 click/缩放。
+          try { ev.preventDefault(); } catch (_) {}
+          lastTap = 0;
+          _enterEdit(df);
+          return;
+        }
+        lastTap = now;
+      });
+      ta.addEventListener('blur', function () { df.classList.remove('editing'); });
+      ta.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Escape') { ev.stopPropagation(); ta.blur(); }
       });
     });
     slide.querySelectorAll('.fc-ed').forEach(function (ta) { ta.addEventListener('input', function () {
