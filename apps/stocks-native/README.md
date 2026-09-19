@@ -82,10 +82,14 @@ the assistant can claim a mark was applied.
 
 The native workspace is a twelve-column two-dimensional canvas. Cards move from
 their own grab handles, snap to adjacent card edges or the canvas boundary, and
-resize from a corner or a shared divider. Overlaps push neighboring cards down;
+resize from a corner or a shared divider. Divider junctions resize both axes
+together, with neighboring cards sharing the new boundaries. Overlaps push neighboring cards down;
 the drop preview shows the resulting placement. The bottom lock protects layout
 while chart gestures remain available; the card library manages tabs and visibility.
 The upper-right toggle exclusively opens or closes the AI sidebar.
+Grab handles use a compact header, which disappears when the layout is locked.
+Fund cards switch between stacked and side-by-side content as their aspect ratio
+changes, retaining the selected date and all flow metrics.
 
 Card coordinates and sizes are saved in Application Support independently of
 market-cache cleanup. The earlier ordered half/full-width layout is converted

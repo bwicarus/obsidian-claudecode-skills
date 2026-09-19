@@ -32,6 +32,15 @@ struct WorkspaceGridSharedEdge: Equatable, Identifiable {
     var id: String { "\(axis.rawValue):\(coordinate)" }
 }
 
+struct WorkspaceGridJunction: Equatable, Identifiable {
+    let vertical: WorkspaceGridSharedEdge
+    let horizontal: WorkspaceGridSharedEdge
+    var id: String { "junction:\(vertical.coordinate):\(horizontal.coordinate)" }
+    var cardIDs: Set<String> {
+        Set(vertical.leadingIDs + vertical.trailingIDs + horizontal.leadingIDs + horizontal.trailingIDs)
+    }
+}
+
 /// Integer-grid geometry shared by the editor and the live native workspace.
 /// As in the original canvas, a moving anchor stays put and collisions flow downward.
 enum WorkspaceGridEngine {
@@ -252,6 +261,106 @@ enum WorkspaceGridEngine {
             result[index].grid = rect
         }
         return resolveCollisions(result, anchors: Set(edge.leadingIDs + edge.trailingIDs))
+    }
+
+    static func sharedJunctions(_ cards: [WorkspaceCard]) -> [WorkspaceGridJunction] {
+        let positioned = normalized(cards)
+        let edges = sharedEdges(positioned)
+        let verticals = edges.filter { $0.axis == .vertical }
+        let horizontals = edges.filter { $0.axis == .horizontal }
+        var junctions: [WorkspaceGridJunction] = []
+        for vertical in verticals {
+            for horizontal in horizontals {
+                guard let localVertical = connectedEdge(vertical, through: horizontal.coordinate, cards: positioned),
+                      let localHorizontal = connectedEdge(horizontal, through: vertical.coordinate, cards: positioned) else { continue }
+                let verticalIDs = Set(localVertical.leadingIDs + localVertical.trailingIDs)
+                let horizontalIDs = Set(localHorizontal.leadingIDs + localHorizontal.trailingIDs)
+                guard !verticalIDs.isDisjoint(with: horizontalIDs) else { continue }
+                junctions.append(WorkspaceGridJunction(vertical: localVertical, horizontal: localHorizontal))
+            }
+        }
+        return junctions
+    }
+
+    static func resizeSharedJunction(_ cards: [WorkspaceCard], junction: WorkspaceGridJunction,
+                                     column: Int, row: Int) -> [WorkspaceCard] {
+        var result = normalized(cards)
+        guard let current = sharedJunctions(result).first(where: { $0.id == junction.id }) else { return result }
+        let vertical = current.vertical, horizontal = current.horizontal
+        let left = Set(vertical.leadingIDs), right = Set(vertical.trailingIDs)
+        let above = Set(horizontal.leadingIDs), below = Set(horizontal.trailingIDs)
+        func minimumSpan(_ ids: Set<String>, axis: WorkspaceGridAxis) -> Int {
+            result.filter { ids.contains($0.id) && $0.isVisible }.compactMap(\.grid)
+                .map { axis == .vertical ? $0.width : $0.height }.min() ?? 1
+        }
+        // Both limits come from the original layout. A diagonal drag must not
+        // reflow one axis before calculating the other axis's participants.
+        let minimumColumn = vertical.coordinate - (minimumSpan(left, axis: .vertical) - 1)
+        let maximumColumn = vertical.coordinate + (minimumSpan(right, axis: .vertical) - 1)
+        let minimumRow = horizontal.coordinate - (minimumSpan(above, axis: .horizontal) - 1)
+        let maximumRow = horizontal.coordinate + (minimumSpan(below, axis: .horizontal) - 1)
+        let dx = min(max(column, minimumColumn), maximumColumn) - vertical.coordinate
+        let dy = min(max(row, minimumRow), maximumRow) - horizontal.coordinate
+        for index in result.indices where result[index].isVisible {
+            guard var rect = result[index].grid else { continue }
+            let id = result[index].id
+            if left.contains(id) { rect.width += dx }
+            if right.contains(id) { rect.column += dx; rect.width -= dx }
+            if above.contains(id) { rect.height += dy }
+            if below.contains(id) { rect.row += dy; rect.height -= dy }
+            result[index].grid = rect
+        }
+        return resolveCollisions(result, anchors: current.cardIDs)
+    }
+
+    private struct SharedSegment {
+        let leadingID: String
+        let trailingID: String
+        let start: Int
+        let end: Int
+    }
+
+    /// sharedEdges intentionally merges collinear groups. For an intersection,
+    /// require real contact here, then follow only connected parts of that seam.
+    private static func connectedEdge(_ edge: WorkspaceGridSharedEdge, through position: Int,
+                                      cards: [WorkspaceCard]) -> WorkspaceGridSharedEdge? {
+        let before = cards.filter { $0.isVisible && edge.leadingIDs.contains($0.id) }
+        let after = cards.filter { $0.isVisible && edge.trailingIDs.contains($0.id) }
+        var segments: [SharedSegment] = []
+        for leading in before {
+            for trailing in after {
+                guard let lhs = leading.grid, let rhs = trailing.grid else { continue }
+                let start = edge.axis == .vertical ? max(lhs.row, rhs.row) : max(lhs.column, rhs.column)
+                let end = edge.axis == .vertical ? min(lhs.maxRow, rhs.maxRow) : min(lhs.maxColumn, rhs.maxColumn)
+                if start < end {
+                    segments.append(SharedSegment(leadingID: leading.id, trailingID: trailing.id, start: start, end: end))
+                }
+            }
+        }
+        var included = Set(segments.indices.filter { segments[$0].start <= position && position <= segments[$0].end })
+        guard !included.isEmpty else { return nil }
+        var changed = true
+        while changed {
+            changed = false
+            let selected = included.map { segments[$0] }
+            let ids = Set(selected.flatMap { [$0.leadingID, $0.trailingID] })
+            for index in segments.indices where !included.contains(index) {
+                let segment = segments[index]
+                let touches = selected.contains { segment.start <= $0.end && $0.start <= segment.end }
+                if touches || ids.contains(segment.leadingID) || ids.contains(segment.trailingID) {
+                    included.insert(index)
+                    changed = true
+                }
+            }
+        }
+        let selected = included.map { segments[$0] }
+        let leadingIDs = Set(selected.map(\.leadingID)), trailingIDs = Set(selected.map(\.trailingID))
+        let members = (before + after).filter { leadingIDs.contains($0.id) || trailingIDs.contains($0.id) }.compactMap(\.grid)
+        let start = members.map { edge.axis == .vertical ? $0.row : $0.column }.min() ?? position
+        let end = members.map { edge.axis == .vertical ? $0.maxRow : $0.maxColumn }.max() ?? position
+        return WorkspaceGridSharedEdge(axis: edge.axis, coordinate: edge.coordinate, rangeStart: start, rangeEnd: end,
+                                       leadingIDs: edge.leadingIDs.filter { leadingIDs.contains($0) },
+                                       trailingIDs: edge.trailingIDs.filter { trailingIDs.contains($0) })
     }
 
     private static func boundary(_ rect: WorkspaceGridRect, _ edge: WorkspaceGridEdge) -> Int {

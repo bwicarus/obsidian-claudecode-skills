@@ -150,6 +150,7 @@ struct StockWorkspaceView: View {
             ScrollView(.vertical) {
                 workspaceCard(card.kind)
                     .environment(\.workspaceCardHeight, geometry.size.height)
+                    .environment(\.workspaceCardWidth, geometry.size.width)
                     .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .topLeading)
             }
             .scrollBounceBehavior(.basedOnSize)
@@ -172,10 +173,19 @@ private struct WorkspaceCardHeightKey: EnvironmentKey {
     static let defaultValue: CGFloat = 0
 }
 
+private struct WorkspaceCardWidthKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
 extension EnvironmentValues {
     var workspaceCardHeight: CGFloat {
         get { self[WorkspaceCardHeightKey.self] }
         set { self[WorkspaceCardHeightKey.self] = newValue }
+    }
+
+    var workspaceCardWidth: CGFloat {
+        get { self[WorkspaceCardWidthKey.self] }
+        set { self[WorkspaceCardWidthKey.self] = newValue }
     }
 }
 

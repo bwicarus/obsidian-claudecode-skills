@@ -723,6 +723,7 @@ private struct FundSlice: Identifiable {
 
 struct FundCard: View {
     @Environment(\.workspaceCardHeight) private var availableHeight
+    @Environment(\.workspaceCardWidth) private var availableWidth
     let panel: FundPanel
     @State private var selectedDate: String?
     private var selected: FundHistory? { panel.history.first { $0.tradeDate == selectedDate } }
@@ -746,8 +747,43 @@ struct FundCard: View {
     private var total: Double { slices.reduce(0) { $0 + $1.amount } }
     private var hasHistoryFlows: Bool { panel.history.contains { flows($0).contains { $0.net != nil } } }
 
+    private var usesColumns: Bool {
+        availableWidth >= 560 && (availableHeight <= 0 || availableWidth / availableHeight >= 1.35)
+    }
+    private var contentWidth: CGFloat { max(0, availableWidth - 40) }
+    private var detailsWidth: CGFloat {
+        usesColumns ? min(390, max(220, contentWidth * 0.43)) : contentWidth
+    }
+    private var historyHeight: CGFloat {
+        guard availableHeight > 0 else { return 150 }
+        if usesColumns { return max(150, availableHeight - 130) }
+        let detailsAllowance: CGFloat = detailsWidth >= 330 ? 440 : 560
+        return max(120, availableHeight - detailsAllowance)
+    }
+    private var mainLayout: AnyLayout {
+        usesColumns ? AnyLayout(HStackLayout(alignment: .top, spacing: 24))
+                    : AnyLayout(VStackLayout(alignment: .leading, spacing: 18))
+    }
+    private var distributionLayout: AnyLayout {
+        detailsWidth >= 330 || availableWidth <= 0
+            ? AnyLayout(HStackLayout(alignment: .center, spacing: 14))
+            : AnyLayout(VStackLayout(alignment: .center, spacing: 12))
+    }
+    private var donutSize: CGFloat { detailsWidth >= 370 ? 124 : 108 }
+
     var body: some View {
         card(title: "资金动向", subtitle: selectedDate ?? panel.asOf ?? "最新资料") {
+            mainLayout {
+                historySection.frame(maxWidth: .infinity, alignment: .topLeading)
+                detailsSection
+                    .frame(width: usesColumns ? detailsWidth : nil)
+                    .frame(maxWidth: usesColumns ? nil : .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    private var historySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
             if hasHistoryFlows {
                 Chart {
                     RuleMark(y: .value("零轴", 0)).foregroundStyle(.secondary.opacity(0.3))
@@ -768,45 +804,68 @@ struct FundCard: View {
                             if let value = value.as(Double.self) { Text(AppStyle.compact(value)).font(.caption2) }
                         }
                     }
-                }.frame(height: availableHeight > 0 ? max(100, availableHeight - 360) : 125)
-                HStack(spacing: 12) {
-                    ForEach(selectedFlows) { flow in
-                        Label(flow.name, systemImage: "circle.fill").font(.caption2).foregroundStyle(flow.color)
+                }
+                .frame(height: historyHeight)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) { tierLegend }
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
+                        tierLegend
                     }
                 }
                 Text("拖动柱状图选择交易日").font(.caption2).foregroundStyle(.secondary)
             } else {
                 Text("暂无分档资金历史").font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 80, alignment: .center)
             }
+        }
+    }
+
+    @ViewBuilder private var tierLegend: some View {
+        ForEach(selectedFlows) { flow in
+            Label(flow.name, systemImage: "circle.fill")
+                .font(.caption2).foregroundStyle(flow.color).lineLimit(1)
+        }
+    }
+
+    private var detailsSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
             if !slices.isEmpty {
-                HStack(alignment: .center, spacing: 14) {
+                distributionLayout {
                     Chart(slices) { slice in
                         SectorMark(angle: .value("金额", slice.amount), innerRadius: .ratio(0.68), angularInset: 1)
                             .foregroundStyle(slice.color)
                     }
-                    .chartLegend(.hidden).frame(width: 108, height: 108)
-                    VStack(spacing: 5) {
-                        ForEach(slices) { slice in
-                            HStack(spacing: 5) {
-                                Circle().fill(slice.color).frame(width: 5, height: 5)
-                                Text(slice.name)
-                                Spacer(minLength: 3)
-                                Text(AppStyle.compact(slice.amount))
-                                Text(String(format: "%.1f%%", total > 0 ? slice.amount / total * 100 : 0))
-                                    .frame(width: 38, alignment: .trailing)
-                            }
-                            .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
-                        }
-                    }
+                    .chartLegend(.hidden).frame(width: donutSize, height: donutSize)
+                    distributionLegend.frame(maxWidth: .infinity)
                 }
+                .frame(maxWidth: .infinity)
             } else {
                 Text("所选日期暂无分档买卖数据").font(.caption).foregroundStyle(.secondary)
             }
-            ForEach(selectedFlows) { flow in valueLine("\(flow.name)净流入", flow.net, compact: true) }
-            Divider()
-            valueLine("今日主力", panel.metrics.latestMainInflow, compact: true)
-            valueLine("五日主力", panel.metrics.mainInflow5d, compact: true)
-            valueLine("主力占比", panel.metrics.latestMainRatio, suffix: "%")
+            VStack(spacing: 8) {
+                ForEach(selectedFlows) { flow in valueLine("\(flow.name)净流入", flow.net, compact: true) }
+                Divider().padding(.vertical, 2)
+                valueLine("今日主力", panel.metrics.latestMainInflow, compact: true)
+                valueLine("五日主力", panel.metrics.mainInflow5d, compact: true)
+                valueLine("主力占比", panel.metrics.latestMainRatio, suffix: "%")
+            }
+        }
+    }
+
+    private var distributionLegend: some View {
+        VStack(spacing: 6) {
+            ForEach(slices) { slice in
+                HStack(spacing: 5) {
+                    Circle().fill(slice.color).frame(width: 5, height: 5)
+                    Text(slice.name).lineLimit(1)
+                    Spacer(minLength: 3)
+                    Text(AppStyle.compact(slice.amount)).lineLimit(1)
+                    Text(String(format: "%.1f%%", total > 0 ? slice.amount / total * 100 : 0))
+                        .lineLimit(1).frame(width: 38, alignment: .trailing)
+                }
+                .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
+                .minimumScaleFactor(0.8)
+            }
         }
     }
 

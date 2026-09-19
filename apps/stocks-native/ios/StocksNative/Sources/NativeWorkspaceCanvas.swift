@@ -133,6 +133,9 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                 host.setEditing(layoutEditing)
             } else {
                 let controller = UIHostingController(rootView: content(card))
+                // The canvas already accounts for screen insets. Each card must use
+                // its whole local rectangle, including cards near the screen edge.
+                controller.safeAreaRegions = []
                 addChild(controller)
                 let host = WorkspaceCardHost(controller: controller)
                 host.accessibilityIdentifier = "workspace.card.\(page.id).\(card.id)"
@@ -205,6 +208,17 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             canvas.addSubview(splitter)
             splitters.append(splitter)
         }
+        // Install last so a junction wins hit testing over either one-axis edge.
+        for junction in WorkspaceGridEngine.sharedJunctions(cards) {
+            let handle = WorkspaceJunctionView()
+            let x = margin + CGFloat(junction.vertical.coordinate) * columnPitch - gap / 2
+            let y = margin + CGFloat(junction.horizontal.coordinate) * rowPitch - gap / 2
+            handle.frame = CGRect(x: x - 22, y: y - 22, width: 44, height: 44)
+            handle.accessibilityIdentifier = "workspace.junction.\(junction.id)"
+            handle.addGestureRecognizer(makePan(.junction(junction)))
+            canvas.addSubview(handle)
+            splitters.append(handle)
+        }
     }
 
     private func makePan(_ operation: WorkspaceCanvasOperation) -> WorkspaceCanvasPan {
@@ -275,6 +289,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         interaction = value
         scrollView.isScrollEnabled = false
         splitters.compactMap { $0 as? WorkspaceSplitterView }.forEach { $0.setLineVisible(false) }
+        splitters.compactMap { $0 as? WorkspaceJunctionView }.forEach { $0.setMarkVisible(false) }
         updateContentSize(extraRows: Int(ceil(scrollView.bounds.height / rowPitch)))
         canvas.layer.addSublayer(previewLayer)
         canvas.layer.addSublayer(targetLayer)
@@ -339,6 +354,13 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             preview = WorkspaceGridEngine.resizeSharedEdge(interaction.initialCards, edge: edge,
                                                            to: edge.coordinate + Int(shift.rounded()))
             for id in edge.leadingIDs + edge.trailingIDs {
+                if let rect = preview.first(where: { $0.id == id })?.grid { interaction.ghosts[id]?.frame = frame(for: rect) }
+            }
+        case .junction(let junction):
+            preview = WorkspaceGridEngine.resizeSharedJunction(interaction.initialCards, junction: junction,
+                column: junction.vertical.coordinate + Int((delta.x / columnPitch).rounded()),
+                row: junction.horizontal.coordinate + Int((delta.y / rowPitch).rounded()))
+            for id in junction.cardIDs {
                 if let rect = preview.first(where: { $0.id == id })?.grid { interaction.ghosts[id]?.frame = frame(for: rect) }
             }
         }
@@ -470,11 +492,12 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
 }
 
 private enum WorkspaceCanvasOperation {
-    case move(String), resize(String), split(WorkspaceGridSharedEdge)
+    case move(String), resize(String), split(WorkspaceGridSharedEdge), junction(WorkspaceGridJunction)
     var cardIDs: [String] {
         switch self {
         case .move(let id), .resize(let id): [id]
         case .split(let edge): Array(Set(edge.leadingIDs + edge.trailingIDs))
+        case .junction(let junction): Array(junction.cardIDs)
         }
     }
 }
@@ -551,14 +574,38 @@ private final class WorkspaceCardHost: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Reserve the whole drag target; its lower 16pt must not cover a chart picker.
-        let headerHeight: CGFloat = 44
+        // A shallow, wide handle leaves room for content without covering chart controls.
+        // Locking the layout also removes the now-unused handle band.
+        let headerHeight: CGFloat = editing ? 24 : 0
         controller.view.frame = CGRect(x: 0, y: headerHeight, width: bounds.width,
                                        height: max(1, bounds.height - headerHeight))
-        grip.frame = CGRect(x: max(0, (bounds.width - 96) / 2), y: 0, width: min(96, bounds.width), height: 44)
-        gripMark.frame = CGRect(x: (grip.bounds.width - 30) / 2, y: 11, width: 30, height: 4)
+        grip.frame = CGRect(x: max(0, (bounds.width - 120) / 2), y: 0, width: min(120, bounds.width), height: headerHeight)
+        gripMark.frame = CGRect(x: (grip.bounds.width - 30) / 2, y: 8, width: 30, height: 4)
         resizeGrip.frame = CGRect(x: max(0, bounds.width - 44), y: max(0, bounds.height - 44), width: 44, height: 44)
         resizeMark.frame = CGRect(x: 20, y: 20, width: 14, height: 14)
+    }
+}
+
+private final class WorkspaceJunctionView: UIView {
+    private let mark = UIImageView(image: UIImage(systemName: "arrow.up.and.down.and.arrow.left.and.right"))
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        mark.tintColor = UIColor.secondaryLabel.withAlphaComponent(0.5)
+        mark.contentMode = .scaleAspectFit
+        mark.isUserInteractionEnabled = false
+        addSubview(mark)
+        isAccessibilityElement = true
+        accessibilityLabel = "向任意方向拖动，同时调整相邻卡片大小"
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func setMarkVisible(_ visible: Bool) { mark.alpha = visible ? 1 : 0 }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        mark.frame = CGRect(x: (bounds.width - 16) / 2, y: (bounds.height - 16) / 2, width: 16, height: 16)
     }
 }
 

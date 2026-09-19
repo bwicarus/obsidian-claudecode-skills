@@ -172,6 +172,80 @@ struct WorkspaceGridChecks {
         }
     }
 
+    static func fourCardJunctionMovesBothAxes() throws {
+        let original = [card(.quote, 0, 0, 6, 4), card(.orderBook, 6, 0, 6, 4),
+                        card(.fund, 0, 4, 6, 4), card(.macd, 6, 4, 6, 4),
+                        card(.kdj, 0, 20, 6, 3), card(.peers, 6, 20, 6, 3)]
+        guard let junction = WorkspaceGridEngine.sharedJunctions(original).first(where: {
+            $0.vertical.coordinate == 6 && $0.horizontal.coordinate == 4
+        }) else { throw CheckFailure(description: "Four touching cards did not expose their junction") }
+        try require(junction.cardIDs == Set(["quote", "orderBook", "fund", "macd"]),
+                    "A disconnected collinear group joined the local junction")
+        let resized = WorkspaceGridEngine.resizeSharedJunction(original, junction: junction, column: 8, row: 6)
+        try require(try rect(.quote, in: resized) == WorkspaceGridRect(column: 0, row: 0, width: 8, height: 6),
+                    "Diagonal movement did not grow both top-left dimensions")
+        try require(try rect(.orderBook, in: resized) == WorkspaceGridRect(column: 8, row: 0, width: 4, height: 6),
+                    "The top-right card did not follow both junction axes")
+        try require(try rect(.fund, in: resized) == WorkspaceGridRect(column: 0, row: 6, width: 8, height: 2),
+                    "The bottom-left card did not follow both junction axes")
+        try require(try rect(.macd, in: resized) == WorkspaceGridRect(column: 8, row: 6, width: 4, height: 2),
+                    "The bottom-right outer boundaries changed")
+        try require(try rect(.kdj, in: resized) == original[4].grid, "A remote left card moved with the junction")
+        try require(try rect(.peers, in: resized) == original[5].grid, "A remote right card moved with the junction")
+        try requireValid(resized)
+    }
+
+    static func junctionLimitsBothAxesIndependently() throws {
+        let original = [card(.quote, 0, 0, 6, 4), card(.orderBook, 6, 0, 6, 4),
+                        card(.fund, 0, 4, 6, 4), card(.macd, 6, 4, 6, 4)]
+        guard let junction = WorkspaceGridEngine.sharedJunctions(original).first else {
+            throw CheckFailure(description: "Expected a junction for minimum-size checks")
+        }
+        for column in [Int.min, Int.max] {
+            for row in [Int.min, Int.max] {
+                let resized = WorkspaceGridEngine.resizeSharedJunction(original, junction: junction, column: column, row: row)
+                let expectedColumn = column < 0 ? 1 : 11
+                let expectedRow = row < 0 ? 1 : 7
+                let topLeft = try rect(.quote, in: resized), bottomRight = try rect(.macd, in: resized)
+                try require(topLeft.column == 0 && topLeft.row == 0
+                            && topLeft.maxColumn == expectedColumn && topLeft.maxRow == expectedRow,
+                            "One axis's limit changed the other axis or the outer top-left corner")
+                try require(bottomRight.column == expectedColumn && bottomRight.row == expectedRow
+                            && bottomRight.maxColumn == 12 && bottomRight.maxRow == 8,
+                            "Clamping a junction moved the outer right/bottom boundaries")
+                try requireValid(resized)
+            }
+        }
+    }
+
+    static func tJunctionResizesOnlyParticipatingDimensions() throws {
+        let original = [card(.quote, 0, 0, 6, 8), card(.orderBook, 6, 0, 6, 4), card(.fund, 6, 4, 6, 4)]
+        guard let junction = WorkspaceGridEngine.sharedJunctions(original).first else {
+            throw CheckFailure(description: "A real T-shaped seam did not expose its junction")
+        }
+        let resized = WorkspaceGridEngine.resizeSharedJunction(original, junction: junction, column: 8, row: 5)
+        try require(try rect(.quote, in: resized) == WorkspaceGridRect(column: 0, row: 0, width: 8, height: 8),
+                    "Moving a T junction changed the unsplit card's height")
+        try require(try rect(.orderBook, in: resized) == WorkspaceGridRect(column: 8, row: 0, width: 4, height: 5),
+                    "Moving a T junction did not resize the upper neighbor")
+        try require(try rect(.fund, in: resized) == WorkspaceGridRect(column: 8, row: 5, width: 4, height: 3),
+                    "Moving a T junction did not preserve the lower neighbor's outer bounds")
+        try requireValid(resized)
+    }
+
+    static func disconnectedSeamsDoNotCreateJunctions() throws {
+        let original = [card(.quote, 4, 0, 2, 2), card(.orderBook, 6, 0, 2, 2),
+                        card(.fund, 4, 8, 2, 2), card(.macd, 6, 8, 2, 2),
+                        card(.kdj, 0, 2, 2, 3), card(.signals, 0, 5, 2, 3),
+                        card(.peers, 10, 2, 2, 3), card(.valuation, 10, 5, 2, 3)]
+        let edges = WorkspaceGridEngine.sharedEdges(original)
+        try require(edges.contains { $0.axis == .vertical && $0.coordinate == 6 }
+                    && edges.contains { $0.axis == .horizontal && $0.coordinate == 5 },
+                    "Fixture must contain merged vertical and horizontal boundaries")
+        try require(WorkspaceGridEngine.sharedJunctions(original).isEmpty,
+                    "Separated seams produced a junction in their empty bounding-box intersection")
+    }
+
     static func main() throws {
         let checks: [(String, () throws -> Void)] = [
             ("schema 1 migration", migrationPreservesUserChoices),
@@ -181,7 +255,11 @@ struct WorkspaceGridChecks {
             ("parallel edge rejection", parallelEdgesDoNotPretendToDock),
             ("vertical shared edge", verticalSharedEdgeResizesAllPeers),
             ("horizontal shared edge", horizontalSharedEdgePreservesOuterBounds),
-            ("minimum sizes and bounds", invalidSizesAndCanvasEscapesAreClamped)
+            ("minimum sizes and bounds", invalidSizesAndCanvasEscapesAreClamped),
+            ("four-card diagonal junction", fourCardJunctionMovesBothAxes),
+            ("junction independent limits", junctionLimitsBothAxesIndependently),
+            ("T-shaped junction", tJunctionResizesOnlyParticipatingDimensions),
+            ("disconnected seam rejection", disconnectedSeamsDoNotCreateJunctions)
         ]
         for (name, check) in checks {
             try check()
