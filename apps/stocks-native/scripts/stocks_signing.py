@@ -24,6 +24,12 @@ BUNDLE_ID = "space.bwicarus.stocksnative"
 API_ROOT = "https://api.appstoreconnect.apple.com"
 
 
+class AppleHTTPError(RuntimeError):
+    def __init__(self, method: str, path: str, status: int):
+        super().__init__(f"Apple {method} {path.split('?')[0]}: HTTP {status}")
+        self.status = status
+
+
 class AppleAPI:
     def __init__(self, key: Path, key_id: str, issuer_id: str):
         self.key = key.read_text(encoding="utf-8")
@@ -51,7 +57,7 @@ class AppleAPI:
                 return json.load(response)
         except urllib.error.HTTPError as error:
             # Never print response bodies; profile and certificate contents are unnecessary.
-            raise RuntimeError(f"Apple {method} {path.split('?')[0]}: HTTP {error.code}") from None
+            raise AppleHTTPError(method, path, error.code) from None
 
     def listing(self, path: str, **params):
         query = urllib.parse.urlencode(params)
@@ -177,14 +183,17 @@ def main():
             },
         }})["data"]
         print("Registered only the StocksNative bundle identifier")
-    capabilities = api.listing(f"/v1/bundleIds/{bundle['id']}/bundleIdCapabilities", limit=200)
-    if not any(item.get("attributes", {}).get("capabilityType") == "APPLE_ID_AUTH" for item in capabilities):
+    try:
         api.request("POST", "/v1/bundleIdCapabilities", {"data": {
             "type": "bundleIdCapabilities",
             "attributes": {"capabilityType": "APPLE_ID_AUTH"},
             "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle["id"]}}},
         }})
         print("Enabled Sign in with Apple only for StocksNative")
+    except AppleHTTPError as error:
+        if error.status != 409:
+            raise
+        print("Sign in with Apple is already enabled for StocksNative")
     profiles = api.listing(f"/v1/bundleIds/{bundle['id']}/profiles", limit=200)
     selected = None
     for profile in profiles:
