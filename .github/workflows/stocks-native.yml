@@ -3,6 +3,10 @@ name: StocksNative iPad MVP
 on:
   workflow_dispatch:
     inputs:
+      status_build:
+        description: Read TestFlight status for this 0.2.0 build number; skips all building and uploading
+        type: string
+        default: ''
       signed_archive:
         description: Build a separate StocksNative App Store IPA
         type: boolean
@@ -32,7 +36,35 @@ env:
   UPLOAD_TESTFLIGHT: ${{ inputs.upload || startsWith(github.ref, 'refs/tags/stocks-native-testflight-') }}
 
 jobs:
+  status:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.status_build != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read StocksNative TestFlight processing and group status
+        env:
+          API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          STATUS_BUILD: ${{ inputs.status_build }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet PyJWT cryptography
+          umask 077
+          trap 'rm -f "$RUNNER_TEMP/stocks-status-key.p8"' EXIT
+          printf '%s' "$API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/stocks-status-key.p8"
+          python "$CODE_DIR/scripts/stocks_signing.py" build-status \
+            --private-key "$RUNNER_TEMP/stocks-status-key.p8" \
+            --build-number "$STATUS_BUILD" --marketing-version '0.2.0'
   build:
+    if: ${{ !inputs.status_build }}
     runs-on: macos-latest
     timeout-minutes: 40
     steps:

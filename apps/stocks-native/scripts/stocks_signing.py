@@ -31,12 +31,15 @@ class AppleHTTPError(RuntimeError):
 
 
 class AppleAPI:
-    def __init__(self, key: Path, key_id: str, issuer_id: str):
+    def __init__(self, key: Path, key_id: str, issuer_id: str, *, read_only=False):
         self.key = key.read_text(encoding="utf-8")
         self.key_id = key_id
         self.issuer_id = issuer_id
+        self.read_only = read_only
 
     def request(self, method: str, path: str, payload=None):
+        if self.read_only and method != "GET":
+            raise ValueError("Build status queries are read-only")
         if method not in {"GET", "POST"}:
             raise ValueError("This tool does not modify or delete existing resources")
         if method == "POST" and path not in {"/v1/bundleIds", "/v1/profiles", "/v1/bundleIdCapabilities"}:
@@ -134,19 +137,95 @@ def profile_supports_apple(profile) -> bool:
     return plistlib.loads(decoded).get("Entitlements", {}).get("com.apple.developer.applesignin") == ["Default"]
 
 
+def build_status(api: AppleAPI, build_number: str, marketing_version: str):
+    apps = api.listing("/v1/apps", **{"filter[bundleId]": BUNDLE_ID, "limit": 200})
+    if len(apps) != 1 or apps[0].get("attributes", {}).get("bundleId") != BUNDLE_ID:
+        raise RuntimeError("Expected exactly one StocksNative app record")
+    app_id = apps[0]["id"]
+    query = urllib.parse.urlencode({
+        "filter[app]": app_id, "filter[version]": build_number,
+        "filter[preReleaseVersion.version]": marketing_version,
+        "include": "preReleaseVersion,buildBetaDetail,betaGroups,betaAppReviewSubmission",
+        "fields[builds]": "version,uploadedDate,expirationDate,expired,processingState,buildAudienceType,"
+                          "usesNonExemptEncryption,preReleaseVersion,buildBetaDetail,betaGroups,betaAppReviewSubmission",
+        "fields[preReleaseVersions]": "version,platform",
+        "fields[buildBetaDetails]": "autoNotifyEnabled,internalBuildState,externalBuildState",
+        "fields[betaGroups]": "isInternalGroup,hasAccessToAllBuilds",
+        "fields[betaAppReviewSubmissions]": "betaReviewState,submittedDate",
+        "limit": 200,
+    })
+    response = api.request("GET", "/v1/builds?" + query)
+    builds = response.get("data", [])
+    summary = {"source": "appstoreconnect-api", "bundleIdentifier": BUNDLE_ID,
+               "marketingVersion": marketing_version, "buildNumber": build_number,
+               "queriedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               "found": bool(builds)}
+    if not builds:
+        return summary
+    if len(builds) != 1:
+        raise RuntimeError("The requested marketing version and build number are not unique")
+    build = builds[0]
+    included = {(item["type"], item["id"]): item for item in response.get("included", [])}
+
+    def related_attributes(name):
+        relation = build.get("relationships", {}).get(name, {}).get("data")
+        if not relation:
+            return {}
+        key = (relation["type"], relation["id"])
+        if key not in included:
+            raise RuntimeError("Apple omitted requested related status: " + name)
+        return included[key].get("attributes", {})
+
+    version = related_attributes("preReleaseVersion")
+    attributes = build.get("attributes", {})
+    if attributes.get("version") != build_number or version.get("version") != marketing_version:
+        raise RuntimeError("Apple returned a different build or marketing version")
+    beta = related_attributes("buildBetaDetail")
+    review = related_attributes("betaAppReviewSubmission")
+    group_fields = "isInternalGroup,hasAccessToAllBuilds"
+    groups = api.listing(f"/v1/apps/{app_id}/betaGroups", **{"fields[betaGroups]": group_fields, "limit": 200})
+    linked = api.listing("/v1/betaGroups", **{"filter[app]": app_id, "filter[builds]": build["id"],
+                         "fields[betaGroups]": group_fields, "limit": 200})
+    linked_ids = {group["id"] for group in linked}
+    summary.update({key: attributes.get(key) for key in (
+        "processingState", "uploadedDate", "expirationDate", "expired",
+        "buildAudienceType", "usesNonExemptEncryption")})
+    summary.update(platform=version.get("platform"),
+                   internalBuildState=beta.get("internalBuildState"),
+                   externalBuildState=beta.get("externalBuildState"),
+                   externalAutoNotifyEnabled=beta.get("autoNotifyEnabled"),
+                   betaReviewState=review.get("betaReviewState"),
+                   betaReviewSubmittedDate=review.get("submittedDate"))
+    # Public CI logs contain status only: no tester identities, group names,
+    # invitation links, tokens, certificates, or private key material.
+    summary["testGroups"] = [{
+        "isInternalGroup": group.get("attributes", {}).get("isInternalGroup"),
+        "hasAccessToAllBuilds": group.get("attributes", {}).get("hasAccessToAllBuilds"),
+        "linkedToRequestedBuild": group["id"] in linked_ids,
+    } for group in groups]
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["inspect", "provision", "require-app"])
+    parser.add_argument("mode", choices=["inspect", "provision", "require-app", "build-status"])
     parser.add_argument("--private-key", type=Path, required=True)
     parser.add_argument("--key-id", default=os.environ.get("API_KEY_ID"), required=False)
     parser.add_argument("--issuer-id", default=os.environ.get("API_ISSUER_ID"), required=False)
     parser.add_argument("--team-id", default=os.environ.get("TEAM_ID"))
     parser.add_argument("--keychain")
     parser.add_argument("--profile-output", type=Path)
+    parser.add_argument("--build-number")
+    parser.add_argument("--marketing-version", default="0.2.0")
     args = parser.parse_args()
     if not args.key_id or not args.issuer_id:
         parser.error("Apple API key ID and issuer ID are required")
-    api = AppleAPI(args.private_key, args.key_id, args.issuer_id)
+    if args.mode == "build-status" and not re.fullmatch(r"[0-9]{1,12}", args.build_number or ""):
+        parser.error("build-status requires a numeric --build-number")
+    api = AppleAPI(args.private_key, args.key_id, args.issuer_id, read_only=args.mode == "build-status")
+    if args.mode == "build-status":
+        print(json.dumps(build_status(api, args.build_number, args.marketing_version), ensure_ascii=False))
+        return
     bundles = api.listing("/v1/bundleIds", **{"filter[identifier]": BUNDLE_ID, "limit": 200})
     apps = api.listing("/v1/apps", **{"filter[bundleId]": BUNDLE_ID, "limit": 200})
     summary = {"bundleIdentifier": BUNDLE_ID, "bundleExists": bool(bundles),
