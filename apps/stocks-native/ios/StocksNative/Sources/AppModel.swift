@@ -25,8 +25,9 @@ final class AppModel: ObservableObject {
     init() {
         let initialBase = UserDefaults.standard.string(forKey: "stocksNative.baseURL") ?? "https://bwicarus.space/stocks-native"
         baseURL = initialBase
-        isPaired = Credentials.token(baseURL: initialBase) != nil
-        isAIEnabled = isPaired ? (UserDefaults.standard.object(forKey: "stocksNative.aiEnabled") as? Bool ?? true) : false
+        let paired = Credentials.token(baseURL: initialBase) != nil
+        isPaired = paired
+        isAIEnabled = paired ? (UserDefaults.standard.object(forKey: "stocksNative.aiEnabled") as? Bool ?? true) : false
         let savedID = UserDefaults.standard.string(forKey: "stocksNative.deviceID") ?? UUID().uuidString
         deviceID = savedID
         UserDefaults.standard.set(savedID, forKey: "stocksNative.deviceID")
