@@ -46,6 +46,14 @@ struct VoiceEvent: Decodable {
     let final: Bool?
     let code: String?
     let message: String?
+    let actionId: String?
+    let capability: String?
+    let operation: String?
+    let color: String?
+    let x: Double?
+    let y: Double?
+    let x2: Double?
+    let y2: Double?
 }
 
 struct Transcript: Identifiable {

@@ -1,4 +1,4 @@
-StocksNative uses an independent bundle `space.bwicarus.stocksnative`, version `0.2.0`, iOS 17+, iPhone and iPad. Its distribution certificate and App Store Connect key can reuse the repository's existing Apple secrets. Reader profiles and targets are never used.
+StocksNative uses an independent bundle `space.bwicarus.stocksnative`, version `0.2.1`, iOS 17+, iPhone and iPad. Its distribution certificate and App Store Connect key can reuse the repository's existing Apple secrets. Reader profiles and targets are never used.
 
 The local source directory is independent. For GitHub CI, place it at `apps/stocks-native/` on an isolated branch and place the workflow at the repository root `.github/workflows/stocks-native.yml`. Do not copy build logs, credentials, runtime configuration, `.build`, or `.git`. The source repository is public.
 

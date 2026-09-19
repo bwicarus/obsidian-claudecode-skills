@@ -21,6 +21,7 @@ final class VoiceSession: ObservableObject {
     @Published private(set) var sentPackets = 0
     @Published private(set) var receivedPackets = 0
     var onStockSelected: ((String) -> Void)?
+    var onCapabilityAction: ((CapabilityAction) -> CapabilityResult)?
 
     var isConnected: Bool { state == .active }
     var isStarted: Bool { state == .connecting || state == .preparing || state == .active }
@@ -64,7 +65,8 @@ final class VoiceSession: ObservableObject {
             let task = URLSession.shared.webSocketTask(with: request)
             socket = task
             task.resume()
-            var start: [String: String] = ["type": "start"]
+            var start: [String: String] = ["type": "start", "clientVersion": "0.2.1",
+                                                   "capabilities": "chart.annotation.v1"]
             if let stockCode { start["stockCode"] = stockCode }
             try await send(start, through: task)
             guard current == generation else { task.cancel(with: .goingAway, reason: nil); return }
@@ -182,6 +184,20 @@ final class VoiceSession: ObservableObject {
             if let code = event.code {
                 stockCode = code
                 onStockSelected?(code)
+            }
+        case "capability.action":
+            guard let actionID = event.actionId,
+                  let capability = event.capability,
+                  let operation = event.operation else { throw AppError.message("收到的界面操作缺少必要字段。") }
+            let start = event.x.flatMap { x in event.y.map { AnnotationPoint(x: x, y: $0) } }
+            let end = event.x2.flatMap { x in event.y2.map { AnnotationPoint(x: x, y: $0) } }
+            let action = CapabilityAction(id: actionID, capability: capability, operation: operation,
+                                          stockCode: event.code, text: event.text, color: event.color,
+                                          start: start, end: end)
+            let result = onCapabilityAction?(action) ?? CapabilityResult(success: false, message: "App 尚未注册该界面能力。")
+            if let socket {
+                try await send(["type": "capability.result", "actionId": actionID,
+                                "success": result.success ? "true" : "false", "message": result.message], through: socket)
             }
         case "error": fail(event.message ?? "语音服务器报告错误。")
         default: break

@@ -192,7 +192,7 @@ struct PairingView: View {
                     if let error { Text(error).foregroundStyle(.red).font(.footnote) }
                 }
                 Section("设备") {
-                    LabeledContent("版本", value: "0.2.0")
+                    LabeledContent("版本", value: "0.2.1")
                     Text(model.deviceID).font(.caption).monospaced().textSelection(.enabled)
                     if model.isPaired {
                         Button("移除此设备的凭证", role: .destructive) {

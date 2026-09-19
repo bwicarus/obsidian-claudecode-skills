@@ -17,6 +17,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var detailError: String?
     let deviceID: String
     let voice = VoiceSession()
+    let annotations = AnnotationStore()
     private var listGeneration = UUID()
     private var detailGeneration = UUID()
 
@@ -28,6 +29,10 @@ final class AppModel: ObservableObject {
         deviceID = savedID
         UserDefaults.standard.set(savedID, forKey: "stocksNative.deviceID")
         voice.onStockSelected = { [weak self] code in self?.selectedCode = code }
+        voice.onCapabilityAction = { [weak self] action in
+            guard let self else { return CapabilityResult(success: false, message: "App 状态不可用。") }
+            return self.annotations.perform(action, selectedStockCode: self.selectedCode)
+        }
     }
 
     var client: APIClient {

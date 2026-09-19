@@ -17,9 +17,12 @@ from av import AudioFrame, AudioResampler
 log = logging.getLogger(__name__)
 
 PROMPT = """你是股票原生 App 的语音助手，用简洁中文交流。
-这是功能验证版：可以回答问题、通过股票工具查询真实数据。报价可能是最近交易日快照，必须说明数据日期，不能称为实时行情。
+可以回答问题、通过股票工具查询真实数据。报价可能是最近交易日快照，必须说明数据日期，不能称为实时行情。
 需要股票数值时委派后台调用工具；当前股票可能已切换，所有关于“当前股票”的查询必须用 stocks_current，不能沿用上文代码。没有数据就明确说明，禁止编造。只查询和切换展示股票，不进行交易、记账或修改生产配置。
 无需主动欢迎或总结。等待用户说话。只在有结果时简洁回答一次。"""
+
+ANNOTATION_PROMPT = """
+你还可以用 app_annotation 操作当前股票图表的本地标注层。标注坐标是图表内从左上角开始的 0 到 1 比例。用户没有指定位置时，用清晰、不遮挡主体的默认位置；完成标注后只说明动作已完成，不朗读内部坐标。"""
 
 VOICE_RULES = """你是股票 App 的语音对话表面，默认简洁中文。
 你自己看不到任何股票行情，也没有股票查询工具。后台才有真实行情工具。
@@ -28,6 +31,9 @@ VOICE_RULES = """你是股票 App 的语音对话表面，默认简洁中文。
 用户说“当前股票”时，把原话交给后台调用 stocks_current；查指定代码交给后台调用 stocks_detail。
 后台结果是权威，只简短说一次结果和数据日期。不要对用户解释内部系统分工。
 纯闲聊、复述一句话可以直接回答。用户没有提出请求时保持安静。"""
+
+ANNOTATION_VOICE_RULES = """
+用户要求在图表画线、箭头、加文字、撤销或清空标注时，立即委派后台调用 app_annotation；你自己不能假装界面已经改变。"""
 
 
 def safe_error(exc):
@@ -99,8 +105,10 @@ class VoiceSession:
         self.delegation_pending = False
         self.reply_lock = asyncio.Lock()
         self.speech_receipts = []
+        self.pending_capabilities = {}
         self.journal = self.state_dir / ('voice-' + hashlib.sha256(device_id.encode()).hexdigest()[:24] + '.jsonl')
         self.thread_file = self.journal.with_suffix('.thread')
+        self.supports_annotations = False
 
     def task(self, coro):
         task = asyncio.create_task(coro)
@@ -177,7 +185,8 @@ class VoiceSession:
             if not answer:
                 await self.fail_turn(state, '后台已结束，但没有收到本轮最终回答，请重试。')
                 return
-            verified = any(tool.get('success') and tool.get('dataReturned') for tool in state['tools'])
+            verified = any(tool.get('success') and (tool.get('dataReturned') or tool.get('actionApplied'))
+                           for tool in state['tools'])
             has_number = bool(re.search(r'\d|[零〇一二两三四五六七八九十百千万亿]+\s*(?:元|块|股|手|％|%)', answer))
             stock_claim = bool(re.search(r'股票|股价|价格|报价|行情|收盘|开盘|涨|跌|成交|市值|换手|量比|元|资金|代码|K线|\b\d{6}\b',
                                         state['inputText'] + '\n' + answer))
@@ -300,6 +309,9 @@ class VoiceSession:
                     result = await asyncio.to_thread(self.data_store.stock_detail, self.stock_code, 10)
             elif name == 'stocks_detail':
                 result = await asyncio.to_thread(self.data_store.stock_detail, str(args.get('code', '')), 30)
+            elif name == 'app_annotation':
+                result = await self.request_capability(args)
+                success = bool(result.get('success'))
             else:
                 raise ValueError('此能力不在验证版范围内')
         except Exception as e:
@@ -310,13 +322,59 @@ class VoiceSession:
                    'requestId': state['requestId'] if state else None, 'turnId': p.get('turnId'),
                    'callId': p.get('callId'), 'code': result.get('stock', {}).get('code'),
                    'asOf': result.get('asOf'),
-                   'dataReturned': bool(result.get('asOf') and (result.get('stock') or result.get('items')))}
+                   'dataReturned': bool(result.get('asOf') and (result.get('stock') or result.get('items'))),
+                   'actionApplied': bool(result.get('success') and result.get('capability') == 'chart.annotation')}
         if state:
             state['tools'].append(receipt)
         self.record(receipt)
         await self.send({'id': obj['id'], 'result': {'success': success, 'contentItems': [
             {'type': 'inputText', 'text': json.dumps(result, ensure_ascii=False)}]}})
         await self.event(receipt)
+
+    async def request_capability(self, args):
+        if not self.stock_code:
+            raise ValueError('当前未选中股票')
+        operation = str(args.get('operation', ''))
+        if operation not in ('add_note', 'add_line', 'add_arrow', 'undo', 'clear'):
+            raise ValueError('不支持这个标注动作')
+        action_id = str(uuid.uuid4())
+        event = {'type': 'capability.action', 'capability': 'chart.annotation',
+                 'actionId': action_id, 'operation': operation, 'code': self.stock_code}
+        if operation in ('add_note', 'add_line', 'add_arrow'):
+            for key in ('x', 'y'):
+                value = float(args.get(key, 0.18 if key == 'x' else 0.16))
+                if not 0 <= value <= 1:
+                    raise ValueError('标注坐标必须在 0 到 1 之间')
+                event[key] = value
+        if operation in ('add_line', 'add_arrow'):
+            for key in ('x2', 'y2'):
+                value = float(args.get(key, 0.78 if key == 'x2' else 0.46))
+                if not 0 <= value <= 1:
+                    raise ValueError('标注坐标必须在 0 到 1 之间')
+                event[key] = value
+        if operation == 'add_note':
+            text = str(args.get('text', '')).strip()[:80]
+            if not text:
+                raise ValueError('文字标注不能为空')
+            event['text'] = text
+        color = str(args.get('color', 'accent'))
+        event['color'] = color if color in ('accent', 'red', 'orange', 'blue') else 'accent'
+        future = asyncio.get_running_loop().create_future()
+        self.pending_capabilities[action_id] = future
+        try:
+            await self.event(event)
+            result = await asyncio.wait_for(future, 12)
+            return {'success': bool(result.get('success')), 'message': str(result.get('message', ''))[:200],
+                    'capability': 'chart.annotation', 'operation': operation, 'stockCode': self.stock_code}
+        except asyncio.TimeoutError as exc:
+            raise ValueError('App 没有确认标注动作，请保持 App 在前台后重试') from exc
+        finally:
+            self.pending_capabilities.pop(action_id, None)
+
+    def capability_result(self, action_id, success, message):
+        future = self.pending_capabilities.get(str(action_id))
+        if future and not future.done():
+            future.set_result({'success': bool(success), 'message': str(message)})
 
     async def select_stock(self, code):
         result = await asyncio.to_thread(self.data_store.stock_detail, code, 1)
@@ -380,8 +438,10 @@ class VoiceSession:
             if not self.closed:
                 await self.event({'type': 'error', 'message': '语音下行中断：' + safe_error(e)})
 
-    async def start(self, code=None):
+    async def start(self, code=None, capabilities=''):
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.supports_annotations = 'chart.annotation.v1' in str(capabilities).split(',')
+        self.thread_file = self.journal.with_suffix('.thread-v2' if self.supports_annotations else '.thread')
         await self.event({'type': 'state', 'state': 'connecting', 'sessionId': self.session_id})
         if code:
             await self.select_stock(code)
@@ -394,7 +454,7 @@ class VoiceSession:
             limit=16 * 1024 * 1024)
         self.task(self.read())
         self.task(self.stderr())
-        await self.call('initialize', {'clientInfo': {'name': 'stocks_native', 'version': '0.2.0'},
+        await self.call('initialize', {'clientInfo': {'name': 'stocks_native', 'version': '0.2.1' if self.supports_annotations else '0.2.0'},
                          'capabilities': {'experimentalApi': True}})
         await self.send({'method': 'initialized'})
         tools = [
@@ -405,9 +465,21 @@ class VoiceSession:
             {'type': 'function', 'name': 'stocks_detail', 'description': '按六位股票代码查询报价和近期K线，数据可能是收盘快照。',
              'inputSchema': {'type': 'object', 'properties': {'code': {'type': 'string'}}, 'required': ['code'], 'additionalProperties': False}},
         ]
+        if self.supports_annotations:
+            tools.append({'type': 'function', 'name': 'app_annotation',
+                'description': '操作 App 当前股票图表的本地原生标注层。坐标为图表内从左上开始的0到1比例。',
+                'inputSchema': {'type': 'object', 'properties': {
+                    'operation': {'type': 'string', 'enum': ['add_note', 'add_line', 'add_arrow', 'undo', 'clear']},
+                    'text': {'type': 'string'}, 'color': {'type': 'string', 'enum': ['accent', 'red', 'orange', 'blue']},
+                    'x': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                    'y': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                    'x2': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                    'y2': {'type': 'number', 'minimum': 0, 'maximum': 1}},
+                 'required': ['operation'], 'additionalProperties': False}})
         params = {'cwd': str(self.state_dir), 'model': 'gpt-5.6-sol', 'modelProvider': 'openai',
                   'approvalPolicy': 'never', 'sandbox': 'read-only', 'environments': [],
-                  'developerInstructions': PROMPT, 'config': {'model_reasoning_effort': 'medium'},
+                  'developerInstructions': PROMPT + (ANNOTATION_PROMPT if self.supports_annotations else ''),
+                  'config': {'model_reasoning_effort': 'medium'},
                   'serviceName': 'stocks-native-mvp'}
         previous = self.thread_file.read_text().strip() if self.thread_file.exists() else None
         if previous:
@@ -430,7 +502,8 @@ class VoiceSession:
             if track.kind == 'audio':
                 self.task(self.consume_audio(track))
         await self.pc.setLocalDescription(await self.pc.createOffer())
-        initial = [{'role': 'developer', 'text': VOICE_RULES + '\n当前选中代码：' + (self.stock_code or '尚未选择')}]
+        voice_rules = VOICE_RULES + (ANNOTATION_VOICE_RULES if self.supports_annotations else '')
+        initial = [{'role': 'developer', 'text': voice_rules + '\n当前选中代码：' + (self.stock_code or '尚未选择')}]
         if self.journal.exists():
             with self.journal.open('rb') as f:
                 f.seek(max(0, self.journal.stat().st_size - 24000))
@@ -507,6 +580,9 @@ class VoiceSession:
         if self.closed:
             return
         self.closed = True
+        for future in self.pending_capabilities.values():
+            if not future.done():
+                future.set_exception(RuntimeError('App 连接已关闭'))
         if self.thread_id and self.proc and self.proc.returncode is None:
             with contextlib.suppress(Exception):
                 await self.call('thread/realtime/stop', {'threadId': self.thread_id}, timeout=8)

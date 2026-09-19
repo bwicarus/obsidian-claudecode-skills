@@ -75,7 +75,7 @@ async def detail(request):
 
 
 async def health(request):
-    return web.json_response({'status': 'ok', 'version': '0.2.0'})
+    return web.json_response({'status': 'ok', 'version': '0.2.1'})
 
 
 async def voice(request):
@@ -106,9 +106,9 @@ async def voice(request):
         async with writes:
             if not ws.closed:
                 await ws.send_bytes(data)
-    async def start(code):
+    async def start(code, capabilities):
         try:
-            await session.start(code)
+            await session.start(code, capabilities)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -135,7 +135,7 @@ async def voice(request):
                     obj = json.loads(msg.data)
                     kind = obj.get('type')
                     if kind == 'start' and start_task is None:
-                        start_task = asyncio.create_task(start(obj.get('stockCode')))
+                        start_task = asyncio.create_task(start(obj.get('stockCode'), obj.get('capabilities', '')))
                     elif kind == 'stop':
                         await ws.send_json({'type': 'state', 'state': 'closed'})
                         break
@@ -143,6 +143,10 @@ async def voice(request):
                         await session.text(str(obj.get('text', '')))
                     elif kind == 'stock.select':
                         await session.select_stock(str(obj.get('code', '')))
+                    elif kind == 'capability.result':
+                        session.capability_result(str(obj.get('actionId', '')),
+                                                  str(obj.get('success', '')).lower() == 'true',
+                                                  str(obj.get('message', '')))
                     else:
                         raise ValueError('请先等待语音连接就绪')
                 elif msg.type == WSMsgType.ERROR:

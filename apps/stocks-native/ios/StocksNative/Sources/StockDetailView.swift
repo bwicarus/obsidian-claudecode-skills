@@ -13,7 +13,9 @@ struct StockDetailView: View {
                         Label(error, systemImage: "exclamationmark.circle")
                             .font(.footnote).foregroundStyle(.red)
                     }
-                    CandleChart(candles: detail.candles)
+                    CandleChart(candles: detail.candles,
+                                stockCode: detail.stock.code,
+                                annotations: model.annotations)
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 5) {
                             Text("数据时间").font(.caption).foregroundStyle(.secondary)
@@ -112,8 +114,14 @@ private struct CandlePriceMarks: ChartContent {
 
 private struct CandleChart: View {
     let candles: [Candle]
+    let stockCode: String
+    @ObservedObject var annotations: AnnotationStore
     @State private var visibleCount = 60
     @State private var selectedX: Double?
+    @State private var annotationMode = false
+    @State private var annotationTool: AnnotationTool = .pen
+    @State private var annotationColor = "accent"
+    @State private var confirmingClear = false
 
     private var visible: [IndexedCandle] {
         Array(candles.suffix(visibleCount)).enumerated().map { IndexedCandle(id: $0.offset, candle: $0.element) }
@@ -140,45 +148,57 @@ private struct CandleChart: View {
                 HStack {
                     Text("价格走势").font(.headline)
                     Spacer(minLength: 16)
+                    annotationToggle
                     periodPicker.frame(width: 220)
                 }
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("价格走势").font(.headline)
+                    HStack {
+                        Text("价格走势").font(.headline)
+                        Spacer()
+                        annotationToggle
+                    }
                     periodPicker
                 }
             }
+            if annotationMode { annotationToolbar }
             if visible.isEmpty {
                 ContentUnavailableView("暂无 K 线数据", systemImage: "chart.bar.xaxis", description: Text("服务器尚未提供这只股票的历史行情。"))
                     .frame(height: 300)
             } else {
                 if let item = inspected { candleSummary(item.candle) }
-                Chart {
-                    ForEach(visible) { item in
-                        CandlePriceMarks(item: item)
+                ZStack {
+                    Chart {
+                        ForEach(visible) { item in
+                            CandlePriceMarks(item: item)
+                        }
+                        if let selectedX {
+                            RuleMark(x: .value("选中", selectedX.rounded()))
+                                .foregroundStyle(AppStyle.ink.opacity(0.25))
+                                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                        }
                     }
-                    if let selectedX {
-                        RuleMark(x: .value("选中", selectedX.rounded()))
-                            .foregroundStyle(AppStyle.ink.opacity(0.25))
-                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                    .chartXScale(domain: -1...Double(visible.count))
+                    .chartYScale(domain: priceDomain)
+                    .chartXSelection(value: $selectedX)
+                    .chartYAxis {
+                        AxisMarks(position: .trailing, values: .automatic(desiredCount: 5)) {
+                            AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.gray.opacity(0.13))
+                            AxisValueLabel().foregroundStyle(.secondary)
+                        }
                     }
-                }
-                .chartXScale(domain: -1...Double(visible.count))
-                .chartYScale(domain: priceDomain)
-                .chartXSelection(value: $selectedX)
-                .chartYAxis {
-                    AxisMarks(position: .trailing, values: .automatic(desiredCount: 5)) {
-                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.gray.opacity(0.13))
-                        AxisValueLabel().foregroundStyle(.secondary)
-                    }
-                }
-                .chartXAxis {
-                    AxisMarks(values: tickPositions) { value in
-                        AxisValueLabel {
-                            if let x = value.as(Double.self), visible.indices.contains(Int(x)) {
-                                Text(shortDate(visible[Int(x)].candle.time)).font(.caption2)
+                    .chartXAxis {
+                        AxisMarks(values: tickPositions) { value in
+                            AxisValueLabel {
+                                if let x = value.as(Double.self), visible.indices.contains(Int(x)) {
+                                    Text(shortDate(visible[Int(x)].candle.time)).font(.caption2)
+                                }
                             }
                         }
                     }
+                    NativeAnnotationCanvas(store: annotations, stockCode: stockCode,
+                                           tool: annotationTool, color: annotationColor,
+                                           isEditing: annotationMode)
+                        .allowsHitTesting(annotationMode)
                 }
                 .frame(height: 290)
                 .accessibilityLabel("原生蜡烛图，\(visible.count) 根日 K 线。拖动查看开盘、最高、最低、收盘。")
@@ -209,7 +229,7 @@ private struct CandleChart: View {
                     }
                 }
                 .frame(height: 85)
-                Text("触碰并拖动图表查看当日数据。红色上涨，绿色下跌。")
+                Text(annotationMode ? "标注模式：使用手指或 Apple Pencil 绘制。标注按股票保存在本机。" : "触碰并拖动图表查看当日数据。红色上涨，绿色下跌。")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
@@ -217,6 +237,76 @@ private struct CandleChart: View {
         .background(.white, in: RoundedRectangle(cornerRadius: 22))
         .onChange(of: visibleCount) { _, _ in selectedX = nil }
         .onChange(of: candles.first?.time) { _, _ in selectedX = nil }
+        .onChange(of: stockCode) { _, _ in annotationMode = false; selectedX = nil }
+        .confirmationDialog("清除此股票的全部标注？", isPresented: $confirmingClear, titleVisibility: .visible) {
+            Button("清除全部", role: .destructive) { _ = annotations.clear(stockCode: stockCode) }
+            Button("取消", role: .cancel) { }
+        }
+    }
+
+    private var annotationToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) { annotationMode.toggle() }
+        } label: {
+            Label(annotationMode ? "完成" : "标记", systemImage: annotationMode ? "checkmark" : "pencil.and.scribble")
+        }
+        .buttonStyle(.bordered)
+        .tint(annotationMode ? AppStyle.accent : .secondary)
+        .controlSize(.small)
+    }
+
+    private var annotationToolbar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(AnnotationTool.allCases) { tool in
+                    Button { annotationTool = tool } label: {
+                        Label(tool.title, systemImage: tool.symbol)
+                            .labelStyle(.iconOnly)
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(annotationTool == tool ? AppStyle.accent : .secondary)
+                    .accessibilityLabel(tool.title)
+                }
+                Divider().frame(height: 24)
+                Menu {
+                    colorButton("墨绿", value: "accent")
+                    colorButton("红色", value: "red")
+                    colorButton("橙色", value: "orange")
+                    colorButton("蓝色", value: "blue")
+                } label: {
+                    Image(systemName: "circle.fill").foregroundStyle(annotationTint)
+                        .frame(width: 32, height: 32)
+                }
+                .accessibilityLabel("标注颜色")
+                Button { _ = annotations.undo(stockCode: stockCode) } label: { Image(systemName: "arrow.uturn.backward") }
+                    .buttonStyle(.bordered)
+                    .disabled(annotations.annotations(for: stockCode).isEmpty)
+                    .accessibilityLabel("撤销上一条标注")
+                Button(role: .destructive) { confirmingClear = true } label: { Image(systemName: "trash") }
+                    .buttonStyle(.bordered)
+                    .disabled(annotations.annotations(for: stockCode).isEmpty)
+                    .accessibilityLabel("清除全部标注")
+            }
+        }
+    }
+
+    @ViewBuilder private func colorButton(_ title: String, value: String) -> some View {
+        Button {
+            annotationColor = value
+        } label: {
+            if annotationColor == value { Label(title, systemImage: "checkmark") }
+            else { Text(title) }
+        }
+    }
+
+    private var annotationTint: Color {
+        switch annotationColor {
+        case "red": return AppStyle.up
+        case "orange": return .orange
+        case "blue": return .blue
+        default: return AppStyle.accent
+        }
     }
 
     private var periodPicker: some View {

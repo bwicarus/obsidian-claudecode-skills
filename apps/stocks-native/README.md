@@ -1,4 +1,4 @@
-# StocksNative 0.2.0 validation app
+# StocksNative 0.2.1 validation app
 
 An iPad-first native SwiftUI client with Swift Charts candlesticks, stock search,
 stock detail and an AVAudioEngine voice sidebar. The MVP embeds no WebView,
@@ -11,9 +11,9 @@ record. Building an IPA does not mean TestFlight or a physical device was tested
 
 ## Scope
 
-This first version validates stock data, native display and bidirectional voice.
-The larger agreed feature migration, native annotations and full AI navigation
-will follow after this MVP is checked on an iPad. Current market data is a dated
+This version validates stock data, native display, bidirectional voice and a
+structured native chart annotation layer. The larger agreed feature migration
+and full AI navigation will follow in later iterations. Current market data is a dated
 snapshot, not a streaming real-time feed. No trading operations are exposed.
 
 ## Gateway
@@ -43,6 +43,13 @@ Codex thread ID is resumed. Realtime startup currently loads only eight recent
 transcripts, with bounded text. This is durable storage, not a guarantee that
 every historical detail is automatically present in the model context.
 Ten minutes without conversational activity closes an idle voice session.
+
+Version 0.2.1 advertises `chart.annotation.v1` when opening voice. Only those
+clients receive the `app_annotation` tool. UI actions use a request/receipt pair,
+so the assistant cannot claim a mark was added before the App applies it. Older
+0.2.0 clients retain their existing thread and tool set. The new tool schema uses
+a new owned thread while the full journal is preserved and recent bounded context
+is restored to Realtime.
 
 Typed requests go directly to the persistent Codex thread through `turn/start`.
 Voice requests use the CLI's native delegation. Both backend result paths share
