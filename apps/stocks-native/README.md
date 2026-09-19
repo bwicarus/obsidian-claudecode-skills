@@ -1,8 +1,9 @@
-# StocksNative 0.2.1 validation app
+# StocksNative 0.2.2 validation app
 
-An iPad-first native SwiftUI client with Swift Charts candlesticks, stock search,
-stock detail and an AVAudioEngine voice sidebar. The MVP embeds no WebView,
-HTML chart or website UI. The Reader project is a read-only reference.
+An iPad-first native SwiftUI client with live market summaries, intraday and
+multi-period Swift Charts, stock analytics, Apple sign-in, local caching and an
+AVAudioEngine voice sidebar. The app embeds no WebView, HTML chart or website UI.
+The Reader project is a read-only reference.
 
 The independent bundle is `space.bwicarus.stocksnative`; it can coexist with
 BWReader. Existing Apple distribution signing material is reused through GitHub
@@ -11,17 +12,23 @@ record. Building an IPA does not mean TestFlight or a physical device was tested
 
 ## Scope
 
-This version validates stock data, native display, bidirectional voice and a
-structured native chart annotation layer. The larger agreed feature migration
-and full AI navigation will follow in later iterations. Current market data is a dated
-snapshot, not a streaming real-time feed. No trading operations are exposed.
+This version validates live stock data, native display, bidirectional voice,
+screen-context injection and a structured native chart annotation layer. It
+includes market breadth, quotes and five-level order books, intraday data,
+5/15/30/60-minute and daily/weekly/monthly K-lines, technical indicators, capital
+flow, chips, concepts, peers and announcements. No trading operations are exposed.
 
 ## Gateway
 
 Base URL: `https://bwicarus.space/stocks-native`.
 
-- `POST /api/pair`: one-use 10 minute pairing code, device ID and device name.
-- `GET /api/stocks`: stock search; `GET /api/stocks/{code}`: details and daily candles.
+- `POST /api/auth/apple`: verifies an Apple identity token and hashed nonce, then
+  issues a device-bound token. One-use pairing remains available only in the
+  folded review/development entry.
+- `GET /api/market/overview`: market breadth and hot sectors.
+- `GET /api/realtime?codes=...`: live quotes and five-level order books.
+- `GET /api/stocks`: stock search; `GET /api/stocks/{code}`: quote and analytics.
+- `GET /api/stocks/{code}/intraday` and `/kline?period=...`: native chart data.
 - `GET /voice?deviceId=...`: WebSocket carrying JSON events and 20 ms PCM16LE mono
   48 kHz audio frames. The bearer token is passed only in an authorization header.
 - `GET /api/health`: unauthenticated minimal version/liveness response.
@@ -44,12 +51,19 @@ transcripts, with bounded text. This is durable storage, not a guarantee that
 every historical detail is automatically present in the model context.
 Ten minutes without conversational activity closes an idle voice session.
 
-Version 0.2.1 advertises `chart.annotation.v1` when opening voice. Only those
-clients receive the `app_annotation` tool. UI actions use a request/receipt pair,
-so the assistant cannot claim a mark was added before the App applies it. Older
-0.2.0 clients retain their existing thread and tool set. The new tool schema uses
-a new owned thread while the full journal is preserved and recent bounded context
-is restored to Realtime.
+Version 0.2.2 advertises `chart.annotation.v1` and `ui.context.v1` when opening
+voice. The client sends bounded, deduplicated context when the visible stock,
+quote, chart period, latest chart point, metrics, panels or key user actions
+change. The server appends the latest context as a developer message so current
+screen questions do not require a tool round trip. UI actions still use a
+request/receipt pair, so the assistant cannot claim a mark was added before the
+App applies it.
+
+The App displays cached overview, list, detail and chart data immediately, then
+refreshes from the VPS. Intraday cache lives for 12 hours, overview/list for 24
+hours and detail/K-lines for 7 days. Startup cleanup removes entries older than
+14 days and keeps the cache below 80 MB. Long-term datasets and computation stay
+on the VPS.
 
 Typed requests go directly to the persistent Codex thread through `turn/start`.
 Voice requests use the CLI's native delegation. Both backend result paths share
