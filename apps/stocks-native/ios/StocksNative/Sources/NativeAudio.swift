@@ -15,6 +15,7 @@ final class NativeAudio {
     private let captureLock = NSLock()
     private var installedTap = false
     private var attachedPlayer = false
+    private var sessionIsActive = false
     private(set) var isRunning = false
     private var interruptionObserver: NSObjectProtocol?
 
@@ -31,24 +32,27 @@ final class NativeAudio {
         try session.setPreferredSampleRate(sampleRate)
         try session.setPreferredIOBufferDuration(0.02)
         try session.setActive(true)
+        sessionIsActive = true
 
         do {
-            let input = engine.inputNode
-            // Voice processing provides echo cancellation for simultaneous capture and playback.
-            try input.setVoiceProcessingEnabled(true)
-            let inputFormat = input.outputFormat(forBus: 0)
-            guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,
-                  let captureFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true),
-                  let converter = AVAudioConverter(from: inputFormat, to: captureFormat),
-                  let playbackFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false) else {
-                throw AppError.message("当前音频设备不支持语音采集。")
+            guard let playbackFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false) else {
+                throw AppError.message("无法创建扬声器音频格式。")
             }
-            self.converter = converter
             if !attachedPlayer {
                 engine.attach(player)
                 attachedPlayer = true
             }
             engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
+            let input = engine.inputNode
+            // Voice processing provides echo cancellation for simultaneous capture and playback.
+            if !input.isVoiceProcessingEnabled { try input.setVoiceProcessingEnabled(true) }
+            let inputFormat = input.outputFormat(forBus: 0)
+            guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,
+                  let captureFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true),
+                  let converter = AVAudioConverter(from: inputFormat, to: captureFormat) else {
+                throw AppError.message("当前音频设备不支持语音采集。")
+            }
+            self.converter = converter
             input.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { [weak self] buffer, _ in
                 self?.convertCapture(buffer, outputFormat: captureFormat, converter: converter)
             }
@@ -120,7 +124,7 @@ final class NativeAudio {
             engine.inputNode.removeTap(onBus: 0)
             installedTap = false
         }
-        player.stop()
+        if attachedPlayer { player.stop() }
         engine.stop()
         converter = nil
         captureLock.lock()
@@ -128,7 +132,10 @@ final class NativeAudio {
         captureLock.unlock()
         if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
         interruptionObserver = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if sessionIsActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            sessionIsActive = false
+        }
     }
 
     deinit {

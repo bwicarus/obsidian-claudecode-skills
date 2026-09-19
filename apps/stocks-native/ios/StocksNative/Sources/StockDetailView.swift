@@ -169,14 +169,18 @@ private struct CandleChart: View {
                 .accessibilityLabel("原生蜡烛图，\(visible.count) 根日 K 线。拖动查看开盘、最高、最低、收盘。")
                 HStack {
                     Text("成交量").font(.caption).foregroundStyle(.secondary)
-                    if let item = inspected {
-                        Text(item.candle.volume.formatted(.number.notation(.compactName).precision(.fractionLength(0...2))))
+                    if let volume = inspected?.candle.volume {
+                        Text(volume.formatted(.number.notation(.compactName).precision(.fractionLength(0...2))))
                             .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    } else {
+                        Text("暂无数据").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Chart(visible) { item in
-                    BarMark(x: .value("交易日", Double(item.id)), y: .value("成交量", item.candle.volume), width: .ratio(0.65))
-                        .foregroundStyle(AppStyle.movement(item.candle.close - item.candle.open).opacity(0.55))
+                    if let volume = item.candle.volume {
+                        BarMark(x: .value("交易日", Double(item.id)), y: .value("成交量", volume), width: .ratio(0.65))
+                            .foregroundStyle(AppStyle.movement(item.candle.close - item.candle.open).opacity(0.55))
+                    }
                 }
                 .chartXScale(domain: -1...Double(visible.count))
                 .chartXAxis(.hidden)

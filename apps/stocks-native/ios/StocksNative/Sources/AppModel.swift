@@ -21,8 +21,9 @@ final class AppModel: ObservableObject {
     private var detailGeneration = UUID()
 
     init() {
-        baseURL = UserDefaults.standard.string(forKey: "stocksNative.baseURL") ?? "https://bwicarus.space/stocks-native"
-        isPaired = Credentials.token(baseURL: baseURL) != nil
+        let initialBase = UserDefaults.standard.string(forKey: "stocksNative.baseURL") ?? "https://bwicarus.space/stocks-native"
+        baseURL = initialBase
+        isPaired = Credentials.token(baseURL: initialBase) != nil
         let savedID = UserDefaults.standard.string(forKey: "stocksNative.deviceID") ?? UUID().uuidString
         deviceID = savedID
         UserDefaults.standard.set(savedID, forKey: "stocksNative.deviceID")

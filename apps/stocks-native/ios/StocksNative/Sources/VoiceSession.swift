@@ -73,7 +73,8 @@ final class VoiceSession: ObservableObject {
                 await self.receive(from: task, generation: current)
             }
             connectionTimeout = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                // Server allows SDP negotiation (40 s) and realtime readiness (30 s).
+                try? await Task.sleep(nanoseconds: 80_000_000_000)
                 guard !Task.isCancelled, let self, self.generation == current, self.state != .active else { return }
                 self.fail("语音通道初始化超时。请重试。")
             }

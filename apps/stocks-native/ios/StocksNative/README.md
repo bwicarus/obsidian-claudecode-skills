@@ -23,7 +23,7 @@ SwiftUI 界面、Swift Charts 蜡烛图/成交量和 AVAudioEngine 双向音频�
 - 配对：`POST /api/pair`，JSON `{code, deviceId, name}`，返回 `{token, deviceId}`。`deviceId` 必须原样匹配请求。
 - 列表：`GET /api/stocks?q=&limit=50`，返回 `{asOf, items:[{code,name,price,changePct,turnover,sector}]}`。
 - 详情：`GET /api/stocks/{code}`，返回 `{asOf, stock:{...}, candles:[{time,open,high,low,close,volume}]}`。
-- `asOf`、`time` 为字符串；价格/涨跌幅/成交额允许 null，蜡烛数值必须为 number。
+- `asOf`、`time` 为字符串；价格/涨跌幅/成交额/成交量允许 null，蜡烛 OHLC 数值必须为 number。缺失成交量不绘制假柱，也不替换为零。
 - 数据接口与 WebSocket 均使用 `Authorization: Bearer <token>`。token 只保存在 Keychain，不写入 URL、普通设置或日志。
 - WebSocket：`wss://bwicarus.space/stocks-native/voice?deviceId=<UUID>`。
 - 客户端控制：`{type:"start",stockCode?}`、`{type:"text",text}`、`{type:"stock.select",code}`、`{type:"stop"}`。

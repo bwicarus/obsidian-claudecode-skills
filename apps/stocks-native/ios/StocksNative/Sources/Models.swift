@@ -16,7 +16,7 @@ struct Candle: Codable, Identifiable {
     let high: Double
     let low: Double
     let close: Double
-    let volume: Double
+    let volume: Double?
     var id: String { time }
 }
 
