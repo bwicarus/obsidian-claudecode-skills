@@ -306,6 +306,15 @@ struct VoiceViewState: Codable, Hashable {
     var settingsPresented = false
     // This describes the active tab, not individual cards hidden below its scroll viewport.
     var visibilityScope = "active_tab"
+    var chartViewport: VoiceChartViewport?
+}
+
+struct VoiceChartViewport: Codable, Hashable {
+    let firstVisibleTime: String?
+    let lastVisibleTime: String?
+    let visiblePointCount: Int
+    // A historical window's summary is separate from the live market quote.
+    let historicalSummary: VoiceChartPoint?
 }
 
 struct VoiceChartPoint: Codable, Hashable {

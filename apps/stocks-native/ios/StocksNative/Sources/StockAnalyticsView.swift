@@ -165,19 +165,40 @@ private struct StockValuationCard: View {
 struct MarketChartSection: View {
     @ObservedObject var model: AppModel
     let stockCode: String
+    @State private var lastCandlePeriod: ChartPeriod = .day
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(ChartPeriod.allCases) { period in
-                        Button(period.title) { model.chartPeriod = period }
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.capsule)
-                            .tint(model.chartPeriod == period ? AppStyle.accent : .secondary)
-                    }
+            HStack(spacing: 12) {
+                Picker("图表类型", selection: Binding(get: { model.chartPeriod == .intraday }, set: {
+                    model.chartPeriod = $0 ? .intraday : lastCandlePeriod
+                })) {
+                    Text("分时走势").tag(true)
+                    Text("K 线").tag(false)
                 }
-                .padding(.horizontal, 2)
+                .pickerStyle(.segmented).frame(maxWidth: 260)
+                Spacer(minLength: 0)
+                if model.chartPeriod != .intraday {
+                    Menu {
+                        ForEach(ChartPeriod.allCases.filter { $0 != .intraday }) { period in
+                            Button {
+                                lastCandlePeriod = period
+                                model.chartPeriod = period
+                            } label: {
+                                if period == model.chartPeriod {
+                                    Label(candleIntervalTitle(period), systemImage: "checkmark")
+                                } else { Text(candleIntervalTitle(period)) }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text(candleIntervalTitle(model.chartPeriod))
+                            Image(systemName: "chevron.down").font(.caption2)
+                        }
+                        .font(.caption.weight(.medium)).padding(.vertical, 12)
+                    }
+                    .accessibilityLabel("K 线精度，\(candleIntervalTitle(model.chartPeriod))")
+                }
             }
             if let error = model.chartError {
                 Label(error, systemImage: "wifi.exclamationmark")
@@ -197,7 +218,7 @@ struct MarketChartSection: View {
                 CandleChart(candles: model.displayedCandles, stockCode: stockCode, period: model.chartPeriod,
                             annotations: model.annotations, onContextChange: model.updateChartContext,
                             onRangeChange: { count in
-                                await model.publishVoiceContext(action: "图表区间：\(count) 根", kind: "chart_range")
+                                await model.publishVoiceContext(action: "调整图表可见区间：\(count) 根", kind: "chart_range")
                             })
                     .id("\(stockCode):\(model.chartPeriod.rawValue)")
             } else if model.isLoadingChart {
@@ -205,6 +226,21 @@ struct MarketChartSection: View {
             } else {
                 emptyChart("暂无这个周期的 K 线")
             }
+        }
+        .onChange(of: model.chartPeriod, initial: true) { _, period in
+            if period != .intraday { lastCandlePeriod = period }
+        }
+    }
+
+    private func candleIntervalTitle(_ period: ChartPeriod) -> String {
+        switch period {
+        case .m5: return "每根 5 分钟"
+        case .m15: return "每根 15 分钟"
+        case .m30: return "每根 30 分钟"
+        case .m60: return "每根 60 分钟"
+        case .week: return "每根 1 周"
+        case .month: return "每根 1 月"
+        default: return "每根 1 天"
         }
     }
 
@@ -248,37 +284,71 @@ private struct IntradayChart: View {
     @ObservedObject var annotations: AnnotationStore
     let onContextChange: (VoiceChartSnapshot) async -> Void
     @State private var selectedTime: String?
+    @State private var window = 0..<242
 
     private var points: [SessionIntradayPoint] {
         data.rows.compactMap(SessionIntradayPoint.init).sorted { $0.minute < $1.minute }
     }
+    private var visiblePoints: [SessionIntradayPoint] {
+        points.filter { window.contains(Int($0.minute)) }
+    }
+    private var xDomain: ClosedRange<Double> {
+        Double(window.lowerBound)...Double(max(window.lowerBound + 1, window.upperBound - 1))
+    }
+    private var overviewValues: [Double?] {
+        var values = [Double?](repeating: nil, count: 242)
+        for item in points { values[Int(item.minute)] = item.point.price }
+        return values
+    }
+    private var tickPositions: [Double] {
+        window == 0..<242 ? [0, 120.5, 241] : [Double(window.lowerBound), Double((window.lowerBound + window.upperBound - 1) / 2), Double(window.upperBound - 1)]
+    }
+    private func sessionTime(_ slot: Int) -> String {
+        let clock = slot <= 120 ? 570 + slot : 780 + slot - 121
+        return String(format: "%02d:%02d", clock / 60, clock % 60)
+    }
+    private var annotationViewport: ChartAnnotationViewport {
+        ChartAnnotationViewport(period: ChartPeriod.intraday.rawValue,
+                                times: (0..<242).map { "\(data.tradeDate)T\(sessionTime($0))" },
+                                xDomain: xDomain, yDomain: domain)
+    }
     private var selectedPoint: SessionIntradayPoint? {
         guard let selectedTime else { return nil }
-        return points.first { $0.point.time == selectedTime }
+        return visiblePoints.first { $0.point.time == selectedTime }
     }
-    private var inspected: SessionIntradayPoint? { selectedPoint ?? points.last }
+    private var inspected: SessionIntradayPoint? { selectedPoint ?? visiblePoints.last }
     private var selection: Binding<Double?> {
         Binding(get: { selectedPoint?.minute }, set: { value in
             guard let value, value.isFinite else { selectedTime = nil; return }
-            selectedTime = points.min { abs($0.minute - value) < abs($1.minute - value) }?.point.time
+            selectedTime = visiblePoints.min { abs($0.minute - value) < abs($1.minute - value) }?.point.time
         })
     }
 
     private var voiceContextSnapshot: VoiceChartSnapshot {
         let point = inspected.map { VoiceChartPoint(time: $0.point.time, price: $0.point.price, volume: $0.point.volume) }
         let chart = VoiceChartContext(stockCode: stockCode, period: ChartPeriod.intraday.rawValue,
-                                      kind: "intraday", firstVisibleTime: points.first?.point.time,
-                                      lastVisibleTime: points.last?.point.time,
-                                      visiblePointCount: points.count, selectedPoint: point,
-                                      selectionSource: selectedPoint == nil ? "latest" : "cursor")
+                                      kind: "intraday", firstVisibleTime: visiblePoints.first?.point.time,
+                                      lastVisibleTime: visiblePoints.last?.point.time,
+                                      visiblePointCount: visiblePoints.count, selectedPoint: point,
+                                      selectionSource: selectedPoint == nil ? (visiblePoints.last?.id == points.last?.id ? "latest" : "visible_end") : "cursor")
         return VoiceChartSnapshot(chart: chart,
-                                  annotations: annotations.voiceContext(stockCode: stockCode, editing: false, tool: .pen))
+                                  annotations: annotations.voiceContext(stockCode: stockCode, editing: false, tool: .pen,
+                                                                        viewport: annotationViewport))
     }
 
     private var domain: ClosedRange<Double> {
-        let values = points.flatMap { [$0.point.price, $0.point.averagePrice].compactMap { $0 } }
+        let values = visiblePoints.flatMap { [$0.point.price, $0.point.averagePrice].compactMap { $0 } }
+        guard !values.isEmpty else {
+            let reference = data.previousClose ?? points.last?.point.price ?? 1
+            let padding = max(abs(reference) * 0.005, 0.01)
+            return (reference - padding)...(reference + padding)
+        }
         let low = values.min() ?? 0
         let high = values.max() ?? 1
+        if window != 0..<242 {
+            let padding = max((high - low) * 0.10, abs(high) * 0.001, 0.01)
+            return (low - padding)...(high + padding)
+        }
         let reference = data.previousClose ?? (low + high) / 2
         let distance = max(abs(high - reference), abs(reference - low), reference * 0.005, 0.01)
         return (reference - distance * 1.08)...(reference + distance * 1.08)
@@ -302,12 +372,12 @@ private struct IntradayChart: View {
             }
             ZStack {
                 Chart {
-                    if let previous = data.previousClose {
+                    if let previous = data.previousClose, domain.contains(previous) {
                         RuleMark(y: .value("昨收", previous))
                             .foregroundStyle(.secondary.opacity(0.35))
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
                     }
-                    ForEach(points) { item in
+                    ForEach(visiblePoints) { item in
                         LineMark(x: .value("交易分钟", item.minute), y: .value("价格", item.point.price),
                                  series: .value("曲线", "价格"))
                             .foregroundStyle(by: .value("曲线", "价格"))
@@ -323,6 +393,10 @@ private struct IntradayChart: View {
                                 .lineStyle(StrokeStyle(lineWidth: 1.2))
                         }
                     }
+                    if visiblePoints.count == 1, selectedPoint == nil, let only = visiblePoints.first {
+                        PointMark(x: .value("交易分钟", only.minute), y: .value("价格", only.point.price))
+                            .foregroundStyle(AppStyle.accent).symbolSize(25)
+                    }
                     if let selectedPoint {
                         RuleMark(x: .value("选中", selectedPoint.minute))
                             .foregroundStyle(AppStyle.ink.opacity(0.3))
@@ -331,7 +405,7 @@ private struct IntradayChart: View {
                             .foregroundStyle(AppStyle.accent).symbolSize(25)
                     }
                 }
-                .chartXScale(domain: 0.0...241.0, range: .plotDimension(padding: 0))
+                .chartXScale(domain: xDomain, range: .plotDimension(padding: 0))
                 .chartYScale(domain: domain)
                 .chartXSelection(value: selection)
                 .chartForegroundStyleScale(["价格": AppStyle.accent, "均价": Color.orange.opacity(0.85)])
@@ -348,21 +422,33 @@ private struct IntradayChart: View {
                     }
                 }
                 .chartXAxis {
-                    AxisMarks(values: [0.0, 120.5, 241.0]) { value in
+                    AxisMarks(values: tickPositions) { value in
                         AxisValueLabel {
                             if let minute = value.as(Double.self) {
-                                Text(minute == 0 ? "09:30" : (minute == 241 ? "15:00" : "11:30 / 13:00"))
+                                Text(minute == 120.5 ? "11:30 / 13:00" : sessionTime(Int(minute)))
                                     .font(.caption2)
                             }
                         }
                     }
                 }
-                NativeAnnotationCanvas(store: annotations, stockCode: stockCode,
-                                       tool: .pen, color: "accent", isEditing: false)
+                .chartOverlay { proxy in
+                    GeometryReader { geometry in
+                        if let plotFrame = proxy.plotFrame {
+                            let frame = geometry[plotFrame]
+                            NativeAnnotationCanvas(store: annotations, stockCode: stockCode,
+                                                   tool: .pen, color: "accent", isEditing: false,
+                                                   viewport: annotationViewport)
+                                .frame(width: frame.width, height: frame.height)
+                                .clipped()
+                                .offset(x: frame.minX, y: frame.minY)
+                        }
+                    }
                     .allowsHitTesting(false)
-                if points.isEmpty {
-                    ContentUnavailableView("交易时段内暂无分时数据", systemImage: "chart.xyaxis.line")
+                }
+                if visiblePoints.isEmpty {
+                    ContentUnavailableView("当前区间暂无分时数据", systemImage: "chart.xyaxis.line")
                         .background(.white)
+                        .allowsHitTesting(false)
                 }
             }
             .frame(height: 300)
@@ -375,11 +461,11 @@ private struct IntradayChart: View {
                 }
             }
             .font(.caption)
-            Chart(points) { item in
+            Chart(visiblePoints) { item in
                 BarMark(x: .value("交易分钟", item.minute), y: .value("成交量", item.point.volume), width: .ratio(0.8))
                     .foregroundStyle(AppStyle.accent.opacity(0.38))
             }
-            .chartXScale(domain: 0.0...241.0, range: .plotDimension(padding: 0))
+            .chartXScale(domain: xDomain, range: .plotDimension(padding: 0))
             .chartXAxis(.hidden)
             .chartYAxis {
                 AxisMarks(position: .trailing, values: .automatic(desiredCount: 2)) { value in
@@ -393,11 +479,31 @@ private struct IntradayChart: View {
                 }
             }
             .frame(height: 70)
+            VStack(spacing: 6) {
+                HStack {
+                    Text("\(sessionTime(window.lowerBound)) — \(sessionTime(window.upperBound - 1))")
+                    Spacer()
+                    Button("全天") {
+                        window = 0..<242
+                        selectedTime = nil
+                        Task { await onContextChange(voiceContextSnapshot) }
+                    }
+                    .disabled(window == 0..<242)
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                ChartRangeNavigator(values: overviewValues, selection: $window, minimumCount: 12,
+                                    onEditingChanged: { editing in
+                    if !editing { Task { await onContextChange(voiceContextSnapshot) } }
+                })
+                Text("两端缩放 · 中间平移")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
         .padding(22).background(.white, in: RoundedRectangle(cornerRadius: 22))
         .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
-        .onChange(of: data.tradeDate) { _, _ in selectedTime = nil }
-        .onChange(of: points.map(\.id)) { _, times in
+        .onChange(of: data.tradeDate) { _, _ in selectedTime = nil; window = 0..<242 }
+        .onChange(of: window) { _, _ in selectedTime = nil }
+        .onChange(of: visiblePoints.map(\.id)) { _, times in
             if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
         }
     }

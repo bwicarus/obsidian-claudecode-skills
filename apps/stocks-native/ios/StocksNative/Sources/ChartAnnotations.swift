@@ -39,6 +39,37 @@ struct AnnotationPoint: Codable, Hashable {
     }
 }
 
+/// The array index is the chart's x coordinate. Time keys keep anchors stable
+/// when earlier candles are added or removed from the local data window.
+struct ChartAnnotationViewport: Hashable {
+    let period: String
+    let times: [String]
+    let xDomain: ClosedRange<Double>
+    let yDomain: ClosedRange<Double>
+
+    var isUsable: Bool {
+        !period.isEmpty && !times.isEmpty &&
+        xDomain.lowerBound.isFinite && xDomain.upperBound.isFinite &&
+        yDomain.lowerBound.isFinite && yDomain.upperBound.isFinite &&
+        xDomain.upperBound > xDomain.lowerBound && yDomain.upperBound > yDomain.lowerBound
+    }
+
+    fileprivate func anchor(for point: AnnotationPoint) -> AnnotationDataAnchor? {
+        guard isUsable else { return nil }
+        let x = xDomain.lowerBound + point.x * (xDomain.upperBound - xDomain.lowerBound)
+        let base = min(max(Int(floor(x)), 0), times.count - 1)
+        guard !times[base].isEmpty else { return nil }
+        return AnnotationDataAnchor(time: times[base], indexOffset: x - Double(base),
+                                    price: yDomain.upperBound - point.y * (yDomain.upperBound - yDomain.lowerBound))
+    }
+}
+
+struct AnnotationDataAnchor: Codable, Hashable {
+    let time: String
+    let indexOffset: Double
+    let price: Double
+}
+
 struct ChartAnnotation: Codable, Identifiable {
     enum Kind: String, Codable { case pen, line, arrow, note }
 
@@ -48,6 +79,9 @@ struct ChartAnnotation: Codable, Identifiable {
     let text: String?
     let color: String
     let createdAt: Date
+    // Optional fields preserve the existing JSON format and unlocated drawings.
+    let period: String?
+    let dataAnchors: [AnnotationDataAnchor]?
 
     init(kind: Kind, points: [AnnotationPoint], text: String? = nil, color: String = "accent") {
         id = UUID()
@@ -56,7 +90,75 @@ struct ChartAnnotation: Codable, Identifiable {
         self.text = text
         self.color = color
         createdAt = Date()
+        period = nil
+        dataAnchors = nil
     }
+
+    fileprivate init(anchoring value: ChartAnnotation, in viewport: ChartAnnotationViewport,
+                     anchors: [AnnotationDataAnchor]) {
+        id = value.id
+        kind = value.kind
+        points = value.points
+        text = value.text
+        color = value.color
+        createdAt = value.createdAt
+        period = viewport.period
+        dataAnchors = anchors
+    }
+}
+
+fileprivate struct ProjectedAnnotation {
+    let annotation: ChartAnnotation
+    // Unclamped plot coordinates, so clipping never moves an offscreen stroke
+    // onto the chart edge or turns a crossing segment into a different line.
+    let points: [CGPoint]
+    let visibleSegments: [(CGPoint, CGPoint)]
+
+    var voiceStart: AnnotationPoint? {
+        let point = annotation.kind == .note ? points.first : visibleSegments.first?.0
+        return point.map { AnnotationPoint(x: $0.x, y: $0.y) }
+    }
+
+    var voiceEnd: AnnotationPoint? {
+        guard annotation.kind != .note, let point = visibleSegments.last?.1 else { return nil }
+        return AnnotationPoint(x: point.x, y: point.y)
+    }
+}
+
+private func containsPlotPoint(_ point: CGPoint) -> Bool {
+    point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1
+}
+
+/// Liang-Barsky clipping to the normalized plot, also used for hit testing and
+/// voice context. A segment crossing the plot is visible even if both ends exit it.
+private func clippedPlotSegment(_ start: CGPoint, _ end: CGPoint) -> (CGPoint, CGPoint)? {
+    let dx = end.x - start.x
+    let dy = end.y - start.y
+    let p = [-dx, dx, -dy, dy]
+    let q = [start.x, 1 - start.x, start.y, 1 - start.y]
+    var lower: CGFloat = 0
+    var upper: CGFloat = 1
+    for index in 0..<4 {
+        if abs(p[index]) < 1e-12 {
+            if q[index] < 0 { return nil }
+        } else {
+            let ratio = q[index] / p[index]
+            if p[index] < 0 { lower = max(lower, ratio) }
+            else { upper = min(upper, ratio) }
+            if lower > upper { return nil }
+        }
+    }
+    return (CGPoint(x: start.x + lower * dx, y: start.y + lower * dy),
+            CGPoint(x: start.x + upper * dx, y: start.y + upper * dy))
+}
+
+private func distanceToSegment(_ point: CGPoint, _ start: CGPoint, _ end: CGPoint) -> CGFloat {
+    let dx = end.x - start.x
+    let dy = end.y - start.y
+    let lengthSquared = dx * dx + dy * dy
+    guard lengthSquared > 1e-12 else { return hypot(point.x - start.x, point.y - start.y) }
+    let ratio = min(max(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0), 1)
+    return hypot(point.x - start.x - ratio * dx, point.y - start.y - ratio * dy)
 }
 
 struct CapabilityAction {
@@ -81,6 +183,7 @@ final class AnnotationStore: ObservableObject {
     var onChange: ((String, String) -> Void)?
     private let fileURL: URL?
     private let maximumPerStock = 240
+    private var activeViewports: [String: ChartAnnotationViewport] = [:]
 
     init() {
         let manager = FileManager.default
@@ -105,13 +208,55 @@ final class AnnotationStore: ObservableObject {
         storage[stockCode] ?? []
     }
 
-    func voiceContext(stockCode: String, editing: Bool, tool: AnnotationTool) -> VoiceAnnotationContext {
-        let values = annotations(for: stockCode)
-        let structured = values.filter { $0.kind != .pen }
+    func legacyAnnotationCount(for stockCode: String) -> Int {
+        annotations(for: stockCode).filter { $0.period == nil || $0.dataAnchors == nil }.count
+    }
+
+    func setActiveViewport(_ viewport: ChartAnnotationViewport?, for stockCode: String) {
+        activeViewports[stockCode] = viewport?.isUsable == true ? viewport : nil
+    }
+
+    func clearActiveViewport(_ viewport: ChartAnnotationViewport?, for stockCode: String) {
+        if activeViewports[stockCode] == viewport { activeViewports.removeValue(forKey: stockCode) }
+    }
+
+    fileprivate func projectedAnnotations(for stockCode: String,
+                                          viewport: ChartAnnotationViewport?) -> [ProjectedAnnotation] {
+        guard let viewport = viewport ?? activeViewports[stockCode], viewport.isUsable else { return [] }
+        var indices: [String: Int] = [:]
+        for (index, time) in viewport.times.enumerated() where indices[time] == nil { indices[time] = index }
+        return annotations(for: stockCode).compactMap { annotation in
+            guard annotation.period == viewport.period,
+                  let anchors = annotation.dataAnchors,
+                  anchors.count == annotation.points.count, !anchors.isEmpty else { return nil }
+            var points: [CGPoint] = []
+            for anchor in anchors {
+                guard let index = indices[anchor.time], anchor.indexOffset.isFinite, anchor.price.isFinite else { return nil }
+                let x = (Double(index) + anchor.indexOffset - viewport.xDomain.lowerBound) /
+                    (viewport.xDomain.upperBound - viewport.xDomain.lowerBound)
+                let y = (viewport.yDomain.upperBound - anchor.price) /
+                    (viewport.yDomain.upperBound - viewport.yDomain.lowerBound)
+                guard x.isFinite, y.isFinite else { return nil }
+                points.append(CGPoint(x: x, y: y))
+            }
+            if annotation.kind == .note {
+                guard let point = points.first, containsPlotPoint(point) else { return nil }
+                return ProjectedAnnotation(annotation: annotation, points: points, visibleSegments: [])
+            }
+            let segments = zip(points, points.dropFirst()).compactMap { clippedPlotSegment($0.0, $0.1) }
+            guard !segments.isEmpty else { return nil }
+            return ProjectedAnnotation(annotation: annotation, points: points, visibleSegments: segments)
+        }
+    }
+
+    func voiceContext(stockCode: String, editing: Bool, tool: AnnotationTool,
+                      viewport: ChartAnnotationViewport? = nil) -> VoiceAnnotationContext {
+        let values = projectedAnnotations(for: stockCode, viewport: viewport)
+        let structured = values.filter { $0.annotation.kind != .pen }
         let items = structured.suffix(3).map {
-            VoiceAnnotationItem(id: $0.id.uuidString, kind: $0.kind.rawValue,
-                                text: $0.text.map { String($0.prefix(80)) }, color: $0.color,
-                                start: $0.points.first, end: $0.kind == .note ? nil : $0.points.last)
+            VoiceAnnotationItem(id: $0.annotation.id.uuidString, kind: $0.annotation.kind.rawValue,
+                                text: $0.annotation.text.map { String($0.prefix(80)) }, color: $0.annotation.color,
+                                start: $0.voiceStart, end: $0.voiceEnd)
         }
         return VoiceAnnotationContext(stockCode: stockCode, surfaceID: "chart-overlay",
                                       editing: editing, tool: tool.rawValue,
@@ -120,13 +265,30 @@ final class AnnotationStore: ObservableObject {
                                       selectionSupported: false, items: items)
     }
 
-    func add(_ annotation: ChartAnnotation, to stockCode: String) {
+    @discardableResult
+    func add(_ annotation: ChartAnnotation, to stockCode: String,
+             viewport: ChartAnnotationViewport? = nil) -> Bool {
+        guard let viewport = viewport ?? activeViewports[stockCode], viewport.isUsable,
+              !annotation.points.isEmpty else { return false }
+        let anchors = annotation.points.compactMap { viewport.anchor(for: $0) }
+        guard anchors.count == annotation.points.count else { return false }
+        let anchored = ChartAnnotation(anchoring: annotation, in: viewport, anchors: anchors)
         var values = storage[stockCode] ?? []
-        values.append(annotation)
-        if values.count > maximumPerStock { values.removeFirst(values.count - maximumPerStock) }
+        values.append(anchored)
+        // Unlocated legacy drawings are retained until the user explicitly
+        // clears or undoes them; adding new drawings never migrates/deletes them.
+        var overflow = values.filter { $0.dataAnchors != nil }.count - maximumPerStock
+        if overflow > 0 {
+            values.removeAll { value in
+                guard overflow > 0, value.dataAnchors != nil else { return false }
+                overflow -= 1
+                return true
+            }
+        }
         storage[stockCode] = values
         save()
         onChange?(stockCode, "添加\(annotation.kind == .pen ? "笔迹" : "标注")")
+        return true
     }
 
     @discardableResult
@@ -149,21 +311,25 @@ final class AnnotationStore: ObservableObject {
     }
 
     @discardableResult
-    func erase(near point: AnnotationPoint, stockCode: String) -> Bool {
+    func erase(near point: AnnotationPoint, stockCode: String,
+               viewport: ChartAnnotationViewport? = nil) -> Bool {
         guard var values = storage[stockCode], !values.isEmpty else { return false }
-        let threshold = 0.075
-        var bestIndex: Int?
-        var bestDistance = threshold
-        for (index, annotation) in values.enumerated() {
-            for candidate in annotation.points {
-                let distance = hypot(candidate.x - point.x, candidate.y - point.y)
-                if distance <= bestDistance {
-                    bestDistance = distance
-                    bestIndex = index
-                }
+        let target = CGPoint(x: point.x, y: point.y)
+        var bestID: UUID?
+        var bestDistance: CGFloat = 0.075
+        for projected in projectedAnnotations(for: stockCode, viewport: viewport) {
+            let distance: CGFloat
+            if projected.annotation.kind == .note, let candidate = projected.points.first {
+                distance = hypot(candidate.x - target.x, candidate.y - target.y)
+            } else {
+                distance = projected.visibleSegments.map { distanceToSegment(target, $0.0, $0.1) }.min() ?? .infinity
+            }
+            if distance <= bestDistance {
+                bestDistance = distance
+                bestID = projected.annotation.id
             }
         }
-        guard let bestIndex else { return false }
+        guard let bestID, let bestIndex = values.firstIndex(where: { $0.id == bestID }) else { return false }
         values.remove(at: bestIndex)
         storage[stockCode] = values
         save()
@@ -179,20 +345,29 @@ final class AnnotationStore: ObservableObject {
             return CapabilityResult(success: false, message: "请先选择一只股票。")
         }
         let color = Self.allowedColor(action.color)
+        if ["add_note", "add_line", "add_arrow"].contains(action.operation) {
+            guard code == selectedStockCode, activeViewports[code]?.isUsable == true else {
+                return CapabilityResult(success: false, message: "请先打开这只股票的图表，再添加标注。")
+            }
+        }
         switch action.operation {
         case "add_note":
             let value = (action.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty, let start = action.start else {
                 return CapabilityResult(success: false, message: "文字和位置不能为空。")
             }
-            add(ChartAnnotation(kind: .note, points: [start], text: String(value.prefix(80)), color: color), to: code)
+            guard add(ChartAnnotation(kind: .note, points: [start], text: String(value.prefix(80)), color: color), to: code) else {
+                return CapabilityResult(success: false, message: "当前图表坐标不可用，请重新打开图表。")
+            }
             return CapabilityResult(success: true, message: "已在 \(code) 图表加入文字标注。")
         case "add_line", "add_arrow":
             guard let start = action.start, let end = action.end else {
                 return CapabilityResult(success: false, message: "起点和终点不能为空。")
             }
             let kind: ChartAnnotation.Kind = action.operation == "add_line" ? .line : .arrow
-            add(ChartAnnotation(kind: kind, points: [start, end], color: color), to: code)
+            guard add(ChartAnnotation(kind: kind, points: [start, end], color: color), to: code) else {
+                return CapabilityResult(success: false, message: "当前图表坐标不可用，请重新打开图表。")
+            }
             return CapabilityResult(success: true, message: "已在 \(code) 图表加入\(kind == .line ? "直线" : "箭头")。")
         case "undo":
             let changed = undo(stockCode: code)
@@ -222,27 +397,56 @@ struct NativeAnnotationCanvas: View {
     let tool: AnnotationTool
     let color: String
     let isEditing: Bool
+    let viewport: ChartAnnotationViewport?
     @State private var current: [AnnotationPoint] = []
     @State private var pendingNote: AnnotationPoint?
     @State private var noteText = ""
     @State private var showingNoteEditor = false
+    @State private var registeredStockCode: String?
+    @State private var registeredViewport: ChartAnnotationViewport?
+
+    init(store: AnnotationStore, stockCode: String, tool: AnnotationTool, color: String,
+         isEditing: Bool, viewport: ChartAnnotationViewport? = nil) {
+        self.store = store
+        self.stockCode = stockCode
+        self.tool = tool
+        self.color = color
+        self.isEditing = isEditing
+        self.viewport = viewport
+    }
 
     var body: some View {
         GeometryReader { geometry in
             Canvas { context, size in
-                for annotation in store.annotations(for: stockCode) {
-                    draw(annotation, in: &context, size: size)
+                context.clip(to: Path(CGRect(origin: .zero, size: size)))
+                for projected in store.projectedAnnotations(for: stockCode, viewport: viewport) {
+                    draw(projected.annotation, points: projected.points, in: &context, size: size)
                 }
                 if !current.isEmpty, tool != .eraser, tool != .note {
                     let kind: ChartAnnotation.Kind = tool == .line ? .line : (tool == .arrow ? .arrow : .pen)
-                    draw(ChartAnnotation(kind: kind, points: current, color: color), in: &context, size: size)
+                    draw(ChartAnnotation(kind: kind, points: current, color: color),
+                         points: current.map { CGPoint(x: $0.x, y: $0.y) }, in: &context, size: size)
                 }
             }
+            .clipped()
             .contentShape(Rectangle())
-            .allowsHitTesting(isEditing)
+            .allowsHitTesting(isEditing && viewport?.isUsable == true)
             .gesture(drawingGesture(size: geometry.size))
             .accessibilityLabel(isEditing ? "图表标注画布" : "图表标注")
             .accessibilityHint(isEditing ? "使用手指或 Apple Pencil 绘制" : "")
+        }
+        .onAppear { registerViewport() }
+        .onChange(of: viewport) { _, _ in
+            resetDrawing()
+            registerViewport()
+        }
+        .onChange(of: stockCode) { _, _ in
+            resetDrawing()
+            registerViewport()
+        }
+        .onChange(of: isEditing) { _, _ in resetDrawing() }
+        .onDisappear {
+            if let registeredStockCode { store.clearActiveViewport(registeredViewport, for: registeredStockCode) }
         }
         .alert("添加文字标注", isPresented: $showingNoteEditor) {
             TextField("标注内容", text: $noteText)
@@ -250,7 +454,8 @@ struct NativeAnnotationCanvas: View {
             Button("添加") {
                 let value = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let point = pendingNote, !value.isEmpty {
-                    store.add(ChartAnnotation(kind: .note, points: [point], text: String(value.prefix(80)), color: color), to: stockCode)
+                    store.add(ChartAnnotation(kind: .note, points: [point], text: String(value.prefix(80)), color: color),
+                              to: stockCode, viewport: viewport)
                 }
                 pendingNote = nil
                 noteText = ""
@@ -258,10 +463,24 @@ struct NativeAnnotationCanvas: View {
         }
     }
 
+    private func registerViewport() {
+        if let registeredStockCode { store.clearActiveViewport(registeredViewport, for: registeredStockCode) }
+        store.setActiveViewport(viewport, for: stockCode)
+        registeredStockCode = stockCode
+        registeredViewport = viewport
+    }
+
+    private func resetDrawing() {
+        current = []
+        pendingNote = nil
+        noteText = ""
+        showingNoteEditor = false
+    }
+
     private func drawingGesture(size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
-                guard isEditing, size.width > 0, size.height > 0 else { return }
+                guard isEditing, viewport?.isUsable == true, size.width > 0, size.height > 0 else { return }
                 let point = normalized(value.location, size: size)
                 switch tool {
                 case .pen:
@@ -274,20 +493,20 @@ struct NativeAnnotationCanvas: View {
                 }
             }
             .onEnded { value in
-                guard isEditing, size.width > 0, size.height > 0 else { current = []; return }
+                guard isEditing, viewport?.isUsable == true, size.width > 0, size.height > 0 else { current = []; return }
                 let end = normalized(value.location, size: size)
                 switch tool {
                 case .pen:
-                    if current.count > 1 { store.add(ChartAnnotation(kind: .pen, points: current, color: color), to: stockCode) }
+                    if current.count > 1 { store.add(ChartAnnotation(kind: .pen, points: current, color: color), to: stockCode, viewport: viewport) }
                 case .line:
-                    if current.count == 2 { store.add(ChartAnnotation(kind: .line, points: current, color: color), to: stockCode) }
+                    if current.count == 2 { store.add(ChartAnnotation(kind: .line, points: current, color: color), to: stockCode, viewport: viewport) }
                 case .arrow:
-                    if current.count == 2 { store.add(ChartAnnotation(kind: .arrow, points: current, color: color), to: stockCode) }
+                    if current.count == 2 { store.add(ChartAnnotation(kind: .arrow, points: current, color: color), to: stockCode, viewport: viewport) }
                 case .note:
                     pendingNote = end
                     showingNoteEditor = true
                 case .eraser:
-                    _ = store.erase(near: end, stockCode: stockCode)
+                    _ = store.erase(near: end, stockCode: stockCode, viewport: viewport)
                 }
                 current = []
             }
@@ -297,10 +516,11 @@ struct NativeAnnotationCanvas: View {
         AnnotationPoint(x: point.x / size.width, y: point.y / size.height)
     }
 
-    private func draw(_ annotation: ChartAnnotation, in context: inout GraphicsContext, size: CGSize) {
-        guard let first = annotation.points.first else { return }
+    private func draw(_ annotation: ChartAnnotation, points normalizedPoints: [CGPoint],
+                      in context: inout GraphicsContext, size: CGSize) {
+        guard let first = normalizedPoints.first else { return }
         let tint = annotationColor(annotation.color)
-        let points = annotation.points.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) }
+        let points = normalizedPoints.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) }
         switch annotation.kind {
         case .pen:
             guard points.count > 1 else { return }

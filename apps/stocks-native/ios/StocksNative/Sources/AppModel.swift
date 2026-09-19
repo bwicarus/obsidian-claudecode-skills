@@ -416,11 +416,16 @@ final class AppModel: ObservableObject {
         let snapshot = voiceViewState.detailTab == "chart" && !voiceViewState.settingsPresented
             && latestChartSnapshot?.chart.stockCode == selectedCode
             && latestChartSnapshot?.chart.period == chartPeriod.rawValue ? latestChartSnapshot : nil
-        let latestTime = snapshot?.chart.lastVisibleTime
-            ?? (chartPeriod == .intraday ? nil : displayedCandles.last?.time)
-        let annotationContext = snapshot.map {
-            annotations.voiceContext(stockCode: $0.chart.stockCode, editing: $0.annotations.editing,
-                                     tool: AnnotationTool(rawValue: $0.annotations.tool) ?? .pen)
+        let latestTime = chartPeriod == .intraday
+            ? (snapshot?.chart.selectionSource == "latest" ? snapshot?.chart.lastVisibleTime : nil)
+            : displayedCandles.last?.time
+        let annotationContext = snapshot?.annotations
+        var contextViewState = voiceViewState
+        contextViewState.chartViewport = snapshot.map {
+            VoiceChartViewport(firstVisibleTime: $0.chart.firstVisibleTime,
+                               lastVisibleTime: $0.chart.lastVisibleTime,
+                               visiblePointCount: $0.chart.visiblePointCount,
+                               historicalSummary: $0.chart.selectionSource == "visible_end" ? $0.chart.selectedPoint : nil)
         }
         let orderBook = voiceViewState.detailTab == "chart" && activeDetail != nil
             && !voiceViewState.settingsPresented && stock != nil
@@ -435,7 +440,7 @@ final class AppModel: ObservableObject {
                                      metrics: metrics, visiblePanels: panels,
                                      recentActions: recentVoiceActions,
                                      chartPeriodID: chartPeriod.rawValue,
-                                     viewState: voiceViewState, chart: snapshot?.chart,
+                                     viewState: contextViewState, chart: snapshot?.chart,
                                      annotations: annotationContext, orderBook: orderBook)
         await voice.updateContext(context)
     }
