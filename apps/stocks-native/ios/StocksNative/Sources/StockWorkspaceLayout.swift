@@ -1,5 +1,7 @@
-import Combine
 import Foundation
+#if canImport(Combine)
+import Combine
+#endif
 
 enum WorkspaceCardKind: String, Codable, CaseIterable, Identifiable {
     case chart, kline, intraday, macd, kdj, fund, chipCosts, chipDistribution
@@ -72,6 +74,19 @@ enum WorkspaceCardKind: String, Codable, CaseIterable, Identifiable {
         default: .half
         }
     }
+
+    var defaultGridHeight: Int {
+        switch self {
+        case .chart, .kline, .intraday, .klineChips: 17
+        case .fund: 18
+        case .macd, .kdj: 8
+        case .quote: 8
+        case .orderBook, .chipDistribution: 12
+        case .announcements, .signals: 15
+        case .concepts: 7
+        default: 10
+        }
+    }
 }
 
 enum WorkspaceCardSpan: String, Codable, CaseIterable, Identifiable {
@@ -84,12 +99,14 @@ struct WorkspaceCard: Codable, Identifiable, Equatable {
     var kind: WorkspaceCardKind
     var span: WorkspaceCardSpan
     var isVisible: Bool
+    var grid: WorkspaceGridRect?
     var id: String { kind.rawValue }
 
-    init(kind: WorkspaceCardKind, span: WorkspaceCardSpan? = nil, isVisible: Bool = true) {
+    init(kind: WorkspaceCardKind, span: WorkspaceCardSpan? = nil, isVisible: Bool = true, grid: WorkspaceGridRect? = nil) {
         self.kind = kind
         self.span = span ?? kind.defaultSpan
         self.isVisible = isVisible
+        self.grid = grid
     }
 }
 
@@ -112,6 +129,7 @@ struct WorkspacePage: Codable, Identifiable, Equatable {
         let kind: String?
         let span: String?
         let isVisible: Bool?
+        let grid: WorkspaceGridRect?
     }
 
     init(from decoder: Decoder) throws {
@@ -124,7 +142,8 @@ struct WorkspacePage: Codable, Identifiable, Equatable {
             return WorkspaceCard(
                 kind: kind,
                 span: card.span.flatMap(WorkspaceCardSpan.init(rawValue:)) ?? kind.defaultSpan,
-                isVisible: card.isVisible ?? true
+                isVisible: card.isVisible ?? true,
+                grid: card.grid
             )
         }
     }
@@ -135,7 +154,7 @@ struct WorkspaceLayout: Codable, Equatable {
     static let maximumCardsPerPage = 16
     static let maximumTitleLength = 24
 
-    var schemaVersion: Int = 1
+    var schemaVersion: Int = 2
     var pages: [WorkspacePage]
     var selectedPageID: String?
 
@@ -162,7 +181,7 @@ struct WorkspaceLayout: Codable, Equatable {
             WorkspacePage(id: "announcements", title: "公告", cards: [
                 WorkspaceCard(kind: .announcements, span: .full)
             ])
-        ], selectedPageID: "chart")
+        ], selectedPageID: "chart").sanitized()
     }
 
     func sanitized() -> WorkspaceLayout {
@@ -178,17 +197,19 @@ struct WorkspaceLayout: Codable, Equatable {
             if page.title.isEmpty { page.title = "页面 \(cleanedPages.count + 1)" }
             var kinds = Set<WorkspaceCardKind>()
             page.cards = Array(page.cards.filter { kinds.insert($0.kind).inserted }.prefix(Self.maximumCardsPerPage))
+            page.cards = WorkspaceGridEngine.normalized(page.cards)
             cleanedPages.append(page)
         }
         guard !cleanedPages.isEmpty else { return Self.defaultLayout }
         return WorkspaceLayout(
-            schemaVersion: 1,
+            schemaVersion: 2,
             pages: cleanedPages,
             selectedPageID: cleanedPages.contains { $0.id == selectedPageID } ? selectedPageID : cleanedPages[0].id
         )
     }
 }
 
+#if canImport(Combine)
 @MainActor
 final class WorkspaceLayoutStore: ObservableObject {
     @Published private(set) var layout: WorkspaceLayout
@@ -204,7 +225,7 @@ final class WorkspaceLayoutStore: ObservableObject {
         guard FileManager.default.fileExists(atPath: self.fileURL.path) else { return }
         do {
             let saved = try JSONDecoder().decode(WorkspaceLayout.self, from: Data(contentsOf: self.fileURL))
-            guard saved.schemaVersion == 1 else {
+            guard saved.schemaVersion == 1 || saved.schemaVersion == 2 else {
                 loadWarning = "已暂用默认布局，保存后会替换无法识别的布局版本。"
                 return
             }
@@ -220,6 +241,14 @@ final class WorkspaceLayoutStore: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(cleaned)
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let original = try? Data(contentsOf: fileURL),
+           let document = try? JSONSerialization.jsonObject(with: original) as? [String: Any],
+           document["schemaVersion"] as? Int == 1 {
+            let backup = fileURL.deletingPathExtension().appendingPathExtension("backup.json")
+            if !FileManager.default.fileExists(atPath: backup.path) {
+                try original.write(to: backup, options: .atomic)
+            }
+        }
         try data.write(to: fileURL, options: .atomic)
         layout = cleaned
         loadWarning = nil
@@ -234,3 +263,4 @@ final class WorkspaceLayoutStore: ObservableObject {
         try commit(next)
     }
 }
+#endif

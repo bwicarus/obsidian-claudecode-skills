@@ -43,8 +43,7 @@ struct WorkspaceEditor: View {
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(AppStyle.canvas)
-            .environment(\.editMode, .constant(.active))
-            .navigationTitle("自定义工作台")
+            .navigationTitle("页签与卡片库")
             .navigationBarTitleDisplayMode(.inline)
             .tint(AppStyle.accent)
             .toolbar {
@@ -97,12 +96,11 @@ struct WorkspaceEditor: View {
                     .font(.subheadline).foregroundStyle(.secondary)
             } else {
                 ForEach(currentCards) { card in cardRow(card) }
-                    .onMove(perform: moveCards)
                     .onDelete(perform: deleteCards)
             }
         } header: { Text("卡片 · \(currentCards.count)/\(WorkspaceLayout.maximumCardsPerPage)") }
         footer: {
-            Text("按住右侧把手拖动排序，或长按卡片使用上移、下移。关闭开关可隐藏卡片并保留位置；屏幕较窄时半宽卡片会自动占满一行。")
+            Text("回到工作台后，拖动卡片顶部把手移动，拖动右下角或卡片间的共享边调整大小。关闭开关会隐藏卡片并保留原位置。")
         }
     }
 
@@ -114,22 +112,11 @@ struct WorkspaceEditor: View {
                     .foregroundStyle(card.isVisible ? AppStyle.ink : Color.secondary)
             }
             .accessibilityLabel("显示\(card.kind.title)")
-            Picker("卡片宽度", selection: cardSpan(card.kind)) {
-                ForEach(WorkspaceCardSpan.allCases) { span in Text(span.title).tag(span) }
-            }
-            .pickerStyle(.segmented)
-            .accessibilityLabel("\(card.kind.title)宽度")
         }
         .padding(.vertical, 5)
         .contextMenu {
-            Button { shiftCard(card.kind, offset: -1) } label: { Label("上移", systemImage: "arrow.up") }
-                .disabled(currentCards.first?.kind == card.kind)
-            Button { shiftCard(card.kind, offset: 1) } label: { Label("下移", systemImage: "arrow.down") }
-                .disabled(currentCards.last?.kind == card.kind)
             Button(role: .destructive) { removeCard(card.kind) } label: { Label("移除卡片", systemImage: "trash") }
         }
-        .accessibilityAction(named: Text("上移")) { shiftCard(card.kind, offset: -1) }
-        .accessibilityAction(named: Text("下移")) { shiftCard(card.kind, offset: 1) }
     }
 
     private var librarySection: some View {
@@ -156,13 +143,6 @@ struct WorkspaceEditor: View {
                 }
             }
         } header: { Text("添加卡片") }
-    }
-
-    private func cardSpan(_ kind: WorkspaceCardKind) -> Binding<WorkspaceCardSpan> {
-        Binding(
-            get: { currentCards.first { $0.kind == kind }?.span ?? kind.defaultSpan },
-            set: { span in updateCard(kind) { $0.span = span } }
-        )
     }
 
     private func cardVisibility(_ kind: WorkspaceCardKind) -> Binding<Bool> {
@@ -206,21 +186,9 @@ struct WorkspaceEditor: View {
         draft.pages[page].cards.removeAll { $0.kind == kind }
     }
 
-    private func moveCards(from source: IndexSet, to destination: Int) {
-        guard let page = pageIndex else { return }
-        draft.pages[page].cards.move(fromOffsets: source, toOffset: destination)
-    }
-
     private func deleteCards(at offsets: IndexSet) {
         guard let page = pageIndex else { return }
         draft.pages[page].cards.remove(atOffsets: offsets)
-    }
-
-    private func shiftCard(_ kind: WorkspaceCardKind, offset: Int) {
-        guard let page = pageIndex, let index = draft.pages[page].cards.firstIndex(where: { $0.kind == kind }) else { return }
-        let target = index + offset
-        guard draft.pages[page].cards.indices.contains(target) else { return }
-        draft.pages[page].cards.swapAt(index, target)
     }
 
     private func save() {

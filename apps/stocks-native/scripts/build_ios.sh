@@ -17,6 +17,12 @@ mkdir -p "$BUILD_ROOT/logs"
 xcodegen generate --spec "$PROJECT_DIR/project.yml" --project "$PROJECT_DIR"
 
 if [[ "$MODE" == simulator ]]; then
+  swiftc -swift-version 5 -parse-as-library \
+    "$PROJECT_DIR/Sources/StockWorkspaceLayout.swift" \
+    "$PROJECT_DIR/Sources/WorkspaceGridEngine.swift" \
+    "$PROJECT_DIR/../Tests/WorkspaceGridChecks.swift" \
+    -o "$BUILD_ROOT/workspace-grid-checks"
+  "$BUILD_ROOT/workspace-grid-checks"
   xcodebuild build -project "$PROJECT_FILE" -scheme StocksNative \
     -configuration Debug -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$BUILD_ROOT/DerivedData-simulator" \

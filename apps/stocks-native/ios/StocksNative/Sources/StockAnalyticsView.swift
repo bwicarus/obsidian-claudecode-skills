@@ -296,6 +296,7 @@ private struct SessionIntradayPoint: Identifiable {
 }
 
 struct IntradayChart: View {
+    @Environment(\.workspaceCardHeight) private var availableHeight
     let data: IntradayResponse
     let stockCode: String
     @ObservedObject var annotations: AnnotationStore
@@ -468,7 +469,7 @@ struct IntradayChart: View {
                         .allowsHitTesting(false)
                 }
             }
-            .frame(height: 300)
+            .frame(height: availableHeight > 0 ? max(150, availableHeight - 300) : 300)
             HStack(spacing: 18) {
                 Label("价格", systemImage: "minus").foregroundStyle(AppStyle.accent)
                 Label("均价", systemImage: "minus").foregroundStyle(.orange)
@@ -563,6 +564,7 @@ struct StockAnnouncementsSection: View {
 }
 
 struct TechnicalCard: View {
+    @Environment(\.workspaceCardHeight) private var availableHeight
     var panel: TechnicalPanel? = nil
     var candles: [Candle] = []
     var visibleContext: VoiceChartContext? = nil
@@ -606,7 +608,7 @@ struct TechnicalCard: View {
                 }
                 .chartXScale(domain: xDomain, range: .plotDimension(padding: 0))
                 .chartXAxis(.hidden).chartYAxis { indicatorAxis }.chartLegend(.hidden)
-                .frame(height: 130)
+                .frame(height: availableHeight > 0 ? max(90, availableHeight - 125) : 130)
                 indicatorDate(inspected?.time)
             }
         }
@@ -614,6 +616,7 @@ struct TechnicalCard: View {
 }
 
 struct KDJCard: View {
+    @Environment(\.workspaceCardHeight) private var availableHeight
     var panel: TechnicalPanel? = nil
     var candles: [Candle] = []
     var visibleContext: VoiceChartContext? = nil
@@ -663,7 +666,7 @@ struct KDJCard: View {
                 }
                 .chartXScale(domain: indicatorDomain(points), range: .plotDimension(padding: 0))
                 .chartYScale(domain: yDomain).chartXAxis(.hidden).chartYAxis { indicatorAxis }.chartLegend(.hidden)
-                .frame(height: 130)
+                .frame(height: availableHeight > 0 ? max(90, availableHeight - 125) : 130)
                 indicatorDate(inspected?.time)
             }
         }
@@ -719,6 +722,7 @@ private struct FundSlice: Identifiable {
 }
 
 struct FundCard: View {
+    @Environment(\.workspaceCardHeight) private var availableHeight
     let panel: FundPanel
     @State private var selectedDate: String?
     private var selected: FundHistory? { panel.history.first { $0.tradeDate == selectedDate } }
@@ -764,7 +768,7 @@ struct FundCard: View {
                             if let value = value.as(Double.self) { Text(AppStyle.compact(value)).font(.caption2) }
                         }
                     }
-                }.frame(height: 125)
+                }.frame(height: availableHeight > 0 ? max(100, availableHeight - 360) : 125)
                 HStack(spacing: 12) {
                     ForEach(selectedFlows) { flow in
                         Label(flow.name, systemImage: "circle.fill").font(.caption2).foregroundStyle(flow.color)
@@ -854,11 +858,13 @@ private struct ChipCostLevel: Identifiable {
 }
 
 struct ChipDistributionCard: View {
+    @Environment(\.workspaceCardHeight) private var availableHeight
     let data: ChipDistributionResponse?
     let currentPrice: Double?
     var body: some View {
         card(title: "筹码峰", subtitle: data?.end ?? "最新分布") {
-            ChipDistributionPlot(data: data, currentPrice: currentPrice).frame(height: 240)
+            ChipDistributionPlot(data: data, currentPrice: currentPrice)
+                .frame(height: availableHeight > 0 ? max(150, availableHeight - 155) : 240)
             if let data, !data.rows.isEmpty {
                 ChipDistributionSummary(data: data, currentPrice: currentPrice)
             }

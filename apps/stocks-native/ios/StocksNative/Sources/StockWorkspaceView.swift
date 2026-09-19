@@ -5,6 +5,8 @@ struct StockWorkspaceView: View {
     let detail: StockResponse
     @ObservedObject private var workspace: WorkspaceLayoutStore
     @State private var showingEditor = false
+    @AppStorage("stocksNative.workspaceLocked") private var layoutLocked = false
+    @State private var layoutError: String?
 
     init(model: AppModel, detail: StockResponse) {
         self.model = model
@@ -17,41 +19,19 @@ struct StockWorkspaceView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            GeometryReader { geometry in
-                let width = max(0, geometry.size.width - 36)
-                let twoColumns = width >= 660
-                ScrollView {
-                    if let page, !page.visibleCards.isEmpty {
-                        LazyVStack(alignment: .leading, spacing: 16) {
-                            ForEach(cardRows(page.visibleCards, twoColumns: twoColumns)) { row in
-                                HStack(alignment: .top, spacing: 16) {
-                                    ForEach(row.cards) { item in
-                                        workspaceCard(item.kind)
-                                            .frame(width: twoColumns && item.span == .half ? (width - 16) / 2 : width,
-                                                   alignment: .topLeading)
-                                            .id("\(page.id):\(item.id)")
-                                            .accessibilityIdentifier("workspace.card.\(page.id).\(item.id)")
-                                    }
-                                    if twoColumns && row.cards.count == 1 && row.cards[0].span == .half {
-                                        Spacer(minLength: 0)
-                                    }
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                        .padding(18)
-                    } else {
-                        ContentUnavailableView {
-                            Label("这个页签还没有显示的卡片", systemImage: "rectangle.grid.2x2")
-                        } description: {
-                            Text("从卡片库添加行情、指标或资料，也可以重新显示隐藏的卡片。")
-                        } actions: {
-                            Button("添加卡片") { showingEditor = true }.buttonStyle(.bordered)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: max(280, geometry.size.height - 36))
-                    }
+            if let page, !page.visibleCards.isEmpty {
+                NativeWorkspaceCanvas(page: page, isEditing: !layoutLocked,
+                                      content: canvasCard, onCommit: saveCards)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView {
+                    Label("这个页签还没有显示的卡片", systemImage: "rectangle.grid.2x2")
+                } description: {
+                    Text("从卡片库添加行情、指标或资料，再直接拖动卡片排布。")
+                } actions: {
+                    Button("添加卡片") { showingEditor = true }.buttonStyle(.bordered)
                 }
-                .refreshable { await refresh() }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             pageDock
         }
@@ -61,6 +41,9 @@ struct StockWorkspaceView: View {
                 .presentationDragIndicator(.visible)
         }
         .onAppear { model.workspaceDidChange() }
+        .alert("布局未保存", isPresented: Binding(get: { layoutError != nil }, set: { if !$0 { layoutError = nil } })) {
+            Button("好", role: .cancel) { layoutError = nil }
+        } message: { Text(layoutError ?? "请重试。") }
     }
 
     private var pageDock: some View {
@@ -82,6 +65,14 @@ struct StockWorkspaceView: View {
                     }
                 }
             }
+            Button { layoutLocked.toggle() } label: {
+                Image(systemName: layoutLocked ? "lock.fill" : "lock.open")
+                    .frame(width: 44, height: 44)
+                    .background(AppStyle.canvas, in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain).foregroundStyle(AppStyle.accent)
+            .accessibilityLabel(layoutLocked ? "解锁卡片布局" : "锁定卡片布局")
+            .help(layoutLocked ? "解锁后可拖动卡片、角标和共享边" : "锁定后只操作图表")
             Button { showingEditor = true } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.subheadline.weight(.medium))
@@ -89,7 +80,7 @@ struct StockWorkspaceView: View {
                     .background(AppStyle.canvas, in: RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(.plain).foregroundStyle(AppStyle.accent)
-            .accessibilityLabel("自定义页签与卡片")
+            .accessibilityLabel("页签与卡片库")
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(.white)
@@ -154,26 +145,38 @@ struct StockWorkspaceView: View {
         await model.loadChart()
     }
 
-    private func cardRows(_ cards: [WorkspaceCard], twoColumns: Bool) -> [WorkspaceCardRow] {
-        var rows: [WorkspaceCardRow] = []
-        var half: WorkspaceCard?
-        for card in cards {
-            if !twoColumns || card.span == .full {
-                if let pending = half { rows.append(WorkspaceCardRow(cards: [pending])); half = nil }
-                rows.append(WorkspaceCardRow(cards: [card]))
-            } else if let pending = half {
-                rows.append(WorkspaceCardRow(cards: [pending, card]))
-                half = nil
-            } else { half = card }
-        }
-        if let half { rows.append(WorkspaceCardRow(cards: [half])) }
-        return rows
+    private func canvasCard(_ card: WorkspaceCard) -> AnyView {
+        AnyView(GeometryReader { geometry in
+            ScrollView(.vertical) {
+                workspaceCard(card.kind)
+                    .environment(\.workspaceCardHeight, geometry.size.height)
+                    .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .topLeading)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        })
+    }
+
+    private func saveCards(_ cards: [WorkspaceCard]) {
+        guard let id = page?.id else { return }
+        var next = workspace.layout
+        guard let index = next.pages.firstIndex(where: { $0.id == id }) else { return }
+        next.pages[index].cards = cards
+        do {
+            try workspace.commit(next)
+            model.workspaceDidChange()
+        } catch { layoutError = "无法保存本机布局：\(error.localizedDescription)" }
     }
 }
 
-private struct WorkspaceCardRow: Identifiable {
-    let cards: [WorkspaceCard]
-    var id: String { cards.map(\.id).joined(separator: ":") }
+private struct WorkspaceCardHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+extension EnvironmentValues {
+    var workspaceCardHeight: CGFloat {
+        get { self[WorkspaceCardHeightKey.self] }
+        set { self[WorkspaceCardHeightKey.self] = newValue }
+    }
 }
 
 private struct WorkspaceCardSurface<Content: View>: View {

@@ -145,6 +145,7 @@ private struct CandlePriceMarks: ChartContent {
 }
 
 struct CandleChart: View {
+    @Environment(\.workspaceCardHeight) private var availableHeight
     let candles: [Candle]
     let stockCode: String
     let period: ChartPeriod
@@ -373,7 +374,7 @@ struct CandleChart: View {
                         .allowsHitTesting(annotationMode)
                     }
                 }
-                .frame(height: 290)
+                .frame(height: availableHeight > 0 ? max(150, availableHeight - (showsChips ? 445 : 385)) : 290)
                 .accessibilityLabel("原生蜡烛图，\(visible.count) 根 K 线。拖动查看开盘、最高、最低、收盘。")
                 HStack {
                     Text("成交量").font(.caption).foregroundStyle(.secondary)

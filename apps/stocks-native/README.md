@@ -80,9 +80,19 @@ the same targeted reader when the question identifies a component. No extra mode
 classifies each UI event. UI actions retain request/receipt verification before
 the assistant can claim a mark was applied.
 
-The native workspace has one quote strip, a main chart and adjacent five-level
-book, with compact MACD/KDJ/fund panels below. The upper-right toggle exclusively
-opens or closes the AI sidebar. Research and announcements stay in the main area.
+The native workspace is a twelve-column two-dimensional canvas. Cards move from
+their own grab handles, snap to adjacent card edges or the canvas boundary, and
+resize from a corner or a shared divider. Overlaps push neighboring cards down;
+the drop preview shows the resulting placement. The bottom lock protects layout
+while chart gestures remain available; the card library manages tabs and visibility.
+The upper-right toggle exclusively opens or closes the AI sidebar.
+
+Card coordinates and sizes are saved in Application Support independently of
+market-cache cleanup. The earlier ordered half/full-width layout is converted
+without discarding tabs or hidden cards and backed up before its first upgrade
+save. The simulator build runs focused Swift checks for migration, snapping,
+collision resolution and shared-divider sizing; physical touch feel still needs
+device verification.
 
 The App displays cached overview, list, detail and chart data immediately, then
 refreshes from the VPS. Intraday cache lives for 12 hours, overview/list for 24
