@@ -1,0 +1,38 @@
+# 股票 iPad 原生验证版 0.2.0
+
+SwiftUI 界面、Swift Charts 蜡烛图/成交量和 AVAudioEngine 双向音频；不含 WKWebView、远程网页界面或第三方依赖。
+
+## 构建
+
+- Xcode 15 或更高，iOS / iPadOS 17 或更高，支持 iPad 和 iPhone。
+- 在本目录执行 `xcodegen generate`。
+- 不签名编译：`xcodebuild -project StocksNative.xcodeproj -scheme StocksNative -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO build`。
+- 真机需为独立 bundle `space.bwicarus.stocksnative` 配置签名；由独立 CI 工作流处理，不修改阅读器项目或证书设置。
+
+## 设备使用
+
+1. 打开 App，在设置中保留默认地址 `https://bwicarus.space/stocks-native`，输入服务器发放的配对码。
+2. 凭证成功写入设备钥匙串后，App 读取股票列表。搜索代码或名称，选择股票读取详情；下拉刷新。
+3. K 线和成交量由本机 Swift Charts 绘制，提供 30 / 60 / 120 个交易日窗口和触摸数据查看。页面标明服务器提供的数据时间；失败不替换成假数据。
+4. 在右侧点击「开始语音」。首次需允许麦克风；服务端 ready / active 后才启动采集和上行。连接后可语音或文字问询。
+5. 「结束通话」立即停止本机音频，仅关闭本设备会话。断线显示错误，需手动重连。MVP 进入后台时主动结束音频，不宣称后台保活。
+6. 连接详情可查看本设备 thread / session ID 以及上下行包数，用于与另一台设备上的阅读器同时测试。
+
+## 协议
+
+- 配对：`POST /api/pair`，JSON `{code, deviceId, name}`，返回 `{token, deviceId}`。`deviceId` 必须原样匹配请求。
+- 列表：`GET /api/stocks?q=&limit=50`，返回 `{asOf, items:[{code,name,price,changePct,turnover,sector}]}`。
+- 详情：`GET /api/stocks/{code}`，返回 `{asOf, stock:{...}, candles:[{time,open,high,low,close,volume}]}`。
+- `asOf`、`time` 为字符串；价格/涨跌幅/成交额允许 null，蜡烛数值必须为 number。
+- 数据接口与 WebSocket 均使用 `Authorization: Bearer <token>`。token 只保存在 Keychain，不写入 URL、普通设置或日志。
+- WebSocket：`wss://bwicarus.space/stocks-native/voice?deviceId=<UUID>`。
+- 客户端控制：`{type:"start",stockCode?}`、`{type:"text",text}`、`{type:"stock.select",code}`、`{type:"stop"}`。
+- 服务端事件：`state`（connecting/ready/active/closed）、`transcript`（role/text/final）、`stock.selected`（code）、`error`（message）。未知事件忽略，已知事件解析失败会关闭本会话并显示错误。
+- 双向音频：WebSocket 二进制，48,000 Hz、单声道、PCM16LE。客户端上行固定每帧 960 采样 / 1,920 字节 / 20 ms。输入通过 AVAudioConverter 处理设备真实采样率；输出转换到本地 float32 回放。
+- 收到 `stock.selected` 会打开对应股票；发送队列拥塞、服务器错误、断线或系统音频中断均停止本机音频，不自动抢占重启。
+
+## 验证边界
+
+源码工程可由 macOS CI 编译；没有在 Windows 上伪称通过 Xcode 或真机验证。真实麦克风、回声消除、扬声器路由、蓝牙设备、配对与网络质量仍需 iPad 安装验收。
+
+本验证版只提供真实行情、原生图表、语音与文字链路；不包含交易、持仓写入、后台盯盘、绘图标记或旧站所有功能。

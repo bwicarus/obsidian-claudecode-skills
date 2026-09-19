@@ -1,0 +1,153 @@
+name: StocksNative iPad MVP
+
+on:
+  workflow_dispatch:
+    inputs:
+      signed_archive:
+        description: Build a separate StocksNative App Store IPA
+        type: boolean
+        default: false
+      upload:
+        description: Upload the separate StocksNative IPA to TestFlight
+        type: boolean
+        default: false
+  push:
+    tags:
+      - stocks-native-simulator-*
+      - stocks-native-ipa-*
+      - stocks-native-testflight-*
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stocks-native-ios
+  cancel-in-progress: false
+
+env:
+  CODE_DIR: apps/stocks-native
+  XCODEGEN_VERSION: '2.46.0'
+  XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+  BUILD_SIGNED: ${{ inputs.signed_archive || inputs.upload || startsWith(github.ref, 'refs/tags/stocks-native-ipa-') || startsWith(github.ref, 'refs/tags/stocks-native-testflight-') }}
+  UPLOAD_TESTFLIGHT: ${{ inputs.upload || startsWith(github.ref, 'refs/tags/stocks-native-testflight-') }}
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Select independent build paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$CODE_DIR/ios/StocksNative/project.yml"
+          echo "STOCKS_BUILD_ROOT=$RUNNER_TEMP/stocks-native-build" >> "$GITHUB_ENV"
+          echo "STOCKS_BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "STOCKS_KEYCHAIN=$RUNNER_TEMP/stocks-native-signing.keychain-db" >> "$GITHUB_ENV"
+          xcodebuild -version
+
+      - name: Install pinned XcodeGen
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "${XCODEGEN_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/xcodegen-release"
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen-release"
+          echo "$RUNNER_TEMP/xcodegen-release/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Build unsigned simulator candidate
+        shell: bash
+        run: bash "$CODE_DIR/scripts/build_ios.sh" simulator
+
+      - name: Prepare private signing material
+        if: env.BUILD_SIGNED == 'true'
+        env:
+          P12_BASE64: ${{ secrets.APPLE_DIST_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DIST_P12_PASSWORD }}
+          API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet PyJWT cryptography
+          mkdir -p "$RUNNER_TEMP/stocks-signing/private_keys"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/stocks-signing/dist.p12"
+          printf '%s' "$API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/stocks-signing/private_keys/AuthKey_${API_KEY_ID}.p8"
+          chmod -R go-rwx "$RUNNER_TEMP/stocks-signing"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$STOCKS_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$STOCKS_KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$STOCKS_KEYCHAIN"
+          security import "$RUNNER_TEMP/stocks-signing/dist.p12" -k "$STOCKS_KEYCHAIN" \
+            -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$STOCKS_KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$STOCKS_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
+          rm -f "$RUNNER_TEMP/stocks-signing/dist.p12"
+
+      - name: Prepare only the StocksNative bundle and profile
+        id: signing
+        if: env.BUILD_SIGNED == 'true'
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$CODE_DIR/scripts/stocks_signing.py" provision \
+            --private-key "$RUNNER_TEMP/stocks-signing/private_keys/AuthKey_${API_KEY_ID}.p8" \
+            --keychain "$STOCKS_KEYCHAIN" \
+            --profile-output "$RUNNER_TEMP/stocks-signing/StocksNative.mobileprovision"
+
+      - name: Archive and export independent IPA
+        if: env.BUILD_SIGNED == 'true'
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PROFILE_UUID: ${{ steps.signing.outputs.profile_uuid }}
+        shell: bash
+        run: bash "$CODE_DIR/scripts/build_ios.sh" archive
+
+      - name: Verify separate app record and upload to TestFlight
+        if: env.UPLOAD_TESTFLIGHT == 'true'
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$CODE_DIR/scripts/stocks_signing.py" require-app \
+            --private-key "$RUNNER_TEMP/stocks-signing/private_keys/AuthKey_${API_KEY_ID}.p8"
+          API_PRIVATE_KEYS_DIR="$RUNNER_TEMP/stocks-signing/private_keys" \
+            xcrun altool --upload-app -f "$STOCKS_BUILD_ROOT/export/StocksNative.ipa" \
+              -t ios --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER_ID"
+
+      - name: Save build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stocks-native-${{ github.run_number }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/stocks-native-build/export/*.ipa
+            ${{ runner.temp }}/stocks-native-build/logs/
+
+      - name: Remove private signing material
+        if: always() && env.BUILD_SIGNED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          security delete-keychain "$STOCKS_KEYCHAIN" || true
+          rm -rf "$RUNNER_TEMP/stocks-signing"

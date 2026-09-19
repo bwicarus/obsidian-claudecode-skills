@@ -1,0 +1,63 @@
+import Foundation
+
+struct APIClient {
+    let baseURL: URL
+    let token: String?
+
+    static func normalizedBase(_ value: String) throws -> URL {
+        guard var components = URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              components.scheme == "https", components.host != nil,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else {
+            throw AppError.message("请输入完整的 HTTPS 服务地址。")
+        }
+        while components.path.hasSuffix("/") { components.path.removeLast() }
+        guard let url = components.url else { throw AppError.message("服务地址无效。") }
+        return url
+    }
+
+    func pair(code: String, deviceID: String, name: String) async throws -> PairResponse {
+        let payload = ["code": code, "deviceId": deviceID, "name": name]
+        return try await request("api/pair", method: "POST", body: JSONEncoder().encode(payload))
+    }
+
+    func stocks(query: String) async throws -> StocksResponse {
+        try await request("api/stocks", query: [URLQueryItem(name: "q", value: query), URLQueryItem(name: "limit", value: "50")])
+    }
+
+    func stock(code: String) async throws -> StockResponse {
+        try await request("api/stocks/\(code)")
+    }
+
+    func webSocketURL(deviceID: String) throws -> URL {
+        var components = URLComponents(url: baseURL.appendingPathComponent("voice"), resolvingAgainstBaseURL: false)!
+        components.scheme = "wss"
+        components.queryItems = [URLQueryItem(name: "deviceId", value: deviceID)]
+        guard let url = components.url else { throw AppError.message("语音地址无效。") }
+        return url
+    }
+
+    private func request<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil,
+                                       query: [URLQueryItem] = []) async throws -> T {
+        var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { components.queryItems = query }
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = method
+        request.timeoutInterval = 30
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let response = response as? HTTPURLResponse else { throw AppError.message("服务器未返回 HTTP 响应。") }
+        guard (200..<300).contains(response.statusCode) else {
+            if response.statusCode == 401 { throw AppError.message("设备凭证无效或已过期，请重新配对。") }
+            if response.statusCode == 403 { throw AppError.message("配对码不正确或设备访问被拒绝。") }
+            let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let message = payload?["message"] as? String ?? payload?["error"] as? String
+            throw AppError.message(message ?? "请求失败（HTTP \(response.statusCode)）。")
+        }
+        do { return try JSONDecoder().decode(T.self, from: data) }
+        catch { throw AppError.message("数据格式与 App 不兼容：\(error.localizedDescription)") }
+    }
+}
