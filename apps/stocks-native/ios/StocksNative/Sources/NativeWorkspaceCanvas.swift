@@ -551,7 +551,8 @@ private final class WorkspaceCardHost: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let headerHeight: CGFloat = 28
+        // Reserve the whole drag target; its lower 16pt must not cover a chart picker.
+        let headerHeight: CGFloat = 44
         controller.view.frame = CGRect(x: 0, y: headerHeight, width: bounds.width,
                                        height: max(1, bounds.height - headerHeight))
         grip.frame = CGRect(x: max(0, (bounds.width - 96) / 2), y: 0, width: min(96, bounds.width), height: 44)
