@@ -1,4 +1,4 @@
-# 股票 iPad 原生验证版 0.2.2
+# 股票 iPad 原生验证版 0.2.0
 
 SwiftUI 界面、Swift Charts 分时/K 线/资金图、Apple 登录、本地缓存和 AVAudioEngine 双向音频；不含 WKWebView、远程网页界面或第三方依赖。
 

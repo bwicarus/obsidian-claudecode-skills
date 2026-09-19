@@ -66,7 +66,8 @@ final class VoiceSession: ObservableObject {
             let task = URLSession.shared.webSocketTask(with: request)
             socket = task
             task.resume()
-            var start: [String: Any] = ["type": "start", "clientVersion": "0.2.2",
+            let clientVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.0"
+            var start: [String: Any] = ["type": "start", "clientVersion": clientVersion,
                                        "capabilities": "chart.annotation.v1,ui.context.v1"]
             if let stockCode { start["stockCode"] = stockCode }
             try await send(start, through: task)

@@ -20,7 +20,7 @@ if [[ "$MODE" == simulator ]]; then
   xcodebuild build -project "$PROJECT_FILE" -scheme StocksNative \
     -configuration Debug -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$BUILD_ROOT/DerivedData-simulator" \
-    CURRENT_PROJECT_VERSION="$BUILD_NUMBER" MARKETING_VERSION=0.2.2 \
+    CURRENT_PROJECT_VERSION="$BUILD_NUMBER" MARKETING_VERSION=0.2.0 \
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
     | tee "$BUILD_ROOT/logs/simulator.log"
   exit 0
@@ -35,7 +35,7 @@ xcodebuild archive -project "$PROJECT_FILE" -scheme StocksNative \
   DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Manual \
   CODE_SIGN_IDENTITY='Apple Distribution' \
   PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
-  CURRENT_PROJECT_VERSION="$BUILD_NUMBER" MARKETING_VERSION=0.2.2 \
+  CURRENT_PROJECT_VERSION="$BUILD_NUMBER" MARKETING_VERSION=0.2.0 \
   | tee "$BUILD_ROOT/logs/archive.log"
 
 APP_PATH="$BUILD_ROOT/StocksNative.xcarchive/Products/Applications/StocksNative.app"

@@ -293,7 +293,10 @@ struct PairingView: View {
                     Text("普通用户使用 Apple ID；配对码只用于审核受限账号和开发诊断。")
                 }
                 Section("设备") {
-                    LabeledContent("版本", value: "0.2.2")
+                    LabeledContent(
+                        "版本",
+                        value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.0"
+                    )
                     Text(model.deviceID).font(.caption).monospaced().textSelection(.enabled)
                     if model.isPaired {
                         Button("移除此设备的凭证", role: .destructive) {

@@ -1,4 +1,4 @@
-# StocksNative 0.2.2 validation app
+# StocksNative 0.2.0 validation track
 
 An iPad-first native SwiftUI client with live market summaries, intraday and
 multi-period Swift Charts, stock analytics, Apple sign-in, local caching and an
@@ -51,7 +51,7 @@ transcripts, with bounded text. This is durable storage, not a guarantee that
 every historical detail is automatically present in the model context.
 Ten minutes without conversational activity closes an idle voice session.
 
-Version 0.2.2 advertises `chart.annotation.v1` and `ui.context.v1` when opening
+The current 0.2.0 build track advertises `chart.annotation.v1` and `ui.context.v1` when opening
 voice. The client sends bounded, deduplicated context when the visible stock,
 quote, chart period, latest chart point, metrics, panels or key user actions
 change. The server appends the latest context as a developer message so current
