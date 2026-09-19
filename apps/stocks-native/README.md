@@ -90,6 +90,11 @@ The upper-right toggle exclusively opens or closes the AI sidebar.
 Grab handles use a compact header, which disappears when the layout is locked.
 Fund cards switch between stacked and side-by-side content as their aspect ratio
 changes, retaining the selected date and all flow metrics.
+Chart range controls stay at the bottom of each chart card while its details
+scroll separately. Intraday price and volume plots use a compact height budget.
+Fund charts default to the latest five trading days with amounts in 100 million
+CNY; selected-day flows are separated from the dated latest summary. All eight
+buy/sell tiers remain listed, including zero amounts and explicitly missing data.
 
 Card coordinates and sizes are saved in Application Support independently of
 market-cache cleanup. The earlier ordered half/full-width layout is converted

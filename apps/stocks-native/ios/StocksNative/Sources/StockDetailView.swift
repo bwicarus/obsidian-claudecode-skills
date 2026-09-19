@@ -233,6 +233,36 @@ struct CandleChart: View {
     }
 
     var body: some View {
+        ChartCardViewport { _ in
+            chartContent
+        } navigator: {
+            if !visible.isEmpty { rangeNavigator }
+        }
+        .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
+        .onChange(of: externalContext) { _, context in
+            guard let context, context.stockCode == stockCode, context.period == period.rawValue,
+                  let first = context.firstVisibleTime, let last = context.lastVisibleTime,
+                  let lower = candles.firstIndex(where: { $0.time == first }),
+                  let upper = candles.firstIndex(where: { $0.time == last }), lower <= upper else { return }
+            let nextWindow = lower..<(upper + 1)
+            if nextWindow != visibleRange { window = nextWindow }
+            let nextSelection = context.selectionSource == "cursor" ? context.selectedPoint?.time : nil
+            if selectedTime != nextSelection { selectedTime = nextSelection }
+        }
+        .onChange(of: candles.map(\.time)) { oldTimes, newTimes in
+            reconcileWindow(oldTimes: oldTimes, newTimes: newTimes)
+        }
+        .onChange(of: visible.map(\.candle.time)) { _, times in
+            if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
+        }
+        .onChange(of: stockCode) { _, _ in annotationMode = false; selectedTime = nil }
+        .confirmationDialog("清除此股票的全部标注？", isPresented: $confirmingClear, titleVisibility: .visible) {
+            Button("清除全部", role: .destructive) { _ = annotations.clear(stockCode: stockCode) }
+            Button("取消", role: .cancel) { }
+        }
+    }
+
+    private var chartContent: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 Text("价格走势").font(.headline)
@@ -258,7 +288,6 @@ struct CandleChart: View {
                 if showsChips, let chipDistribution, !chipDistribution.rows.isEmpty {
                     ChipDistributionSummary(data: chipDistribution, currentPrice: currentPrice ?? chipDistribution.currentPrice ?? candles.last?.close)
                 }
-                rangeNavigator
                 if annotations.legacyAnnotationCount(for: stockCode) > 0 {
                     Text("旧版笔迹仍保留在本机；因缺少行情坐标，暂不叠加显示。")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -266,30 +295,6 @@ struct CandleChart: View {
                 Text(annotationMode ? "使用手指或 Apple Pencil 绘制；新标注随行情缩放和平移。" : "拖动图表查看单根数据；拖动下方范围条调整视野。")
                     .font(.caption2).foregroundStyle(.secondary)
             }
-        }
-        .padding(22)
-        .background(.white, in: RoundedRectangle(cornerRadius: 22))
-        .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
-        .onChange(of: externalContext) { _, context in
-            guard let context, context.stockCode == stockCode, context.period == period.rawValue,
-                  let first = context.firstVisibleTime, let last = context.lastVisibleTime,
-                  let lower = candles.firstIndex(where: { $0.time == first }),
-                  let upper = candles.firstIndex(where: { $0.time == last }), lower <= upper else { return }
-            let nextWindow = lower..<(upper + 1)
-            if nextWindow != visibleRange { window = nextWindow }
-            let nextSelection = context.selectionSource == "cursor" ? context.selectedPoint?.time : nil
-            if selectedTime != nextSelection { selectedTime = nextSelection }
-        }
-        .onChange(of: candles.map(\.time)) { oldTimes, newTimes in
-            reconcileWindow(oldTimes: oldTimes, newTimes: newTimes)
-        }
-        .onChange(of: visible.map(\.candle.time)) { _, times in
-            if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
-        }
-        .onChange(of: stockCode) { _, _ in annotationMode = false; selectedTime = nil }
-        .confirmationDialog("清除此股票的全部标注？", isPresented: $confirmingClear, titleVisibility: .visible) {
-            Button("清除全部", role: .destructive) { _ = annotations.clear(stockCode: stockCode) }
-            Button("取消", role: .cancel) { }
         }
     }
 

@@ -165,6 +165,7 @@ struct StockValuationCard: View {
 enum WorkspaceChartMode: Hashable { case adaptive, kline, intraday, withChips }
 
 struct MarketChartSection: View {
+    @Environment(\.workspaceCardHeight) private var availableHeight
     @ObservedObject var model: AppModel
     let stockCode: String
     var mode: WorkspaceChartMode = .adaptive
@@ -216,36 +217,46 @@ struct MarketChartSection: View {
                 Label(error, systemImage: "wifi.exclamationmark")
                     .font(.caption).foregroundStyle(.red)
             }
-            if isIntraday {
-                if let intraday = model.displayedIntraday, !intraday.rows.isEmpty {
-                    IntradayChart(data: intraday, stockCode: stockCode, annotations: model.annotations,
-                                  onContextChange: { snapshot in
-                                      await model.updateChartContext(snapshot, sourceID: "\(mode):intraday")
-                                  })
-                        .id(stockCode)
-                } else if model.isLoadingChart {
-                    chartLoading
-                } else {
-                    emptyChart("当天暂无分时数据")
+            if availableHeight > 0 {
+                GeometryReader { geometry in
+                    chartContent.environment(\.workspaceCardHeight, geometry.size.height)
                 }
-            } else if !candles.isEmpty {
-                CandleChart(candles: candles, stockCode: stockCode, period: candlePeriod,
-                            annotations: model.annotations, onContextChange: { snapshot in
-                                await model.updateChartContext(snapshot, sourceID: "\(mode):kline")
-                            },
-                            onRangeChange: { count in
-                                await model.publishVoiceContext(action: "调整图表可见区间：\(count) 根", kind: "chart_range")
-                            }, chipDistribution: model.chipDistribution, showsChips: mode == .withChips,
-                            externalContext: model.chartSnapshotForKline, currentPrice: model.displayedStock?.price)
-                    .id("\(stockCode):\(candlePeriod.rawValue):\(mode)")
-            } else if model.isLoadingChart {
-                chartLoading
             } else {
-                emptyChart("暂无这个周期的 K 线")
+                chartContent
             }
         }
         .onChange(of: model.chartPeriod, initial: true) { _, period in
             if period != .intraday { lastCandlePeriod = period }
+        }
+    }
+
+    @ViewBuilder private var chartContent: some View {
+        if isIntraday {
+            if let intraday = model.displayedIntraday, !intraday.rows.isEmpty {
+                IntradayChart(data: intraday, stockCode: stockCode, annotations: model.annotations,
+                              onContextChange: { snapshot in
+                                  await model.updateChartContext(snapshot, sourceID: "\(mode):intraday")
+                              })
+                    .id(stockCode)
+            } else if model.isLoadingChart {
+                chartLoading
+            } else {
+                emptyChart("当天暂无分时数据")
+            }
+        } else if !candles.isEmpty {
+            CandleChart(candles: candles, stockCode: stockCode, period: candlePeriod,
+                        annotations: model.annotations, onContextChange: { snapshot in
+                            await model.updateChartContext(snapshot, sourceID: "\(mode):kline")
+                        },
+                        onRangeChange: { count in
+                            await model.publishVoiceContext(action: "调整图表可见区间：\(count) 根", kind: "chart_range")
+                        }, chipDistribution: model.chipDistribution, showsChips: mode == .withChips,
+                        externalContext: model.chartSnapshotForKline, currentPrice: model.displayedStock?.price)
+                .id("\(stockCode):\(candlePeriod.rawValue):\(mode)")
+        } else if model.isLoadingChart {
+            chartLoading
+        } else {
+            emptyChart("暂无这个周期的 K 线")
         }
     }
 
@@ -296,7 +307,6 @@ private struct SessionIntradayPoint: Identifiable {
 }
 
 struct IntradayChart: View {
-    @Environment(\.workspaceCardHeight) private var availableHeight
     let data: IntradayResponse
     let stockCode: String
     @ObservedObject var annotations: AnnotationStore
@@ -373,7 +383,21 @@ struct IntradayChart: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        ChartCardViewport { height in
+            chartContent(contentHeight: height)
+        } navigator: {
+            rangeNavigator
+        }
+        .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
+        .onChange(of: data.tradeDate) { _, _ in selectedTime = nil; window = 0..<242 }
+        .onChange(of: window) { _, _ in selectedTime = nil }
+        .onChange(of: visiblePoints.map(\.id)) { _, times in
+            if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
+        }
+    }
+
+    private func chartContent(contentHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("当日分时").font(.headline)
@@ -469,7 +493,7 @@ struct IntradayChart: View {
                         .allowsHitTesting(false)
                 }
             }
-            .frame(height: availableHeight > 0 ? max(150, availableHeight - 300) : 300)
+            .frame(height: contentHeight > 0 ? min(220, max(110, contentHeight - 150)) : 220)
             HStack(spacing: 18) {
                 Label("价格", systemImage: "minus").foregroundStyle(AppStyle.accent)
                 Label("均价", systemImage: "minus").foregroundStyle(.orange)
@@ -496,33 +520,29 @@ struct IntradayChart: View {
                     }
                 }
             }
-            .frame(height: 70)
-            VStack(spacing: 6) {
-                HStack {
-                    Text("\(sessionTime(window.lowerBound)) — \(sessionTime(window.upperBound - 1))")
-                    Spacer()
-                    Button("全天") {
-                        window = 0..<242
-                        selectedTime = nil
-                        Task { await onContextChange(voiceContextSnapshot) }
-                    }
-                    .disabled(window == 0..<242)
-                }
-                .font(.caption).foregroundStyle(.secondary)
-                ChartRangeNavigator(values: overviewValues, selection: $window, minimumCount: 12,
-                                    onEditingChanged: { editing in
-                    if !editing { Task { await onContextChange(voiceContextSnapshot) } }
-                })
-                Text("两端缩放 · 中间平移")
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
+            .frame(height: 56)
         }
-        .padding(22).background(.white, in: RoundedRectangle(cornerRadius: 22))
-        .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
-        .onChange(of: data.tradeDate) { _, _ in selectedTime = nil; window = 0..<242 }
-        .onChange(of: window) { _, _ in selectedTime = nil }
-        .onChange(of: visiblePoints.map(\.id)) { _, times in
-            if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
+    }
+
+    private var rangeNavigator: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text("\(sessionTime(window.lowerBound)) — \(sessionTime(window.upperBound - 1))")
+                Spacer()
+                Button("全天") {
+                    window = 0..<242
+                    selectedTime = nil
+                    Task { await onContextChange(voiceContextSnapshot) }
+                }
+                .disabled(window == 0..<242)
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            ChartRangeNavigator(values: overviewValues, selection: $window, minimumCount: 12,
+                                onEditingChanged: { editing in
+                if !editing { Task { await onContextChange(voiceContextSnapshot) } }
+            })
+            Text("两端缩放 · 中间平移")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 }
@@ -716,7 +736,7 @@ private struct FundSizeFlow: Identifiable {
 
 private struct FundSlice: Identifiable {
     let name: String
-    let amount: Double
+    let amount: Double?
     let color: Color
     var id: String { name }
 }
@@ -726,26 +746,47 @@ struct FundCard: View {
     @Environment(\.workspaceCardWidth) private var availableWidth
     let panel: FundPanel
     @State private var selectedDate: String?
-    private var selected: FundHistory? { panel.history.first { $0.tradeDate == selectedDate } }
+    private var history: [FundHistory] {
+        Array(panel.history.sorted { $0.tradeDate < $1.tradeDate }.suffix(5))
+    }
+    private var selected: FundHistory? {
+        history.first { $0.tradeDate == selectedDate } ?? history.last
+    }
+    private var inspectedDate: String? { selected?.tradeDate ?? panel.asOf }
+    private var dateSelection: Binding<String?> {
+        Binding(get: { inspectedDate }, set: { date in
+            guard let date, history.contains(where: { $0.tradeDate == date }) else { return }
+            selectedDate = date
+        })
+    }
     private var selectedFlows: [FundSizeFlow] {
         if let selected { return flows(selected) }
         let m = panel.metrics
         return flowValues(m.buyExtraLargeAmount, m.sellExtraLargeAmount, m.buyLargeAmount, m.sellLargeAmount,
                           m.buyMediumAmount, m.sellMediumAmount, m.buySmallAmount, m.sellSmallAmount)
     }
-    private var slices: [FundSlice] {
-        let buyColors: [Color] = [AppStyle.up, .orange, .yellow, .yellow.opacity(0.5)]
-        let sellColors: [Color] = [AppStyle.down, .green, .mint, .mint.opacity(0.5)]
-        let buys = selectedFlows.enumerated().compactMap { index, flow in
-            flow.buy.map { FundSlice(name: "\(flow.name)买入", amount: max(0, $0), color: buyColors[index]) }
-        }
-        let sells = selectedFlows.enumerated().compactMap { index, flow in
-            flow.sell.map { FundSlice(name: "\(flow.name)卖出", amount: max(0, $0), color: sellColors[index]) }
-        }
-        return (buys + sells).filter { $0.amount > 0 }
+    private var selectedMainInflow: Double? {
+        let main = selectedFlows.prefix(2).compactMap(\.net)
+        guard main.count == 2, main.allSatisfy(\.isFinite) else { return nil }
+        return main.reduce(0, +)
     }
-    private var total: Double { slices.reduce(0) { $0 + $1.amount } }
-    private var hasHistoryFlows: Bool { panel.history.contains { flows($0).contains { $0.net != nil } } }
+    private var slices: [FundSlice] {
+        let buyColors = [0xdc2626, 0xf59e0b, 0xfbbf24, 0xfde68a].map(Self.palette)
+        let sellColors = [0x059669, 0x10b981, 0x6ee7b7, 0xa7f3d0].map(Self.palette)
+        let buys = selectedFlows.enumerated().map { index, flow in
+            FundSlice(name: "\(flow.name)买入", amount: flow.buy, color: buyColors[index])
+        }
+        let sells = selectedFlows.enumerated().map { index, flow in
+            FundSlice(name: "\(flow.name)卖出", amount: flow.sell, color: sellColors[index])
+        }
+        return buys + sells
+    }
+    private var total: Double? {
+        let amounts = slices.compactMap(\.amount)
+        guard amounts.count == 8, amounts.allSatisfy(\.isFinite) else { return nil }
+        return amounts.reduce(0) { $0 + abs($1) }
+    }
+    private var hasHistoryFlows: Bool { history.contains { flows($0).contains { $0.net != nil } } }
 
     private var usesColumns: Bool {
         availableWidth >= 560 && (availableHeight <= 0 || availableWidth / availableHeight >= 1.35)
@@ -757,7 +798,7 @@ struct FundCard: View {
     private var historyHeight: CGFloat {
         guard availableHeight > 0 else { return 150 }
         if usesColumns { return max(150, availableHeight - 130) }
-        let detailsAllowance: CGFloat = detailsWidth >= 330 ? 440 : 560
+        let detailsAllowance: CGFloat = detailsWidth >= 330 ? 500 : 620
         return max(120, availableHeight - detailsAllowance)
     }
     private var mainLayout: AnyLayout {
@@ -772,7 +813,7 @@ struct FundCard: View {
     private var donutSize: CGFloat { detailsWidth >= 370 ? 124 : 108 }
 
     var body: some View {
-        card(title: "资金动向", subtitle: selectedDate ?? panel.asOf ?? "最新资料") {
+        card(title: "资金动向", subtitle: "最近 \(history.count) 个交易日") {
             mainLayout {
                 historySection.frame(maxWidth: .infinity, alignment: .topLeading)
                 detailsSection
@@ -780,14 +821,23 @@ struct FundCard: View {
                     .frame(maxWidth: usesColumns ? nil : .infinity, alignment: .topLeading)
             }
         }
+        .onChange(of: history.map(\.tradeDate)) { _, dates in
+            if let selectedDate, !dates.contains(selectedDate) { self.selectedDate = nil }
+        }
     }
 
     private var historySection: some View {
         VStack(alignment: .leading, spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { tierLegend }
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
+                    tierLegend
+                }
+            }
             if hasHistoryFlows {
                 Chart {
                     RuleMark(y: .value("零轴", 0)).foregroundStyle(.secondary.opacity(0.3))
-                    ForEach(panel.history) { point in
+                    ForEach(history) { point in
                         ForEach(flows(point)) { flow in
                             if let value = flow.net {
                                 BarMark(x: .value("日期", point.tradeDate), y: .value("净流入", value), stacking: .standard)
@@ -796,22 +846,38 @@ struct FundCard: View {
                         }
                     }
                 }
-                .chartXAxis(.hidden).chartXSelection(value: $selectedDate)
+                .chartXScale(domain: history.map(\.tradeDate))
+                .chartXSelection(value: dateSelection)
+                .chartXAxis {
+                    AxisMarks(values: history.map(\.tradeDate)) { value in
+                        AxisValueLabel {
+                            if let date = value.as(String.self) {
+                                Text(String(date.suffix(5))).font(.caption2).monospacedDigit()
+                            }
+                        }
+                    }
+                }
                 .chartYAxis {
                     AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
                         AxisGridLine().foregroundStyle(.secondary.opacity(0.1))
                         AxisValueLabel {
-                            if let value = value.as(Double.self) { Text(AppStyle.compact(value)).font(.caption2) }
+                            if let value = value.as(Double.self) { Text(money(value)).font(.caption2).monospacedDigit() }
                         }
                     }
                 }
-                .frame(height: historyHeight)
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { tierLegend }
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
-                        tierLegend
-                    }
+                .chartBackground { proxy in
+                    GeometryReader { geometry in
+                        if let anchor = proxy.plotFrame, let date = inspectedDate,
+                           let x = proxy.position(forX: date) {
+                            let plot = geometry[anchor]
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.secondary.opacity(0.10))
+                                .frame(width: max(1, plot.width / CGFloat(max(history.count, 1))), height: plot.height)
+                                .position(x: plot.minX + x, y: plot.midY)
+                        }
+                    }.allowsHitTesting(false)
                 }
+                .frame(height: historyHeight)
                 Text("拖动柱状图选择交易日").font(.caption2).foregroundStyle(.secondary)
             } else {
                 Text("暂无分档资金历史").font(.caption).foregroundStyle(.secondary)
@@ -822,32 +888,59 @@ struct FundCard: View {
 
     @ViewBuilder private var tierLegend: some View {
         ForEach(selectedFlows) { flow in
-            Label(flow.name, systemImage: "circle.fill")
+            Label("\(flow.name)净", systemImage: "circle.fill")
                 .font(.caption2).foregroundStyle(flow.color).lineLimit(1)
         }
     }
 
     private var detailsSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if !slices.isEmpty {
-                distributionLayout {
-                    Chart(slices) { slice in
-                        SectorMark(angle: .value("金额", slice.amount), innerRadius: .ratio(0.68), angularInset: 1)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("\(inspectedDate ?? "日期未知") · 所选交易日")
+                    .font(.caption2).foregroundStyle(.secondary)
+                HStack {
+                    Text("主力净流入").font(.caption.weight(.medium))
+                    Spacer(minLength: 4)
+                    Text(money(selectedMainInflow, signed: true))
+                        .font(.subheadline.weight(.semibold)).monospacedDigit()
+                        .foregroundStyle(AppStyle.movement(selectedMainInflow))
+                }
+            }
+            distributionLayout {
+                distributionChart.frame(width: donutSize, height: donutSize)
+                distributionLegend.frame(maxWidth: .infinity)
+            }
+            .frame(maxWidth: .infinity)
+            VStack(spacing: 8) {
+                ForEach(selectedFlows) { flow in fundValueLine("\(flow.name)净流入", flow.net) }
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("最新汇总 · \(panel.asOf ?? "日期未知")")
+                    .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                fundValueLine("当日主力", panel.metrics.latestMainInflow)
+                fundValueLine("五日主力合计", panel.metrics.mainInflow5d)
+                valueLine("当日主力占比", panel.metrics.latestMainRatio, suffix: "%")
+            }
+        }
+    }
+
+    @ViewBuilder private var distributionChart: some View {
+        if let total, total > 0 {
+            Chart {
+                ForEach(slices) { slice in
+                    if let amount = slice.amount, amount != 0 {
+                        SectorMark(angle: .value("金额", abs(amount)), innerRadius: .ratio(0.45), angularInset: 1)
                             .foregroundStyle(slice.color)
                     }
-                    .chartLegend(.hidden).frame(width: donutSize, height: donutSize)
-                    distributionLegend.frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity)
-            } else {
-                Text("所选日期暂无分档买卖数据").font(.caption).foregroundStyle(.secondary)
-            }
-            VStack(spacing: 8) {
-                ForEach(selectedFlows) { flow in valueLine("\(flow.name)净流入", flow.net, compact: true) }
-                Divider().padding(.vertical, 2)
-                valueLine("今日主力", panel.metrics.latestMainInflow, compact: true)
-                valueLine("五日主力", panel.metrics.mainInflow5d, compact: true)
-                valueLine("主力占比", panel.metrics.latestMainRatio, suffix: "%")
+            }.chartLegend(.hidden)
+        } else {
+            ZStack {
+                Circle().stroke(Color.secondary.opacity(0.12), lineWidth: donutSize * 0.20)
+                    .padding(donutSize * 0.1)
+                Text(total == nil ? "数据不完整" : "暂无金额")
+                    .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
             }
         }
     }
@@ -859,8 +952,8 @@ struct FundCard: View {
                     Circle().fill(slice.color).frame(width: 5, height: 5)
                     Text(slice.name).lineLimit(1)
                     Spacer(minLength: 3)
-                    Text(AppStyle.compact(slice.amount)).lineLimit(1)
-                    Text(String(format: "%.1f%%", total > 0 ? slice.amount / total * 100 : 0))
+                    Text(money(slice.amount)).lineLimit(1)
+                    Text(share(slice.amount))
                         .lineLimit(1).frame(width: 38, alignment: .trailing)
                 }
                 .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
@@ -869,16 +962,37 @@ struct FundCard: View {
         }
     }
 
+    private func share(_ amount: Double?) -> String {
+        guard let total, let amount, amount.isFinite else { return "—" }
+        return String(format: "%.1f%%", total > 0 ? abs(amount) / total * 100 : 0)
+    }
+    private func money(_ amount: Double?, signed: Bool = false) -> String {
+        guard let amount, amount.isFinite else { return "—" }
+        // Server metrics are already yuan, including the upstream Tushare conversion.
+        return String(format: signed ? "%+.2f亿" : "%.2f亿", amount / 100_000_000)
+    }
+    private func fundValueLine(_ title: String, _ amount: Double?) -> some View {
+        HStack {
+            Text(title).foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            Text(money(amount, signed: true)).monospacedDigit().foregroundStyle(AppStyle.movement(amount))
+        }.font(.caption)
+    }
+    private static func palette(_ hex: Int) -> Color {
+        Color(red: Double((hex >> 16) & 0xff) / 255,
+              green: Double((hex >> 8) & 0xff) / 255,
+              blue: Double(hex & 0xff) / 255)
+    }
     private func flows(_ point: FundHistory) -> [FundSizeFlow] {
         flowValues(point.buyExtraLargeAmount, point.sellExtraLargeAmount, point.buyLargeAmount, point.sellLargeAmount,
                    point.buyMediumAmount, point.sellMediumAmount, point.buySmallAmount, point.sellSmallAmount)
     }
     private func flowValues(_ extraBuy: Double?, _ extraSell: Double?, _ largeBuy: Double?, _ largeSell: Double?,
                             _ mediumBuy: Double?, _ mediumSell: Double?, _ smallBuy: Double?, _ smallSell: Double?) -> [FundSizeFlow] {
-        [FundSizeFlow(name: "超大单", buy: extraBuy, sell: extraSell, color: AppStyle.up),
-         FundSizeFlow(name: "大单", buy: largeBuy, sell: largeSell, color: .orange),
-         FundSizeFlow(name: "中单", buy: mediumBuy, sell: mediumSell, color: AppStyle.down),
-         FundSizeFlow(name: "小单", buy: smallBuy, sell: smallSell, color: .blue)]
+        [FundSizeFlow(name: "超大单", buy: extraBuy, sell: extraSell, color: Self.palette(0xdc2626)),
+         FundSizeFlow(name: "大单", buy: largeBuy, sell: largeSell, color: Self.palette(0xf59e0b)),
+         FundSizeFlow(name: "中单", buy: mediumBuy, sell: mediumSell, color: Self.palette(0x10b981)),
+         FundSizeFlow(name: "小单", buy: smallBuy, sell: smallSell, color: Self.palette(0x3b82f6))]
     }
 }
 

@@ -1,5 +1,47 @@
 import SwiftUI
 
+/// Range controls belong to the card viewport, outside the scrolling chart details.
+struct ChartCardViewport<Content: View, Navigator: View>: View {
+    @Environment(\.workspaceCardHeight) private var availableHeight
+    private let content: (CGFloat) -> Content
+    private let navigator: Navigator
+
+    init(@ViewBuilder content: @escaping (CGFloat) -> Content, @ViewBuilder navigator: () -> Navigator) {
+        self.content = content
+        self.navigator = navigator()
+    }
+
+    var body: some View {
+        Group {
+            if availableHeight > 0 {
+                VStack(spacing: 0) {
+                    GeometryReader { geometry in
+                        ScrollView(.vertical) {
+                            content(max(0, geometry.size.height - 32))
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .padding(.horizontal, 22).padding(.vertical, 16)
+                        }
+                        .scrollBounceBehavior(.basedOnSize)
+                    }
+                    Divider()
+                    navigator
+                        .padding(.horizontal, 22).padding(.top, 8).padding(.bottom, 22)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .layoutPriority(1)
+                }
+                .frame(height: availableHeight, alignment: .top)
+            } else {
+                VStack(alignment: .leading, spacing: 16) {
+                    content(0)
+                    navigator
+                }
+                .padding(22)
+            }
+        }
+        .background(.white, in: RoundedRectangle(cornerRadius: 22))
+    }
+}
+
 enum ChartRangeBounds {
     static func clamped(_ range: Range<Int>, count: Int, minimumCount: Int = 1) -> Range<Int> {
         guard count > 0 else { return 0..<0 }

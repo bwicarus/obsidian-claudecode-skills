@@ -147,13 +147,21 @@ struct StockWorkspaceView: View {
 
     private func canvasCard(_ card: WorkspaceCard) -> AnyView {
         AnyView(GeometryReader { geometry in
-            ScrollView(.vertical) {
-                workspaceCard(card.kind)
-                    .environment(\.workspaceCardHeight, geometry.size.height)
-                    .environment(\.workspaceCardWidth, geometry.size.width)
-                    .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .topLeading)
+            Group {
+                switch card.kind {
+                case .chart, .kline, .intraday, .klineChips:
+                    // Chart cards own their scrollable body and pinned range controls.
+                    workspaceCard(card.kind)
+                default:
+                    ScrollView(.vertical) {
+                        workspaceCard(card.kind)
+                            .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .topLeading)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                }
             }
-            .scrollBounceBehavior(.basedOnSize)
+            .environment(\.workspaceCardHeight, geometry.size.height)
+            .environment(\.workspaceCardWidth, geometry.size.width)
         })
     }
 
