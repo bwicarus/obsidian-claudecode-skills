@@ -85,6 +85,13 @@ class AuthTests(unittest.TestCase):
         with self.assertRaises(AuthError):
             self.store.pair(result["code"], "apple-review", "App Review")
 
+    def test_verified_apple_subject_issues_device_bound_token_without_storing_subject(self):
+        receipt = self.store.apple_login("001234.abcdef.stable-subject", "ipad-apple", "iPad")
+        identity = self.store.authenticate(receipt["token"], "ipad-apple")
+        self.assertTrue(identity["aiEnabled"])
+        self.assertEqual(identity["name"], "iPad")
+        self.assertNotIn(b"stable-subject", self.store.db_path.read_bytes())
+
 
 class DataTests(unittest.TestCase):
     def setUp(self):
@@ -100,15 +107,37 @@ class DataTests(unittest.TestCase):
         self.database = self.root / "stocks.db"
         connection = sqlite3.connect(self.database)
         connection.executescript("""
-            CREATE TABLE daily_quotes(trade_date TEXT, code TEXT, open REAL, high REAL, low REAL, price REAL, volume REAL);
+            CREATE TABLE daily_quotes(trade_date TEXT, code TEXT, name TEXT, open REAL, high REAL, low REAL,
+                price REAL, volume REAL, change_pct REAL, turnover_rate REAL, market_cap REAL);
             CREATE INDEX idx_daily_quotes_code ON daily_quotes(code, trade_date);
             CREATE TABLE stock_industries(code TEXT, industry TEXT);
+            CREATE TABLE stock_concepts(code TEXT, concept TEXT, name TEXT, updated_at TEXT);
+            CREATE TABLE daily_feature_groups(trade_date TEXT, code TEXT, feature_group TEXT,
+                checks_json TEXT, metrics_json TEXT, status TEXT, error TEXT, updated_at TEXT);
+            CREATE TABLE daily_chips(trade_date TEXT, code TEXT, his_low REAL, his_high REAL,
+                cost_5pct REAL, cost_15pct REAL, cost_50pct REAL, cost_85pct REAL, cost_95pct REAL,
+                weight_avg REAL, winner_rate REAL, updated_at TEXT);
+            CREATE TABLE daily_news(code TEXT, items_json TEXT, fetched_date TEXT, updated_at TEXT);
+            CREATE TABLE daily_top_list(trade_date TEXT, code TEXT, reason TEXT, net_amount REAL, net_rate REAL);
+            CREATE TABLE daily_hsgt_top10(trade_date TEXT, code TEXT, rank INTEGER, amount REAL,
+                net_amount REAL, buy REAL, sell REAL);
+            CREATE TABLE daily_limit(trade_date TEXT, code TEXT, up_limit REAL, down_limit REAL);
+            CREATE TABLE daily_hsgt_total(trade_date TEXT, north_money REAL, south_money REAL);
+            CREATE TABLE daily_sector_flow(trade_date TEXT, sector_code TEXT, sector_name TEXT,
+                pct_change REAL, net_amount REAL, net_amount_rate REAL);
             INSERT INTO stock_industries VALUES('000001', '银行');
-            INSERT INTO daily_quotes VALUES('2026-09-17', '000001',11.68,11.74,11.57,11.61,691925);
-            INSERT INTO daily_quotes VALUES('2026-09-18', '000001',11.59,11.82,11.56,11.7,NULL);
-            INSERT INTO daily_quotes VALUES('2026-09-16', '000001',NULL,12,11,11.7,1);
-            INSERT INTO daily_quotes VALUES('2026-09-15', '000001',13,12,11,11.7,1);
-            INSERT INTO daily_quotes VALUES('2026-09-19', '000001',12,12,12,12,1);
+            INSERT INTO stock_concepts VALUES('000001', '金融科技', '平安银行', '2026-09-18');
+            INSERT INTO daily_quotes VALUES('2026-09-17', '000001','平安银行',11.68,11.74,11.57,11.61,691925,-.2,1.1,1000);
+            INSERT INTO daily_quotes VALUES('2026-09-18', '000001','平安银行',11.59,11.82,11.56,11.7,NULL,.78,1.2,1001);
+            INSERT INTO daily_quotes VALUES('2026-09-16', '000001','平安银行',NULL,12,11,11.7,1,0,1,1000);
+            INSERT INTO daily_quotes VALUES('2026-09-15', '000001','平安银行',13,12,11,11.7,1,0,1,1000);
+            INSERT INTO daily_quotes VALUES('2026-09-19', '000001','平安银行',12,12,12,12,1,1,1,1002);
+            INSERT INTO daily_feature_groups VALUES('2026-09-18','000001','technical','{}','{"macd_hist":0.2,"kdj_k":55}', 'done',NULL,'x');
+            INSERT INTO daily_feature_groups VALUES('2026-09-18','000001','fund','{}','{"latest_main_inflow":1000000}', 'done',NULL,'x');
+            INSERT INTO daily_chips VALUES('2026-09-18','000001',9,13,10,10.5,11.2,11.8,12,11.3,.8,'x');
+            INSERT INTO daily_news VALUES('000001','[{"title":"半年报","date":"2026-08-29","url":"https://example.com/a","column":"财报"}]','2026-09-18','x');
+            INSERT INTO daily_hsgt_total VALUES('2026-09-18',100,200);
+            INSERT INTO daily_sector_flow VALUES('2026-09-18','BK1','银行',1.2,300,2.1);
         """)
         connection.commit()
         connection.close()
@@ -126,7 +155,16 @@ class DataTests(unittest.TestCase):
         self.assertEqual([row["time"] for row in detail["candles"]], ["2026-09-17", "2026-09-18"])
         self.assertIsNone(detail["candles"][-1]["volume"])
         self.assertEqual(detail["omittedCandles"], 2)
+        self.assertEqual(detail["technical"]["metrics"]["macd_hist"], .2)
+        self.assertEqual(detail["fund"]["metrics"]["latest_main_inflow"], 1000000)
+        self.assertEqual(detail["chips"]["cost50"], 11.2)
+        self.assertEqual(detail["concepts"], ["金融科技"])
+        self.assertEqual(detail["announcements"][0]["title"], "半年报")
         json.dumps(detail, allow_nan=False)
+
+        overview = self.store.market_overview()
+        self.assertEqual(overview["rising"], 1)
+        self.assertEqual(overview["hotSectors"][0]["name"], "银行")
 
     def test_reads_do_not_change_source_and_connection_rejects_writes(self):
         before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in self.root.iterdir()}

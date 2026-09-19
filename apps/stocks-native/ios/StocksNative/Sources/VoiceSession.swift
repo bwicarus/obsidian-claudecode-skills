@@ -34,6 +34,7 @@ final class VoiceSession: ObservableObject {
     private var audioQueue: [Data] = []
     private var pendingPlayback: [Data] = []
     private var generation = UUID()
+    private var lastContextPayload: String?
 
     func start(client: APIClient, deviceID: String, stockCode: String?) async {
         guard !isStarted else { return }
@@ -65,8 +66,8 @@ final class VoiceSession: ObservableObject {
             let task = URLSession.shared.webSocketTask(with: request)
             socket = task
             task.resume()
-            var start: [String: String] = ["type": "start", "clientVersion": "0.2.1",
-                                                   "capabilities": "chart.annotation.v1"]
+            var start: [String: Any] = ["type": "start", "clientVersion": "0.2.2",
+                                       "capabilities": "chart.annotation.v1,ui.context.v1"]
             if let stockCode { start["stockCode"] = stockCode }
             try await send(start, through: task)
             guard current == generation else { task.cancel(with: .goingAway, reason: nil); return }
@@ -111,7 +112,23 @@ final class VoiceSession: ObservableObject {
         catch { fail("同步当前股票失败：\(error.localizedDescription)") }
     }
 
-    private func send(_ payload: [String: String], through task: URLSessionWebSocketTask) async throws {
+    func updateContext(_ context: VoiceUIContext) async {
+        guard isConnected, let socket else { return }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(context)
+            guard data.count <= 8_000, let value = String(data: data, encoding: .utf8),
+                  value != lastContextPayload,
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            try await send(["type": "ui.context", "context": object], through: socket)
+            lastContextPayload = value
+        } catch {
+            // Context is an optimization. A failed update must not end a working voice call.
+        }
+    }
+
+    private func send(_ payload: [String: Any], through task: URLSessionWebSocketTask) async throws {
         let data = try JSONSerialization.data(withJSONObject: payload)
         guard let text = String(data: data, encoding: .utf8) else { throw AppError.message("无法编码语音指令。") }
         try await task.send(.string(text))
@@ -242,6 +259,7 @@ final class VoiceSession: ObservableObject {
         audioSender = nil
         audioQueue.removeAll()
         pendingPlayback.removeAll()
+        lastContextPayload = nil
         if closeSocket { socket?.cancel(with: .goingAway, reason: nil) }
         socket = nil
     }

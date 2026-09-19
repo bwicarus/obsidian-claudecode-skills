@@ -9,7 +9,7 @@ settings:
     TARGETED_DEVICE_FAMILY: "1,2"
     CODE_SIGN_STYLE: Automatic
     ENABLE_USER_SCRIPT_SANDBOXING: YES
-    MARKETING_VERSION: "0.2.1"
+    MARKETING_VERSION: "0.2.2"
     CURRENT_PROJECT_VERSION: "1"
 targets:
   StocksNative:
@@ -21,6 +21,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.stocksnative
         PRODUCT_NAME: StocksNative
+        CODE_SIGN_ENTITLEMENTS: Sources/StocksNative.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: 股票

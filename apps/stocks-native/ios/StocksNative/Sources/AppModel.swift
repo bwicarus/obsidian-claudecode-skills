@@ -11,16 +11,26 @@ final class AppModel: ObservableObject {
     @Published var selectedCode: String?
     @Published private(set) var stocks: [Stock] = []
     @Published private(set) var detail: StockResponse?
+    @Published private(set) var liveStock: Stock?
+    @Published private(set) var overview: MarketOverview?
+    @Published private(set) var intraday: IntradayResponse?
+    @Published private(set) var kline: KLineResponse?
+    @Published var chartPeriod: ChartPeriod = .intraday
     @Published private(set) var listAsOf: String?
     @Published private(set) var isLoadingList = false
     @Published private(set) var isLoadingDetail = false
+    @Published private(set) var isLoadingChart = false
     @Published private(set) var listError: String?
     @Published private(set) var detailError: String?
+    @Published private(set) var chartError: String?
     let deviceID: String
     let voice = VoiceSession()
     let annotations = AnnotationStore()
     private var listGeneration = UUID()
     private var detailGeneration = UUID()
+    private var chartGeneration = UUID()
+    private let cache = MarketCache.shared
+    private var recentVoiceActions: [String] = []
 
     init() {
         let initialBase = UserDefaults.standard.string(forKey: "stocksNative.baseURL") ?? "https://bwicarus.space/stocks-native"
@@ -34,13 +44,25 @@ final class AppModel: ObservableObject {
         voice.onStockSelected = { [weak self] code in self?.selectedCode = code }
         voice.onCapabilityAction = { [weak self] action in
             guard let self else { return CapabilityResult(success: false, message: "App 状态不可用。") }
-            return self.annotations.perform(action, selectedStockCode: self.selectedCode)
+            let result = self.annotations.perform(action, selectedStockCode: self.selectedCode)
+            Task { await self.publishVoiceContext(action: "图表标注：\(action.operation)") }
+            return result
         }
     }
 
     var client: APIClient {
         // Every saved URL has passed normalizedBase; the bundled default is a fixed HTTPS URL.
         APIClient(baseURL: URL(string: baseURL)!, token: Credentials.token(baseURL: baseURL))
+    }
+
+    var displayedStock: Stock? {
+        if liveStock?.code == selectedCode { return liveStock }
+        return detail?.stock
+    }
+
+    var displayedCandles: [Candle] {
+        if let rows = kline?.rows, !rows.isEmpty { return rows }
+        return chartPeriod == .day ? (detail?.candles ?? []) : []
     }
 
     func pair(base: String, code: String) async throws {
@@ -56,13 +78,44 @@ final class AppModel: ObservableObject {
         await voice.stop()
         listGeneration = UUID()
         detailGeneration = UUID()
+        chartGeneration = UUID()
         baseURL = normalized.absoluteString
         UserDefaults.standard.set(baseURL, forKey: "stocksNative.baseURL")
         isPaired = true
         stocks = []
         selectedCode = nil
         detail = nil
+        liveStock = nil
+        overview = nil
+        intraday = nil
+        kline = nil
         listAsOf = nil
+        await loadStocks()
+    }
+
+    func signInWithApple(base: String, identityToken: String, rawNonce: String) async throws {
+        let normalized = try APIClient.normalizedBase(base)
+        let loginClient = APIClient(baseURL: normalized, token: nil)
+        let result = try await loginClient.appleLogin(identityToken: identityToken, rawNonce: rawNonce,
+                                                      deviceID: deviceID, name: UIDevice.current.name)
+        guard result.deviceId == deviceID, !result.token.isEmpty else {
+            throw AppError.message("服务器返回的设备凭证不匹配。")
+        }
+        try Credentials.save(token: result.token, baseURL: normalized.absoluteString)
+        isAIEnabled = result.aiEnabled ?? true
+        UserDefaults.standard.set(isAIEnabled, forKey: "stocksNative.aiEnabled")
+        await voice.stop()
+        listGeneration = UUID()
+        detailGeneration = UUID()
+        chartGeneration = UUID()
+        baseURL = normalized.absoluteString
+        UserDefaults.standard.set(baseURL, forKey: "stocksNative.baseURL")
+        isPaired = true
+        stocks = []
+        selectedCode = nil
+        detail = nil
+        liveStock = nil
+        await loadOverview()
         await loadStocks()
     }
 
@@ -74,14 +127,21 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "stocksNative.aiEnabled")
         listGeneration = UUID()
         detailGeneration = UUID()
+        chartGeneration = UUID()
         stocks = []
         selectedCode = nil
         detail = nil
+        liveStock = nil
+        overview = nil
+        intraday = nil
+        kline = nil
         listAsOf = nil
         listError = nil
         detailError = nil
+        chartError = nil
         isLoadingList = false
         isLoadingDetail = false
+        isLoadingChart = false
     }
 
     func loadStocks() async {
@@ -90,12 +150,21 @@ final class AppModel: ObservableObject {
         listGeneration = current
         isLoadingList = true
         listError = nil
+        let cacheable = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if cacheable, stocks.isEmpty,
+           let cached = await cache.value(StocksResponse.self, for: "stocks", maxAge: 24 * 3600) {
+            stocks = cached.items
+            listAsOf = cached.asOf
+            if selectedCode == nil { selectedCode = cached.items.first?.code }
+        }
         do {
             let result = try await client.stocks(query: query)
             guard current == listGeneration, !Task.isCancelled else { return }
             stocks = result.items
             listAsOf = result.asOf
             if selectedCode == nil { selectedCode = result.items.first?.code }
+            if cacheable { await cache.save(result, for: "stocks") }
+            if !query.isEmpty { await publishVoiceContext(action: "搜索股票：\(query)") }
         } catch {
             guard current == listGeneration, !Task.isCancelled else { return }
             listError = error.localizedDescription
@@ -103,25 +172,150 @@ final class AppModel: ObservableObject {
         if current == listGeneration { isLoadingList = false }
     }
 
+    func loadOverview() async {
+        guard isPaired else { return }
+        if overview == nil {
+            overview = await cache.value(MarketOverview.self, for: "market-overview", maxAge: 24 * 3600)
+        }
+        do {
+            let result = try await client.marketOverview()
+            overview = result
+            await cache.save(result, for: "market-overview")
+            await publishVoiceContext()
+        } catch {
+            if overview == nil { listError = error.localizedDescription }
+        }
+    }
+
     func loadDetail() async {
         let current = UUID()
         detailGeneration = current
         guard isPaired, let code = selectedCode else {
             detail = nil
+            liveStock = nil
             isLoadingDetail = false
             return
         }
-        if detail?.stock.code != code { detail = nil }
+        if detail?.stock.code != code {
+            detail = nil
+            liveStock = nil
+            intraday = nil
+            kline = nil
+            if let cached = await cache.value(StockResponse.self, for: "detail-\(code)", maxAge: 7 * 24 * 3600) {
+                detail = cached
+                liveStock = cached.stock
+            }
+        }
         isLoadingDetail = true
         detailError = nil
         do {
             let result = try await client.stock(code: code)
             guard current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
             detail = result
+            liveStock = result.stock
+            await cache.save(result, for: "detail-\(code)")
+            await publishVoiceContext()
         } catch {
             guard current == detailGeneration, !Task.isCancelled else { return }
             detailError = error.localizedDescription
         }
         if current == detailGeneration { isLoadingDetail = false }
+    }
+
+    func loadChart() async {
+        let current = UUID()
+        chartGeneration = current
+        guard isPaired, let code = selectedCode else {
+            intraday = nil
+            kline = nil
+            isLoadingChart = false
+            return
+        }
+        let period = chartPeriod
+        isLoadingChart = true
+        chartError = nil
+        let cacheKey = "chart-\(code)-\(period.rawValue)"
+        do {
+            if period == .intraday {
+                if intraday?.code != code {
+                    intraday = await cache.value(IntradayResponse.self, for: cacheKey, maxAge: 12 * 3600)
+                }
+                let result = try await client.intraday(code: code)
+                guard current == chartGeneration, selectedCode == code,
+                      chartPeriod == period, !Task.isCancelled else { return }
+                intraday = result
+                await cache.save(result, for: cacheKey)
+                await publishVoiceContext()
+            } else {
+                if kline?.code != code || kline?.period != period.rawValue {
+                    kline = await cache.value(KLineResponse.self, for: cacheKey, maxAge: 7 * 24 * 3600)
+                }
+                let result = try await client.kline(code: code, period: period)
+                guard current == chartGeneration, selectedCode == code,
+                      chartPeriod == period, !Task.isCancelled else { return }
+                kline = result
+                await cache.save(result, for: cacheKey)
+                await publishVoiceContext()
+            }
+        } catch {
+            guard current == chartGeneration, !Task.isCancelled else { return }
+            chartError = error.localizedDescription
+        }
+        if current == chartGeneration { isLoadingChart = false }
+    }
+
+    func loadRealtime() async {
+        guard isPaired, let code = selectedCode else { return }
+        do {
+            let result = try await client.realtime(codes: [code])
+            guard selectedCode == code, !Task.isCancelled else { return }
+            if let stock = result.items.first {
+                liveStock = stock
+                await publishVoiceContext()
+            }
+        } catch {
+            // Keep the last honest snapshot visible; chart refresh surfaces connection failures.
+        }
+    }
+
+    func refreshLiveData() async {
+        await loadRealtime()
+        if chartPeriod == .intraday { await loadChart() }
+    }
+
+    func maintainCache() async {
+        await cache.clean()
+    }
+
+    func publishVoiceContext(action: String? = nil) async {
+        if let action, !action.isEmpty {
+            recentVoiceActions.append(action)
+            recentVoiceActions = Array(recentVoiceActions.suffix(6))
+        }
+        let stock = displayedStock
+        var metrics: [String: String] = [:]
+        if let value = stock?.price { metrics["price"] = String(format: "%.3f", value) }
+        if let value = stock?.changePct { metrics["changePct"] = String(format: "%+.3f%%", value) }
+        if let value = stock?.open { metrics["open"] = String(format: "%.3f", value) }
+        if let value = stock?.high { metrics["high"] = String(format: "%.3f", value) }
+        if let value = stock?.low { metrics["low"] = String(format: "%.3f", value) }
+        if let value = stock?.turnover { metrics["turnover"] = String(format: "%.0f", value) }
+        if let value = stock?.turnoverRate { metrics["turnoverRate"] = String(format: "%.3f%%", value) }
+        if let value = detail?.technical?.metrics.macdHist { metrics["macdHist"] = String(format: "%.4f", value) }
+        if let value = detail?.fund?.metrics.latestMainInflow { metrics["mainInflow"] = String(format: "%.0f", value) }
+        var panels = [chartPeriod.title, "行情指标"]
+        if detail?.technical != nil { panels.append("技术指标") }
+        if detail?.fund != nil { panels.append("资金动向") }
+        if detail?.chips != nil { panels.append("筹码分布") }
+        if !(detail?.peers ?? []).isEmpty { panels.append("同业对比") }
+        if !(detail?.announcements ?? []).isEmpty { panels.append("公司公告") }
+        let latestTime = chartPeriod == .intraday ? intraday?.rows.last?.time : displayedCandles.last?.time
+        let context = VoiceUIContext(screen: selectedCode == nil ? "market_overview" : "stock_detail",
+                                     selectedCode: selectedCode, selectedName: stock?.name,
+                                     quoteAsOf: intraday?.tradeDate.isEmpty == false ? intraday?.tradeDate : detail?.asOf,
+                                     chartPeriod: chartPeriod.title, latestPointTime: latestTime,
+                                     metrics: metrics, visiblePanels: panels,
+                                     recentActions: recentVoiceActions)
+        await voice.updateContext(context)
     }
 }

@@ -8,9 +8,11 @@ import os
 from pathlib import Path
 import time
 
-from aiohttp import web, WSMsgType
+from aiohttp import web, WSMsgType, ClientError
+from apple_auth import AppleIdentityVerifier
 from auth import AuthStore, AuthError
 from data import StockDataStore, DataUnavailable, StockNotFound
+from live import LiveMarketSource
 from voice import VoiceSession, safe_error
 
 log = logging.getLogger(__name__)
@@ -61,21 +63,98 @@ async def pair(request):
     return web.json_response(result)
 
 
+async def apple_login(request):
+    peer = request.headers.get('X-Real-IP', request.remote or 'unknown')
+    now = time.monotonic()
+    bucket = request.app['pair_attempts']['apple:' + peer]
+    while bucket and now - bucket[0] > 600:
+        bucket.popleft()
+    if len(bucket) >= 20:
+        return web.json_response({'error': '尝试过于频繁，请稍后重试'}, status=429)
+    bucket.append(now)
+    data = await request.json()
+    claims = await request.app['apple'].verify(data['identityToken'], data['rawNonce'])
+    result = await asyncio.to_thread(request.app['auth'].apple_login, claims['sub'],
+                                     data['deviceId'], data['name'])
+    return web.json_response(result)
+
+
 async def stocks(request):
     await identity(request)
     result = await asyncio.to_thread(request.app['data'].list_stocks,
         request.query.get('q', '')[:80], int(request.query.get('limit', 50)))
+    try:
+        quotes = await request.app['live'].quotes([item['code'] for item in result['items']])
+        for item in result['items']:
+            request.app['data'].overlay_live(item, quotes.get(item['code']))
+    except (ClientError, asyncio.TimeoutError, OSError) as exc:
+        log.warning('Live list quote unavailable: %s', safe_error(exc))
+        result.setdefault('warnings', []).append('live_quote_unavailable')
     return web.json_response(result)
 
 
 async def detail(request):
     await identity(request)
     result = await asyncio.to_thread(request.app['data'].stock_detail, request.match_info['code'])
+    try:
+        quotes = await request.app['live'].quotes([request.match_info['code']])
+        request.app['data'].overlay_live(result['stock'], quotes.get(request.match_info['code']))
+    except (ClientError, asyncio.TimeoutError, OSError) as exc:
+        log.warning('Live detail quote unavailable: %s', safe_error(exc))
+        result.setdefault('warnings', []).append('live_quote_unavailable')
     return web.json_response(result)
 
 
+async def market_overview(request):
+    await identity(request)
+    result = await asyncio.to_thread(request.app['data'].market_overview)
+    return web.json_response(result)
+
+
+async def realtime(request):
+    await identity(request)
+    raw = request.query.get('codes', '')
+    codes = [code.strip() for code in raw.split(',') if code.strip()][:100]
+    if any(len(code) != 6 or not code.isdigit() for code in codes):
+        raise ValueError('invalid stock code')
+    try:
+        quotes = await request.app['live'].quotes(codes)
+        return web.json_response({'items': list(quotes.values()), 'warning': None})
+    except (ClientError, asyncio.TimeoutError, OSError) as exc:
+        log.warning('Realtime quote unavailable: %s', safe_error(exc))
+        return web.json_response({'items': [], 'warning': 'realtime_source_unavailable'})
+
+
+async def intraday(request):
+    await identity(request)
+    code = request.match_info['code']
+    if len(code) != 6 or not code.isdigit():
+        raise ValueError('invalid stock code')
+    try:
+        return web.json_response(await request.app['live'].minute(code))
+    except (ClientError, asyncio.TimeoutError, OSError) as exc:
+        log.warning('Intraday quote unavailable: %s', safe_error(exc))
+        return web.json_response({'code': code, 'tradeDate': '', 'previousClose': None,
+                                  'rows': [], 'warning': 'realtime_source_unavailable'})
+
+
+async def kline(request):
+    await identity(request)
+    code = request.match_info['code']
+    if len(code) != 6 or not code.isdigit():
+        raise ValueError('invalid stock code')
+    period = request.query.get('period', 'day')
+    count = int(request.query.get('count', 180))
+    try:
+        return web.json_response(await request.app['live'].kline(code, period, count))
+    except (ClientError, asyncio.TimeoutError, OSError) as exc:
+        log.warning('K-line source unavailable: %s', safe_error(exc))
+        return web.json_response({'code': code, 'period': period, 'rows': [],
+                                  'warning': 'realtime_source_unavailable'})
+
+
 async def health(request):
-    return web.json_response({'status': 'ok', 'version': '0.2.1'})
+    return web.json_response({'status': 'ok', 'version': '0.2.2'})
 
 
 async def voice(request):
@@ -145,6 +224,8 @@ async def voice(request):
                         await session.text(str(obj.get('text', '')))
                     elif kind == 'stock.select':
                         await session.select_stock(str(obj.get('code', '')))
+                    elif kind == 'ui.context':
+                        session.task(session.update_context(obj.get('context') or {}))
                     elif kind == 'capability.result':
                         session.capability_result(str(obj.get('actionId', '')),
                                                   str(obj.get('success', '')).lower() == 'true',
@@ -174,6 +255,7 @@ async def shutdown(app):
     for entry in list(app['voices'].values()):
         if entry:
             await entry[0].close(code=1001, message=b'Server shutdown')
+    await app['live'].close()
 
 
 def create_app():
@@ -181,11 +263,19 @@ def create_app():
     app = web.Application(middlewares=[errors], client_max_size=16384)
     app['state'] = state
     app['auth'] = AuthStore(state)
+    app['apple'] = AppleIdentityVerifier(os.environ.get('APPLE_CLIENT_ID', 'space.bwicarus.stocksnative'))
     app['data'] = StockDataStore(os.environ.get('STOCKS_DATA_ROOT', '/root/webapp/data/stocks'))
+    app['live'] = LiveMarketSource()
     app['pair_attempts'] = defaultdict(deque)
     app['voices'] = {}
     app.add_routes([web.get('/api/health', health), web.post('/api/pair', pair),
-                    web.get('/api/stocks', stocks), web.get('/api/stocks/{code}', detail),
+                    web.post('/api/auth/apple', apple_login),
+                    web.get('/api/market/overview', market_overview),
+                    web.get('/api/realtime', realtime),
+                    web.get('/api/stocks', stocks),
+                    web.get('/api/stocks/{code}/intraday', intraday),
+                    web.get('/api/stocks/{code}/kline', kline),
+                    web.get('/api/stocks/{code}', detail),
                     web.get('/voice', voice)])
     app.on_shutdown.append(shutdown)
     return app

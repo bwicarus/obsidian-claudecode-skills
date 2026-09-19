@@ -44,6 +44,26 @@ def _limit(value: int, maximum: int) -> int:
         raise ValueError("limit must be an integer") from exc
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        result = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return result if isinstance(result, dict) else {}
+
+
+def _json_array(value: Any) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    try:
+        result = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
+
+
 class StockDataStore:
     def __init__(self, data_root: str | os.PathLike[str] | None = None):
         self.root = Path(data_root or os.environ.get("STOCKS_DATA_DIR", "/root/webapp/data/stocks")).resolve()
@@ -121,8 +141,26 @@ class StockDataStore:
             ("turnoverRate", "turnover_rate"), ("open", "open"),
             ("high", "high"), ("low", "low"), ("prevClose", "prev_close"),
             ("volume", "volume"), ("marketCap", "market_cap"),
+            ("floatMarketCap", "float_market_cap"), ("amplitude", "amplitude"),
+            ("volumeRatio", "volume_ratio"), ("peDynamic", "pe_dynamic"),
+            ("pb", "pb"), ("speed", "speed"), ("change5m", "change_5m"),
+            ("change60d", "change_60d"), ("changeYtd", "change_ytd"),
+            ("upLimit", "up_limit"), ("downLimit", "down_limit"),
+            ("innerVolume", "inner_vol"), ("outerVolume", "outer_vol"),
         ):
             result[output] = _number(row.get(source))
+        for output, source in (("bids", "bids"), ("asks", "asks")):
+            value = row.get(source)
+            result[output] = value if isinstance(value, list) else []
+        return result
+
+    @staticmethod
+    def overlay_live(result: dict[str, Any], live: dict[str, Any] | None) -> dict[str, Any]:
+        if not live:
+            return result
+        for key, value in live.items():
+            if key not in {"code"} and value is not None:
+                result[key] = value
         return result
 
     def list_stocks(self, q: str = "", limit: int = 50) -> dict[str, Any]:
@@ -184,9 +222,145 @@ class StockDataStore:
             warnings.append("candle_data_unavailable")
         if omitted:
             warnings.append("incomplete_candles_omitted")
+        panels = self.stock_panels(code)
+        warnings.extend(panel for panel in panels.pop("warnings", []) if panel not in warnings)
         return {
             "asOf": snapshot["asOf"], "source": snapshot["source"],
             "stock": self._stock(row, sectors.get(code)), "candles": candles,
             "candlesAsOf": candles[-1]["time"] if candles else None,
-            "omittedCandles": omitted, "warnings": warnings,
+            "omittedCandles": omitted, "warnings": warnings, **panels,
         }
+
+    def market_overview(self) -> dict[str, Any]:
+        snapshot = self._read_snapshot()
+        rows = snapshot["rows"]
+        rising = falling = flat = limit_up = limit_down = 0
+        turnover = 0.0
+        for row in rows:
+            change = _number(row.get("change_pct"))
+            price = _number(row.get("price"))
+            upper = _number(row.get("up_limit"))
+            lower = _number(row.get("down_limit"))
+            amount = _number(row.get("turnover"))
+            turnover += amount or 0.0
+            if change is not None:
+                if change > 0.001:
+                    rising += 1
+                elif change < -0.001:
+                    falling += 1
+                else:
+                    flat += 1
+            if price is not None and ((upper is not None and price >= upper - 0.005) or (upper is None and change is not None and change >= 9.8)):
+                limit_up += 1
+            if price is not None and ((lower is not None and price <= lower + 0.005) or (lower is None and change is not None and change <= -9.8)):
+                limit_down += 1
+        warnings: list[str] = []
+        north = south = None
+        hot_sectors: list[dict[str, Any]] = []
+        try:
+            with self._connect() as connection:
+                flow = connection.execute(
+                    "SELECT trade_date, north_money, south_money FROM daily_hsgt_total "
+                    "ORDER BY trade_date DESC LIMIT 1"
+                ).fetchone()
+                if flow:
+                    north, south = _number(flow["north_money"]), _number(flow["south_money"])
+                sectors = connection.execute(
+                    "SELECT trade_date, sector_code, sector_name, pct_change, net_amount, net_amount_rate "
+                    "FROM daily_sector_flow WHERE trade_date = (SELECT MAX(trade_date) FROM daily_sector_flow) "
+                    "ORDER BY ABS(COALESCE(net_amount, 0)) DESC LIMIT 8"
+                ).fetchall()
+                hot_sectors = [{
+                    "code": row["sector_code"], "name": row["sector_name"],
+                    "changePct": _number(row["pct_change"]), "netAmount": _number(row["net_amount"]),
+                    "netAmountRate": _number(row["net_amount_rate"]), "tradeDate": row["trade_date"],
+                } for row in sectors]
+        except sqlite3.Error:
+            warnings.append("market_overview_database_unavailable")
+        return {
+            "asOf": snapshot["asOf"], "rising": rising, "falling": falling,
+            "flat": flat, "limitUp": limit_up, "limitDown": limit_down,
+            "turnover": turnover, "northMoney": north, "southMoney": south,
+            "hotSectors": hot_sectors, "warnings": warnings,
+        }
+
+    def stock_panels(self, code: str) -> dict[str, Any]:
+        warnings: list[str] = []
+        technical: dict[str, Any] | None = None
+        fund: dict[str, Any] | None = None
+        chips: dict[str, Any] | None = None
+        peers: list[dict[str, Any]] = []
+        announcements: list[dict[str, Any]] = []
+        concepts: list[str] = []
+        signals: dict[str, Any] = {"topList": [], "northbound": [], "limits": []}
+        try:
+            with self._connect() as connection:
+                for group in ("technical", "fund"):
+                    group_rows = connection.execute(
+                        "SELECT trade_date, checks_json, metrics_json FROM daily_feature_groups "
+                        "WHERE code = ? AND feature_group = ? AND status = 'done' "
+                        "ORDER BY trade_date DESC LIMIT 30", (code, group)
+                    ).fetchall()
+                    history = [{"tradeDate": row["trade_date"], **_json_object(row["metrics_json"])}
+                               for row in reversed(group_rows)]
+                    payload = ({"asOf": group_rows[0]["trade_date"],
+                                "metrics": _json_object(group_rows[0]["metrics_json"]),
+                                "checks": _json_object(group_rows[0]["checks_json"]),
+                                "history": history} if group_rows else None)
+                    if group == "technical":
+                        technical = payload
+                    else:
+                        fund = payload
+
+                chip = connection.execute(
+                    "SELECT * FROM daily_chips WHERE code = ? ORDER BY trade_date DESC LIMIT 1", (code,)
+                ).fetchone()
+                if chip:
+                    chips = {"asOf": chip["trade_date"], "low": _number(chip["his_low"]),
+                             "high": _number(chip["his_high"]), "cost5": _number(chip["cost_5pct"]),
+                             "cost15": _number(chip["cost_15pct"]), "cost50": _number(chip["cost_50pct"]),
+                             "cost85": _number(chip["cost_85pct"]), "cost95": _number(chip["cost_95pct"]),
+                             "average": _number(chip["weight_avg"]), "winnerRate": _number(chip["winner_rate"])}
+
+                concepts = [row["concept"] for row in connection.execute(
+                    "SELECT DISTINCT concept FROM stock_concepts WHERE code = ? AND concept <> '' ORDER BY concept LIMIT 16",
+                    (code,)
+                ).fetchall()]
+
+                industry = connection.execute(
+                    "SELECT industry FROM stock_industries WHERE code = ? AND industry <> '' ORDER BY industry LIMIT 1",
+                    (code,)
+                ).fetchone()
+                if industry:
+                    peer_rows = connection.execute(
+                        "SELECT q.code, q.name, q.price, q.change_pct, q.turnover_rate, q.market_cap "
+                        "FROM stock_industries i JOIN daily_quotes q ON q.code = i.code "
+                        "AND q.trade_date = (SELECT MAX(q2.trade_date) FROM daily_quotes q2 WHERE q2.code = q.code) "
+                        "WHERE i.industry = ? AND i.code <> ? ORDER BY q.change_pct DESC LIMIT 10",
+                        (industry["industry"], code)
+                    ).fetchall()
+                    peers = [{"code": row["code"], "name": row["name"], "price": _number(row["price"]),
+                              "changePct": _number(row["change_pct"]),
+                              "turnoverRate": _number(row["turnover_rate"]),
+                              "marketCap": _number(row["market_cap"])} for row in peer_rows]
+
+                news = connection.execute(
+                    "SELECT items_json, fetched_date FROM daily_news WHERE code = ? ORDER BY fetched_date DESC LIMIT 1",
+                    (code,)
+                ).fetchone()
+                if news:
+                    announcements = [{"title": item.get("title"), "date": item.get("date"),
+                                      "category": item.get("column"), "url": item.get("url")}
+                                     for item in _json_array(news["items_json"])[:20]]
+
+                for key, sql in (
+                    ("topList", "SELECT trade_date, reason, net_amount, net_rate FROM daily_top_list WHERE code = ? ORDER BY trade_date DESC LIMIT 5"),
+                    ("northbound", "SELECT trade_date, rank, amount, net_amount, buy, sell FROM daily_hsgt_top10 WHERE code = ? ORDER BY trade_date DESC LIMIT 5"),
+                    ("limits", "SELECT trade_date, up_limit, down_limit FROM daily_limit WHERE code = ? ORDER BY trade_date DESC LIMIT 5"),
+                ):
+                    signals[key] = [dict(row) for row in connection.execute(sql, (code,)).fetchall()]
+        except sqlite3.Error:
+            warnings.append("stock_panel_database_unavailable")
+        return {"technical": technical, "fund": fund, "chips": chips,
+                "peers": peers, "concepts": concepts, "announcements": announcements,
+                "signals": signals, "warnings": warnings}

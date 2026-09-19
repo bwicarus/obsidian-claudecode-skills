@@ -21,12 +21,37 @@ struct APIClient {
         return try await request("api/pair", method: "POST", body: JSONEncoder().encode(payload))
     }
 
+    func appleLogin(identityToken: String, rawNonce: String, deviceID: String, name: String) async throws -> PairResponse {
+        let payload = ["identityToken": identityToken, "rawNonce": rawNonce,
+                       "deviceId": deviceID, "name": name]
+        return try await request("api/auth/apple", method: "POST", body: JSONEncoder().encode(payload))
+    }
+
     func stocks(query: String) async throws -> StocksResponse {
         try await request("api/stocks", query: [URLQueryItem(name: "q", value: query), URLQueryItem(name: "limit", value: "50")])
     }
 
     func stock(code: String) async throws -> StockResponse {
         try await request("api/stocks/\(code)")
+    }
+
+    func marketOverview() async throws -> MarketOverview {
+        try await request("api/market/overview")
+    }
+
+    func realtime(codes: [String]) async throws -> RealtimeResponse {
+        try await request("api/realtime", query: [URLQueryItem(name: "codes", value: codes.joined(separator: ","))])
+    }
+
+    func intraday(code: String) async throws -> IntradayResponse {
+        try await request("api/stocks/\(code)/intraday")
+    }
+
+    func kline(code: String, period: ChartPeriod, count: Int = 180) async throws -> KLineResponse {
+        try await request("api/stocks/\(code)/kline", query: [
+            URLQueryItem(name: "period", value: period.rawValue),
+            URLQueryItem(name: "count", value: String(count)),
+        ])
     }
 
     func webSocketURL(deviceID: String) throws -> URL {

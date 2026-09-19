@@ -70,6 +70,12 @@ class AuthStore:
                     revoked_at REAL,
                     access TEXT NOT NULL DEFAULT 'full'
                 );
+                CREATE TABLE IF NOT EXISTS apple_accounts (
+                    subject_hash TEXT PRIMARY KEY,
+                    created_at REAL NOT NULL,
+                    last_login_at REAL NOT NULL,
+                    access TEXT NOT NULL DEFAULT 'full'
+                );
                 CREATE INDEX IF NOT EXISTS idx_device_tokens_device
                     ON device_tokens(device_id);
             """)
@@ -150,6 +156,33 @@ class AuthStore:
                 (_digest(token), device_id, name.strip(), now, now + self._token_ttl, row["access"]),
             )
         return {"token": token, "deviceId": device_id, "aiEnabled": row["access"] == "full"}
+
+    def apple_login(self, subject: str, device_id: str, name: str) -> dict[str, object]:
+        """Issue an app token after a caller has cryptographically verified Apple identity."""
+        device_id = self._device_id(device_id)
+        if not isinstance(subject, str) or not 6 <= len(subject) <= 255:
+            raise AuthError("Invalid Apple subject")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+            raise AuthError("Device name must contain between 1 and 80 characters")
+        now = self._clock()
+        token = secrets.token_urlsafe(32)
+        subject_hash = _digest("apple:" + subject)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            account = connection.execute(
+                "SELECT access FROM apple_accounts WHERE subject_hash=?", (subject_hash,)
+            ).fetchone()
+            access = account["access"] if account else "full"
+            connection.execute(
+                "INSERT INTO apple_accounts(subject_hash,created_at,last_login_at,access) VALUES(?,?,?,?) "
+                "ON CONFLICT(subject_hash) DO UPDATE SET last_login_at=excluded.last_login_at",
+                (subject_hash, now, now, access),
+            )
+            connection.execute(
+                "INSERT INTO device_tokens(token_hash,device_id,name,created_at,expires_at,access) VALUES(?,?,?,?,?,?)",
+                (_digest(token), device_id, name.strip(), now, now + self._token_ttl, access),
+            )
+        return {"token": token, "deviceId": device_id, "aiEnabled": access == "full"}
 
     def authenticate(self, token: str, device_id: str | None = None) -> dict[str, object]:
         if not isinstance(token, str) or not 32 <= len(token) <= 128:

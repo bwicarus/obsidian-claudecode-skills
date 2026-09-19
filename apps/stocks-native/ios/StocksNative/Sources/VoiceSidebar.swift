@@ -36,7 +36,10 @@ struct VoiceSidebar: View {
                 Button {
                     Task {
                         if voice.isStarted { await voice.stop() }
-                        else { await voice.start(client: model.client, deviceID: model.deviceID, stockCode: model.selectedCode) }
+                        else {
+                            await voice.start(client: model.client, deviceID: model.deviceID, stockCode: model.selectedCode)
+                            await model.publishVoiceContext(action: "开始语音对话")
+                        }
                     }
                 } label: {
                     Label(voice.isStarted ? "结束通话" : "开始语音", systemImage: voice.isStarted ? "stop.fill" : "mic.fill")

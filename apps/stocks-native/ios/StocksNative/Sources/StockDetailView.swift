@@ -7,15 +7,19 @@ struct StockDetailView: View {
     var body: some View {
         ScrollView {
             if let detail = model.detail {
+                let currentStock = model.displayedStock ?? detail.stock
                 VStack(alignment: .leading, spacing: 26) {
-                    header(detail.stock)
+                    header(currentStock)
                     if let error = model.detailError {
                         Label(error, systemImage: "exclamationmark.circle")
                             .font(.footnote).foregroundStyle(.red)
                     }
-                    CandleChart(candles: detail.candles,
-                                stockCode: detail.stock.code,
-                                annotations: model.annotations)
+                    QuoteMetricGrid(stock: currentStock)
+                    if !(currentStock.bids ?? []).isEmpty || !(currentStock.asks ?? []).isEmpty {
+                        OrderBookCard(stock: currentStock)
+                    }
+                    MarketChartSection(model: model, stockCode: detail.stock.code)
+                    StockAnalyticsSections(model: model, detail: detail)
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 5) {
                             Text("数据时间").font(.caption).foregroundStyle(.secondary)
@@ -42,7 +46,11 @@ struct StockDetailView: View {
                     .padding(.top, 80)
             }
         }
-        .refreshable { await model.loadDetail() }
+        .refreshable {
+            await model.loadDetail()
+            await model.loadRealtime()
+            await model.loadChart()
+        }
         .background(AppStyle.canvas)
     }
 
@@ -112,7 +120,7 @@ private struct CandlePriceMarks: ChartContent {
     }
 }
 
-private struct CandleChart: View {
+struct CandleChart: View {
     let candles: [Candle]
     let stockCode: String
     @ObservedObject var annotations: AnnotationStore

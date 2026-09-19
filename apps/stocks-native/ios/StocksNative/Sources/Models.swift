@@ -1,11 +1,39 @@
 import Foundation
 
+struct OrderLevel: Codable, Hashable {
+    let price: Double?
+    let volume: Double?
+}
+
 struct Stock: Codable, Identifiable, Hashable {
     let code: String
     let name: String
     let price: Double?
     let changePct: Double?
+    let changeAmount: Double?
     let turnover: Double?
+    let turnoverRate: Double?
+    let open: Double?
+    let high: Double?
+    let low: Double?
+    let prevClose: Double?
+    let volume: Double?
+    let marketCap: Double?
+    let floatMarketCap: Double?
+    let amplitude: Double?
+    let volumeRatio: Double?
+    let peDynamic: Double?
+    let pb: Double?
+    let speed: Double?
+    let change5m: Double?
+    let change60d: Double?
+    let changeYtd: Double?
+    let upLimit: Double?
+    let downLimit: Double?
+    let innerVolume: Double?
+    let outerVolume: Double?
+    let bids: [OrderLevel]?
+    let asks: [OrderLevel]?
     let sector: String?
     var id: String { code }
 }
@@ -20,15 +48,235 @@ struct Candle: Codable, Identifiable {
     var id: String { time }
 }
 
-struct StocksResponse: Decodable {
+struct IntradayPoint: Codable, Identifiable {
+    let time: String
+    let price: Double
+    let volume: Double
+    let averagePrice: Double?
+    var id: String { time }
+}
+
+struct IntradayResponse: Codable {
+    let code: String
+    let tradeDate: String
+    let previousClose: Double?
+    let rows: [IntradayPoint]
+    let warning: String?
+}
+
+struct KLineResponse: Codable {
+    let code: String
+    let period: String
+    let rows: [Candle]
+    let warning: String?
+}
+
+struct HotSector: Codable, Identifiable {
+    let code: String?
+    let name: String
+    let changePct: Double?
+    let netAmount: Double?
+    let netAmountRate: Double?
+    let tradeDate: String?
+    var id: String { code ?? name }
+}
+
+struct MarketOverview: Codable {
+    let asOf: String?
+    let rising: Int
+    let falling: Int
+    let flat: Int
+    let limitUp: Int
+    let limitDown: Int
+    let turnover: Double?
+    let northMoney: Double?
+    let southMoney: Double?
+    let hotSectors: [HotSector]
+}
+
+struct TechnicalMetrics: Codable {
+    let ma5: Double?
+    let ma10: Double?
+    let ma20: Double?
+    let ma60: Double?
+    let high60d: Double?
+    let volumeRatio5d: Double?
+    let macdDif: Double?
+    let macdDea: Double?
+    let macdHist: Double?
+    let kdjK: Double?
+    let kdjD: Double?
+    let kdjCrossDaysAgo: Double?
+    let profitRatio: Double?
+    let chipConcentration: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case ma5, ma10, ma20, ma60
+        case high60d = "high_60d"
+        case volumeRatio5d = "volume_ratio_5d"
+        case macdDif = "macd_dif"
+        case macdDea = "macd_dea"
+        case macdHist = "macd_hist"
+        case kdjK = "kdj_k"
+        case kdjD = "kdj_d"
+        case kdjCrossDaysAgo = "kdj_cross_days_ago"
+        case profitRatio = "profit_ratio"
+        case chipConcentration = "chip_concentration"
+    }
+}
+
+struct TechnicalHistory: Codable, Identifiable {
+    let tradeDate: String
+    let macdDif: Double?
+    let macdDea: Double?
+    let macdHist: Double?
+    let kdjK: Double?
+    let kdjD: Double?
+    var id: String { tradeDate }
+
+    enum CodingKeys: String, CodingKey {
+        case tradeDate
+        case macdDif = "macd_dif"
+        case macdDea = "macd_dea"
+        case macdHist = "macd_hist"
+        case kdjK = "kdj_k"
+        case kdjD = "kdj_d"
+    }
+}
+
+struct TechnicalPanel: Codable {
+    let asOf: String?
+    let metrics: TechnicalMetrics
+    let history: [TechnicalHistory]
+}
+
+struct FundMetrics: Codable {
+    let latestMainInflow: Double?
+    let mainInflow5d: Double?
+    let latestMainRatio: Double?
+    let buySmallAmount: Double?
+    let sellSmallAmount: Double?
+    let buyMediumAmount: Double?
+    let sellMediumAmount: Double?
+    let buyLargeAmount: Double?
+    let sellLargeAmount: Double?
+    let buyExtraLargeAmount: Double?
+    let sellExtraLargeAmount: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case latestMainInflow = "latest_main_inflow"
+        case mainInflow5d = "main_inflow_5d"
+        case latestMainRatio = "latest_main_ratio"
+        case buySmallAmount = "buy_sm_amount"
+        case sellSmallAmount = "sell_sm_amount"
+        case buyMediumAmount = "buy_md_amount"
+        case sellMediumAmount = "sell_md_amount"
+        case buyLargeAmount = "buy_lg_amount"
+        case sellLargeAmount = "sell_lg_amount"
+        case buyExtraLargeAmount = "buy_elg_amount"
+        case sellExtraLargeAmount = "sell_elg_amount"
+    }
+}
+
+struct FundHistory: Codable, Identifiable {
+    let tradeDate: String
+    let latestMainInflow: Double?
+    let latestMainRatio: Double?
+    var id: String { tradeDate }
+
+    enum CodingKeys: String, CodingKey {
+        case tradeDate
+        case latestMainInflow = "latest_main_inflow"
+        case latestMainRatio = "latest_main_ratio"
+    }
+}
+
+struct FundPanel: Codable {
+    let asOf: String?
+    let metrics: FundMetrics
+    let history: [FundHistory]
+}
+
+struct ChipPanel: Codable {
+    let asOf: String?
+    let low: Double?
+    let high: Double?
+    let cost5: Double?
+    let cost15: Double?
+    let cost50: Double?
+    let cost85: Double?
+    let cost95: Double?
+    let average: Double?
+    let winnerRate: Double?
+}
+
+struct PeerStock: Codable, Identifiable {
+    let code: String
+    let name: String
+    let price: Double?
+    let changePct: Double?
+    let turnoverRate: Double?
+    let marketCap: Double?
+    var id: String { code }
+}
+
+struct Announcement: Codable, Identifiable {
+    let title: String?
+    let date: String?
+    let category: String?
+    let url: String?
+    var id: String { url ?? "\(date ?? "")-\(title ?? "")" }
+}
+
+struct StocksResponse: Codable {
     let asOf: String?
     let items: [Stock]
 }
 
-struct StockResponse: Decodable {
+struct StockResponse: Codable {
     let asOf: String?
     let stock: Stock
     let candles: [Candle]
+    let technical: TechnicalPanel?
+    let fund: FundPanel?
+    let chips: ChipPanel?
+    let peers: [PeerStock]?
+    let concepts: [String]?
+    let announcements: [Announcement]?
+}
+
+struct RealtimeResponse: Codable {
+    let items: [Stock]
+    let warning: String?
+}
+
+enum ChartPeriod: String, CaseIterable, Identifiable {
+    case intraday, m5, m15, m30, m60, day, week, month
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .intraday: return "分时"
+        case .m5: return "5分"
+        case .m15: return "15分"
+        case .m30: return "30分"
+        case .m60: return "60分"
+        case .day: return "日K"
+        case .week: return "周K"
+        case .month: return "月K"
+        }
+    }
+}
+
+struct VoiceUIContext: Codable {
+    let screen: String
+    let selectedCode: String?
+    let selectedName: String?
+    let quoteAsOf: String?
+    let chartPeriod: String
+    let latestPointTime: String?
+    let metrics: [String: String]
+    let visiblePanels: [String]
+    let recentActions: [String]
 }
 
 struct PairResponse: Decodable {

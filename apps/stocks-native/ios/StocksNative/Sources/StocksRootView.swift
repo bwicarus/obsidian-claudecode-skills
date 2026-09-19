@@ -1,3 +1,6 @@
+import AuthenticationServices
+import CryptoKit
+import Security
 import SwiftUI
 
 enum AppStyle {
@@ -13,6 +16,10 @@ enum AppStyle {
     }
     static func price(_ value: Double?) -> String { value.map { String(format: "%.2f", $0) } ?? "—" }
     static func change(_ value: Double?) -> String { value.map { String(format: "%+.2f%%", $0) } ?? "—" }
+    static func percent(_ value: Double?) -> String { value.map { String(format: "%.2f%%", $0) } ?? "—" }
+    static func compact(_ value: Double?) -> String {
+        value?.formatted(.number.notation(.compactName).precision(.fractionLength(0...2))) ?? "—"
+    }
 }
 
 struct StocksRootView: View {
@@ -55,7 +62,7 @@ struct StocksRootView: View {
                 .onChange(of: geometry.size.width) { _, width in detailWidth = width }
             }
             .background(AppStyle.canvas)
-            .navigationTitle(model.detail?.stock.name ?? "市场概览")
+            .navigationTitle(model.displayedStock?.name ?? "市场概览")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -76,7 +83,11 @@ struct StocksRootView: View {
             }
         }
         .task {
-            if model.isPaired { await model.loadStocks() }
+            await model.maintainCache()
+            if model.isPaired {
+                await model.loadOverview()
+                await model.loadStocks()
+            }
             else { showingSettings = true }
         }
         .task(id: model.query) {
@@ -86,6 +97,18 @@ struct StocksRootView: View {
         .task(id: model.selectedCode) {
             if let code = model.selectedCode { await model.voice.selectStock(code) }
             await model.loadDetail()
+            if let code = model.selectedCode { await model.publishVoiceContext(action: "打开股票：\(code)") }
+        }
+        .task(id: "\(model.selectedCode ?? ""):\(model.chartPeriod.rawValue)") {
+            await model.loadChart()
+            await model.publishVoiceContext(action: "切换图表：\(model.chartPeriod.title)")
+        }
+        .task(id: scenePhase) {
+            guard scenePhase == .active, model.isPaired else { return }
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(10)) } catch { return }
+                await model.refreshLiveData()
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             // MVP does not promise background audio; explicitly release its session when backgrounded.
@@ -104,6 +127,7 @@ struct StocksRootView: View {
                     Button("配对此设备") { showingSettings = true }.buttonStyle(.borderedProminent)
                 }
             } else {
+                if let overview = model.overview { MarketPulseStrip(overview: overview) }
                 if let error = model.listError {
                     Text(error).font(.caption).foregroundStyle(.red).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -135,16 +159,64 @@ private struct StockRow: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(stock.name).font(.system(.body, design: .rounded, weight: .medium)).lineLimit(1)
-                Text(stock.code).font(.caption).monospaced().foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text(stock.code).monospaced()
+                    if let sector = stock.sector, !sector.isEmpty {
+                        Text("·").foregroundStyle(.tertiary)
+                        Text(sector).lineLimit(1)
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 5) {
                 Text(AppStyle.price(stock.price)).font(.system(.body, design: .rounded, weight: .semibold))
                 Text(AppStyle.change(stock.changePct)).font(.caption).foregroundStyle(AppStyle.movement(stock.changePct))
+                if let rate = stock.turnoverRate {
+                    Text("换 \(AppStyle.percent(rate))").font(.caption2).foregroundStyle(.secondary)
+                }
             }
             .monospacedDigit()
         }
         .padding(.vertical, 6)
+    }
+}
+
+private struct MarketPulseStrip: View {
+    let overview: MarketOverview
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                pulse("涨", overview.rising, AppStyle.up)
+                pulse("跌", overview.falling, AppStyle.down)
+                pulse("平", overview.flat, .secondary)
+                Spacer(minLength: 4)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("成交额").font(.caption2).foregroundStyle(.secondary)
+                    Text(AppStyle.compact(overview.turnover)).font(.caption.monospacedDigit())
+                }
+            }
+            HStack(spacing: 14) {
+                Text("涨停 \(overview.limitUp)").foregroundStyle(AppStyle.up)
+                Text("跌停 \(overview.limitDown)").foregroundStyle(AppStyle.down)
+                if let sector = overview.hotSectors.first {
+                    Spacer()
+                    Text("热 · \(sector.name)").lineLimit(1)
+                    Text(AppStyle.change(sector.changePct)).foregroundStyle(AppStyle.movement(sector.changePct))
+                }
+            }
+            .font(.caption2)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .background(.white)
+    }
+
+    private func pulse(_ title: String, _ value: Int, _ color: Color) -> some View {
+        HStack(spacing: 3) {
+            Text(title).foregroundStyle(.secondary)
+            Text(String(value)).foregroundStyle(color).monospacedDigit().fontWeight(.semibold)
+        }
+        .font(.caption)
     }
 }
 
@@ -155,6 +227,7 @@ struct PairingView: View {
     @State private var code = ""
     @State private var isPairing = false
     @State private var error: String?
+    @State private var appleNonce: String?
 
     var body: some View {
         NavigationStack {
@@ -168,31 +241,59 @@ struct PairingView: View {
                 Section("服务连接") {
                     TextField("HTTPS 服务地址", text: $base)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                    SecureField("配对码", text: $code)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    Button {
+                    SignInWithAppleButton(.signIn) { request in
+                        let nonce = randomNonce()
+                        appleNonce = nonce
+                        request.requestedScopes = [.fullName, .email]
+                        request.nonce = SHA256.hash(data: Data(nonce.utf8)).map { String(format: "%02x", $0) }.joined()
+                    } onCompletion: { result in
+                        guard case .success(let authorization) = result,
+                              let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+                              let tokenData = credential.identityToken,
+                              let identityToken = String(data: tokenData, encoding: .utf8),
+                              let nonce = appleNonce else {
+                            if case .failure(let failure) = result { error = failure.localizedDescription }
+                            return
+                        }
                         isPairing = true
                         error = nil
                         Task {
                             do {
-                                try await model.pair(base: base, code: code)
-                                code = ""
+                                try await model.signInWithApple(base: base, identityToken: identityToken, rawNonce: nonce)
                                 dismiss()
                             } catch { self.error = error.localizedDescription }
+                            appleNonce = nil
                             isPairing = false
                         }
-                    } label: {
-                        HStack {
-                            Text(model.isPaired ? "重新配对" : "配对此设备")
-                            Spacer()
-                            if isPairing { ProgressView() } else { Image(systemName: "arrow.right") }
-                        }
                     }
-                    .disabled(isPairing || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .signInWithAppleButtonStyle(.black)
+                    .frame(height: 48)
+                    .disabled(isPairing)
                     if let error { Text(error).foregroundStyle(.red).font(.footnote) }
                 }
+                Section {
+                    DisclosureGroup("审核与开发连接") {
+                        SecureField("配对码", text: $code)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        Button(model.isPaired ? "使用配对码重新连接" : "使用配对码连接") {
+                            isPairing = true
+                            error = nil
+                            Task {
+                                do {
+                                    try await model.pair(base: base, code: code)
+                                    code = ""
+                                    dismiss()
+                                } catch { self.error = error.localizedDescription }
+                                isPairing = false
+                            }
+                        }
+                        .disabled(isPairing || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                } footer: {
+                    Text("普通用户使用 Apple ID；配对码只用于审核受限账号和开发诊断。")
+                }
                 Section("设备") {
-                    LabeledContent("版本", value: "0.2.1")
+                    LabeledContent("版本", value: "0.2.2")
                     Text(model.deviceID).font(.caption).monospaced().textSelection(.enabled)
                     if model.isPaired {
                         Button("移除此设备的凭证", role: .destructive) {
@@ -209,5 +310,22 @@ struct PairingView: View {
         .tint(AppStyle.accent)
         .onAppear { base = model.baseURL }
         .interactiveDismissDisabled(isPairing)
+    }
+
+    private func randomNonce(length: Int = 32) -> String {
+        let characters = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+        var result = ""
+        var remaining = length
+        while remaining > 0 {
+            var bytes = [UInt8](repeating: 0, count: 16)
+            guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+                return UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            }
+            for byte in bytes where remaining > 0 && Int(byte) < characters.count {
+                result.append(characters[Int(byte)])
+                remaining -= 1
+            }
+        }
+        return result
     }
 }
