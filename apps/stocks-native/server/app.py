@@ -82,7 +82,9 @@ async def voice(request):
     device_id = request.query.get('deviceId')
     if not device_id:
         raise AuthError('Missing device')
-    await identity(request, device_id)
+    caller = await identity(request, device_id)
+    if not caller["aiEnabled"]:
+        return web.json_response({'error': '审核账号未开放 AI 助手'}, status=403)
     active = request.app['voices']
     if device_id in active:
         return web.json_response({'error': '该设备已有通话，请先结束原通话'}, status=409)

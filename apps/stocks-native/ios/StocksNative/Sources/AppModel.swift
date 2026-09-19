@@ -6,6 +6,7 @@ import UIKit
 final class AppModel: ObservableObject {
     @Published private(set) var baseURL: String
     @Published private(set) var isPaired: Bool
+    @Published private(set) var isAIEnabled: Bool
     @Published var query = ""
     @Published var selectedCode: String?
     @Published private(set) var stocks: [Stock] = []
@@ -25,6 +26,7 @@ final class AppModel: ObservableObject {
         let initialBase = UserDefaults.standard.string(forKey: "stocksNative.baseURL") ?? "https://bwicarus.space/stocks-native"
         baseURL = initialBase
         isPaired = Credentials.token(baseURL: initialBase) != nil
+        isAIEnabled = isPaired ? (UserDefaults.standard.object(forKey: "stocksNative.aiEnabled") as? Bool ?? true) : false
         let savedID = UserDefaults.standard.string(forKey: "stocksNative.deviceID") ?? UUID().uuidString
         deviceID = savedID
         UserDefaults.standard.set(savedID, forKey: "stocksNative.deviceID")
@@ -48,6 +50,8 @@ final class AppModel: ObservableObject {
         let result = try await pairClient.pair(code: code, deviceID: deviceID, name: UIDevice.current.name)
         guard result.deviceId == deviceID, !result.token.isEmpty else { throw AppError.message("服务器返回的设备凭证不匹配。") }
         try Credentials.save(token: result.token, baseURL: normalized.absoluteString)
+        isAIEnabled = result.aiEnabled ?? true
+        UserDefaults.standard.set(isAIEnabled, forKey: "stocksNative.aiEnabled")
         await voice.stop()
         listGeneration = UUID()
         detailGeneration = UUID()
@@ -65,6 +69,8 @@ final class AppModel: ObservableObject {
         await voice.stop()
         Credentials.delete(baseURL: baseURL)
         isPaired = false
+        isAIEnabled = false
+        UserDefaults.standard.removeObject(forKey: "stocksNative.aiEnabled")
         listGeneration = UUID()
         detailGeneration = UUID()
         stocks = []

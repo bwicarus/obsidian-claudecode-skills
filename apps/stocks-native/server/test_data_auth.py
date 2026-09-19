@@ -8,7 +8,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from auth import AuthError, AuthStore
+from auth import AuthError, AuthStore, REVIEW_PAIRING_TTL_SECONDS
 from data import DataUnavailable, StockDataStore, StockNotFound
 
 
@@ -65,6 +65,25 @@ class AuthTests(unittest.TestCase):
         other = AuthStore(Path(self.directory.name) / "other", clock=lambda: self.now)
         with self.assertRaises(AuthError):
             other.authenticate(receipt["token"])
+
+    def test_review_code_is_long_lived_single_use_and_disables_ai(self):
+        with self.assertRaises(ValueError):
+            self.store.create_pairing_code(601)
+        result = self.store.create_review_pairing_code()
+        self.assertEqual(result["validForSeconds"], REVIEW_PAIRING_TTL_SECONDS)
+        self.assertFalse(result["aiEnabled"])
+        self.now += 601
+        receipt = self.store.pair(result["code"], "apple-review", "App Review")
+        self.assertFalse(receipt["aiEnabled"])
+        self.assertFalse(self.store.authenticate(receipt["token"])["aiEnabled"])
+        with self.assertRaises(AuthError):
+            self.store.pair(result["code"], "apple-review-2", "App Review 2")
+
+    def test_review_code_expires_after_seven_days(self):
+        result = self.store.create_review_pairing_code()
+        self.now += REVIEW_PAIRING_TTL_SECONDS
+        with self.assertRaises(AuthError):
+            self.store.pair(result["code"], "apple-review", "App Review")
 
 
 class DataTests(unittest.TestCase):

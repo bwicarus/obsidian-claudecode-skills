@@ -26,6 +26,7 @@ from typing import Callable
 
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 PAIRING_TTL_SECONDS = 600
+REVIEW_PAIRING_TTL_SECONDS = 7 * 24 * 60 * 60
 TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60
 
 
@@ -57,7 +58,8 @@ class AuthStore:
                     code_hash TEXT PRIMARY KEY,
                     created_at REAL NOT NULL,
                     expires_at REAL NOT NULL,
-                    used_at REAL
+                    used_at REAL,
+                    access TEXT NOT NULL DEFAULT 'full'
                 );
                 CREATE TABLE IF NOT EXISTS device_tokens (
                     token_hash TEXT PRIMARY KEY,
@@ -65,11 +67,14 @@ class AuthStore:
                     name TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     expires_at REAL NOT NULL,
-                    revoked_at REAL
+                    revoked_at REAL,
+                    access TEXT NOT NULL DEFAULT 'full'
                 );
                 CREATE INDEX IF NOT EXISTS idx_device_tokens_device
                     ON device_tokens(device_id);
             """)
+            self._ensure_column(connection, "pairing_codes", "access", "TEXT NOT NULL DEFAULT 'full'")
+            self._ensure_column(connection, "device_tokens", "access", "TEXT NOT NULL DEFAULT 'full'")
         if os.name != "nt":
             self.db_path.chmod(0o600)
 
@@ -85,6 +90,12 @@ class AuthStore:
             connection.close()
 
     @staticmethod
+    def _ensure_column(connection, table: str, column: str, definition: str) -> None:
+        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @staticmethod
     def _device_id(value: str) -> str:
         if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value):
             raise AuthError("Invalid device identifier")
@@ -94,13 +105,23 @@ class AuthStore:
         ttl = int(ttl_seconds)
         if not 1 <= ttl <= PAIRING_TTL_SECONDS:
             raise ValueError("Pairing code lifetime must be between 1 and 600 seconds")
+        return self._create_pairing_code(ttl, "full")
+
+    def create_review_pairing_code(self) -> dict[str, object]:
+        """Create an administrator-only, single-use code with AI disabled."""
+        result = self._create_pairing_code(REVIEW_PAIRING_TTL_SECONDS, "review")
+        result["purpose"] = "app-review"
+        result["aiEnabled"] = False
+        return result
+
+    def _create_pairing_code(self, ttl: int, access: str) -> dict[str, object]:
         now = self._clock()
         raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
         with self._connect() as connection:
             connection.execute("DELETE FROM pairing_codes WHERE expires_at <= ? OR used_at IS NOT NULL", (now,))
             connection.execute(
-                "INSERT INTO pairing_codes(code_hash,created_at,expires_at) VALUES(?,?,?)",
-                (_digest(raw), now, now + ttl),
+                "INSERT INTO pairing_codes(code_hash,created_at,expires_at,access) VALUES(?,?,?,?)",
+                (_digest(raw), now, now + ttl, access),
             )
         return {"code": raw[:4] + "-" + raw[4:], "expiresAt": _iso(now + ttl), "validForSeconds": ttl}
 
@@ -119,16 +140,16 @@ class AuthStore:
             # The lock covers validation and redemption, including across workers.
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT expires_at,used_at FROM pairing_codes WHERE code_hash=?", (_digest(normalized),)
+                "SELECT expires_at,used_at,access FROM pairing_codes WHERE code_hash=?", (_digest(normalized),)
             ).fetchone()
             if row is None or row["used_at"] is not None or row["expires_at"] <= now:
                 raise AuthError("Invalid or expired pairing code")
             connection.execute("UPDATE pairing_codes SET used_at=? WHERE code_hash=?", (now, _digest(normalized)))
             connection.execute(
-                "INSERT INTO device_tokens(token_hash,device_id,name,created_at,expires_at) VALUES(?,?,?,?,?)",
-                (_digest(token), device_id, name.strip(), now, now + self._token_ttl),
+                "INSERT INTO device_tokens(token_hash,device_id,name,created_at,expires_at,access) VALUES(?,?,?,?,?,?)",
+                (_digest(token), device_id, name.strip(), now, now + self._token_ttl, row["access"]),
             )
-        return {"token": token, "deviceId": device_id}
+        return {"token": token, "deviceId": device_id, "aiEnabled": row["access"] == "full"}
 
     def authenticate(self, token: str, device_id: str | None = None) -> dict[str, object]:
         if not isinstance(token, str) or not 32 <= len(token) <= 128:
@@ -137,14 +158,15 @@ class AuthStore:
             device_id = self._device_id(device_id)
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT device_id,name,created_at,expires_at,revoked_at FROM device_tokens WHERE token_hash=?",
+                "SELECT device_id,name,created_at,expires_at,revoked_at,access FROM device_tokens WHERE token_hash=?",
                 (_digest(token),),
             ).fetchone()
         if row is None or row["revoked_at"] is not None or row["expires_at"] <= self._clock() \
                 or (device_id is not None and not secrets.compare_digest(device_id, row["device_id"])):
             raise AuthError("Invalid or expired device token")
         return {"deviceId": row["device_id"], "name": row["name"],
-                "createdAt": _iso(row["created_at"]), "expiresAt": _iso(row["expires_at"])}
+                "createdAt": _iso(row["created_at"]), "expiresAt": _iso(row["expires_at"]),
+                "aiEnabled": row["access"] == "full"}
 
     def revoke_device(self, device_id: str) -> int:
         device_id = self._device_id(device_id)
@@ -161,12 +183,15 @@ def main() -> None:
     parser.add_argument("--state-dir", default=os.environ.get("STOCKS_MVP_STATE_DIR"))
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("create-code", help="Print a new single-use code valid for ten minutes")
+    subparsers.add_parser("create-review-code", help="Print a single-use seven-day App Review code with AI disabled")
     revoke = subparsers.add_parser("revoke-device", help="Revoke every token for a device")
     revoke.add_argument("device_id")
     arguments = parser.parse_args()
     store = AuthStore(arguments.state_dir)
     if arguments.command == "create-code":
         print(json.dumps(store.create_pairing_code(), ensure_ascii=False))
+    elif arguments.command == "create-review-code":
+        print(json.dumps(store.create_review_pairing_code(), ensure_ascii=False))
     else:
         print(json.dumps({"revoked": store.revoke_device(arguments.device_id)}))
 

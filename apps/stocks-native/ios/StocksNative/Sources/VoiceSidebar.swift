@@ -26,6 +26,10 @@ struct VoiceSidebar: View {
                 if let error = voice.error {
                     Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
                 }
+                if model.isPaired && !model.isAIEnabled {
+                    Label("审核账号未开放 AI 助手", systemImage: "lock.shield")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if let code = voice.stockCode, voice.isStarted {
                     Text("当前股票 · \(code)").font(.caption).foregroundStyle(.secondary)
                 }
@@ -40,7 +44,7 @@ struct VoiceSidebar: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(voice.isStarted ? Color.secondary : AppStyle.accent)
-                .disabled(!model.isPaired)
+                .disabled(!model.isPaired || !model.isAIEnabled)
                 if showDiagnostics {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("上行 \(voice.sentPackets) 包 · 下行 \(voice.receivedPackets) 包")
@@ -57,7 +61,16 @@ struct VoiceSidebar: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
-                        if voice.transcripts.isEmpty {
+                        if !model.isAIEnabled {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("AI 功能未开放")
+                                    .font(.system(.title3, design: .rounded, weight: .medium))
+                                    .foregroundStyle(AppStyle.ink)
+                                Text("审核账号可验证股票搜索、原生 K 线、成交量和图表标注；AI 助手不会消耗任何额度。")
+                                    .font(.subheadline).foregroundStyle(.secondary).lineSpacing(4)
+                            }
+                            .padding(.top, 16)
+                        } else if voice.transcripts.isEmpty {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("边看行情，边聊想法。")
                                     .font(.system(.title3, design: .rounded, weight: .medium))

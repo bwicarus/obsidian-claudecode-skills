@@ -34,6 +34,7 @@ struct StockResponse: Decodable {
 struct PairResponse: Decodable {
     let token: String
     let deviceId: String
+    let aiEnabled: Bool?
 }
 
 struct VoiceEvent: Decodable {
