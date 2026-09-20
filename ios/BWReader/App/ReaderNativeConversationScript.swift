@@ -9,11 +9,12 @@ enum ReaderNativeConversationScript {
       if (window !== window.top || window.__bwNativeConversation) return;
       const handler = window.webkit?.messageHandlers?.bwNativeConversation;
       if (!handler || typeof handler.postMessage !== 'function') return;
-      let nativeMode = false, legacyVisible = false, savedDrawer = null;
+      let legacyVisible = false;
       let thread = null, threadObserver = null, timer = null, revision = 0;
       let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null;
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
-      let nativeActivated = false, drawerMutation = false, controls = null, controlsObserver = null, suspended = false;
+      let controls = null, controlsObserver = null, suspended = false;
+      let drawerElement = null, drawerObserver = null;
       const navigationID = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
       const hooked = new WeakMap();
       const text = (value, limit = 32000) => typeof value === 'string' ? value.slice(0, limit) : '';
@@ -170,6 +171,7 @@ enum ReaderNativeConversationScript {
       }
       function capabilities() {
         const out = ['refresh', 'showLegacy', 'hideLegacy'];
+        if (typeof drawer()?.open === 'function' && typeof drawer()?.close === 'function') out.push('toggleAssistant');
         if (typeof window.__asstSend === 'function') out.push('send');
         if (document.getElementById('asst-send')) out.push('stop');
         if (typeof rc().assistant?.openModelSettings === 'function') out.push('openModels');
@@ -183,38 +185,18 @@ enum ReaderNativeConversationScript {
         return out;
       }
       function applyVisualMode() {
-        const active = nativeMode && isReady() && !legacyVisible;
-        document.documentElement.classList.toggle('bw-native-conversation-active', active);
-      }
-      function saveDrawer() {
-        if (!savedDrawer) savedDrawer = { open: isOpen(), tab: activeTab() };
-      }
-      function activateHiddenReader() {
-        if (!nativeMode || legacyVisible || !isReady()) return;
-        saveDrawer();
-        drawerMutation = true;
-        try { if (!isOpen() || activeTab() !== 'asst') drawer()?.open('asst'); } finally { drawerMutation = false; }
-        nativeActivated = true;
-        applyVisualMode();
+        // Drawer visibility routes generated cards to sidebar or book/float.
+        // Never fake an open drawer merely to read its conversation state.
+        document.documentElement.classList.remove('bw-native-conversation-active');
       }
       function setLegacy(visible) {
         legacyVisible = !!visible;
         applyVisualMode();
-        if (visible) { nativeActivated = false; drawer()?.open('asst'); }
-        else activateHiddenReader();
+        if (visible) drawer()?.open('asst');
         schedule();
       }
       function setNativeMode(enabled) {
-        nativeMode = enabled === true;
-        if (nativeMode) activateHiddenReader();
-        else {
-          legacyVisible = false; nativeActivated = false; applyVisualMode();
-          if (savedDrawer) {
-            const previous = savedDrawer; savedDrawer = null;
-            if (previous.open) drawer()?.open(previous.tab);
-            else { drawer()?.setTab(previous.tab); drawer()?.close(); }
-          }
-        }
+        applyVisualMode();
         schedule();
         return { ok: true };
       }
@@ -234,7 +216,7 @@ enum ReaderNativeConversationScript {
         const messages = all.filter(node => !excludedNodes.has(node)).map(projectMessage).filter(Boolean);
         previousNodes = all;
         const payload = { version: 1, scope, revision: 0, title: text(document.title, 160) || '阅读助手', ready: isReady(), busy: isBusy(),
-          legacyVisible, conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          legacyVisible, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -273,14 +255,19 @@ enum ReaderNativeConversationScript {
           const original = owner[name];
           owner[name] = function (...args) {
             const result = original.apply(this, args);
-            if (nativeMode && !drawerMutation && name !== 'close' && args[0] && args[0] !== 'asst') {
-              legacyVisible = true; nativeActivated = false; applyVisualMode();
-            }
             schedule(); return result;
           };
         });
       }
       function discover() {
+        const currentDrawer = document.getElementById('ep-side') || document.getElementById('grammar-panel');
+        if (currentDrawer !== drawerElement) {
+          drawerObserver?.disconnect(); drawerElement = currentDrawer;
+          if (drawerElement) {
+            drawerObserver = new MutationObserver(schedule);
+            drawerObserver.observe(drawerElement, { attributes: true, attributeFilter: ['class'] });
+          }
+        }
         const current = document.getElementById('asst-thread');
         if (current !== thread) {
           threadObserver?.disconnect(); thread = current;
@@ -295,7 +282,7 @@ enum ReaderNativeConversationScript {
           if (controls) { controlsObserver = new MutationObserver(schedule); controlsObserver.observe(controls, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'title', 'placeholder'] }); }
         }
         observeDrawer();
-        if (!nativeActivated) activateHiddenReader();
+        applyVisualMode();
         wrapNotifications(rc().turnCard, ['addPart', 'draftText', 'freezeDraft', 'reconcile', 'cliPart', 'busy', 'idle', 'status', 'progress', 'drop', 'rename', 'reset']);
         if (!accountSubscription && account()?.subscribe) accountSubscription = account().subscribe(schedule);
       }
@@ -323,6 +310,10 @@ enum ReaderNativeConversationScript {
               const pending = window.__asstSend(command.text.trim());
               if (pending?.catch) pending.catch(schedule);
             }
+          } else if (action === 'toggleAssistant') {
+            if (!drawer()?.open || !drawer()?.close) return { ok: false, error: '侧栏尚未准备好' };
+            if (isOpen() && activeTab() === 'asst') drawer().close();
+            else drawer().open('asst');
           } else if (action === 'stop') {
             const button = document.getElementById('asst-send');
             if (!button?.classList.contains('stop') || button.disabled) return { ok: false, error: '当前没有可停止的文字回复' };
@@ -356,27 +347,14 @@ enum ReaderNativeConversationScript {
           return { ok: true };
         } catch (_) { return { ok: false, error: '操作未完成，请在原界面重试' }; }
       }
-      const style = document.createElement('style');
-      style.id = 'bw-native-conversation-style';
-      style.textContent = `
-        html.bw-native-conversation-active #ep-side,html.bw-native-conversation-active #grammar-panel,
-        html.bw-native-conversation-active #ep-side-handle,html.bw-native-conversation-active #side-handle,
-        html.bw-native-conversation-active #asst-fab{visibility:hidden!important;pointer-events:none!important}
-        html.bw-native-conversation-active body #main,html.bw-native-conversation-active body #header,
-        html.bw-native-conversation-active body #result-mask,html.bw-native-conversation-active body #ep-viewer,
-        html.bw-native-conversation-active body #html-content{margin-right:0!important;right:0!important}
-        html.bw-native-conversation-active body #main,html.bw-native-conversation-active body #header,
-        html.bw-native-conversation-active body #result-mask{padding-right:0!important}
-        html.bw-native-conversation-active body #ep-content,html.bw-native-conversation-active body #ep-top{padding-right:0!important}
-      `;
-      (document.head || document.documentElement).appendChild(style);
+      document.getElementById('bw-native-conversation-style')?.remove();
       const mountObserver = new MutationObserver(records => {
         if (!thread || !thread.isConnected || records.some(record => Array.from(record.addedNodes).some(node => node.nodeType === 1 && (['asst-thread', 'asst-input', 'asst-computer', 'asst-call'].includes(node.id) || node.querySelector?.('#asst-thread,#asst-input,#asst-computer,#asst-call'))))) schedule();
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
       ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
-      window.addEventListener('pageshow', () => { suspended = false; mountObserver.observe(document.documentElement, { childList: true, subtree: true }); thread = null; controls = null; schedule(); });
-      window.addEventListener('pagehide', () => { suspended = true; threadObserver?.disconnect(); controlsObserver?.disconnect(); mountObserver.disconnect(); if (timer != null) clearTimeout(timer); timer = null; });
+      window.addEventListener('pageshow', () => { suspended = false; mountObserver.observe(document.documentElement, { childList: true, subtree: true }); thread = null; controls = null; drawerElement = null; schedule(); });
+      window.addEventListener('pagehide', () => { suspended = true; threadObserver?.disconnect(); controlsObserver?.disconnect(); drawerObserver?.disconnect(); mountObserver.disconnect(); if (timer != null) clearTimeout(timer); timer = null; });
       window.__bwNativeConversation = Object.freeze({ perform, setNativeMode, snapshot: () => { lastSignature = ''; snapshot(); } });
       schedule();
     })();

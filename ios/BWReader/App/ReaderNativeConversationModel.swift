@@ -84,6 +84,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var ready = false
     @Published private(set) var busy = false
     @Published private(set) var legacyVisible = false
+    @Published private(set) var sidebarOpen = false
     @Published private(set) var messages: [ReaderNativeConversationMessage] = []
     @Published private(set) var capabilities = Set<String>()
     @Published private(set) var voice = ReaderNativeConversationVoice()
@@ -129,6 +130,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         ready = payload["ready"] as? Bool ?? false
         busy = payload["busy"] as? Bool ?? false
         legacyVisible = payload["legacyVisible"] as? Bool ?? false
+        sidebarOpen = payload["sidebarOpen"] as? Bool ?? false
         capabilities = Set(payload["capabilities"] as? [String] ?? [])
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
         messages = nextMessages
@@ -145,6 +147,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         ready = false
         busy = false
         legacyVisible = false
+        sidebarOpen = false
         messages = []
         capabilities = []
         voice = ReaderNativeConversationVoice()
@@ -165,7 +168,7 @@ final class ReaderNativeConversationModel: ObservableObject {
             error = "当前页面尚未提供这项操作。"
             return false
         }
-        guard ready || ["refresh", "showLegacy", "hideLegacy"].contains(action) else {
+        guard ready || ["refresh", "showLegacy", "hideLegacy", "toggleAssistant"].contains(action) else {
             error = "助手仍在准备，请稍后重试。"
             return false
         }

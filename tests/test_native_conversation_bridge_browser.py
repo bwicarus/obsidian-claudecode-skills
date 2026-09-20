@@ -62,9 +62,13 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertIn('openTOC', first['capabilities'])
             self.assertFalse(page.evaluate("document.documentElement.classList.contains('bw-native-conversation-active')"))
             page.evaluate('__bwNativeConversation.setNativeMode(true)')
-            self.assertEqual(page.locator('#ep-side').evaluate('(n)=>getComputedStyle(n).visibility'), 'hidden')
+            self.assertNotEqual(page.locator('#ep-side').evaluate('(n)=>getComputedStyle(n).visibility'), 'hidden')
             self.assertEqual(page.locator('#main').evaluate('(n)=>getComputedStyle(n).paddingRight'), '0px')
-            self.assertTrue(page.evaluate('RC.sidedrawer.isOpen()'))
+            self.assertFalse(page.evaluate('RC.sidedrawer.isOpen()'))
+            self.assertFalse(snapshot()['sidebarOpen'])
+            page.evaluate('__bwNativeConversation.perform({action:"toggleAssistant"})')
+            self.assertTrue(snapshot()['sidebarOpen'])
+            self.assertEqual(page.locator('#main').evaluate('(n)=>getComputedStyle(n).paddingRight'), '320px')
             page.evaluate("RC.turnCard.draftText('user:u','我的','user','u-item','runner')")
             user = snapshot()['messages'][0]
             page.evaluate("RC.turnCard.draftText('user:u','我的问题','user','u-item','runner');RC.turnCard.freezeDraft('user:u','u-item','runner','user')")
@@ -154,10 +158,98 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             snapshot()
             page.evaluate("RC.turnCard.draftText('new-account','恢复后继续','user')")
             self.assertEqual(snapshot()['messages'][0]['text'], '恢复后继续')
-            page.evaluate('__bwNativeConversation.setNativeMode(false)')
+            page.evaluate("RC.sidedrawer.setTab('toc');RC.sidedrawer.close();__bwNativeConversation.setNativeMode(false)")
             self.assertFalse(page.evaluate('RC.sidedrawer.isOpen()'))
             self.assertEqual(page.locator('.ep-side-tab.active').get_attribute('data-pane'), 'toc')
             self.assertNotEqual(page.locator('#ep-side').evaluate('(n)=>getComputedStyle(n).visibility'), 'hidden')
+            self.assertEqual(errors, [])
+            browser.close()
+
+
+    def test_original_card_drag_closed_delivery_and_selection(self):
+        source = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
+        figures = (ROOT / '_server_deploy/static/pdf/reader.src/26-figures.js').read_text(encoding='utf-8')
+        focus = figures[figures.index('  window.__focusSel = null;'):figures.index('  window.__renderFocusSel = _renderFocusSel;') + len('  window.__renderFocusSel = _renderFocusSel;')]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
+            page = browser.new_page(viewport={'width': 1200, 'height': 900})
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.route('**/*', lambda route: route.fulfill(status=200, content_type='text/html', body='<html><body></body></html>') if route.request.url == 'http://reader.test/' else route.abort())
+            page.goto('http://reader.test/')
+            page.set_content('''<title>交互验证</title><div id="main">阅读正文</div>
+              <aside id="ep-side"><div id="side-pane-asst" class="ep-side-pane active" data-pane="asst">
+              <div id="asst-thread"></div><div id="asst-input"><textarea id="asst-ta"></textarea></div></div></aside>''')
+            page.evaluate('''() => {
+              window.receipts=[];window.drops=[];window.RC={};
+              window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};
+              window.__asstSend=()=>{}; window.__asstBusy=()=>false;
+            }''')
+            for name in ['rc-ui.js', 'rc-sidedrawer.js', 'rc-flashcard.js', 'rc-voicecall.js', 'rc-turncard.js']:
+                page.add_script_tag(path=str(ROOT / '_server_deploy/static/pdf' / name))
+            page.evaluate('''() => {
+              RC.sidedrawer.init({tabs:[{name:'asst',label:'助手'}],defaultTab:'asst'});
+              RC.stickynote={createHtmlAt:(x,y,payload)=>{drops.push({x,y,payload});return true;},
+                createCardAt:(x,y,cards,gid)=>{drops.push({x,y,cards,gid});return true;}};
+            }''')
+            page.add_script_tag(content=source)
+            page.evaluate('__bwNativeConversation.setNativeMode(true)')
+            page.wait_for_timeout(100)
+            self.assertFalse(page.evaluate('RC.sidedrawer.isOpen()'))
+            page.evaluate('__bwNativeConversation.perform({action:"toggleAssistant"})')
+            page.wait_for_timeout(420)
+            self.assertTrue(page.evaluate('RC.voiceCard.sideOpen()'))
+            self.assertTrue(page.locator('#asst-input').is_visible())
+            page.locator('#ep-side-handle').click()
+            page.wait_for_timeout(420)
+            self.assertFalse(page.evaluate('receipts[receipts.length-1].sidebarOpen'))
+            page.evaluate('__bwNativeConversation.perform({action:"toggleAssistant"})')
+            page.wait_for_timeout(420)
+            self.assertTrue(page.evaluate('receipts[receipts.length-1].sidebarOpen'))
+
+            # The actual original focus chip remains above the actual composer.
+            page.add_script_tag(content='(() => {' + focus + '})();')
+            page.evaluate("__setFocusSel('刚才选择的段落', 'text')")
+            self.assertTrue(page.locator('#asst-sel-chip').is_visible())
+            self.assertIn('刚才选择的段落', page.locator('#asst-sel-chip').inner_text())
+            self.assertTrue(page.evaluate("!!(document.querySelector('#asst-sel-chip').compareDocumentPosition(document.querySelector('#asst-input')) & Node.DOCUMENT_POSITION_FOLLOWING)"))
+            page.locator('#asst-sel-chip .asc-x').click()
+            self.assertIsNone(page.evaluate('window.__focusSel'))
+
+            # Real Anki renderer and charged drag; only persistence at the
+            # book-placement boundary is replaced by an in-memory receipt.
+            page.evaluate('''() => {
+              window.entity=RC.flashcard.renderEntity(document.querySelector('#asst-thread'), {
+                surface:'inflow',mode:'state',form:'full',gid:'card_abc12345',
+                cards:[{front:'問題',back:'解答',_st:'draft'},{front:'二問',back:'二答',_st:'draft'}]});
+            }''')
+            self.assertEqual(page.locator('[data-learning-card-id="card_abc12345"] .fc-slide').count(), 2)
+            self.assertEqual(page.evaluate('entity.bd.__fc.cards[0].front'), '問題')
+            self.assertTrue(page.evaluate('!!entity.bd.__fcPager'))
+            self.assertGreater(page.locator('[data-learning-card-id="card_abc12345"] button').count(), 1)
+            handle = page.locator('[data-learning-card-id="card_abc12345"] .vc-card-hd')
+            rect = handle.bounding_box()
+            self.assertIsNotNone(rect)
+            page.mouse.move(rect['x'] + 60, rect['y'] + 12)
+            page.mouse.down()
+            page.wait_for_timeout(470)
+            page.mouse.move(180, 220, steps=12)
+            page.mouse.up()
+            page.wait_for_timeout(100)
+            drops = page.evaluate('drops')
+            self.assertEqual(len(drops), 1)
+            self.assertEqual(drops[0]['gid'], 'card_abc12345')
+            self.assertEqual(drops[0]['cards'][0]['back'], '解答')
+            self.assertEqual(page.locator('[data-learning-card-id="card_abc12345"]').count(), 1)
+
+            # Native close must really close the shared drawer. The unchanged
+            # live output dispatcher then puts its card into the reading area.
+            page.evaluate('__bwNativeConversation.perform({action:"toggleAssistant"})')
+            page.wait_for_timeout(420)
+            self.assertFalse(page.evaluate('RC.voiceCard.sideOpen()'))
+            page.evaluate("__vcDispatch('renderInfoCard', [{kind:'fact',cid:'card_closed1234',title:'关栏后的生成物',data:{answer:'阅读区可见',detail:'原卡片状态机'}}])")
+            page.wait_for_timeout(150)
+            self.assertTrue(page.locator('.vc-card:not(.vc-inflow)').filter(has_text='关栏后的生成物').is_visible())
             self.assertEqual(errors, [])
             browser.close()
 
