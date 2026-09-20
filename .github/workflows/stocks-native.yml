@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       status_build:
-        description: Read TestFlight status for this 0.2.0 build number; skips all building and uploading
+        description: Read TestFlight status for this build number; skips all building and uploading
         type: string
         default: ''
+      status_version:
+        description: Marketing version for the TestFlight status query
+        type: string
+        default: '0.3.0'
       signed_archive:
         description: Build a separate StocksNative App Store IPA
         type: boolean
@@ -53,6 +57,7 @@ jobs:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           STATUS_BUILD: ${{ inputs.status_build }}
+          STATUS_VERSION: ${{ inputs.status_version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -62,7 +67,7 @@ jobs:
           printf '%s' "$API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/stocks-status-key.p8"
           python "$CODE_DIR/scripts/stocks_signing.py" build-status \
             --private-key "$RUNNER_TEMP/stocks-status-key.p8" \
-            --build-number "$STATUS_BUILD" --marketing-version '0.2.0'
+            --build-number "$STATUS_BUILD" --marketing-version "$STATUS_VERSION"
   build:
     if: ${{ !inputs.status_build }}
     runs-on: macos-latest
