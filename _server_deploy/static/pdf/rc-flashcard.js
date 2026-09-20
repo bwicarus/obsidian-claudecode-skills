@@ -523,26 +523,102 @@
     slide.addEventListener('pointerup', end);
     slide.addEventListener('pointercancel', end);
   }
+  // Semantic operations shared by native controls and web projections. Native
+  // controls never need to find a hidden button or synthesize an input event.
+  function interactionState(container, i) {
+    var st = container && container.__fc, c = st && st.cards[i];
+    if (!Number.isInteger(i) || i < 0 || !c || c._removed) return null;
+    var pending = !!(c._addPending || c._removePending || c._ratingPending || c._syncPending);
+    var controls = [], fields = [];
+    function control(key, title, destructive) {
+      controls.push({ key: key, title: title, destructive: !!destructive, disabled: pending || !!st.readonly });
+    }
+    if (c._st === 'draft') {
+      fields = (c.type === 'cloze' ? ['cloze'] : ['front', 'back']).map(function (key) {
+        return { key: key, value: String(c[key] || '') };
+      });
+      control('del', '删除', true);
+      control('add', '保存到 Reader 卡库');
+    } else if (c._st !== 'done' && c._st !== 'preview' && !c._addPending) {
+      if (!c._showBack) control('reveal', '显示答案');
+      else if (!c._ratingUnavailable) {
+        _EASE.forEach(function (ease) { control('rate-' + ease[0], ease[1]); });
+      } else if (c._ratingUnavailableReason === 'not-exported') {
+        var canDesktop = !!(((st.opts && st.opts.localDraft) || entityIdOf(st.gid)) &&
+          RC.computerVoice && typeof RC.computerVoice.addLocalAnkiCard === 'function');
+        if (canDesktop && c._pcExportStatus === 'failed') control('export-desktop', '重发到电脑 Anki');
+        var mobile = window.BWReaderRuntime && window.BWReaderRuntime.ankiMobileExport;
+        if (mobile && typeof mobile.available === 'function' && mobile.available()) {
+          control('export-mobile', '同步到 iPad Anki');
+        }
+      }
+    }
+    return { gid: st.gid, cardIndex: i, state: c._st, pending: pending,
+      editable: c._st === 'draft' && !pending && !st.readonly,
+      fields: fields, controls: controls };
+  }
+  function editDraftField(container, i, field, value) {
+    var st = container.__fc;
+    st.cards[i][field] = value;
+    broadcast(st.gid, i, container);
+    notifyGroup(st.gid, 'draft-edit', i);
+    // Persist every edit at its stable batch index before native reports save.
+    return _stateSync(st, i);
+  }
+  function revealAnswer(container, i) {
+    var st = container.__fc, card = st.cards[i];
+    card._showBack = true;
+    updateSlide(container, i);
+    broadcast(st.gid, i, container);
+    try {
+      if (st.opts && typeof st.opts.onReveal === 'function') st.opts.onReveal(i, card, container);
+    } catch (_) {}
+  }
+  function submitRating(container, i, ease) {
+    var st = container.__fc;
+    if (st.opts && typeof st.opts.onRate === 'function') {
+      return st.opts.onRate(ease, i, st.cards[i], container);
+    }
+    return rate(container, i, ease);
+  }
+  async function performInteraction(container, i, action, payload) {
+    var state = interactionState(container, i), st = container && container.__fc;
+    if (!state) throw new Error('卡片已移除或更新');
+    if (action === 'edit') {
+      if (!state.editable || !payload || !state.fields.some(function (f) { return f.key === payload.field; }) ||
+          typeof payload.value !== 'string' || payload.value.length > 24000) throw new Error('当前卡片不能这样修改');
+      var result = await editDraftField(container, i, payload.field, payload.value);
+      updateSlide(container, i);
+      if (!result) throw new Error('卡片修改尚未保存，请重试');
+      return { accepted: true };
+    }
+    var control = state.controls.filter(function (c) { return c.key === action; })[0];
+    if (!control || control.disabled) throw new Error('这项卡片操作当前不可用');
+    if (action === 'reveal') revealAnswer(container, i);
+    else if (action === 'add') {
+      var record = await addToAnki(container, i);
+      if (!record) throw new Error(st.cards[i]._addPending ? '保存结果待核对，请勿重复提交' : '卡片未保存');
+    } else if (action === 'del') {
+      await removeDraft(container, i);
+      if (!st.cards[i]._removed) throw new Error('草稿未删除');
+    } else if (action === 'export-desktop') await exportToComputerAnki(container, i);
+    else if (action === 'export-mobile') exportToMobileAnki(container, i);
+    else if (/^rate-[1-4]$/.test(action)) await submitRating(container, i, Number(action.slice(-1)));
+    // Dispatch acceptance is not an Anki receipt. Pending/unknown/completed
+    // remain owned by the original rating/export state machine.
+    return { accepted: true };
+  }
   function bindSlide(container, slide, st, i) {
     bindSwipe(container, slide, st, i);
     slide.querySelectorAll('[data-fc]').forEach(function (el) {
       el.addEventListener('click', function (ev) {
-        ev.stopPropagation(); var act = el.dataset.fc, cc = st.cards[i];
+        ev.stopPropagation(); var act = el.dataset.fc;
         if (act === 'del') { removeDraft(container, i); }
         else if (act === 'add') { addToAnki(container, i); }
         else if (act === 'export-pc') { exportToComputerAnki(container, i); }
         else if (act === 'export-desktop') { exportToComputerAnki(container, i); }
         else if (act === 'export-mobile') { exportToMobileAnki(container, i); }
-        else if (act === 'reveal') {
-          cc._showBack = true;
-          updateSlide(container, i);
-          broadcast(st.gid, i, container);
-          try {
-            if (st.opts && typeof st.opts.onReveal === 'function') {
-              st.opts.onReveal(i, cc, container);
-            }
-          } catch (_) {}
-        }
+        else if (act === 'reveal') revealAnswer(container, i);
       });
     });
     // 双击预览 → 就地编辑；失焦 / Esc → 回预览（用户 2026-09-19）。
@@ -582,7 +658,7 @@
       });
     });
     slide.querySelectorAll('.fc-ed').forEach(function (ta) { ta.addEventListener('input', function () {
-      st.cards[i][ta.dataset.f] = ta.value;
+      editDraftField(container, i, ta.dataset.f, ta.value);
       var preview = slide.querySelector('.fc-draft-preview[data-preview="' + ta.dataset.f + '"]');
       if (preview) {
         var side = ta.dataset.f === 'back' || ta.dataset.f === 'cloze' ? 'back' : 'front';
@@ -591,18 +667,11 @@
         preview.innerHTML = faceHtml(st, st.cards[i], side);
         try { RC.typeset && RC.typeset(preview); } catch (_) {}
       }
-      broadcast(st.gid, i, container);
-      notifyGroup(st.gid, 'draft-edit', i);
-      // 草稿正文跟状态一起按稳定 batch index 写入本地权威仓。每次 input 都立刻
-      // 入串行队列，避免用户刚编辑就刷新时只剩 DOM 内存副本。
-      _stateSync(st, i);
     }); });
     slide.querySelectorAll('.fc-e').forEach(function (el) { el.addEventListener('click', function (ev) {
       ev.stopPropagation();
       var ease = parseInt(el.dataset.ease, 10);
-      if (st.opts && typeof st.opts.onRate === 'function') {
-        try { st.opts.onRate(ease, i, st.cards[i], container); } catch (_) {}
-      } else rate(container, i, ease);
+      try { submitRating(container, i, ease); } catch (_) {}
     }); });
   }
   function updateSlide(container, i) {
@@ -1195,7 +1264,7 @@
     updateSlide(container, i);
     broadcast(st.gid, i, container);
     notifyGroup(st.gid, 'card-repository-pending', i);
-    repo.saveConfirmedCard(request, { mutationId: mutationId }).then(function (record) {
+    return repo.saveConfirmedCard(request, { mutationId: mutationId }).then(function (record) {
       if (!repositoryConfirmation(record, i)) {
         return failRepositoryConfirmation(
           container, st, c, i, previous,
@@ -1238,7 +1307,7 @@
       return;
     }
     card._removePending = true;
-    repo.removeDraftCard(st.gid, i, { mutationId: mutationId }).then(function (record) {
+    return repo.removeDraftCard(st.gid, i, { mutationId: mutationId }).then(function (record) {
       card._removePending = false;
       card._removed = true;
       if (record) applyRepositoryRecord(container, record);
@@ -2041,6 +2110,8 @@
     });
   }
   RC.flashcard = {
+    interactionState: interactionState,
+    performInteraction: performInteraction,
     mountDrafts: mountDrafts,
     mountPreview: mountPreview,
     mountReview: mountReview,

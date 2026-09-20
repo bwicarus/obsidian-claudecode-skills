@@ -176,28 +176,23 @@ enum ReaderNativeConversationScript {
           const group = flashGroup(node);
           const cardIndex = Number(part.id.match(/-c-(\d+)$/)?.[1] || 0);
           if (group?.__fc.cards[cardIndex]?._removed) { part.removed = true; continue; }
+          const interaction = group && rc().flashcard?.interactionState(group, cardIndex);
           const slide = group?.querySelector('.fc-slide[data-i="' + cardIndex + '"]');
-          if (group && slide && (part.kind === 'anki' || part.kind === 'artifact')) {
-            const state = group.__fc.cards[cardIndex];
+          if (interaction && (part.kind === 'anki' || part.kind === 'artifact')) {
             part.kind = 'anki';
             part.data.live = true;
-            part.data.state = String(state._st || '');
+            part.data.state = String(interaction.state || '');
             part.data.body = cleanText(slide, 24000);
-            part.data.controls = Array.from(slide.querySelectorAll('button[data-fc],button[data-ease]')).map((button, i) => ({
-              id: registerAction(part.id + '-button-' + (button.dataset.fc || button.dataset.ease), button, () => {
-                if (button.disabled) throw new Error('操作暂不可用');
-                button.click();
-              }),
-              title: button.textContent.trim(), disabled: button.disabled,
-              destructive: button.dataset.fc === 'del'
+            part.data.editable = interaction.editable;
+            part.data.controls = interaction.controls.map(control => ({
+              id: registerAction(part.id + '-control-' + control.key, group, () =>
+                rc().flashcard.performInteraction(group, cardIndex, control.key)),
+              title: control.title, disabled: control.disabled, destructive: control.destructive
             }));
-            part.data.fields = Array.from(slide.querySelectorAll('textarea.fc-ed')).map(field => ({
-              id: registerAction(part.id + '-field-' + field.dataset.f, field, command => {
-                if (typeof command.text !== 'string' || command.text.length > 24000) throw new Error('内容过长');
-                field.value = command.text;
-                field.dispatchEvent(new Event('input', { bubbles: true }));
-              }),
-              key: field.dataset.f, value: field.value
+            part.data.fields = interaction.fields.map(field => ({
+              id: registerAction(part.id + '-field-' + field.key, group, command =>
+                rc().flashcard.performInteraction(group, cardIndex, 'edit', { field: field.key, value: command.text })),
+              key: field.key, value: field.value
             }));
           }
           const cardElement = node.matches('.vc-card') ? node : node.querySelector('.vc-card');
@@ -379,7 +374,7 @@ enum ReaderNativeConversationScript {
         wrapNotifications(rc().turnCard, ['addPart', 'draftText', 'freezeDraft', 'reconcile', 'cliPart', 'busy', 'idle', 'status', 'progress', 'drop', 'rename', 'reset']);
         if (!accountSubscription && account()?.subscribe) accountSubscription = account().subscribe(schedule);
       }
-      function perform(command) {
+      async function perform(command) {
         if (suspended) return { ok: false, error: '页面已离开，请在当前页面操作' };
         if (!command || typeof command !== 'object' || Array.isArray(command)) return { ok: false, error: '无效操作' };
         if (getScopeKey() !== scopeKey) snapshot();
@@ -413,7 +408,7 @@ enum ReaderNativeConversationScript {
           } else if (action === 'liveAction') {
             const target = actions.get(command.actionId);
             if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected) return { ok: false, error: '内容已更新，请重试' };
-            target.run(command);
+            await target.run(command);
           } else if (action === 'stop') {
             const button = document.getElementById('asst-send');
             if (!button?.classList.contains('stop') || button.disabled) return { ok: false, error: '当前没有可停止的文字回复' };

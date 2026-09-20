@@ -198,6 +198,7 @@ private struct ReaderNativeConversationArtifactCard: View {
                         }
                         Button("修改内容", systemImage: "pencil") { editing = true }
                             .font(.caption).buttonStyle(.bordered)
+                            .disabled(part.data["editable"] as? Bool != true)
                     } else {
                         ReaderNativeConversationMarkdown(text: part.string("body"))
                     }

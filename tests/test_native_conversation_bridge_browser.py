@@ -229,6 +229,16 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
 
             # Real Anki renderer and charged drag; only persistence at the
             # book-placement boundary is replaced by an in-memory receipt.
+            for name in ['data-store.js', 'card-repository.js']:
+                page.add_script_tag(path=str(ROOT / '_server_deploy/static/reader-runtime' / name))
+            page.evaluate('''async () => {
+              const data=BWReaderRuntime.dataStore;
+              window.cardStore=data.createDataStore({backend:data.createMemoryBackend(),deviceId:'native-test',causalCollections:['card-entities','card-states']});
+              BWReaderRuntime.cardRepository=BWReaderRuntime.cardRepository.createCardRepository({store:cardStore});
+              await BWReaderRuntime.cardRepository.registerDraft({id:'card_abc12345',cid:'card_abc12345',gid:'card_abc12345',
+                cards:[{type:'basic',front:'問題',back:'解答'},{type:'basic',front:'二問',back:'二答'}],
+                source:{kind:'reader-card-entity',sourceId:'card_abc12345',tool:'rc-flashcard',legacy:{piEntityRegistered:true}}});
+            }''')
             page.evaluate('''() => {
               window.entity=RC.flashcard.renderEntity(document.querySelector('#asst-thread'), {
                 surface:'inflow',mode:'state',form:'full',gid:'card_abc12345',
@@ -250,10 +260,14 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertTrue(first['data']['live'])
             self.assertEqual(first['data']['state'], 'draft')
             self.assertIn('保存到 Reader 卡库', [c['title'] for c in first['data']['controls']])
+            # Neither a hidden textarea nor an original button owns the action.
+            page.evaluate("entity.bd.querySelectorAll('textarea,button').forEach(node=>node.remove())")
             field = first['data']['fields'][0]
             self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
                 'action':'liveAction','scope':native['scope'],'actionId':field['id'],'text':'修改过的問題'})['ok'])
             self.assertEqual(page.evaluate('entity.bd.__fc.cards[0].front'), '修改过的問題')
+            stored = page.evaluate("BWReaderRuntime.cardRepository.load('card_abc12345')")
+            self.assertEqual(stored['states']['0']['exactState']['front'], '修改过的問題')
             # Native placement carries original gid and the edited full snapshot.
             self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
                 'action':'liveAction','scope':native['scope'],'actionId':first['data']['dragId'],'x':0.25,'y':0.4})['ok'])
@@ -266,12 +280,14 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertFalse(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
                 'action':'liveAction','scope':native['scope'],'actionId':first['data']['dragId'],'x':2,'y':0.4})['ok'])
             # Reveal comes from rc-flashcard, including its original four ratings.
+            page.evaluate("BWReaderRuntime.cardRepository.patchState('card_abc12345',0,{exactState:{front:'学習',back:'答案',_st:'learn',_showBack:false}})")
             page.evaluate("RC.flashcard.mountState(entity.bd,[{front:'学習',back:'答案',_st:'learn',_showBack:false},{front:'二問',back:'二答',_st:'draft'}],{gid:'card_abc12345',authoritative:true})")
             page.wait_for_timeout(120)
             state = page.evaluate('receipts[receipts.length-1]')
             learning = next(part for message in state['messages'] for part in message['parts'] if part['kind']=='anki')
             reveal = next(c for c in learning['data']['controls'] if c['title']=='显示答案')
             self.assertNotIn('答案', learning['data']['body'])
+            page.evaluate("entity.bd.querySelectorAll('button,[data-fc]').forEach(node=>node.remove())")
             self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
                 'action':'liveAction','scope':state['scope'],'actionId':reveal['id']})['ok'])
             page.wait_for_timeout(100)
@@ -279,7 +295,24 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             learning = next(part for message in state['messages'] for part in message['parts'] if part['kind']=='anki')
             self.assertIn('答案', learning['data']['body'])
             self.assertEqual(len(learning['data']['controls']), 4)
+            # A controlled review keeps its existing callback and refuses a
+            # second rating while the original submission is pending.
+            rating = page.evaluate('''async () => {
+              const st=entity.bd.__fc, calls=[];
+              st.opts.onRate=(ease,index,card)=>{calls.push({ease,index});card._ratingPending=true;};
+              await RC.flashcard.performInteraction(entity.bd,0,'rate-3');
+              let refused=false;
+              try { await RC.flashcard.performInteraction(entity.bd,0,'rate-4'); } catch (_) { refused=true; }
+              const disabled=RC.flashcard.interactionState(entity.bd,0).controls.every(c=>c.disabled);
+              st.cards[0]._ratingPending=false;
+              delete st.opts.onRate;
+              return {calls,refused,disabled};
+            }''')
+            self.assertEqual(rating['calls'], [{'ease':3,'index':0}])
+            self.assertTrue(rating['refused'])
+            self.assertTrue(rating['disabled'])
             # Restore draft for the existing original charged-drag test.
+            page.evaluate("BWReaderRuntime.cardRepository.patchState('card_abc12345',0,{exactState:{front:'修改过的問題',back:'解答',_st:'draft',_showBack:false}})")
             page.evaluate("RC.flashcard.mountState(entity.bd,[{front:'修改过的問題',back:'解答',_st:'draft'},{front:'二問',back:'二答',_st:'draft'}],{gid:'card_abc12345',authoritative:true})")
             page.evaluate('__bwNativeConversation.perform({action:"clearSelection"})')
             self.assertIsNone(page.evaluate('window.__focusSel'))
@@ -308,6 +341,28 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.evaluate("__vcDispatch('renderInfoCard', [{kind:'fact',cid:'card_closed1234',title:'关栏后的生成物',data:{answer:'阅读区可见',detail:'原卡片状态机'}}])")
             page.wait_for_timeout(150)
             self.assertTrue(page.locator('.vc-card:not(.vc-inflow)').filter(has_text='关栏后的生成物').is_visible())
+            # Save and delete await the real card repository receipt without
+            # clicking web controls. Stable batch indexes and identity survive.
+            mutation = page.evaluate('''async () => {
+              const gid='card_cafe1234', repo=BWReaderRuntime.cardRepository;
+              const cards=[{type:'basic',front:'保存',back:'save'},{type:'basic',front:'删除',back:'delete'}];
+              await repo.registerDraft({id:gid,cid:gid,gid,cards,source:{kind:'reader-card-entity',sourceId:gid,tool:'rc-flashcard',legacy:{piEntityRegistered:true}}});
+              const e=RC.flashcard.renderEntity(document.querySelector('#asst-thread'),{surface:'inflow',mode:'state',gid,cards});
+              e.bd.querySelectorAll('textarea,button').forEach(node=>node.remove());
+              const save=await RC.flashcard.performInteraction(e.bd,0,'add');
+              const confirmed=await repo.load(gid);
+              let duplicateRefused=false;
+              try { await RC.flashcard.performInteraction(e.bd,0,'add'); } catch (_) { duplicateRefused=true; }
+              await RC.flashcard.performInteraction(e.bd,1,'del');
+              const removed=await repo.load(gid);
+              return {save,confirmed,removed,duplicateRefused};
+            }''')
+            self.assertTrue(mutation['save']['accepted'])
+            self.assertEqual(mutation['confirmed']['states']['0']['phase'], 'confirmed')
+            self.assertTrue(mutation['duplicateRefused'])
+            self.assertTrue(mutation['removed']['states']['1']['removed'])
+            self.assertEqual(mutation['removed']['id'], 'card_cafe1234')
+            self.assertEqual(len(mutation['removed']['cards']), 2)
             self.assertEqual(errors, [])
             browser.close()
 

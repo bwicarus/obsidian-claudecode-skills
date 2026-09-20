@@ -114,8 +114,11 @@ test("draft textarea persists its live value at the stable batch index", () => {
   const start = SOURCE.indexOf("function bindSlide(container, slide, st, i)");
   const bind = SOURCE.slice(start, SOURCE.indexOf("function updateSlide", start));
 
-  assert.match(bind, /st\.cards\[i\]\[ta\.dataset\.f\]\s*=\s*ta\.value/);
-  assert.match(bind, /_stateSync\(st, i\)/);
+  assert.match(bind, /editDraftField\(container, i, ta\.dataset\.f, ta\.value\)/);
+  const editStart = SOURCE.indexOf("function editDraftField(");
+  const edit = SOURCE.slice(editStart, SOURCE.indexOf("function revealAnswer", editStart));
+  assert.match(edit, /st\.cards\[i\]\[field\]\s*=\s*value/);
+  assert.match(edit, /return _stateSync\(st, i\)/);
   const exactFields = SOURCE.slice(
     SOURCE.indexOf("var _EXACT_STATE_FIELDS"),
     SOURCE.indexOf("var _repositorySubscription"),
