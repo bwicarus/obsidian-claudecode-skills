@@ -154,7 +154,7 @@ private struct ReaderNativeConversationArtifacts: View {
 private struct ReaderNativeConversationArtifactCard: View {
     let part: ReaderNativeConversationPart
     @ObservedObject var model: ReaderNativeConversationModel
-    @State private var showsAnswer = false
+    @State private var editing = false
 
     private var isAnki: Bool { part.kind == "anki" || part.kind == "flashcard" }
     private var heading: String {
@@ -166,16 +166,14 @@ private struct ReaderNativeConversationArtifactCard: View {
         if isAnki { return "rectangle.on.rectangle" }
         return part.kind == "weather" ? "cloud.sun" : part.kind == "news" ? "newspaper" : "doc.text"
     }
-    private var rawFront: String { firstText(part.string("front"), part.string("frontText"), part.text) }
-    private var isCloze: Bool { part.string("type") == "cloze" || rawFront.contains("{{c1::") }
-    private var front: String {
-        isCloze ? rawFront.replacingOccurrences(of: "(?s)\\{\\{c\\d+::.*?\\}\\}", with: "[…]", options: .regularExpression) : rawFront
+    private var controls: [ReaderNativeControl] {
+        (part.data["controls"] as? [[String: Any]] ?? []).compactMap(ReaderNativeControl.init)
     }
-    private var back: String {
-        let text = firstText(part.string("back"), part.string("backText"), isCloze ? rawFront : "")
-        return isCloze ? text.replacingOccurrences(of: "(?s)\\{\\{c\\d+::(.*?)(?:::[^}]*?)?\\}\\}", with: "$1", options: .regularExpression) : text
+    private var fields: [[String: String]] { part.data["fields"] as? [[String: String]] ?? [] }
+    private var isDraft: Bool { part.string("state") == "draft" }
+    private var dragPayload: ReaderNativeCardTransfer {
+        ReaderNativeCardTransfer(scope: model.scope, actionID: part.string("dragId"))
     }
-    private var isDraft: Bool { part.data["draft"] as? Bool == true || part.status == "draft" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -186,14 +184,32 @@ private struct ReaderNativeConversationArtifactCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if isDraft { Text("待确认").font(.caption2).foregroundStyle(ReaderNativeTheme.muted) }
             }
+            .draggable(dragPayload)
+            .accessibilityHint("长按卡片标题，拖到书页正文放置")
             if isAnki {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(showsAnswer ? "背面" : "正面").font(.caption).foregroundStyle(ReaderNativeTheme.muted)
-                    ReaderNativeConversationMarkdown(text: readable(showsAnswer ? back : front))
-                    if !back.isEmpty {
-                        Button(showsAnswer ? "返回正面" : "显示答案") { showsAnswer.toggle() }
-                            .font(.caption.weight(.medium)).buttonStyle(.bordered)
+                if part.data["live"] as? Bool == true {
+                    if isDraft && !fields.isEmpty {
+                        ForEach(fields.indices, id: \.self) { index in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(fields[index]["key"] == "front" ? "正面" : fields[index]["key"] == "cloze" ? "填空" : "背面")
+                                    .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
+                                ReaderNativeConversationMarkdown(text: readable(fields[index]["value"] ?? ""))
+                            }
+                        }
+                        Button("修改内容", systemImage: "pencil") { editing = true }
+                            .font(.caption).buttonStyle(.bordered)
+                    } else {
+                        ReaderNativeConversationMarkdown(text: part.string("body"))
                     }
+                    if !controls.isEmpty {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 6) { liveButtons }
+                            VStack(alignment: .leading, spacing: 6) { liveButtons }
+                        }
+                    }
+                } else {
+                    Text("学习卡正在同步，完整操作可随时打开。")
+                        .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
                 }
             } else if part.kind == "fact" {
                 ReaderNativeConversationMarkdown(text: readable(firstText(part.string("answer"), part.text)))
@@ -224,7 +240,23 @@ private struct ReaderNativeConversationArtifactCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(ReaderNativeTheme.accent.opacity(0.12), lineWidth: 1))
-        .onChange(of: part.id) { _, _ in showsAnswer = false }
+        .sheet(isPresented: $editing) {
+            ReaderNativeCardEditor(fields: fields, model: model)
+        }
+    }
+
+    @ViewBuilder
+    private var liveButtons: some View {
+        ForEach(controls) { control in
+            Button(role: control.destructive ? .destructive : nil) {
+                Task { await model.perform("liveAction", parameters: ["actionId": control.id]) }
+            } label: {
+                Text(control.title).font(.caption.weight(.medium))
+                    .frame(maxWidth: .infinity).padding(.vertical, 3)
+            }
+            .buttonStyle(.bordered)
+            .disabled(control.disabled || model.isPerforming("liveAction"))
+        }
     }
 
     private func firstText(_ choices: String...) -> String { choices.first { !$0.isEmpty } ?? "" }
@@ -321,6 +353,56 @@ private struct ReaderNativeConversationAction: View {
                     Button("打开完整界面") { Task { await model.perform("showLegacy") } }
                         .font(.caption.weight(.medium)).buttonStyle(.bordered)
                         .disabled(model.isPerforming("showLegacy"))
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+private struct ReaderNativeCardEditor: View {
+    let fields: [[String: String]]
+    @ObservedObject var model: ReaderNativeConversationModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var values: [String: String] = [:]
+    @State private var saving = false
+    @State private var failure: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                ForEach(fields.indices, id: \.self) { index in
+                    let field = fields[index]
+                    let id = field["id"] ?? ""
+                    Section(field["key"] == "front" ? "正面" : field["key"] == "cloze" ? "填空" : "背面") {
+                        TextEditor(text: Binding(
+                            get: { values[id] ?? field["value"] ?? "" },
+                            set: { values[id] = $0 }
+                        ))
+                        .frame(minHeight: 120)
+                    }
+                }
+                if let failure { Text(failure).foregroundStyle(.red) }
+            }
+            .navigationTitle("修改学习卡")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }.disabled(saving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存修改") {
+                        saving = true
+                        Task {
+                            for field in fields {
+                                guard let id = field["id"], let text = values[id], text != field["value"] else { continue }
+                                guard await model.perform("liveAction", parameters: ["actionId": id, "text": text]) else {
+                                    failure = model.error; saving = false; return
+                                }
+                            }
+                            saving = false; dismiss()
+                        }
+                    }.disabled(saving)
                 }
             }
         }

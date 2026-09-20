@@ -13,24 +13,76 @@ struct ReaderNativeWorkspace<Document: View>: View {
     let openDiagnostics: () -> Void
     @ViewBuilder let document: () -> Document
 
+    @AppStorage("reader.navigationCollapsed") private var navigationCollapsed = false
+    @State private var dropTarget = false
+
+    private var nativeSidebarVisible: Bool {
+        enabled && conversation.sidebarOpen && !conversation.legacyVisible
+    }
+
     var body: some View {
-            VStack(spacing: 0) {
-                navigationBar
-                Divider().overlay(ReaderNativeTheme.separator)
-                // Cards, selection chips and book placements must share the
-                // same live interaction surface. A SwiftUI preview cannot
-                // replace the card/review state machine or its drag session.
-                    document()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            if !navigationCollapsed { navigationBar }
+            GeometryReader { geometry in
+                HStack(spacing: 0) {
+                    GeometryReader { page in
+                        document()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .dropDestination(for: ReaderNativeCardTransfer.self) { values, location in
+                                guard let payload = values.first,
+                                      payload.scope == conversation.scope,
+                                      !payload.actionID.isEmpty,
+                                      page.size.width > 0, page.size.height > 0 else { return false }
+                                Task {
+                                    let frame = page.frame(in: .global)
+                                    await reader.placeNativeConversationCard(
+                                        actionID: payload.actionID, scope: payload.scope,
+                                        windowPoint: CGPoint(x: frame.minX + location.x, y: frame.minY + location.y)
+                                    )
+                                }
+                                return true
+                            } isTargeted: { dropTarget = $0 }
+                            .overlay {
+                                if dropTarget {
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(ReaderNativeTheme.accent, style: StrokeStyle(lineWidth: 2, dash: [6]))
+                                        .padding(4).allowsHitTesting(false)
+                                }
+                            }
+                    }
+                    if nativeSidebarVisible {
+                        Divider()
+                        ReaderNativeConversationView(
+                            model: conversation, voiceBridge: voiceBridge,
+                            onClose: { Task { await conversation.perform("toggleAssistant") } },
+                            onDiagnostics: openDiagnostics,
+                            onSettings: { Task { await conversation.perform("openModels") } }
+                        )
+                        .frame(width: min(420, max(300, geometry.size.width * 0.36)))
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    if navigationCollapsed {
+                        Button { navigationCollapsed = false } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.caption.weight(.semibold))
+                                .frame(width: 44, height: 26)
+                                .background(.regularMaterial, in: Capsule())
+                        }
+                        .accessibilityLabel("展开阅读顶栏")
+                        .padding(6)
+                    }
+                }
             }
-            .background(ReaderNativeTheme.canvas)
-            .foregroundStyle(ReaderNativeTheme.ink)
-            .tint(ReaderNativeTheme.accent)
-            .task(id: enabled) { await reader.setNativeConversationMode(enabled) }
+        }
+        .background(ReaderNativeTheme.canvas)
+        .foregroundStyle(ReaderNativeTheme.ink)
+        .tint(ReaderNativeTheme.accent)
+        .task(id: enabled) { await reader.setNativeConversationMode(enabled) }
     }
 
     private var navigationBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Button(action: openLibrary) {
                 Label("书库", systemImage: "books.vertical")
                     .font(.subheadline.weight(.medium))
@@ -60,6 +112,32 @@ struct ReaderNativeWorkspace<Document: View>: View {
                 Button("启用原生导航") { enabled = true }
                     .font(.subheadline.weight(.medium))
             }
+            if enabled, let page = conversation.readingTools.first(where: { $0.key == "page" }) {
+                Button(page.title) {
+                    Task { await conversation.perform("liveAction", parameters: ["actionId": page.id]) }
+                }
+                .font(.caption.monospacedDigit())
+                .accessibilityLabel("跳转页码：" + page.title)
+            }
+            if enabled && !conversation.readingTools.isEmpty {
+                Menu {
+                    ForEach(conversation.readingTools) { control in
+                        Button(control.title) {
+                            Task { await conversation.perform("liveAction", parameters: ["actionId": control.id]) }
+                        }
+                        .disabled(control.disabled)
+                    }
+                } label: {
+                    Image(systemName: "textformat.size")
+                        .frame(width: 36, height: 36)
+                }
+                .accessibilityLabel("阅读工具：翻页、适应、翻译与批注")
+            }
+            if enabled && conversation.legacyVisible {
+                Button("返回原生助手") {
+                    Task { await conversation.perform("hideLegacy") }
+                }.font(.caption)
+            }
             Menu {
                 Button("App 设置", systemImage: "slider.horizontal.3", action: openSettings)
                 if conversation.capabilities.contains("openSettings") {
@@ -79,7 +157,7 @@ struct ReaderNativeWorkspace<Document: View>: View {
                     }
                 }
                 Divider()
-                Toggle("原生导航", isOn: $enabled)
+                Toggle("原生界面", isOn: $enabled)
             } label: {
                 Image(systemName: "slider.horizontal.3")
                     .frame(minWidth: 32, minHeight: 36)
@@ -98,10 +176,14 @@ struct ReaderNativeWorkspace<Document: View>: View {
                 .accessibilityLabel(conversation.sidebarOpen ? "收起 AI 侧栏" : "展开 AI 侧栏")
                 .disabled(!conversation.supports("toggleAssistant") || conversation.isPerforming("toggleAssistant"))
             }
+            Button { navigationCollapsed = true } label: {
+                Image(systemName: "chevron.up").frame(width: 36, height: 36)
+            }
+            .accessibilityLabel("收起阅读顶栏")
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 14)
-        .frame(height: 48)
+        .frame(height: 40)
         .background(ReaderNativeTheme.card)
     }
 }

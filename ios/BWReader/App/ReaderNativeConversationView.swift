@@ -289,6 +289,18 @@ struct ReaderNativeConversationView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 7) {
+            if !model.selectionText.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "text.quote").foregroundStyle(ReaderNativeTheme.accent)
+                    Text(model.selectionText).font(.caption).lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        Task { await model.perform("clearSelection") }
+                    } label: { Image(systemName: "xmark.circle.fill") }
+                    .accessibilityLabel("移除选中文本")
+                }
+                .padding(9).background(ReaderNativeTheme.accentWash, in: RoundedRectangle(cornerRadius: 10))
+            }
             if isReview {
                 Label(voiceActive || voiceBusy ? "复习文字使用独立对话，与当前语音分开。" : "复习对话", systemImage: "rectangle.on.rectangle")
                     .font(.caption2).foregroundStyle(ReaderNativeTheme.muted)

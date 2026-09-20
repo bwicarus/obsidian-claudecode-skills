@@ -9,12 +9,12 @@ enum ReaderNativeConversationScript {
       if (window !== window.top || window.__bwNativeConversation) return;
       const handler = window.webkit?.messageHandlers?.bwNativeConversation;
       if (!handler || typeof handler.postMessage !== 'function') return;
-      let legacyVisible = false;
+      let legacyVisible = false, nativeMode = false;
       let thread = null, threadObserver = null, timer = null, revision = 0;
       let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null;
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
       let controls = null, controlsObserver = null, suspended = false;
-      let drawerElement = null, drawerObserver = null;
+      let drawerElement = null, drawerObserver = null, contextObserver = null, contextElement = null, toolbarObserver = null, toolbarElement = null;
       const navigationID = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
       const hooked = new WeakMap();
       const text = (value, limit = 32000) => typeof value === 'string' ? value.slice(0, limit) : '';
@@ -138,7 +138,7 @@ enum ReaderNativeConversationScript {
         const completedText = source.filter(part => part.kind === 'text');
         // Final source text preserves Markdown, links and formulas. During a
         // draft, read its actual rendered text without treating tools as prose.
-        const body = node.__vcCard ? '' : (textNodes.length
+        const body = node.__vcCard || flashGroup(node) ? '' : (textNodes.length
           ? (completedText.length === textNodes.length ? completedText.map(part => text(part.text)) : textNodes.map(el => cleanText(el))).join('\n\n')
           : (tid ? '' : cleanText(node)));
         const status = node.querySelector(':scope > .rc-turn-status');
@@ -153,6 +153,10 @@ enum ReaderNativeConversationScript {
           usedContent.add(content);
           parts.push(...projectPart(part, partID(part, id, partIndex), content, tid));
         });
+        if (!parts.length && flashGroup(node)) {
+          const group = flashGroup(node);
+          parts.push(...projectPart({ kind: 'cards', cards: group.__fc.cards, gid: group.__fc.gid }, id + '-learning', node, ''));
+        }
         if (!parts.length && node.__vcCard) parts.push(...projectPart({ kind: 'card', card: node.__vcCard }, id + '-card', node, ''));
         if (!parts.length && !body && !streaming && (node.matches('.vc-card,.vc-if') || node.querySelector('.vc-card,.fc-wrap,iframe,video'))) {
           parts.push(artifact(id + '-artifact', node, node.querySelector('.vc-card-hd,.vc-if-hd')?.textContent || '生成物'));
@@ -162,6 +166,84 @@ enum ReaderNativeConversationScript {
         }
         return body || parts.length || streaming ? { id, role, text: text(body), streaming, parts } : null;
       }
+      function flashGroup(node) {
+        return [node, ...node.querySelectorAll('*')].find(el => el.__fc && Array.isArray(el.__fc.cards));
+      }
+      function liveArtifacts(messages) {
+        for (const message of messages) {
+        for (const part of message.parts) {
+          if (part.kind === 'tool') continue;
+          const target = actions.get(part.actionId), node = target?.node;
+          if (!node?.isConnected) continue;
+          const group = flashGroup(node);
+          const cardIndex = Number(part.id.match(/-c-(\d+)$/)?.[1] || 0);
+          if (group?.__fc.cards[cardIndex]?._removed) { part.removed = true; continue; }
+          const slide = group?.querySelector('.fc-slide[data-i="' + cardIndex + '"]');
+          if (group && slide && (part.kind === 'anki' || part.kind === 'artifact')) {
+            const state = group.__fc.cards[cardIndex];
+            part.kind = 'anki';
+            part.data.live = true;
+            part.data.state = String(state._st || '');
+            part.data.body = cleanText(slide, 24000);
+            part.data.controls = Array.from(slide.querySelectorAll('button[data-fc],button[data-ease]')).map((button, i) => ({
+              id: registerAction(part.id + '-button-' + (button.dataset.fc || button.dataset.ease), button, () => {
+                if (button.disabled) throw new Error('操作暂不可用');
+                button.click();
+              }),
+              title: button.textContent.trim(), disabled: button.disabled,
+              destructive: button.dataset.fc === 'del'
+            }));
+            part.data.fields = Array.from(slide.querySelectorAll('textarea.fc-ed')).map(field => ({
+              id: registerAction(part.id + '-field-' + field.dataset.f, field, command => {
+                if (typeof command.text !== 'string' || command.text.length > 24000) throw new Error('内容过长');
+                field.value = command.text;
+                field.dispatchEvent(new Event('input', { bubbles: true }));
+              }),
+              key: field.dataset.f, value: field.value
+            }));
+          }
+          const cardElement = node.matches('.vc-card') ? node : node.querySelector('.vc-card');
+          const body = cardElement?.querySelector('.vc-card-bd') || node.querySelector('.vc-if-bd');
+          if ((group || body) && rc().stickynote) {
+            part.data.dragId = registerAction(part.id + '-place', node, command => {
+              if (![command.x, command.y].every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
+              const x = command.x * innerWidth, y = command.y * innerHeight;
+              let accepted = false;
+              if (group && rc().flashcard?.snapshot && rc().stickynote.createCardAt) {
+                const cards = rc().flashcard.snapshot(group);
+                accepted = rc().stickynote.createCardAt(x, y, cards, group.__fc.gid);
+              } else if (body && rc().stickynote.createHtmlAt) {
+                accepted = rc().stickynote.createHtmlAt(x, y, {
+                  content: body.innerHTML, contextText: body.textContent || '', isHtml: true,
+                  cid: cardElement?.dataset.vcCid || cardElement?.__vcCard?.cid || '', label: part.title
+                });
+              }
+              if (!accepted) throw new Error('请把卡片拖到书页正文上');
+            });
+          }
+        }
+        message.parts = message.parts.filter(part => !part.removed);
+        }
+      }
+      function toolbarActions() {
+        const root = document.getElementById('header') || document.getElementById('ep-top');
+        if (!root) return [];
+        const page = root.querySelector('#page-scrub');
+        const paging = page ? [{
+          id: registerAction('toolbar-page', page, () => {
+            page.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, pointerId:1, clientX:0}));
+            page.dispatchEvent(new PointerEvent('pointerup', {bubbles:true, pointerId:1, clientX:0}));
+          }), title: page.textContent.trim(), key: 'page', disabled: false
+        }] : [];
+        return paging.concat(Array.from(root.querySelectorAll('button')).filter(button => !button.hidden && button.getAttribute('aria-hidden') !== 'true').map((button, index) => ({
+          id: registerAction('toolbar-' + (button.id || index), button, () => button.click()),
+          key: button.id || '', title: text(button.getAttribute('title') || button.getAttribute('aria-label') || button.textContent, 140).trim() || '阅读操作',
+          disabled: !!button.disabled
+        })));
+      }
+      function selectedContext() {
+        return { text: text(window.__focusSel?.text, 16000), kind: text(window.__focusSel?.kind, 40) };
+      }
       function getScopeKey() {
         let identity = '', history = '', mode = pane()?.dataset.assistantMode || 'normal';
         try { const state = account()?.snapshot(); identity = [state?.contextId || '', state?.namespace || '', state?.generation ?? '', state?.active || false].join(':'); } catch (_) {}
@@ -170,7 +252,8 @@ enum ReaderNativeConversationScript {
         return [navigationID, location.pathname, location.search, identity, history, mode].join('|');
       }
       function capabilities() {
-        const out = ['refresh', 'showLegacy', 'hideLegacy'];
+        const out = ['refresh', 'showLegacy', 'hideLegacy', 'liveAction'];
+        if (typeof window.__clearFocusSel === 'function') out.push('clearSelection');
         if (typeof drawer()?.open === 'function' && typeof drawer()?.close === 'function') out.push('toggleAssistant');
         if (typeof window.__asstSend === 'function') out.push('send');
         if (document.getElementById('asst-send')) out.push('stop');
@@ -185,19 +268,18 @@ enum ReaderNativeConversationScript {
         return out;
       }
       function applyVisualMode() {
-        // Drawer visibility routes generated cards to sidebar or book/float.
-        // Never fake an open drawer merely to read its conversation state.
-        document.documentElement.classList.remove('bw-native-conversation-active');
+        const root = document.documentElement;
+        root.classList.toggle('bw-native-navigation', nativeMode);
+        root.classList.toggle('bw-native-conversation-active', nativeMode && !legacyVisible && isOpen() && activeTab() === 'asst');
       }
       function setLegacy(visible) {
         legacyVisible = !!visible;
-        applyVisualMode();
         if (visible) drawer()?.open('asst');
-        schedule();
+        applyVisualMode(); schedule();
       }
       function setNativeMode(enabled) {
-        applyVisualMode();
-        schedule();
+        nativeMode = !!enabled;
+        applyVisualMode(); schedule();
         return { ok: true };
       }
       function snapshot() {
@@ -215,8 +297,10 @@ enum ReaderNativeConversationScript {
         const all = thread ? Array.from(thread.children).filter(el => el.matches('.asst-msg,.vc-card,.vc-if,.rc-turn')) : [];
         const messages = all.filter(node => !excludedNodes.has(node)).map(projectMessage).filter(Boolean);
         previousNodes = all;
+        liveArtifacts(messages);
+        const readingTools = toolbarActions();
         const payload = { version: 1, scope, revision: 0, title: text(document.title, 160) || '阅读助手', ready: isReady(), busy: isBusy(),
-          legacyVisible, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          legacyVisible, selection: selectedContext(), readingTools, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -273,9 +357,20 @@ enum ReaderNativeConversationScript {
           threadObserver?.disconnect(); thread = current;
           if (thread) {
             threadObserver = new MutationObserver(schedule);
-            threadObserver.observe(thread, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'hidden', 'data-turn-id', 'data-turn'] });
+            threadObserver.observe(thread, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'hidden', 'data-turn-id', 'data-turn', 'disabled'] });
           }
         }
+        const bar = document.getElementById('header') || document.getElementById('ep-top');
+        if (toolbarElement !== bar) {
+          toolbarObserver?.disconnect(); toolbarElement = bar;
+          if (bar) { toolbarObserver = new MutationObserver(schedule); toolbarObserver.observe(bar, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'title'] }); }
+        }
+        const parent = pane();
+        if (contextElement !== parent) {
+          contextObserver?.disconnect(); contextElement = parent;
+          if (parent) { contextObserver = new MutationObserver(schedule); contextObserver.observe(parent, { childList: true, subtree: true, characterData: true }); }
+        }
+        wrapNotifications(window, ['__setFocusSel', '__clearFocusSel', '__renderFocusSel']);
         const currentControls = document.getElementById('asst-input');
         if (currentControls !== controls) {
           controlsObserver?.disconnect(); controls = currentControls;
@@ -291,7 +386,7 @@ enum ReaderNativeConversationScript {
         if (!command || typeof command !== 'object' || Array.isArray(command)) return { ok: false, error: '无效操作' };
         if (getScopeKey() !== scopeKey) snapshot();
         if (command.scope && command.scope !== scope) return { ok: false, error: '会话已切换，请重新操作' };
-        if (Object.keys(command).some(key => !['action', 'scope', 'text', 'actionId'].includes(key))) return { ok: false, error: '不支持的操作参数' };
+        if (Object.keys(command).some(key => !['action', 'scope', 'text', 'actionId', 'x', 'y'].includes(key))) return { ok: false, error: '不支持的操作参数' };
         const action = command.action;
         try {
           if (action === 'send') {
@@ -312,8 +407,15 @@ enum ReaderNativeConversationScript {
             }
           } else if (action === 'toggleAssistant') {
             if (!drawer()?.open || !drawer()?.close) return { ok: false, error: '侧栏尚未准备好' };
-            if (isOpen() && activeTab() === 'asst') drawer().close();
+            if (isOpen() && activeTab() === 'asst') { drawer().close(); legacyVisible = false; }
             else drawer().open('asst');
+          } else if (action === 'clearSelection') {
+            if (typeof window.__clearFocusSel !== 'function') return { ok: false, error: '选区尚未准备好' };
+            window.__clearFocusSel();
+          } else if (action === 'liveAction') {
+            const target = actions.get(command.actionId);
+            if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected) return { ok: false, error: '内容已更新，请重试' };
+            target.run(command);
           } else if (action === 'stop') {
             const button = document.getElementById('asst-send');
             if (!button?.classList.contains('stop') || button.disabled) return { ok: false, error: '当前没有可停止的文字回复' };
@@ -345,16 +447,27 @@ enum ReaderNativeConversationScript {
           } else return { ok: false, error: '当前页面不支持此操作' };
           schedule();
           return { ok: true };
-        } catch (_) { return { ok: false, error: '操作未完成，请在原界面重试' }; }
+        } catch (error) { return { ok: false, error: error?.message || '操作未完成，请重试' }; }
       }
       document.getElementById('bw-native-conversation-style')?.remove();
+      const style = document.createElement('style');
+      style.id = 'bw-native-conversation-style';
+      style.textContent = `
+        .bw-native-navigation #header,.bw-native-navigation #ep-top,.bw-native-navigation #fs-restore {display:none!important}
+        .bw-native-conversation-active #ep-side,.bw-native-conversation-active #grammar-panel,
+        .bw-native-conversation-active #side-handle,.bw-native-conversation-active #ep-side-handle {visibility:hidden!important;pointer-events:none!important}
+        .bw-native-conversation-active body.grammar-open #main,.bw-native-conversation-active body.grammar-open #header {padding-right:0!important}
+        .bw-native-conversation-active body.ep-side-open #ep-content {padding-right:0!important}
+        .bw-native-conversation-active body.ep-side-open #ep-viewer,.bw-native-conversation-active body.ep-side-open #html-content {margin-right:0!important}
+      `;
+      document.documentElement.appendChild(style);
       const mountObserver = new MutationObserver(records => {
         if (!thread || !thread.isConnected || records.some(record => Array.from(record.addedNodes).some(node => node.nodeType === 1 && (['asst-thread', 'asst-input', 'asst-computer', 'asst-call'].includes(node.id) || node.querySelector?.('#asst-thread,#asst-input,#asst-computer,#asst-call'))))) schedule();
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
       ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
-      window.addEventListener('pageshow', () => { suspended = false; mountObserver.observe(document.documentElement, { childList: true, subtree: true }); thread = null; controls = null; drawerElement = null; schedule(); });
-      window.addEventListener('pagehide', () => { suspended = true; threadObserver?.disconnect(); controlsObserver?.disconnect(); drawerObserver?.disconnect(); mountObserver.disconnect(); if (timer != null) clearTimeout(timer); timer = null; });
+      window.addEventListener('pageshow', () => { suspended = false; mountObserver.observe(document.documentElement, { childList: true, subtree: true }); thread = null; controls = null; drawerElement = null; contextElement = null; toolbarElement = null; schedule(); });
+      window.addEventListener('pagehide', () => { suspended = true; threadObserver?.disconnect(); controlsObserver?.disconnect(); drawerObserver?.disconnect(); contextObserver?.disconnect(); toolbarObserver?.disconnect(); mountObserver.disconnect(); if (timer != null) clearTimeout(timer); timer = null; });
       window.__bwNativeConversation = Object.freeze({ perform, setNativeMode, snapshot: () => { lastSignature = ''; snapshot(); } });
       schedule();
     })();

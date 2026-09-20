@@ -1,5 +1,7 @@
 import Combine
 import Foundation
+import CoreTransferable
+import UniformTypeIdentifiers
 
 struct ReaderNativeConversationPart: Identifiable {
     let id: String
@@ -85,6 +87,8 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var legacyVisible = false
     @Published private(set) var sidebarOpen = false
+    @Published private(set) var selectionText = ""
+    @Published private(set) var readingTools: [ReaderNativeControl] = []
     @Published private(set) var messages: [ReaderNativeConversationMessage] = []
     @Published private(set) var capabilities = Set<String>()
     @Published private(set) var voice = ReaderNativeConversationVoice()
@@ -131,6 +135,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         busy = payload["busy"] as? Bool ?? false
         legacyVisible = payload["legacyVisible"] as? Bool ?? false
         sidebarOpen = payload["sidebarOpen"] as? Bool ?? false
+        selectionText = (payload["selection"] as? [String: Any])?["text"] as? String ?? ""
+        readingTools = (payload["readingTools"] as? [[String: Any]] ?? []).compactMap(ReaderNativeControl.init)
         capabilities = Set(payload["capabilities"] as? [String] ?? [])
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
         messages = nextMessages
@@ -148,6 +154,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         busy = false
         legacyVisible = false
         sidebarOpen = false
+        selectionText = ""
+        readingTools = []
         messages = []
         capabilities = []
         voice = ReaderNativeConversationVoice()
@@ -168,7 +176,7 @@ final class ReaderNativeConversationModel: ObservableObject {
             error = "当前页面尚未提供这项操作。"
             return false
         }
-        guard ready || ["refresh", "showLegacy", "hideLegacy", "toggleAssistant"].contains(action) else {
+        guard ready || ["refresh", "showLegacy", "hideLegacy", "toggleAssistant", "liveAction"].contains(action) else {
             error = "助手仍在准备，请稍后重试。"
             return false
         }
@@ -198,5 +206,33 @@ final class ReaderNativeConversationModel: ObservableObject {
             return false
         }
         return true
+    }
+}
+
+struct ReaderNativeControl: Identifiable {
+    let id: String
+    let key: String
+    let title: String
+    let disabled: Bool
+    let destructive: Bool
+
+    init?(_ value: [String: Any]) {
+        guard let id = value["id"] as? String, !id.isEmpty else { return nil }
+        self.id = id
+        key = value["key"] as? String ?? ""
+        title = value["title"] as? String ?? "操作"
+        disabled = value["disabled"] as? Bool ?? false
+        destructive = value["destructive"] as? Bool ?? false
+    }
+}
+
+/// Only Reader card handles can be dropped onto the native book surface.
+/// No card content is copied or persisted by the drag session.
+struct ReaderNativeCardTransfer: Codable, Transferable {
+    let scope: String
+    let actionID: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: UTType(exportedAs: "space.bwicarus.reader-card-handle"))
     }
 }

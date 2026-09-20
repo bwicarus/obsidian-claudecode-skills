@@ -68,7 +68,8 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertFalse(snapshot()['sidebarOpen'])
             page.evaluate('__bwNativeConversation.perform({action:"toggleAssistant"})')
             self.assertTrue(snapshot()['sidebarOpen'])
-            self.assertEqual(page.locator('#main').evaluate('(n)=>getComputedStyle(n).paddingRight'), '320px')
+            self.assertEqual(page.locator('#main').evaluate('(n)=>getComputedStyle(n).paddingRight'), '0px')
+            self.assertEqual(page.locator('#ep-side').evaluate('(n)=>getComputedStyle(n).visibility'), 'hidden')
             page.evaluate("RC.turnCard.draftText('user:u','我的','user','u-item','runner')")
             user = snapshot()['messages'][0]
             page.evaluate("RC.turnCard.draftText('user:u','我的问题','user','u-item','runner');RC.turnCard.freezeDraft('user:u','u-item','runner','user')")
@@ -199,6 +200,9 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.evaluate('__bwNativeConversation.perform({action:"toggleAssistant"})')
             page.wait_for_timeout(420)
             self.assertTrue(page.evaluate('RC.voiceCard.sideOpen()'))
+            self.assertFalse(page.locator('#asst-input').is_visible())
+            page.evaluate('__bwNativeConversation.perform({action:"showLegacy"})')
+            page.wait_for_timeout(100)
             self.assertTrue(page.locator('#asst-input').is_visible())
             page.locator('#ep-side-handle').click()
             page.wait_for_timeout(420)
@@ -206,6 +210,9 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.evaluate('__bwNativeConversation.perform({action:"toggleAssistant"})')
             page.wait_for_timeout(420)
             self.assertTrue(page.evaluate('receipts[receipts.length-1].sidebarOpen'))
+
+            page.evaluate('__bwNativeConversation.perform({action:"showLegacy"})')
+            page.wait_for_timeout(100)
 
             # The actual original focus chip remains above the actual composer.
             page.add_script_tag(content='(() => {' + focus + '})();')
@@ -227,6 +234,53 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertEqual(page.evaluate('entity.bd.__fc.cards[0].front'), '問題')
             self.assertTrue(page.evaluate('!!entity.bd.__fcPager'))
             self.assertGreater(page.locator('[data-learning-card-id="card_abc12345"] button').count(), 1)
+            # Native view reads the live state machine, not original stale parts.
+            page.evaluate('__bwNativeConversation.perform({action:"hideLegacy"})')
+            page.evaluate("__setFocusSel('原生输入区的选区', 'text')")
+            page.wait_for_timeout(100)
+            native = page.evaluate('receipts[receipts.length-1]')
+            self.assertEqual(native['selection']['text'], '原生输入区的选区')
+            cards = [part for message in native['messages'] for part in message['parts'] if part['kind']=='anki']
+            self.assertEqual(len(cards), 2)
+            first = cards[0]
+            self.assertTrue(first['data']['live'])
+            self.assertEqual(first['data']['state'], 'draft')
+            self.assertIn('保存到 Reader 卡库', [c['title'] for c in first['data']['controls']])
+            field = first['data']['fields'][0]
+            self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
+                'action':'liveAction','scope':native['scope'],'actionId':field['id'],'text':'修改过的問題'})['ok'])
+            self.assertEqual(page.evaluate('entity.bd.__fc.cards[0].front'), '修改过的問題')
+            # Native placement carries original gid and the edited full snapshot.
+            self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
+                'action':'liveAction','scope':native['scope'],'actionId':first['data']['dragId'],'x':0.25,'y':0.4})['ok'])
+            placed = page.evaluate('drops.pop()')
+            self.assertEqual(placed['gid'], 'card_abc12345')
+            self.assertEqual(placed['cards'][0]['front'], '修改过的問題')
+            self.assertEqual([placed['x'],placed['y']], [300,360])
+            self.assertFalse(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
+                'action':'liveAction','scope':'stale','actionId':first['data']['dragId'],'x':0.25,'y':0.4})['ok'])
+            self.assertFalse(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
+                'action':'liveAction','scope':native['scope'],'actionId':first['data']['dragId'],'x':2,'y':0.4})['ok'])
+            # Reveal comes from rc-flashcard, including its original four ratings.
+            page.evaluate("RC.flashcard.mountState(entity.bd,[{front:'学習',back:'答案',_st:'learn',_showBack:false},{front:'二問',back:'二答',_st:'draft'}],{gid:'card_abc12345',authoritative:true})")
+            page.wait_for_timeout(120)
+            state = page.evaluate('receipts[receipts.length-1]')
+            learning = next(part for message in state['messages'] for part in message['parts'] if part['kind']=='anki')
+            reveal = next(c for c in learning['data']['controls'] if c['title']=='显示答案')
+            self.assertNotIn('答案', learning['data']['body'])
+            self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
+                'action':'liveAction','scope':state['scope'],'actionId':reveal['id']})['ok'])
+            page.wait_for_timeout(100)
+            state = page.evaluate('receipts[receipts.length-1]')
+            learning = next(part for message in state['messages'] for part in message['parts'] if part['kind']=='anki')
+            self.assertIn('答案', learning['data']['body'])
+            self.assertEqual(len(learning['data']['controls']), 4)
+            # Restore draft for the existing original charged-drag test.
+            page.evaluate("RC.flashcard.mountState(entity.bd,[{front:'修改过的問題',back:'解答',_st:'draft'},{front:'二問',back:'二答',_st:'draft'}],{gid:'card_abc12345',authoritative:true})")
+            page.evaluate('__bwNativeConversation.perform({action:"clearSelection"})')
+            self.assertIsNone(page.evaluate('window.__focusSel'))
+            page.evaluate('__bwNativeConversation.perform({action:"showLegacy"})')
+            page.wait_for_timeout(100)
             handle = page.locator('[data-learning-card-id="card_abc12345"] .vc-card-hd')
             rect = handle.bounding_box()
             self.assertIsNotNone(rect)

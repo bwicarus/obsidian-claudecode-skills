@@ -389,10 +389,23 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
     }
 
+    func placeNativeConversationCard(actionID: String, scope: String, windowPoint: CGPoint) async {
+        guard scope == nativeConversation.scope, webView.window != nil,
+              webView.bounds.width > 0, webView.bounds.height > 0 else { return }
+        // Convert the native drop into the same WKWebView viewport used by the
+        // existing anchor resolver; safe-area/Pencil overlays add no offset.
+        let point = webView.convert(windowPoint, from: nil)
+        await nativeConversation.perform("liveAction", parameters: [
+            "actionId": actionID,
+            "x": point.x / webView.bounds.width,
+            "y": point.y / webView.bounds.height
+        ])
+    }
+
     private func performNativeConversationCommand(_ command: [String: Any]) async -> String? {
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             "showLegacy", "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
-            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant"]
+            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {
