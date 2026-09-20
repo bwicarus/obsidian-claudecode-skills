@@ -89,6 +89,22 @@ struct APIClient {
         try await request("api/monitor/mutate", method: "POST", body: JSONEncoder().encode(mutation))
     }
 
+    func plans(code: String? = nil, includeArchived: Bool = false) async throws -> StockPlanListResponse {
+        var query = [URLQueryItem(name: "includeArchived", value: includeArchived ? "1" : "0"),
+                     URLQueryItem(name: "limit", value: "100")]
+        if let code { query.append(URLQueryItem(name: "code", value: code)) }
+        return try await request("api/plans", query: query)
+    }
+
+    func plan(id: String) async throws -> StockPlanResponse {
+        try await request("api/plans/\(id)")
+    }
+
+    func archivePlan(id: String, requestID: String, expectedRevision: Int) async throws -> StockPlanMutationResponse {
+        let payload = StockPlanArchiveRequest(id: id, requestId: requestID, expectedRevision: expectedRevision)
+        return try await request("api/plans/archive", method: "POST", body: JSONEncoder().encode(payload))
+    }
+
     func recordMonitoringReceipt(id: String) async throws {
         let payload = MonitoringDeliveryReceipt(notificationId: id, channel: "visual", outcome: "displayed")
         let _: MonitoringDeliveryResponse = try await request("api/notifications/receipt", method: "POST", body: JSONEncoder().encode(payload))
@@ -116,6 +132,12 @@ struct APIClient {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw AppError.message("服务器未返回 HTTP 响应。") }
         guard (200..<300).contains(response.statusCode) else {
+            if path.hasPrefix("api/plans") {
+                let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                throw StockPlanAPIError(status: response.statusCode, code: payload?["code"] as? String,
+                                        message: payload?["message"] as? String ?? payload?["error"] as? String
+                                            ?? "方案请求失败（HTTP \(response.statusCode)）。")
+            }
             if path.hasPrefix("api/monitor/") {
                 let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
                 throw MonitoringAPIError(status: response.statusCode,

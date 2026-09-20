@@ -459,6 +459,7 @@ struct VoiceEvent: Decodable {
     let messageId: String?
     let items: [VoiceHistoryItem]?
     let code: String?
+    let planId: String?
     let message: String?
     let actionId: String?
     let capability: String?
@@ -468,6 +469,16 @@ struct VoiceEvent: Decodable {
     let y: Double?
     let x2: Double?
     let y2: Double?
+    let turnId: String?
+    let requestId: String?
+    let callId: String?
+    let name: String?
+    let success: Bool?
+    let durationMs: Double?
+    let summary: String?
+    let errorDetail: String?
+    let at: Double?
+    let events: [VoiceEvent]?
 }
 
 struct VoiceHistoryItem: Decodable {
@@ -481,12 +492,14 @@ struct Transcript: Identifiable {
     let role: String
     var text: String
     var isFinal: Bool
+    var turnID: String?
 
-    init(id: String = UUID().uuidString, role: String, text: String, isFinal: Bool) {
+    init(id: String = UUID().uuidString, role: String, text: String, isFinal: Bool, turnID: String? = nil) {
         self.id = id
         self.role = role
         self.text = text
         self.isFinal = isFinal
+        self.turnID = turnID
     }
 }
 

@@ -24,6 +24,9 @@ final class AppModel: ObservableObject {
                 chipGeneration = UUID()
                 chipRefreshTask?.cancel()
                 publishDetailPresentationChange()
+                if let code = selectedCode {
+                    Task { [weak self] in await self?.refreshPlans(code: code) }
+                }
             }
         }
     }
@@ -68,6 +71,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var listError: String?
     @Published private(set) var detailError: String?
     @Published private(set) var chartError: String?
+    @Published private(set) var savedPlans: [StockPlan] = []
+    @Published private(set) var isLoadingPlans = false
+    @Published private(set) var planError: String?
+    @Published private(set) var archivingPlanIDs: Set<String> = []
+    @Published private(set) var planScopeID = "signed-out"
+    private var plansAccountScopeID: String?
+    private var plansGeneration = UUID()
+    private var planLoads: [String: UUID] = [:]
+    private var pendingPlanArchives: [String: StockPlanArchiveRequest] = [:]
     let deviceID: String
     let voice = VoiceSession()
     let annotations = AnnotationStore()
@@ -96,6 +108,14 @@ final class AppModel: ObservableObject {
         deviceID = savedID
         UserDefaults.standard.set(savedID, forKey: "stocksNative.deviceID")
         voice.onStockSelected = { [weak self] code in self?.openStock(code) }
+        voice.onPlansChanged = { [weak self] id, code in
+            guard let self else { return }
+            let scope = self.planScopeID
+            Task { [weak self] in
+                guard let self, self.planScopeID == scope else { return }
+                await self.refreshChangedPlan(id: id, code: code)
+            }
+        }
         voice.onCapabilityAction = { [weak self] action in
             guard let self else { return CapabilityResult(success: false, message: "App 状态不可用。") }
             return self.annotations.perform(action, selectedStockCode: self.selectedCode)
@@ -107,11 +127,145 @@ final class AppModel: ObservableObject {
                 await self.publishVoiceContext(action: "图表标注：\(operation)", kind: "annotation")
             }
         }
+        resetPlanState()
+        Task { [weak self] in await self?.refreshPlans() }
     }
 
     var client: APIClient {
         // Every saved URL has passed normalizedBase; the bundled default is a fixed HTTPS URL.
         APIClient(baseURL: URL(string: baseURL)!, token: Credentials.token(baseURL: baseURL))
+    }
+
+    var currentAccountPlans: [StockPlan] {
+        plansAccountScopeID == planScopeID ? savedPlans : []
+    }
+
+    var selectedStockPlans: [StockPlan] {
+        currentAccountPlans.filter { $0.code == selectedCode }
+    }
+
+    func plans(for transcript: Transcript) -> [StockPlan] {
+        guard transcript.role == "assistant" else { return [] }
+        return currentAccountPlans.filter { plan in
+            if let thread = plan.source.threadId, let currentThread = voice.threadID, thread != currentThread { return false }
+            if let message = plan.source.messageId { return message == transcript.id }
+            guard let turn = plan.source.turnId, turn == transcript.turnID else { return false }
+            return voice.transcripts.last(where: { $0.role == "assistant" && $0.turnID == turn })?.id == transcript.id
+        }
+    }
+
+    var unattachedSidebarPlans: [StockPlan] {
+        let attached = Set(voice.transcripts.flatMap { plans(for: $0).map(\.id) })
+        return Array(currentAccountPlans.filter { plan in
+            !attached.contains(plan.id) && plan.status != "archived" &&
+                (plan.code == selectedCode || (plan.source.threadId != nil && plan.source.threadId == voice.threadID))
+        }.prefix(5))
+    }
+
+    private func resetPlanState() {
+        plansGeneration = UUID()
+        planScopeID = StockSelectionModel.scopeID(client: isPaired ? client : nil)
+        plansAccountScopeID = planScopeID
+        savedPlans = []
+        planLoads = [:]
+        pendingPlanArchives = [:]
+        archivingPlanIDs = []
+        isLoadingPlans = false
+        planError = nil
+    }
+
+    private func mergePlans(_ incoming: [StockPlan]) {
+        var byID = Dictionary(uniqueKeysWithValues: savedPlans.map { ($0.id, $0) })
+        for plan in incoming {
+            if let existing = byID[plan.id] {
+                guard plan.revision >= existing.revision else { continue }
+                // A source binding can arrive before an older list response.
+                if plan.revision == existing.revision, existing.source.turnId != nil, plan.source.turnId == nil { continue }
+            }
+            byID[plan.id] = plan
+        }
+        savedPlans = Array(byID.values.sorted {
+            $0.createdAt == $1.createdAt ? $0.id > $1.id : $0.createdAt > $1.createdAt
+        }.prefix(500))
+    }
+
+    func refreshPlans(code: String? = nil) async {
+        if plansAccountScopeID != planScopeID { resetPlanState() }
+        guard isPaired, isAIEnabled else { return }
+        let scope = planScopeID, generation = plansGeneration, api = client
+        let key = code ?? "*", ticket = UUID()
+        planLoads[key] = ticket
+        isLoadingPlans = true
+        defer {
+            if scope == planScopeID, generation == plansGeneration, planLoads[key] == ticket {
+                planLoads.removeValue(forKey: key)
+                isLoadingPlans = !planLoads.isEmpty
+            }
+        }
+        do {
+            let result = try await api.plans(code: code, includeArchived: true)
+            guard scope == planScopeID, generation == plansGeneration, planLoads[key] == ticket, !Task.isCancelled else { return }
+            mergePlans(result.items)
+            planError = nil
+        } catch {
+            guard scope == planScopeID, generation == plansGeneration, planLoads[key] == ticket, !Task.isCancelled else { return }
+            planError = error.localizedDescription
+        }
+    }
+
+    private func refreshChangedPlan(id: String?, code: String?) async {
+        if plansAccountScopeID != planScopeID { resetPlanState() }
+        guard isPaired, isAIEnabled else { return }
+        if let id {
+            let scope = planScopeID, generation = plansGeneration, api = client
+            do {
+                let response = try await api.plan(id: id)
+                guard scope == planScopeID, generation == plansGeneration else { return }
+                mergePlans([response.plan])
+                planError = nil
+                return
+            } catch {
+                guard scope == planScopeID, generation == plansGeneration else { return }
+                planError = error.localizedDescription
+            }
+        }
+        await refreshPlans(code: code)
+    }
+
+    func archivePlan(_ plan: StockPlan) async {
+        guard isPaired, isAIEnabled, plansAccountScopeID == planScopeID,
+              plan.status != "archived", !archivingPlanIDs.contains(plan.id) else { return }
+        let scope = planScopeID, generation = plansGeneration, api = client
+        archivingPlanIDs.insert(plan.id)
+        defer {
+            if scope == planScopeID, generation == plansGeneration { archivingPlanIDs.remove(plan.id) }
+        }
+        do {
+            if pendingPlanArchives[plan.id] == nil {
+                let latest = try await api.plan(id: plan.id)
+                guard scope == planScopeID, generation == plansGeneration else { return }
+                mergePlans([latest.plan])
+                if latest.plan.status == "archived" { planError = nil; return }
+                pendingPlanArchives[plan.id] = .init(id: plan.id, requestId: UUID().uuidString, expectedRevision: latest.revision)
+            }
+            guard let pending = pendingPlanArchives[plan.id] else { return }
+            let receipt = try await api.archivePlan(id: pending.id, requestID: pending.requestId, expectedRevision: pending.expectedRevision)
+            guard scope == planScopeID, generation == plansGeneration else { return }
+            guard receipt.success, receipt.requestId == pending.requestId, receipt.planId == plan.id else {
+                planError = "服务器尚未确认归档，请重试确认。"
+                return
+            }
+            pendingPlanArchives.removeValue(forKey: plan.id)
+            mergePlans([receipt.plan])
+            planError = nil
+        } catch let failure as StockPlanAPIError {
+            guard scope == planScopeID, generation == plansGeneration else { return }
+            if (400..<500).contains(failure.status) { pendingPlanArchives.removeValue(forKey: plan.id) }
+            planError = failure.message
+        } catch {
+            guard scope == planScopeID, generation == plansGeneration else { return }
+            planError = "归档结果尚未确认，可重试：\(error.localizedDescription)"
+        }
     }
 
     var displayedStock: Stock? {
@@ -346,6 +500,7 @@ final class AppModel: ObservableObject {
     }
 
     private func resetAccountDetailState() {
+        resetPlanState()
         invalidateDetailRequests()
         detailPresented = false
         selectedCode = nil
@@ -379,6 +534,7 @@ final class AppModel: ObservableObject {
         let result = try await pairClient.pair(code: code, deviceID: deviceID, name: UIDevice.current.name)
         guard result.deviceId == deviceID, !result.token.isEmpty else { throw AppError.message("服务器返回的设备凭证不匹配。") }
         try Credentials.save(token: result.token, baseURL: normalized.absoluteString)
+        resetPlanState()
         isAIEnabled = result.aiEnabled ?? true
         UserDefaults.standard.set(isAIEnabled, forKey: "stocksNative.aiEnabled")
         await voice.stop()
@@ -393,6 +549,7 @@ final class AppModel: ObservableObject {
         overview = nil
         listAsOf = nil
         await loadStocks()
+        await refreshPlans()
     }
 
     func signInWithApple(base: String, identityToken: String, rawNonce: String) async throws {
@@ -404,6 +561,7 @@ final class AppModel: ObservableObject {
             throw AppError.message("服务器返回的设备凭证不匹配。")
         }
         try Credentials.save(token: result.token, baseURL: normalized.absoluteString)
+        resetPlanState()
         isAIEnabled = result.aiEnabled ?? true
         UserDefaults.standard.set(isAIEnabled, forKey: "stocksNative.aiEnabled")
         await voice.stop()
@@ -419,6 +577,7 @@ final class AppModel: ObservableObject {
         listAsOf = nil
         await loadOverview()
         await loadStocks()
+        await refreshPlans()
         if let warning = result.libraryMigrationWarning { listError = warning }
     }
 

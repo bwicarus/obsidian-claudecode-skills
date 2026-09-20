@@ -10,7 +10,8 @@ ASSISTANT_ROOT = Path(__file__).with_name("assistant")
 
 def contract(base_instructions):
     agent = (ASSISTANT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    skill = (ASSISTANT_ROOT / ".agents/skills/stocks-monitoring/SKILL.md").read_text(encoding="utf-8")
+    skill = "\n".join(str(path.relative_to(ASSISTANT_ROOT)) + "\n" + path.read_text(encoding="utf-8")
+                      for path in sorted((ASSISTANT_ROOT / ".agents/skills").glob("*/SKILL.md")))
     text = (base_instructions + "\n\n[股票 App 当前能力契约]\n" + agent +
             "\n上述能力契约更新旧版功能说明，保留已有对话事实与用户选择。不要重新执行历史用户请求；等待本轮明确意图。")
     digest = hashlib.sha256((text + "\n" + skill).encode()).hexdigest()

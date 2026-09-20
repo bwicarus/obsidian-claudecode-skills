@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import web, WSMsgType, ClientError
 from apple_auth import AppleIdentityVerifier
@@ -19,6 +20,9 @@ from voice import VoiceSession, closes_voice_connection, safe_error
 from monitoring import MonitorService, MonitorError
 from notification_delivery import NotificationDelivery
 from monitor_runtime import MonitorRuntime
+from plans import PlanService, PlanError
+from schedules import ScheduleService, ScheduleError
+from schedule_runtime import ScheduleRuntime
 
 log = logging.getLogger(__name__)
 @web.middleware
@@ -31,7 +35,7 @@ async def errors(request, handler):
         response = web.json_response({'error': '未找到该股票'}, status=404)
     except DataUnavailable:
         response = web.json_response({'error': '行情数据暂不可用，请稍后重试'}, status=503)
-    except (SelectionError, MonitorError) as exc:
+    except (SelectionError, MonitorError, PlanError, ScheduleError) as exc:
         result = {'error': str(exc), 'message': str(exc), 'code': exc.code, **exc.detail}
         if isinstance(exc, SelectionConflict):
             result['revision'] = exc.revision
@@ -139,6 +143,34 @@ async def selection_mutate(request):
 async def monitor_catalog(request):
     await identity(request)
     return web.json_response(request.app['monitor'].catalog())
+
+
+async def plans_list(request):
+    caller = await identity(request)
+    archived = request.query.get('includeArchived', '0')
+    if archived not in ('0', '1'):
+        raise ValueError('includeArchived must be 0 or 1')
+    result = await asyncio.to_thread(request.app['plans'].list, caller['ownerId'],
+        request.query.get('code'), int(request.query.get('limit', '100')), archived == '1')
+    return web.json_response(result)
+
+
+async def plan_item(request):
+    caller = await identity(request)
+    return web.json_response(await asyncio.to_thread(request.app['plans'].get, caller['ownerId'], request.match_info['id']))
+
+
+async def plan_archive(request):
+    caller = await identity(request)
+    result = await asyncio.to_thread(request.app['plans'].archive, caller['ownerId'], await request.json())
+    if not result.get('replayed'):
+        event = {'type': 'plan.changed', 'revision': result['revision'], 'planId': result['planId'],
+                 'code': result['plan']['code'], 'requestId': result['requestId'], 'operation': 'archive'}
+        for entry in list(request.app['voices'].values()):
+            if entry and getattr(entry[1], 'selection_owner', None) == caller['ownerId']:
+                with contextlib.suppress(ConnectionError, RuntimeError):
+                    await entry[1].emit_json(event)
+    return web.json_response(result)
 
 
 async def monitor_library(request):
@@ -419,6 +451,7 @@ async def voice(request):
                                live_source=request.app['live'],
                                selection_service=request.app['selection'], selection_owner=caller['ownerId'])
         session.monitor_service = request.app['monitor']
+        session.plan_service = request.app['plans']
         session.notification_delivery = request.app['notifications']
         active[device_id] = (ws, session)
         await asyncio.to_thread(request.app['notifications'].voice_presence, caller['ownerId'], device_id)
@@ -432,6 +465,15 @@ async def voice(request):
                     obj = json.loads(msg.data)
                     kind = obj.get('type')
                     if kind == 'start' and start_task is None:
+                        zone = obj.get('clientTimeZone')
+                        if zone is not None:
+                            if not isinstance(zone, str) or not zone or len(zone) > 80:
+                                raise ValueError('设备时区无效')
+                            try:
+                                ZoneInfo(zone)
+                            except (ZoneInfoNotFoundError, ValueError) as exc:
+                                raise ValueError('设备时区无效') from exc
+                            session.client_time_zone = zone
                         if obj.get('callId'):
                             call = await asyncio.to_thread(request.app['notifications'].call, caller['ownerId'], device_id, str(obj['callId']))
                             if not call.get('valid') or call.get('status') != 'answered':
@@ -487,6 +529,8 @@ async def voice(request):
 
 
 async def shutdown(app):
+    if app.get('schedule_runtime'):
+        await app['schedule_runtime'].close()
     if app.get('monitor_runtime'):
         await app['monitor_runtime'].close()
     for entry in list(app['voices'].values()):
@@ -499,6 +543,8 @@ async def startup(app):
     if os.environ.get('STOCKS_MONITOR_ENABLED') == '1':
         app['monitor_runtime'] = MonitorRuntime(app)
         app['monitor_runtime'].start()
+        app['schedule_runtime'] = ScheduleRuntime(app)
+        app['schedule_runtime'].start()
 
 
 def create_app():
@@ -510,6 +556,8 @@ def create_app():
     app['data'] = StockDataStore(os.environ.get('STOCKS_DATA_ROOT', '/root/webapp/data/stocks'))
     app['selection'] = SelectionService(app['data'], state)
     app['monitor'] = MonitorService(state)
+    app['plans'] = PlanService(state)
+    app['schedules'] = ScheduleService(state)
     app['notifications'] = NotificationDelivery(state)
     app['live'] = LiveMarketSource()
     app['pair_attempts'] = defaultdict(deque)
@@ -521,6 +569,9 @@ def create_app():
                     web.get('/api/monitor/catalog', monitor_catalog),
                     web.get('/api/monitor/library', monitor_library),
                     web.post('/api/monitor/mutate', monitor_mutate),
+                    web.get('/api/plans', plans_list),
+                    web.post('/api/plans/archive', plan_archive),
+                    web.get('/api/plans/{id}', plan_item),
                     web.post('/api/notifications/device', notification_device),
                     web.post('/api/notifications/presence', notification_presence),
                     web.post('/api/notifications/receipt', notification_receipt),

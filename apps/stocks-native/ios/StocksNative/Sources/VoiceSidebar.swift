@@ -6,6 +6,7 @@ struct VoiceSidebar: View {
     var onClose: (() -> Void)? = nil
     @State private var draft = ""
     @State private var sendingText = false
+    @State private var showsDiagnostics = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -14,6 +15,11 @@ struct VoiceSidebar: View {
                     Image(systemName: "waveform").font(.title3).foregroundStyle(AppStyle.accent)
                     Text("股票助手").font(.headline)
                     Spacer()
+                    Button { showsDiagnostics = true } label: {
+                        Image(systemName: "waveform.path.ecg").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("通话诊断")
                     if let onClose {
                         Button(action: onClose) {
                             Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
@@ -109,6 +115,14 @@ struct VoiceSidebar: View {
                                 Text(message.text)
                                     .font(.subheadline).lineSpacing(5).textSelection(.enabled)
                                     .foregroundStyle(AppStyle.ink)
+                                if let process = voice.process(for: message) {
+                                    VoiceProcessView(process: process)
+                                }
+                                ForEach(model.plans(for: message)) { plan in
+                                    StockPlanCard(plan: plan, isArchiving: model.archivingPlanIDs.contains(plan.id)) {
+                                        Task { await model.archivePlan(plan) }
+                                    }
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(message.role == "user" ? 12 : 0)
@@ -116,11 +130,32 @@ struct VoiceSidebar: View {
                                         in: RoundedRectangle(cornerRadius: 12))
                             .id(message.id)
                         }
+                        ForEach(voice.unattachedProcesses) { process in
+                            VoiceProcessView(process: process)
+                        }
+                        if !model.unattachedSidebarPlans.isEmpty {
+                            Text("已保存方案").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                            ForEach(model.unattachedSidebarPlans) { plan in
+                                StockPlanCard(plan: plan, isArchiving: model.archivingPlanIDs.contains(plan.id)) {
+                                    Task { await model.archivePlan(plan) }
+                                }
+                            }
+                        }
+                        if let error = model.planError {
+                            HStack(alignment: .top) {
+                                Text(error).font(.caption).foregroundStyle(.secondary)
+                                Button("刷新方案") { Task { await model.refreshPlans() } }
+                                    .font(.caption).buttonStyle(.plain)
+                            }
+                        }
                         Color.clear.frame(height: 1).id("conversationBottom")
                     }
                     .padding(20)
                 }
                 .onChange(of: voice.transcripts.last?.text) { _, _ in
+                    proxy.scrollTo("conversationBottom", anchor: .bottom)
+                }
+                .onChange(of: model.currentAccountPlans.count) { _, _ in
                     proxy.scrollTo("conversationBottom", anchor: .bottom)
                 }
             }
@@ -144,5 +179,7 @@ struct VoiceSidebar: View {
             .padding(18)
         }
         .background(.white)
+        .sheet(isPresented: $showsDiagnostics) { VoiceDiagnosticsView(voice: voice) }
+        .task(id: model.planScopeID) { await model.refreshPlans() }
     }
 }

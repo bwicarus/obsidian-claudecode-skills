@@ -25,13 +25,114 @@ final class VoiceSession: ObservableObject {
     @Published private(set) var stockCode: String?
     @Published private(set) var sentPackets = 0
     @Published private(set) var receivedPackets = 0
+    @Published private(set) var processes: [VoiceProcess] = []
+    @Published private(set) var diagnostics: [VoiceDiagnosticEntry] = []
     var onStockSelected: ((String) -> Void)?
+    var onPlansChanged: ((String?, String?) -> Void)?
     var onCapabilityAction: ((CapabilityAction) -> CapabilityResult)?
     var onSystemCallEnded: ((String) -> Void)?
     private(set) var systemCallID: String?
 
     var isConnected: Bool { state == .active }
     var isStarted: Bool { state == .connecting || state == .reconnecting || state == .preparing || state == .active }
+
+    var buildVersion: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        return "\(version) (\(build))"
+    }
+    var socketSummary: String {
+        guard let socket else { return "未连接" }
+        switch socket.state {
+        case .running: return isConnected ? "已连接" : "正在协商"
+        case .suspended: return "暂停"
+        case .canceling: return "正在关闭"
+        case .completed: return "已关闭"
+        @unknown default: return "未知"
+        }
+    }
+    var audioSummary: String {
+        audio.isRunning ? (systemCallID == nil ? "采集与播放已启动" : "系统来电音频已启动") : "已停止"
+    }
+    var diagnosticReport: String {
+        let formatter = ISO8601DateFormatter()
+        let header = "StocksNative \(buildVersion)\n通话=\(state.rawValue) WebSocket=\(socketSummary)\n音频=\(audioSummary) 发送=\(sentPackets) 收到=\(receivedPackets)"
+        return ([header] + diagnostics.map {
+            "\(formatter.string(from: $0.timestamp)) [\($0.category)] \(VoiceLogPrivacy.clean($0.message))"
+        }).joined(separator: "\n")
+    }
+
+    func clearDiagnostics() { diagnostics.removeAll() }
+
+    private func recordDiagnostic(_ category: String, _ message: String) {
+        diagnostics.append(VoiceDiagnosticEntry(category: category, message: VoiceLogPrivacy.clean(message, limit: 400)))
+        if diagnostics.count > 80 { diagnostics.removeFirst(diagnostics.count - 80) }
+    }
+
+    private func transcriptTurnID(_ id: String) -> String? {
+        let parts = id.split(separator: ":", omittingEmptySubsequences: false)
+        if parts.count >= 4 && parts[0] == "backend" { return String(parts[2]) }
+        return parts.count == 2 && parts[1] == "assistant" ? String(parts[0]) : nil
+    }
+
+    func process(for transcript: Transcript) -> VoiceProcess? {
+        guard transcript.role == "assistant", let turnID = transcript.turnID,
+              transcripts.last(where: { $0.role == "assistant" && $0.turnID == turnID })?.id == transcript.id else { return nil }
+        return processes.first(where: { $0.id == turnID })
+    }
+
+    var unattachedProcesses: [VoiceProcess] {
+        let attached = Set(transcripts.filter { $0.role == "assistant" }.compactMap(\.turnID))
+        return processes.filter { !attached.contains($0.id) }
+    }
+
+    private func consumeProcess(_ event: VoiceEvent, restored: Bool = false) {
+        guard let id = event.turnId ?? event.requestId else { return }
+        if !processes.contains(where: { $0.id == id }) {
+            processes.append(VoiceProcess(id: id, requestID: event.requestId))
+        }
+        guard let index = processes.firstIndex(where: { $0.id == id }) else { return }
+        let state = event.state ?? (event.success == true ? "completed" : "failed")
+        if event.type == "task" {
+            processes[index].state = state
+            processes[index].durationMs = event.durationMs ?? processes[index].durationMs
+            if let message = event.errorDetail ?? event.message {
+                processes[index].error = VoiceLogPrivacy.clean(message)
+            }
+            if state != "running" {
+                for step in processes[index].tools.indices where processes[index].tools[step].state == "running" {
+                    processes[index].tools[step].state = "interrupted"
+                }
+            }
+        } else {
+            let callID = event.callId ?? "legacy:\(event.name ?? "tool")"
+            let step = VoiceToolStep(id: callID, name: VoiceLogPrivacy.clean(event.name ?? "工具", limit: 100),
+                                     state: state, durationMs: event.durationMs,
+                                     summary: event.summary.map { VoiceLogPrivacy.clean($0) },
+                                     error: event.errorDetail.map { VoiceLogPrivacy.clean($0) })
+            if let existing = processes[index].tools.firstIndex(where: { $0.id == callID }) {
+                if !(processes[index].tools[existing].state != "running" && state == "running") {
+                    processes[index].tools[existing] = step
+                }
+            } else if processes[index].tools.count < 32 {
+                processes[index].tools.append(step)
+            }
+        }
+        if !restored {
+            recordDiagnostic(event.type == "tool" ? "工具" : "任务",
+                             "\(event.name ?? "后台处理") · \(state) · \(event.errorDetail ?? event.message ?? "")")
+        }
+        if processes.count > 30 { processes.removeFirst(processes.count - 30) }
+    }
+
+    private func interruptProcesses() {
+        for index in processes.indices where processes[index].state == "running" {
+            processes[index].state = "interrupted"
+            for step in processes[index].tools.indices where processes[index].tools[step].state == "running" {
+                processes[index].tools[step].state = "interrupted"
+            }
+        }
+    }
 
     private let audio = NativeAudio()
     private let inkUpload = VoiceInkUpload()
@@ -88,6 +189,7 @@ final class VoiceSession: ObservableObject {
         generation = UUID()
         let current = generation
         state = isReconnect ? .reconnecting : .connecting
+        recordDiagnostic("连接", isReconnect ? "开始恢复原对话" : "开始连接")
         if !isReconnect { error = nil }
         self.stockCode = stockCode
         sessionID = nil
@@ -106,6 +208,7 @@ final class VoiceSession: ObservableObject {
             fail("麦克风权限未开启，请在系统设置中允许股票 App 使用麦克风。")
             return
         }
+        recordDiagnostic("音频", "麦克风权限已允许，等待服务器就绪")
         do {
             var request = URLRequest(url: try client.webSocketURL(deviceID: deviceID))
             request.timeoutInterval = 30
@@ -115,6 +218,7 @@ final class VoiceSession: ObservableObject {
             task.resume()
             let clientVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.0"
             var start: [String: Any] = ["type": "start", "clientVersion": clientVersion,
+                                       "clientTimeZone": TimeZone.current.identifier,
                                        "capabilities": "chart.annotation.v1,ui.context.v1"]
             handshakeStockCode = self.stockCode
             if let handshakeStockCode { start["stockCode"] = handshakeStockCode }
@@ -138,6 +242,8 @@ final class VoiceSession: ObservableObject {
     }
 
     func stop() async {
+        recordDiagnostic("连接", "用户结束通话")
+        interruptProcesses()
         let endedCall = systemCallID
         systemCallID = nil
         wantsConnection = false
@@ -217,6 +323,8 @@ final class VoiceSession: ObservableObject {
                     }
                     if event.type == "state", event.state == "closed", event.reason == "new_thread" {
                         transcripts.removeAll()
+                        processes.removeAll()
+                        recordDiagnostic("对话", "已创建新对话")
                         threadID = nil
                         sessionID = nil
                         state = .idle
@@ -225,7 +333,8 @@ final class VoiceSession: ObservableObject {
                 }
             } catch {
                 guard current == generation else { return }
-                self.error = "新对话未获确认：\(error.localizedDescription)；请重试。"
+                self.error = VoiceLogPrivacy.clean("新对话未获确认：\(error.localizedDescription)；请重试。")
+                recordDiagnostic("错误", self.error ?? "新对话未获确认")
             }
             return
         }
@@ -336,6 +445,7 @@ final class VoiceSession: ObservableObject {
                 switch message {
                 case .data(let data):
                     receivedPackets += 1
+                    if receivedPackets == 1 { recordDiagnostic("音频", "收到首个下行音频包") }
                     if audio.isRunning { audio.play(data) }
                     else if pendingPlayback.count < 100 { pendingPlayback.append(data) }
                 case .string(let text):
@@ -343,7 +453,8 @@ final class VoiceSession: ObservableObject {
                     do {
                         await handle(try JSONDecoder().decode(VoiceEvent.self, from: data), generation: current)
                     } catch {
-                        self.error = "收到无法识别的语音消息：\(error.localizedDescription)"
+                        self.error = "收到无法识别的语音消息。"
+                        recordDiagnostic("协议", "消息解析失败：\(error.localizedDescription)")
                     }
                 @unknown default: break
                 }
@@ -357,6 +468,7 @@ final class VoiceSession: ObservableObject {
     private func handle(_ event: VoiceEvent, generation current: UUID) async {
         switch event.type {
         case "state":
+            recordDiagnostic("连接", "服务器状态：\(event.state ?? "未知") · \(event.reason ?? "")")
             if let sessionID = event.sessionId { self.sessionID = sessionID }
             if let threadID = event.threadId {
                 if let expected = reconnectExpectedThreadID, expected != threadID {
@@ -385,6 +497,7 @@ final class VoiceSession: ObservableObject {
                 do { try audio.start(managedBySystemCall: systemCallID != nil) }
                 catch { fail("无法启动音频：\(error.localizedDescription)"); return }
                 state = .active
+                recordDiagnostic("音频", audioSummary)
                 if reconnectExpectedThreadID == nil || reconnectExpectedThreadID == threadID {
                     error = nil
                 }
@@ -423,6 +536,15 @@ final class VoiceSession: ObservableObject {
             }
         case "history":
             replaceHistory(event.items ?? [])
+            onPlansChanged?(nil, nil)
+            processes.removeAll()
+            for item in event.events ?? [] where item.type == "task" || item.type == "tool" {
+                consumeProcess(item, restored: true)
+            }
+            interruptProcesses()
+            recordDiagnostic("对话", "已恢复 \(transcripts.count) 条消息、\(processes.count) 个处理过程")
+        case "task", "tool":
+            consumeProcess(event)
         case "transcript":
             guard let text = event.text, !text.isEmpty else { return }
             reconnectAttempts = 0
@@ -433,17 +555,21 @@ final class VoiceSession: ObservableObject {
                       !(transcripts[index].isFinal && event.final == false) else { return }
                 transcripts[index].text = text
                 transcripts[index].isFinal = event.final ?? true
+                transcripts[index].turnID = event.turnId ?? event.requestId ?? transcripts[index].turnID ?? transcriptTurnID(messageID)
             } else if event.messageId == nil, let index = transcripts.indices.last,
                       !transcripts[index].isFinal, transcripts[index].role == role {
                 transcripts[index].text = text
                 transcripts[index].isFinal = event.final ?? true
             } else {
                 transcripts.append(Transcript(id: event.messageId ?? UUID().uuidString,
-                                              role: role, text: text, isFinal: event.final ?? true))
+                                              role: role, text: text, isFinal: event.final ?? true,
+                                              turnID: event.turnId ?? event.requestId ?? event.messageId.flatMap { transcriptTurnID($0) }))
             }
             trimTranscripts()
         case "selection.changed":
             NotificationCenter.default.post(name: .stocksSelectionDidChange, object: nil)
+        case "plan.changed":
+            onPlansChanged?(event.planId, event.code)
         case "stock.selected":
             if let code = event.code {
                 stockCode = code
@@ -472,8 +598,9 @@ final class VoiceSession: ObservableObject {
                 }
             }
         case "error":
+            recordDiagnostic("错误", event.message ?? "服务器报告错误")
             if event.fatal == false {
-                error = event.message ?? "本次操作未完成，语音连接仍然可用。"
+                error = VoiceLogPrivacy.clean(event.message ?? "本次操作未完成，语音连接仍然可用。")
             } else {
                 handleConnectionLoss(event.message ?? "语音服务器报告错误。", reason: "server")
             }
@@ -486,7 +613,8 @@ final class VoiceSession: ObservableObject {
         var restored: [Transcript] = []
         for item in items.suffix(100) where !item.text.isEmpty {
             guard seen.insert(item.id).inserted else { continue }
-            restored.append(Transcript(id: item.id, role: item.role, text: item.text, isFinal: true))
+            restored.append(Transcript(id: item.id, role: item.role, text: item.text, isFinal: true,
+                                       turnID: transcriptTurnID(item.id)))
         }
         transcripts = restored
     }
@@ -511,6 +639,7 @@ final class VoiceSession: ObservableObject {
                     let packet = self.audioQueue.removeFirst()
                     try await socket.send(.data(packet))
                     self.sentPackets += 1
+                    if self.sentPackets == 1 { self.recordDiagnostic("音频", "首个上行音频包已发送") }
                 }
                 if current == self.generation { self.audioSender = nil }
             } catch {
@@ -522,12 +651,16 @@ final class VoiceSession: ObservableObject {
     }
 
     private func handleConnectionLoss(_ message: String, reason: String) {
+        let message = VoiceLogPrivacy.clean(message)
+        recordDiagnostic("连接", "\(reason)：\(message)")
+        interruptProcesses()
         generation = UUID()
         cleanup()
         let requestedNewConversation = newConversationRequested
         newConversationRequested = false
         if reason == "new_thread", requestedNewConversation {
             transcripts.removeAll()
+            processes.removeAll()
             threadID = nil
             sessionID = nil
         }
@@ -573,6 +706,7 @@ final class VoiceSession: ObservableObject {
         }
         let delay = min(30, 2 * (1 << min(reconnectAttempts, 4)))
         reconnectAttempts += 1
+        recordDiagnostic("重连", "第 \(reconnectAttempts) 次，将在 \(delay) 秒后恢复")
         state = .reconnecting
         reconnectTask?.cancel()
         reconnectTask = Task { @MainActor [weak self] in
@@ -586,6 +720,9 @@ final class VoiceSession: ObservableObject {
     }
 
     private func fail(_ message: String) {
+        let message = VoiceLogPrivacy.clean(message)
+        recordDiagnostic("错误", message)
+        interruptProcesses()
         let endedCall = systemCallID
         systemCallID = nil
         wantsConnection = false
@@ -600,6 +737,7 @@ final class VoiceSession: ObservableObject {
     }
 
     private func cleanup(closeSocket: Bool = true) {
+        if audio.isRunning { recordDiagnostic("音频", "停止采集与播放") }
         inkUpload.disconnect()
         conversationControl?.cancel(with: .goingAway, reason: nil)
         conversationControl = nil

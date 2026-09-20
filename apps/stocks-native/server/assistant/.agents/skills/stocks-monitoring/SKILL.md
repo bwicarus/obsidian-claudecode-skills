@@ -31,4 +31,4 @@ description: 在股票 App 中创建或修改后台阈值盯盘、查看通知�
 - answered：已有接听回执；audioSubmitted 也不保证用户听见。
 - failed / declined / missed / expired / cancelled：报告实际状态，保留视觉通知，不重复新建来电。
 
-结果不明时先查同一 notificationId；重试复用 requestId。暂不支持指定未来时刻的来电，不声称已经定时。工具不可用时报告实际错误；不要用“我是 AI，不能打电话”替代能力查询。
+结果不明时先查同一 notificationId；重试复用 requestId。指定未来时刻的请求改用 `stocks_schedule`，读取相邻 stocks-scheduling/SKILL.md；到点才产生通知，不要现在创建一个等待几小时的来电。工具不可用时报告实际错误；不要用“我是 AI，不能打电话”替代能力查询。

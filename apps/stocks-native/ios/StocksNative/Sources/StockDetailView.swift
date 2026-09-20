@@ -4,6 +4,7 @@ import SwiftUI
 struct StockDetailView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var selection: StockSelectionModel
+    @State private var showingPlans = false
 
     var body: some View {
         Group {
@@ -37,6 +38,7 @@ struct StockDetailView: View {
             }
         }
         .background(AppStyle.canvas)
+        .sheet(isPresented: $showingPlans) { StockPlanHistoryView(model: model) }
     }
 
     private func quoteHeader(_ stock: Stock, sector: String?, asOf: String?) -> some View {
@@ -78,6 +80,14 @@ struct StockDetailView: View {
             HStack(spacing: 8) {
                 Text(stock.code).monospaced().tracking(1.2)
                 Text(asOf.map { "资料 \(StockChartLabels.detail($0))" } ?? "等待资料时间").lineLimit(1)
+                if model.isAIEnabled {
+                    Button { showingPlans = true } label: {
+                        Label("方案 \(model.selectedStockPlans.filter { $0.status != "archived" }.count)", systemImage: "doc.text")
+                            .lineLimit(1).fixedSize()
+                    }
+                    .buttonStyle(.plain).foregroundStyle(AppStyle.accent)
+                    .accessibilityLabel("查看这只股票的操作方案")
+                }
             }
             .font(.caption2).foregroundStyle(.secondary)
         }
@@ -110,6 +120,7 @@ struct StockDetailView: View {
         await model.loadDetail()
         await model.loadRealtime()
         await model.loadChart()
+        await model.refreshPlans(code: model.selectedCode)
     }
 }
 
