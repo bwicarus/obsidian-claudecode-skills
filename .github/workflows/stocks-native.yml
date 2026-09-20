@@ -10,7 +10,7 @@ on:
       status_version:
         description: Marketing version for the TestFlight status query
         type: string
-        default: '0.3.0'
+        default: '0.3.1'
       signed_archive:
         description: Build a separate StocksNative App Store IPA
         type: boolean

@@ -10,7 +10,6 @@ struct StockDetailPanel: View {
     @State private var restoreFrame: CGRect?
     @State private var hasUserAdjusted = false
     @State private var restoreWasUserAdjusted = false
-    @State private var dragOrigin: CGRect?
     @State private var resizeOrigin: CGRect?
     @State private var isExpanded = false
 
@@ -32,16 +31,16 @@ struct StockDetailPanel: View {
         }
         .frame(width: frame.width, height: frame.height)
         .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(UnevenRoundedRectangle(topLeadingRadius: 18, style: .continuous))
         .background {
             // Cast the shadow from a simple shape, not the native chart/list subtree.
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            UnevenRoundedRectangle(topLeadingRadius: 18, style: .continuous)
                 .fill(.white)
                 .shadow(color: .black.opacity(0.13), radius: 18, x: 0, y: 6)
                 .allowsHitTesting(false)
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            UnevenRoundedRectangle(topLeadingRadius: 18, style: .continuous)
                 .strokeBorder(.black.opacity(0.07), lineWidth: 1)
                 .allowsHitTesting(false)
         }
@@ -52,7 +51,6 @@ struct StockDetailPanel: View {
         .onChange(of: availableSize) { _, _ in
             // Clamp only the displayed frame. A temporarily narrow viewport must
             // not replace the user's preferred geometry when its space returns.
-            dragOrigin = nil
             resizeOrigin = nil
         }
     }
@@ -80,17 +78,11 @@ struct StockDetailPanel: View {
                 Text("个股详情")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(AppStyle.ink)
-                Image(systemName: "line.3.horizontal")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.tertiary)
                 Spacer(minLength: 0)
             }
             .lineLimit(1)
             .frame(maxWidth: .infinity, minHeight: 44)
-            .contentShape(Rectangle())
-            .gesture(moveGesture)
             .accessibilityElement(children: .combine)
-            .accessibilityHint("拖动标题移动详情面板")
             Button(action: toggleExpanded) {
                 Image(systemName: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                     .frame(width: 44, height: 44)
@@ -112,21 +104,6 @@ struct StockDetailPanel: View {
         .background(AppStyle.canvas)
     }
 
-    private var moveGesture: some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .global)
-            .onChanged { value in
-                guard !isExpanded else { return }
-                if dragOrigin == nil { dragOrigin = visibleFrame }
-                guard let origin = dragOrigin else { return }
-                panelFrame = StockDetailPanelGeometry.clamp(
-                    origin.offsetBy(dx: value.translation.width, dy: value.translation.height),
-                    in: availableSize
-                )
-                hasUserAdjusted = true
-            }
-            .onEnded { _ in dragOrigin = nil }
-    }
-
     private var resizeGesture: some Gesture {
         DragGesture(minimumDistance: 4, coordinateSpace: .global)
             .onChanged { value in
@@ -142,7 +119,6 @@ struct StockDetailPanel: View {
     }
 
     private func toggleExpanded() {
-        dragOrigin = nil
         resizeOrigin = nil
         withAnimation(.easeInOut(duration: 0.18)) {
             if isExpanded {
@@ -162,11 +138,7 @@ enum StockDetailPanelGeometry {
     static func bounds(in size: CGSize) -> CGRect {
         let width = size.width.isFinite ? max(1, size.width) : 1
         let height = size.height.isFinite ? max(1, size.height) : 1
-        let horizontalInset: CGFloat = width >= 600 ? 8 : 0
-        let verticalInset = min(8, max(0, (height - 1) / 2))
-        return CGRect(x: horizontalInset, y: verticalInset,
-                      width: max(1, width - horizontalInset * 2),
-                      height: max(1, height - verticalInset * 2))
+        return CGRect(x: 0, y: 0, width: width, height: height)
     }
 
     static func initialFrame(in size: CGSize) -> CGRect {
@@ -183,9 +155,8 @@ enum StockDetailPanelGeometry {
               frame.width.isFinite, frame.height.isFinite else { return initialFrame(in: size) }
         let width = min(area.width, max(min(480, area.width), frame.width))
         let height = min(area.height, max(min(280, area.height), frame.height))
-        let x = min(max(frame.minX, area.minX), area.maxX - width)
-        let y = min(max(frame.minY, area.minY), area.maxY - height)
-        return CGRect(x: x, y: y, width: width, height: height)
+        // Only size is user adjustable. The viewport owns the bottom/right anchor.
+        return CGRect(x: area.maxX - width, y: area.maxY - height, width: width, height: height)
     }
 
     static func resizingTopLeft(_ frame: CGRect, translation: CGSize, in size: CGSize) -> CGRect {

@@ -377,9 +377,15 @@ struct StockSelectionSidebar: View {
         if let result = activeEvaluation {
             VStack(spacing: 0) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("\(result.resultCount) 只股票").font(.subheadline.weight(.semibold))
-                        Text(result.asOf ?? "数据时间未知").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 6) {
+                            Text("\(result.resultCount) 只股票").font(.subheadline.weight(.semibold))
+                            Text(result.asOf ?? "数据时间未知").font(.caption2).foregroundStyle(.secondary)
+                        }.fixedSize(horizontal: true, vertical: false)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(result.resultCount) 只股票").font(.subheadline.weight(.semibold))
+                            Text(result.asOf ?? "数据时间未知").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        }
                     }
                     Spacer()
                     Menu {
@@ -393,7 +399,7 @@ struct StockSelectionSidebar: View {
                     Button(choosingStocks ? "完成" : "选择") { choosingStocks.toggle(); model.selectedCodes = [] }
                         .font(.caption).disabled(section == .screener && !model.resultsAreCurrent)
                 }
-                .padding(12)
+                .padding(.horizontal, 12).padding(.vertical, 6)
                 if section == .watchlist, let quoteTime = model.watchQuoteTime {
                     Text("行情 \(quoteTime)").font(.caption2).foregroundStyle(.secondary).padding(.horizontal, 12)
                 }
@@ -419,6 +425,7 @@ struct StockSelectionSidebar: View {
                             } else { onSelectStock(stock.code) }
                         }, onMonitoring: { onMonitoring(stock.code) })
                         .listRowBackground(selectedStockCode == stock.code && !choosingStocks ? AppStyle.accent.opacity(0.08) : Color.clear)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
                         .contextMenu {
                             Button("打开股票") { onOpenStock(stock.code) }
                             Button("盯盘规则") { onMonitoring(stock.code) }
@@ -440,6 +447,7 @@ struct StockSelectionSidebar: View {
                     }
                 }
                 .listStyle(.plain)
+                .environment(\.defaultMinListRowHeight, 44)
                 .overlay { if result.items.isEmpty { ContentUnavailableView("暂无符合条件的股票", systemImage: "line.3.horizontal.decrease.circle") } }
                 .refreshable {
                     if section == .watchlist { await model.refreshVisibleGroup(force: true) }

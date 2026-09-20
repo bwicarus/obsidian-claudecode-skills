@@ -85,14 +85,29 @@ struct OrderBookPanel: View {
     @Environment(\.workspaceCardWidth) private var availableWidth
     let stock: Stock
     let compact: Bool
-    private var showsColumns: Bool { availableWidth > 0 ? availableWidth >= 420 : compact }
+    private static let columnBreakpoint: CGFloat = 420
+    private static let contentPadding: CGFloat = 12
+    private static let sectionSpacing: CGFloat = 6
+    private static let rowSpacing: CGFloat = 3
+    private var showsColumns: Bool { availableWidth > 0 ? availableWidth >= Self.columnBreakpoint : compact }
+
+    static func minimumContentHeight(stock: Stock, width: CGFloat) -> CGFloat {
+        let bids = min(stock.bids?.count ?? 0, 5), asks = min(stock.asks?.count ?? 0, 5)
+        func sectionHeight(_ count: Int) -> CGFloat { CGFloat(count + 1) * 16 + CGFloat(count) * rowSpacing }
+        var sections: [CGFloat] = [22]
+        if bids == 0 && asks == 0 { sections.append(20) }
+        else if width >= columnBreakpoint { sections.append(max(sectionHeight(bids), sectionHeight(asks))) }
+        else { sections += [sectionHeight(asks), 1, sectionHeight(bids)] }
+        if stock.innerVolume != nil && stock.outerVolume != nil { sections += [1, 16] }
+        return max(80, contentPadding * 2 + sections.reduce(0, +) + CGFloat(sections.count - 1) * sectionSpacing)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Self.sectionSpacing) {
             Text("五档盘口").font(.headline)
             if (stock.asks ?? []).isEmpty && (stock.bids ?? []).isEmpty {
                 Text("暂无五档数据").font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 90)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else if showsColumns {
                 HStack(alignment: .top, spacing: 16) {
                     bookSection("买盘", rows: stock.bids ?? [], tint: AppStyle.up)
@@ -112,12 +127,13 @@ struct OrderBookPanel: View {
                 }
             }
         }
-        .padding(16)
+        .padding(Self.contentPadding)
+        .fixedSize(horizontal: false, vertical: true)
         .background(.white, in: RoundedRectangle(cornerRadius: 18))
     }
 
     private func bookSection(_ title: String, rows: [OrderLevel], tint: Color, reversed: Bool = false) -> some View {
-        VStack(spacing: 6) {
+        VStack(spacing: Self.rowSpacing) {
             HStack {
                 Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer()
@@ -139,7 +155,7 @@ struct OrderBookPanel: View {
     }
 
     private func smallValue(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 4) {
             Text(title).font(.caption2).foregroundStyle(.secondary)
             Text(value).font(.caption.monospacedDigit()).foregroundStyle(AppStyle.ink)
         }
@@ -154,7 +170,7 @@ struct StockValuationCard: View {
         card(title: "估值与表现", subtitle: detail.asOf ?? "最新资料") {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading),
                                     count: availableWidth >= 500 ? 2 : 1),
-                      alignment: .leading, spacing: 10) {
+                      alignment: .leading, spacing: 8) {
             valueLine("市盈率", detail.stock.peDynamic, color: AppStyle.ink)
             valueLine("市净率", detail.stock.pb, color: AppStyle.ink)
             valueLine("总市值", detail.stock.marketCap, compact: true, color: AppStyle.ink)

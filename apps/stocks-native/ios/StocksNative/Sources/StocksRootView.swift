@@ -369,6 +369,7 @@ struct StocksRootView: View {
                                        summary: monitoringModel.library?.summary[stock.code],
                                        onOpen: { openStock(stock.code) }, onMonitoring: { openMonitoring(stock.code) })
                     .listRowBackground(model.detailPresented && model.selectedCode == stock.code ? AppStyle.accent.opacity(0.08) : Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
                     .contextMenu {
                         Button("打开股票") { model.openStock(stock.code) }
                         Button("盯盘规则", systemImage: "waveform.path.ecg") { openMonitoring(stock.code) }
@@ -377,6 +378,7 @@ struct StocksRootView: View {
                     }
                 }
                 .listStyle(.plain)
+                .environment(\.defaultMinListRowHeight, 44)
                 .overlay {
                     if model.isLoadingList && model.stocks.isEmpty { ProgressView("读取行情…") }
                     else if model.stocks.isEmpty && model.listError == nil {
@@ -385,11 +387,11 @@ struct StocksRootView: View {
                 }
                 .refreshable { await model.loadStocks() }
                 .searchable(text: $model.query, prompt: "代码或名称")
-                VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
                     Text("数据时间").font(.caption2).foregroundStyle(.secondary)
-                    Text(model.listAsOf ?? "服务器未提供时间").font(.caption2).monospacedDigit()
+                    Text(model.listAsOf ?? "服务器未提供时间").font(.caption2).monospacedDigit().lineLimit(1)
                 }
-                .padding(.horizontal, 18).padding(.vertical, 12).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -403,29 +405,25 @@ private struct ScreenerControlsHeight: PreferenceKey {
 private struct MarketPulseStrip: View {
     let overview: MarketOverview
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                pulse("涨", overview.rising, AppStyle.up)
-                pulse("跌", overview.falling, AppStyle.down)
-                pulse("平", overview.flat, .secondary)
-                Spacer(minLength: 4)
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("全市场成交").font(.caption2).foregroundStyle(.secondary)
-                    Text(AppStyle.compact(overview.turnover)).font(.caption.monospacedDigit())
-                }
+        SelectionBubbleFlow(spacing: 8) {
+            pulse("涨", overview.rising, AppStyle.up)
+            pulse("跌", overview.falling, AppStyle.down)
+            pulse("平", overview.flat, .secondary)
+            pulse("涨停", overview.limitUp, AppStyle.up)
+            pulse("跌停", overview.limitDown, AppStyle.down)
+            HStack(spacing: 3) {
+                Text("成交").foregroundStyle(.secondary)
+                Text(AppStyle.compact(overview.turnover)).monospacedDigit()
             }
-            HStack(spacing: 14) {
-                Text("涨停 \(overview.limitUp)").foregroundStyle(AppStyle.up)
-                Text("跌停 \(overview.limitDown)").foregroundStyle(AppStyle.down)
-                if let sector = overview.hotSectors.first {
-                    Spacer()
+            if let sector = overview.hotSectors.first {
+                HStack(spacing: 3) {
                     Text("热 · \(sector.name)").lineLimit(1)
                     Text(AppStyle.change(sector.changePct)).foregroundStyle(AppStyle.movement(sector.changePct))
                 }
             }
-            .font(.caption2)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .font(.caption2)
+        .padding(.horizontal, 12).padding(.vertical, 6)
         .background(.white)
     }
 
@@ -434,7 +432,7 @@ private struct MarketPulseStrip: View {
             Text(title).foregroundStyle(.secondary)
             Text(String(value)).foregroundStyle(color).monospacedDigit().fontWeight(.semibold)
         }
-        .font(.caption)
+        .font(.caption2)
     }
 }
 

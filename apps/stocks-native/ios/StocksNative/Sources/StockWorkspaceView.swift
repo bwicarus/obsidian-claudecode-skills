@@ -6,6 +6,7 @@ struct StockWorkspaceView: View {
     @ObservedObject private var workspace: WorkspaceLayoutStore
     @State private var showingEditor = false
     @AppStorage("stocksNative.workspaceLocked") private var layoutLocked = false
+    @ScaledMetric(relativeTo: .caption) private var compactCardTextScale: CGFloat = 1
     @State private var layoutError: String?
 
     init(model: AppModel, detail: StockResponse) {
@@ -176,11 +177,14 @@ struct StockWorkspaceView: View {
             minimumWidth = 260
             let columns = max(1, Int((width - 32 + 12) / 94))
             let rows = Int(ceil(9.0 / Double(columns)))
-            minimumHeight = 64 + CGFloat(rows * 42 + max(0, rows - 1) * 12)
+            minimumHeight = 64 + CGFloat(rows * 38 + max(0, rows - 1) * 12)
         case .orderBook:
-            minimumWidth = 220; minimumHeight = width < 420 ? 420 : 270
+            minimumWidth = 220; minimumHeight = OrderBookPanel.minimumContentHeight(stock: stock, width: width)
         case .valuation:
-            minimumWidth = 260; minimumHeight = width < 500 ? 260 : 180
+            minimumWidth = 260
+            let count = detail.technical?.metrics.profitRatio == nil ? 6 : 7
+            let rows = width < 500 ? count : (count + 1) / 2
+            minimumHeight = 76 + CGFloat(rows * 16 + max(0, rows - 1) * 8)
         case .chipCosts:
             minimumWidth = 300; minimumHeight = 280
         case .chipDistribution:
@@ -216,7 +220,8 @@ struct StockWorkspaceView: View {
             minimumWidth = 280
             minimumHeight = WorkspaceSignalsCard.minimumHeight(signals: detail.signals, width: width)
         }
-        return CGSize(width: minimumWidth, height: minimumHeight)
+        let textScale = [.orderBook, .quote, .valuation].contains(card.kind) ? max(1, compactCardTextScale) : 1
+        return CGSize(width: minimumWidth, height: minimumHeight * textScale)
     }
 
     private func textHeight(_ text: String, width: CGFloat, glyph: CGFloat, line: CGFloat) -> CGFloat {

@@ -147,7 +147,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                 // its whole local rectangle, including cards near the screen edge.
                 controller.safeAreaRegions = []
                 addChild(controller)
-                let host = WorkspaceCardHost(controller: controller)
+                let host = WorkspaceCardHost(controller: controller, kind: card.kind)
                 host.accessibilityIdentifier = "workspace.card.\(page.id).\(card.id)"
                 canvas.addSubview(host)
                 controller.didMove(toParent: self)
@@ -183,8 +183,8 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             var rows: [Int: Int] = [:]
             for columns in 1...WorkspaceGridEngine.columnCount {
                 let width = max(1, CGFloat(columns) * columnPitch - gap)
-                // Keep the same content budget when locking/unlocking the 24pt handle.
-                let height = minimumContentSize(card, width).height + 24
+                // Reserve the content inset even when locked; the touch target stays 24pt.
+                let height = minimumContentSize(card, width).height + WorkspaceCardHost.headerInset(for: card.kind)
                 rows[columns] = max(1, Int(ceil((height + gap) / rowPitch)))
             }
             result.minimumRows[card.id] = rows
@@ -571,10 +571,19 @@ private final class WorkspaceCardHost: UIView {
     let resizeGrip = UIView()
     private let gripMark = UIView()
     private let resizeMark = UIImageView(image: UIImage(systemName: "arrow.up.left.and.arrow.down.right"))
+    private let contentInset: CGFloat
     private var editing = true
 
-    init(controller: UIHostingController<AnyView>) {
+    static func headerInset(for kind: WorkspaceCardKind) -> CGFloat {
+        switch kind {
+        case .chart, .kline, .intraday, .klineChips: 24
+        default: 16
+        }
+    }
+
+    init(controller: UIHostingController<AnyView>, kind: WorkspaceCardKind) {
         self.controller = controller
+        contentInset = WorkspaceCardHost.headerInset(for: kind)
         super.init(frame: .zero)
         backgroundColor = .white
         layer.cornerRadius = 20
@@ -609,11 +618,12 @@ private final class WorkspaceCardHost: UIView {
         super.layoutSubviews()
         // A shallow, wide handle leaves room for content without covering chart controls.
         // Locking the layout also removes the now-unused handle band.
-        let headerHeight: CGFloat = editing ? 24 : 0
+        let headerHeight: CGFloat = editing ? contentInset : 0
         controller.view.frame = CGRect(x: 0, y: headerHeight, width: bounds.width,
                                        height: max(1, bounds.height - headerHeight))
-        grip.frame = CGRect(x: max(0, (bounds.width - 120) / 2), y: 0, width: min(120, bounds.width), height: headerHeight)
-        gripMark.frame = CGRect(x: (grip.bounds.width - 30) / 2, y: 8, width: 30, height: 4)
+        // Data cards already have top padding: the extra touch area only covers that padding.
+        grip.frame = CGRect(x: max(0, (bounds.width - 120) / 2), y: 0, width: min(120, bounds.width), height: editing ? 24 : 0)
+        gripMark.frame = CGRect(x: (grip.bounds.width - 30) / 2, y: contentInset == 16 ? 5 : 8, width: 30, height: 4)
         resizeGrip.frame = CGRect(x: max(0, bounds.width - 44), y: max(0, bounds.height - 44), width: 44, height: 44)
         resizeMark.frame = CGRect(x: 20, y: 20, width: 14, height: 14)
     }

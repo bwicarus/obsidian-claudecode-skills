@@ -390,43 +390,46 @@ struct MonitoringStockRow: View {
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 Button(action: onOpen) {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 10) {
                         selectionMark
-                        identity.frame(width: 140, alignment: .leading)
-                        metric("最新价", AppStyle.price(price), width: 68)
-                        metric("涨跌幅", AppStyle.change(changePct), color: AppStyle.movement(changePct), width: 74)
-                        metric("量比", volumeRatio.map { String(format: "%.2f", $0) } ?? "—", width: 50)
-                        metric("换手", AppStyle.percent(turnoverRate), width: 62)
-                        metric("成交额", AppStyle.compact(turnover), width: 78)
-                        metric("市值", AppStyle.compact(marketCap), width: 78)
+                        identity.frame(width: 148, alignment: .leading)
+                        compactMetric("现价", AppStyle.price(price))
+                        compactMetric("涨跌", AppStyle.change(changePct), color: AppStyle.movement(changePct))
+                        compactMetric("量比", volumeRatio.map { String(format: "%.2f", $0) } ?? "—")
+                        compactMetric("换手", AppStyle.percent(turnoverRate))
+                        compactMetric("成交额", AppStyle.compact(turnover))
+                        compactMetric("市值", AppStyle.compact(marketCap))
                     }.contentShape(Rectangle())
                 }.buttonStyle(.plain)
                 Spacer(minLength: 0)
                 monitorBadge
             }.fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
                 Button(action: onOpen) {
-                    HStack(spacing: 10) {
-                        selectionMark
-                        identity
-                        Spacer(minLength: 4)
-                        VStack(alignment: .trailing, spacing: 4) {
-                            Text(AppStyle.price(price)).font(.subheadline.weight(.semibold))
-                            Text(AppStyle.change(changePct)).font(.caption).foregroundStyle(AppStyle.movement(changePct))
-                        }.monospacedDigit()
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 8) {
+                            selectionMark
+                            Text(name).font(.subheadline.weight(.medium)).foregroundStyle(AppStyle.ink).lineLimit(1)
+                            Spacer(minLength: 4)
+                            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                Text(AppStyle.price(price)).font(.subheadline.weight(.semibold))
+                                Text(AppStyle.change(changePct)).font(.caption).foregroundStyle(AppStyle.movement(changePct))
+                            }.monospacedDigit().fixedSize()
+                        }
+                        stockMetadata
                     }.contentShape(Rectangle())
                 }.buttonStyle(.plain)
-                SelectionBubbleFlow(spacing: 10) {
+                SelectionBubbleFlow(spacing: 6) {
                     compactMetric("量比", volumeRatio.map { String(format: "%.2f", $0) } ?? "—")
                     compactMetric("换手", AppStyle.percent(turnoverRate))
                     compactMetric("成交额", AppStyle.compact(turnover))
                     compactMetric("市值", AppStyle.compact(marketCap))
+                    monitorBadge
                 }
-                monitorBadge
             }
-        }.padding(.vertical, 5)
+        }.padding(.vertical, 2)
     }
 
     @ViewBuilder private var selectionMark: some View {
@@ -437,12 +440,19 @@ struct MonitoringStockRow: View {
     }
 
     private var identity: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
             Text(name).font(.subheadline.weight(.medium)).foregroundStyle(AppStyle.ink).lineLimit(1)
-            Text(code + (sector.flatMap { $0.isEmpty ? nil : " · " + $0 } ?? ""))
-                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            if let score { Text("评分 \(score.formatted(.number.precision(.fractionLength(0...1))))").font(.caption2).foregroundStyle(.secondary) }
+            stockMetadata
         }
+    }
+
+    private var stockMetadata: some View {
+        HStack(spacing: 5) {
+            Text(code).monospacedDigit().fixedSize()
+            if let score { Text("评 \(score.formatted(.number.precision(.fractionLength(0...1))))").fixedSize() }
+            if let sector, !sector.isEmpty { Text(sector).lineLimit(1) }
+        }
+        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
     }
 
     private var monitorBadge: some View {
@@ -450,22 +460,15 @@ struct MonitoringStockRow: View {
             Label(summary?.title ?? "添加盯盘", systemImage: (summary?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "waveform.path.ecg")
                 .font(.caption2.weight(.medium))
                 .foregroundStyle((summary?.unreadCount ?? 0) > 0 ? AppStyle.up : AppStyle.accent)
-                .padding(.horizontal, 8).padding(.vertical, 7)
+                .padding(.horizontal, 7).padding(.vertical, 4)
                 .background(AppStyle.accent.opacity(0.07), in: Capsule())
         }.buttonStyle(.borderless).accessibilityLabel("\(name) \(summary?.title ?? "创建盯盘规则")")
     }
 
-    private func metric(_ title: String, _ value: String, color: Color = AppStyle.ink, width: CGFloat) -> some View {
-        VStack(alignment: .trailing, spacing: 5) {
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-            Text(value).font(.caption.monospacedDigit()).foregroundStyle(color)
-        }.frame(width: width, alignment: .trailing)
-    }
-
-    private func compactMetric(_ title: String, _ value: String) -> some View {
+    private func compactMetric(_ title: String, _ value: String, color: Color = AppStyle.ink) -> some View {
         HStack(spacing: 3) {
             Text(title).foregroundStyle(.secondary)
-            Text(value).monospacedDigit().foregroundStyle(AppStyle.ink)
+            Text(value).monospacedDigit().foregroundStyle(color)
         }.font(.caption2)
     }
 }
