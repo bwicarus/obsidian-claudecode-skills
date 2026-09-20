@@ -1680,6 +1680,26 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 headers: [HTTPHeader("Allow"): "GET"]
             )
         }
+        // names=a,b,c → 只回「哪些名字这台设备认得」的清单。
+        // ⚠ 这条存在的理由：某个符号在当前 iOS 版本上没有时，取图会 404，
+        //   而 CSS mask 拿不到图就是**空白方块**，没有回落可言。让网页先问一次、
+        //   只对认得的名字切成 SF Symbols，其余继续用内置 SVG。
+        if let namesParam = request.query["names"] {
+            let allowed = CharacterSet(charactersIn:
+                "abcdefghijklmnopqrstuvwxyz0123456789.")
+            let asked = namesParam.split(separator: ",").map(String.init)
+                .filter { !$0.isEmpty && $0.count <= 64
+                    && $0.unicodeScalars.allSatisfy { allowed.contains($0) } }
+            guard asked.count <= 128 else {
+                return response(status: .badRequest, text: "too many names")
+            }
+            let have = asked.filter { UIImage(systemName: $0) != nil }
+            return jsonResponse(
+                request,
+                status: .ok,
+                object: ["ok": true, "have": have]
+            )
+        }
         let name = request.query["name"] ?? ""
         let allowed = CharacterSet(charactersIn:
             "abcdefghijklmnopqrstuvwxyz0123456789.")

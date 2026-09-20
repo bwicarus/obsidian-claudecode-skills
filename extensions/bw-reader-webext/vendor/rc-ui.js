@@ -82,6 +82,28 @@ if (window.__bwPwaProviderOnly) return;
       return /^\/r\/[a-f0-9]{64}$/.test(v) ? v + '/native-api/sf-symbol' : '';
     } catch (_) { return ''; }
   }
+  // App 说它认得的符号名。null = 还没问过（一律先用回落，不留空白方块）。
+  var _sfHave = null;
+  function _probeSymbols() {
+    var sf = _sfBase();
+    if (!sf || _sfHave) return;
+    var names = [];
+    Object.keys(ICONS).forEach(function (k) {
+      if (names.indexOf(ICONS[k].s) < 0) names.push(ICONS[k].s);
+    });
+    try {
+      // @interaction icons.sf-symbol.probe
+      fetch(sf + '?names=' + encodeURIComponent(names.join(',')))
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || !d.ok || !Array.isArray(d.have)) return;
+          _sfHave = {};
+          d.have.forEach(function (n) { _sfHave[n] = 1; });
+          if (_iconStyle) _iconStyle.textContent = _iconCss();
+        })
+        .catch(function () {});
+    } catch (_) {}
+  }
   function _iconCss() {
     var sf = _sfBase(), out = [];
     Object.keys(ICONS).forEach(function (k) {
@@ -90,7 +112,10 @@ if (window.__bwPwaProviderOnly) return;
       var fallback = "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg'"
         + " viewBox='0 0 24 24' fill='" + (ic.f ? 'black' : 'none') + "' stroke='black' stroke-width='1.8'"
         + " stroke-linecap='round' stroke-linejoin='round'><path d='" + ic.d + "'/></svg>\")";
-      var src = sf ? ('url("' + sf + '?name=' + ic.s + '&size=20")') : fallback;
+      // ⚠ 只有**确认这台设备认得**这个名字时才指向 SF —— 取不到图时 CSS mask
+      //   给的是空白方块，没有回落可言（所以不能乐观地一律指过去）。
+      var useSf = sf && _sfHave && _sfHave[ic.s];
+      var src = useSf ? ('url("' + sf + '?name=' + ic.s + '&size=20")') : fallback;
       out.push('.rc-i-' + k + '{-webkit-mask-image:' + src + ';mask-image:' + src + '}');
     });
     return out.join('');
@@ -204,6 +229,7 @@ body.fs-mode .rc-topbar-pill{display:none!important}
     _iconStyle = document.createElement('style'); _iconStyle.id = 'rc-ui-icons';
     _iconStyle.textContent = _iconCss();
     document.head.appendChild(_iconStyle);
+    _probeSymbols();
   }
   function placeSelectionToolbar(el, rect, opts) {
     if (!el) return null; opts = opts || {}; rect = rect || {};

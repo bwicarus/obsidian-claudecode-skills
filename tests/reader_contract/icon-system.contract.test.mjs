@@ -61,22 +61,24 @@ test("图标靠 currentColor 上色，所以跟着按钮文字变色", () => {
   assert.match(css, /\.rc-i\{[^}]*mask-size:contain/);
 });
 
-test("App 内指向真 SF Symbols，别处回落手绘 SVG", () => {
+test("没问过 App 之前一律用回落，问过之后只切它认得的", () => {
+  // ⚠ 这条是 2026-09-20 补的防线：某个符号在当前 iOS 版本上不存在时，取图 404，
+  //   而 CSS mask 拿不到图就是**空白方块** —— 没有回落可言。所以不能乐观地
+  //   「有 App 就全指过去」，必须先问一次 names=…，只对它认得的切。
   const token = "a".repeat(64);
   const { css } = run("/r/" + token);
-  // ⚠ 用 includes 而不是 new RegExp(...)：字符串里的 `\?` 在 JS 里就是 `?`，
-  //   拼进正则后变成「前一个字符可选」，于是这条断言永远匹配不上真实的 URL。
-  assert.ok(
-    css.includes("/r/" + token + "/native-api/sf-symbol?name=trash"),
-    "App 内 mask 必须指向环回的符号端点");
-  assert.doesNotMatch(css, /rc-i-trash\{[^}]*data:image\/svg/,
-    "有 App 就不该再用回落图");
+  assert.doesNotMatch(css, /native-api\/sf-symbol\?name=/,
+    "还没问过就指向 SF = 未知符号会变空白方块");
+  assert.match(css, /rc-i-trash\{[^}]*data:image\/svg/,
+    "问过之前必须先用内置 SVG");
+});
 
-  const plain = run(null).css;
-  assert.match(plain, /rc-i-trash\{[^}]*data:image\/svg/,
-    "没有 App（扩展/桌面）必须回落到内置 SVG");
-  assert.doesNotMatch(plain, /native-api\/sf-symbol/,
-    "扩展里不能去请求 App 的环回地址");
+test("探测只在 App 内发起，且一次把所有符号名问完", () => {
+  const SRC2 = readFileSync(
+    new URL("../../_server_deploy/static/pdf/rc-ui.js", import.meta.url), "utf8");
+  assert.match(SRC2, /\?names=/, "用 names= 批量问，而不是每个图标各探一次");
+  assert.match(SRC2, /if \(!sf \|\| _sfHave\) return;/,
+    "没有 App 不发请求（扩展里不该去碰 App 的环回地址），问过一次不再问");
 });
 
 test("环回路径必须是合法能力路径，否则一律回落", () => {

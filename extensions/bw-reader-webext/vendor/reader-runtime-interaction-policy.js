@@ -408,6 +408,17 @@
         transport: { outbox: true, extensionBridge: true, serviceWorker: 'none' }
       }
     ),
+    // 图标：问 App「这批 SF Symbol 名字你认得哪些」(2026-09-20)。
+    // 每次开页最多一次，拿不到就继续用内置 SVG —— 所以离线直接 fallback，
+    // 不排队、不重试：一个图标的形状不值得占 outbox，也不该反过来拖住页面。
+    networkRead(
+      'icons.sf-symbol.probe',
+      ['/native-api/sf-symbol'],
+      {
+        surfaces: ['pwa'],
+        reason: '只在 App 内发；答不上就用内置 SVG，界面不受影响。'
+      }
+    ),
     // App 端诊断行落盘(用户 2026-09-03 建议):离线就丢,不排队 —— 诊断不能反过来制造积压
     backgroundMutation(
       'diagnostics.client-log.report',
