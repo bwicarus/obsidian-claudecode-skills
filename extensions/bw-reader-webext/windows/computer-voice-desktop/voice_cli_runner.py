@@ -300,6 +300,9 @@ DEFAULTS: dict = {
     # 后台在这么多秒内跑过 → 不补投。判据从"委派序号"改成"后台动没动"，前者会被
     # 委派早于转写定稿的时序绕过（2026-09-18 实录）。
     "promiseRecentBackendSeconds": 30.0,
+    # 对话还在动就续等（见 _promise_rescue_inner）；封顶避免永远等下去。
+    "promiseIdleSeconds": 4.0,
+    "promiseMaxWaitSeconds": 45.0,
     "steerWaitSeconds": 3.0,          # 委托之后等这一轮起来的上限（实测 22~60 ms 就起）
     "contextInjectOn": "delegationSteer",  # 后台那份状态什么时候投。
                                       # delegationSteer（默认，2026-09-17）= 后台真的开工之后，
@@ -510,7 +513,11 @@ class PipeMicTrack(MediaStreamTrack):
         self.q: queue.Queue = queue.Queue(maxsize=100)
         self.pts = 0
         self.level = 0.0
-        self.drops = 0           # 队列满丢掉的 20 ms 块
+        self.drops = 0           # 队列满丢掉的 20 ms 块（**消费端卡住**，真丢了）
+        # ⚠ 跟 drops 分开数：削深是**有意的**（PIPE_MAX_DEPTH，压住延迟），
+        #   跟「卡住导致丢帧」是两回事。混在一个数里，这个数就没法用来判断有没有问题 ——
+        #   2026-09-20 我就差点把 micDrops=160 读成故障，其实几乎全是正常削深。
+        self.trimmed = 0         # 为压延迟主动丢掉的最旧块（正常，不是故障）
         self.status_flags = 0    # 坏包（魔数/长度不对）
         self.silence = 0         # 没收到帧、补静音的次数
         self.gaps = 0            # 放着放着断流（缓冲见底）的次数
@@ -573,7 +580,7 @@ class PipeMicTrack(MediaStreamTrack):
         while self.q.qsize() > PIPE_MAX_DEPTH:
             try:
                 self.q.get_nowait()
-                self.drops += 1
+                self.trimmed += 1
             except queue.Empty:
                 break
         try:
@@ -938,6 +945,8 @@ class Runner:
         self._delegation_seq = 0              # 累计委派次数（只增）
         self._last_backend_turn_id = None     # 上一条后台轮 id：轮外那句收尾语音认领用
         self._user_asks: list = []            # 最近几次用户发言 (时刻, 原话, 当时的委派序号)
+        self._voice_user_stream = ""   # 用户说话的实时转写（见 transcript/delta）
+        self._stream_role: dict[str, str] = {}   # 每轮草稿的角色（user / assistant）
         self._voice_stream = ""
         # 这段话的流正在往哪个容器投。⚠ 必须记住 —— 委派常发生在语音**还在说**的中途，
         #   每个 delta 各自重算目标的话，前半句进 v- 容器、后半句进后台轮容器，
@@ -1068,6 +1077,19 @@ class Runner:
                 elif role == "user" and text:
                     self._voice_user_acc = (self._voice_user_acc + " " + text).strip()
             elif m == "thread/realtime/transcript/delta":
+                # 用户 2026-09-21：「我说话时也要实时显示」。此前只有助手侧有逐字流式，
+                # 用户自己说的话要等整句转写定稿才出现 —— 说话当下屏幕上什么都没有。
+                # ⚠ 推到 <tid>.u（用户句的轮次 id，与落库同一个），带 role=user，
+                #   否则会被当成助手正文渲进卡里。
+                if p.get("role") == "user" and p.get("delta"):
+                    if self._voice_turn_id is None:
+                        self._voice_turn_id = "v-" + str(int(time.time() * 1000))[-12:]
+                    self._voice_user_stream += str(p.get("delta"))
+                    try:
+                        self._stream_post(self._voice_turn_id + ".u",
+                                          self._voice_user_stream, role="user")
+                    except Exception:
+                        pass
                 if p.get("role") == "assistant" and p.get("delta"):
                     if self._voice_turn_id is None:
                         self._voice_turn_id = "v-" + str(int(time.time() * 1000))[-12:]
@@ -1595,6 +1617,30 @@ class Runner:
                 pass
         self.pc = None
         self.dc = None
+        # ⚠ 收尾时把这场通话的音频统计留一笔。计数器一直都有，但**没人看** ——
+        #   用户 2026-09-20 报「语音有点卡顿」，我只能去翻实时 status，而那时
+        #   上一场早已清零。卡顿要能自己说话，否则每次都只能靠现场复现。
+        #   只在真有问题时记（干净的通话不写日志，免得把统一日志刷成噪声）。
+        try:
+            sp, mc = self.speaker, self.mic
+            bad = []
+            if sp is not None:
+                if getattr(sp, 'underruns', 0):
+                    bad.append('speakerUnderruns=%d' % sp.underruns)
+                if getattr(sp, 'gaps', 0):
+                    bad.append('speakerGaps=%d' % sp.gaps)
+                if getattr(sp, 'status_flags', 0):
+                    bad.append('speakerFlags=%d' % sp.status_flags)
+            if mc is not None and getattr(mc, 'drops', 0):
+                # 只报真丢帧；trimmed 是有意削深，不该算故障。
+                bad.append('micDrops=%d' % mc.drops)
+            if bad:
+                error_log('voice', 'BW_VOICE_AUDIO_DEGRADED',
+                          '通话音频有丢失或欠载：' + '、'.join(bad),
+                          'reason=' + str(reason)
+                          + ' micTrimmed=' + str(getattr(mc, 'trimmed', 0) if mc else 0))
+        except Exception:
+            pass
         if self.mic:
             self.mic.close()
         if self.speaker:
@@ -2617,6 +2663,26 @@ class Runner:
         await asyncio.sleep(wait)
         if self._promise_pending is not pend:
             return          # 期间已经委派过（或又有新承诺），不补
+        # ⚠ 对话还在动的时候，承诺**不算掉了** —— 只是还没轮到它。
+        #   2026-09-20 实录：用户一口气说完八项（23:36:44），补投 6 秒后就开跑
+        #   （23:36:50），而真委派 23:36:56 才到 —— 提问到委派整整 12 秒，因为长句
+        #   转写 + 语音模型处理本来就慢。结果同一个问题被答了两遍，用户看到的就是
+        #   「反复一轮轮回答同一个问题」。
+        #   单纯调大窗口是钝的：真掉了的那次也要跟着多等。判据应当是「对话是否还在
+        #   进行」—— 在说话就续等，安静下来再算。
+        idle_needed = float(self.settings.get("promiseIdleSeconds") or 4.0)
+        deadline = time.time() + float(self.settings.get("promiseMaxWaitSeconds") or 45.0)
+        # ⚠ 用 getattr：补投的测试桩是个轻量 Runner，没有这两个语音状态属性。
+        #   直接取会 AttributeError，而这个协程的异常进了没人取的 Future —— 整条链路无声。
+        def _voice_busy():
+            return bool(getattr(self, 'user_speaking', False)
+                        or getattr(self, 'assistant_speaking', False))
+        while _voice_busy() and time.time() < deadline:
+            await asyncio.sleep(idle_needed)
+            if self._promise_pending is not pend:
+                return      # 续等期间委派到了
+        if self._promise_pending is not pend:
+            return
         if self.backend_busy or not (self.app and self.thread_id):
             self._promise_pending = None
             return
@@ -3508,6 +3574,13 @@ class Runner:
             tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
             self._voice_turn_id = tid
             self._history_post({"user": text, "via": "voice", "turn_id": tid + ".u"})
+            # 定稿后把草稿换成这句完整的 —— 跟助手侧同一条原则：草稿等于最终文本，
+            # 内容一致就不会跳动，也不会把半截话留在屏幕上。
+            self._voice_user_stream = ""
+            try:
+                self._stream_post(tid + ".u", text, role="user")
+            except Exception:
+                pass
         elif role == "assistant":
             tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
             self._voice_turn_id = None
@@ -3568,6 +3641,19 @@ class Runner:
         if absorb:
             body["absorb"] = [absorb]
         self._history_post(body)
+        # ⚠ 落库之后把草稿换成**同一份完整文本**。
+        #   用户 2026-09-19 要求「流式的最终结果直接当最终结果，不要重新整理」，
+        #   于是轮次收尾不再重渲 —— 代价是草稿一旦不对就永远不对。2026-09-20 实录：
+        #   侧栏显示「步： 上一轮…这轮到了七项,」，开头少了「有进」、结尾断在逗号，
+        #   而库里那条正文是完整的 147 字。
+        #   正确的做法不是「不再校对」，而是让**草稿等于最终文本** —— 内容一致就
+        #   不会有跳动，也不会把半截话永久留在屏幕上。
+        # ⚠ 包起来：这是**显示上的收尾**，落库已经完成了，它失败不该把整条路径带下水。
+        #   （补投那次同样的教训：测试桩是个轻量 Runner，没有 settings 之类的属性。）
+        try:
+            self._stream_post(owner, (chr(10) + chr(10)).join(acc))
+        except Exception:
+            pass
 
     def _history_enabled(self) -> str:
         url = str(self.settings.get("historyUrl") or "").rstrip("/")
@@ -3605,11 +3691,13 @@ class Runner:
         except Exception:
             pass
 
-    def _stream_post(self, turn_id: str, text: str):
+    def _stream_post(self, turn_id: str, text: str, role: str = "assistant"):
         """流式草稿：只保留每轮最新全文，队列里同一轮最多挂一条（到达节奏快于发送节奏时自然合并）。"""
         if not self._history_enabled() or not turn_id:
             return
         self._stream_latest[turn_id] = text
+        # role 跟着轮次记：用户句的草稿要渲成**他自己的气泡**，不是助手正文。
+        self._stream_role[turn_id] = role
         if turn_id not in self._stream_queued:
             self._stream_queued.add(turn_id)
             self._history_q.put(("stream", turn_id))
@@ -3637,7 +3725,8 @@ class Runner:
                         time.sleep(wait)
                     self._stream_queued.discard(payload)
                     text = self._stream_latest.get(payload, "")
-                    self._history_request("/api/assistant/stream", {"turn_id": payload, "content": text[:8000]})
+                    self._history_request("/api/assistant/stream", {"turn_id": payload, "content": text[:8000],
+                                                                   "role": self._stream_role.get(payload, "assistant")})
                     last_stream_at = time.monotonic()
                     self.history_stats["streamed"] += 1
                 else:
@@ -3671,6 +3760,8 @@ class Runner:
             "speakerFlags": self.speaker.status_flags if self.speaker else None,
             "speakerBufferedMs": round(len(self.speaker.buf) / 2 / self.speaker.out_rate * 1000) if self.speaker else None,
             "micDrops": self.mic.drops if self.mic else None,
+            # 主动削深：正常现象，单独看；跟 micDrops 混在一起会让人误判。
+            "micTrimmed": getattr(self.mic, "trimmed", None) if self.mic else None,
             "micFlags": self.mic.status_flags if self.mic else None,
             "micQueued": self.mic.q.qsize() if self.mic else None,
             # 直连管道的计数（走声卡那条路时为 None）：收了多少帧、补了多少静音、发出去多少帧。

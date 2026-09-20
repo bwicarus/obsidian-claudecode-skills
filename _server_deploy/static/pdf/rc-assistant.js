@@ -3718,7 +3718,8 @@
         //   影子容器是"一次任务散成好几个框"的一环：草稿在 live_<tid>、工具与卡片在 <tid>、
         //   语音正文又在 v-<ts> —— 三个框。同一个 tid 之后，工具链、绿点红点、逐字出现的
         //   回答和最终生成物都落在一张卡里（用户要的形状），权威重载也替换的是同一个容器。
-        try { RC.turnCard.draftText(tid, String(ev.content || '')); } catch (e0) {}
+        // role=user：这是**用户自己正在说的话**，渲成他的气泡（2026-09-21）。
+        try { RC.turnCard.draftText(tid, String(ev.content || ''), ev.role); } catch (e0) {}
         return;
       }
       // ⚠ 重载是**权威**的：存储里没有的部件，这一刻全被冲掉（本函数上面那条注释

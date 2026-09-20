@@ -625,14 +625,19 @@
   }
 
   // 流式文字:唯一允许"就地更新"的 part(不变式②的例外)。response 结束调 freezeDraft。
-  function draftText(tid, text) {
+  function draftText(tid, text, role) {
     var t = _turns[tid] || open(tid);
     if (!t) return;
     if (!t.draft) {
       t.draft = { kind: 'text', text: '', seq: t.parts.length };
       t.parts.push(t.draft);
       t.draft._el = document.createElement('div');
-      t.draft._el.className = 'rc-part rc-part-text';
+      // role=user：用户自己正在说的话，渲成他的气泡而不是助手正文（2026-09-21）。
+      // 复用 .asst-u（已有的蓝色靠右气泡）：实时那条和定稿后那条长得一样，
+      // 定稿替换时不会有样式跳变。
+      t.draft._el.className = (role === 'user')
+        ? 'rc-part rc-part-text rc-part-user asst-u'
+        : 'rc-part rc-part-text';
       t.bd.appendChild(t.draft._el);
     }
     t.draft.text = text;

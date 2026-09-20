@@ -10962,6 +10962,9 @@ def assistant_stream_external():
     if not tid:
         return jsonify({"ok": False, "error": "turn_id"}), 400
     content = str(b.get("content") or "")[:8000]
+    # 用户 2026-09-21：「我说话时也要实时显示」。用户句的草稿要渲成他自己的气泡，
+    # 所以 role 必须跟着走 —— 不带的话侧栏会把它当成助手正文渲进卡里。
+    role = "user" if str(b.get("role") or "") == "user" else "assistant"
     stream = str(b.get("stream") or "delta")
     if stream not in ("delta", "start"):
         return jsonify({"ok": False, "error": "stream"}), 400
@@ -10975,7 +10978,7 @@ def assistant_stream_external():
         import reader_events
         delivered = reader_events.publish(
             "assistant-history", b.get("file") or "", session["user_id"],
-            {"turn_id": tid, "stream": stream, "content": content}) or 0
+            {"turn_id": tid, "stream": stream, "content": content, "role": role}) or 0
     except Exception:
         pass
     return jsonify({"ok": True, "delivered": delivered})
