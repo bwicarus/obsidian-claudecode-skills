@@ -373,6 +373,7 @@ struct MonitoringBanner: View {
 }
 
 struct MonitoringStockRow: View {
+    @ScaledMetric(relativeTo: .caption2) private var monitorControlHeight: CGFloat = 20
     let code: String
     let name: String
     let sector: String?
@@ -406,30 +407,34 @@ struct MonitoringStockRow: View {
                 Spacer(minLength: 0)
                 monitorBadge
             }.fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
                 Button(action: onOpen) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 8) {
-                            selectionMark
-                            Text(name).font(.subheadline.weight(.medium)).foregroundStyle(AppStyle.ink).lineLimit(1)
-                            Spacer(minLength: 4)
-                            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                                Text(AppStyle.price(price)).font(.subheadline.weight(.semibold))
-                                Text(AppStyle.change(changePct)).font(.caption).foregroundStyle(AppStyle.movement(changePct))
-                            }.monospacedDigit().fixedSize()
-                        }
-                        stockMetadata
+                    HStack(spacing: 8) {
+                        selectionMark
+                        Text(name).font(.subheadline.weight(.medium)).foregroundStyle(AppStyle.ink).lineLimit(1)
+                        Spacer(minLength: 4)
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
+                            Text(AppStyle.price(price)).font(.subheadline.weight(.semibold))
+                            Text(AppStyle.change(changePct)).font(.caption).foregroundStyle(AppStyle.movement(changePct))
+                        }.monospacedDigit().fixedSize()
                     }.contentShape(Rectangle())
                 }.buttonStyle(.plain)
+                HStack(spacing: 6) {
+                    Button(action: onOpen) {
+                        stockMetadata
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                    monitorBadge
+                }
                 SelectionBubbleFlow(spacing: 6) {
                     compactMetric("量比", volumeRatio.map { String(format: "%.2f", $0) } ?? "—")
                     compactMetric("换手", AppStyle.percent(turnoverRate))
                     compactMetric("成交额", AppStyle.compact(turnover))
                     compactMetric("市值", AppStyle.compact(marketCap))
-                    monitorBadge
                 }
             }
-        }.padding(.vertical, 2)
+        }.padding(.vertical, 1)
     }
 
     @ViewBuilder private var selectionMark: some View {
@@ -440,7 +445,7 @@ struct MonitoringStockRow: View {
     }
 
     private var identity: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 1) {
             Text(name).font(.subheadline.weight(.medium)).foregroundStyle(AppStyle.ink).lineLimit(1)
             stockMetadata
         }
@@ -457,12 +462,19 @@ struct MonitoringStockRow: View {
 
     private var monitorBadge: some View {
         Button(action: onMonitoring) {
-            Label(summary?.title ?? "添加盯盘", systemImage: (summary?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "waveform.path.ecg")
+            HStack(spacing: 3) {
+                Image(systemName: (summary?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "waveform.path.ecg")
+                Text(summary?.title ?? "盯盘")
+            }
                 .font(.caption2.weight(.medium))
                 .foregroundStyle((summary?.unreadCount ?? 0) > 0 ? AppStyle.up : AppStyle.accent)
-                .padding(.horizontal, 7).padding(.vertical, 4)
-                .background(AppStyle.accent.opacity(0.07), in: Capsule())
-        }.buttonStyle(.borderless).accessibilityLabel("\(name) \(summary?.title ?? "创建盯盘规则")")
+                .lineLimit(1)
+                .padding(.horizontal, 5)
+                .frame(height: monitorControlHeight)
+                .background(AppStyle.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
+                .fixedSize(horizontal: true, vertical: true)
+        }.buttonStyle(.plain).accessibilityLabel("\(name) \(summary?.title ?? "创建盯盘规则")")
     }
 
     private func compactMetric(_ title: String, _ value: String, color: Color = AppStyle.ink) -> some View {
