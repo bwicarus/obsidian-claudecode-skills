@@ -7,6 +7,11 @@ struct VoiceSidebar: View {
     @State private var draft = ""
     @State private var sendingText = false
     @State private var showsDiagnostics = false
+    @State private var showsVoiceSettings = false
+    @State private var followsLatest = true
+    @GestureState private var isInteractingWithConversation = false
+    @State private var conversationIsNearBottom = true
+    @State private var resumesWhenReachingBottom = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,6 +25,12 @@ struct VoiceSidebar: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("通话诊断")
+                    Button { showsVoiceSettings = true } label: {
+                        Image(systemName: "gearshape").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("语音设置")
+                    .disabled(!model.isPaired || !model.isAIEnabled)
                     if let onClose {
                         Button(action: onClose) {
                             Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
@@ -80,7 +91,8 @@ struct VoiceSidebar: View {
             }
             .padding(20)
             Divider()
-            ScrollViewReader { proxy in
+            GeometryReader { viewport in
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         if !model.isAIEnabled {
@@ -145,12 +157,71 @@ struct VoiceSidebar: View {
                         Color.clear.frame(height: 1).id("conversationBottom")
                     }
                     .padding(20)
+                    .background {
+                        GeometryReader { content in
+                            Color.clear.preference(key: ConversationBottomPosition.self,
+                                                   value: content.frame(in: .named("voiceConversation")).maxY)
+                        }
+                    }
                 }
+                .coordinateSpace(name: "voiceConversation")
+                .onPreferenceChange(ConversationBottomPosition.self) { bottom in
+                    conversationIsNearBottom = bottom <= viewport.size.height + 44
+                    guard !isInteractingWithConversation else { return }
+                    if resumesWhenReachingBottom && conversationIsNearBottom {
+                        followsLatest = true
+                        resumesWhenReachingBottom = false
+                    }
+                    // Growing text/cards must not change the reader's intent.
+                    if followsLatest { proxy.scrollTo("conversationBottom", anchor: .bottom) }
+                }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .updating($isInteractingWithConversation) { _, interacting, _ in
+                            interacting = true
+                        }
+                        .onChanged { _ in
+                            followsLatest = false
+                            resumesWhenReachingBottom = false
+                        }
+                        .onEnded { value in
+                            // Only scrolling toward newer messages can resume
+                            // follow. Tapping or paging a card leaves it paused.
+                            resumesWhenReachingBottom = value.translation.height < -8 &&
+                                abs(value.translation.height) > abs(value.translation.width)
+                            if resumesWhenReachingBottom && conversationIsNearBottom {
+                                followsLatest = true
+                                resumesWhenReachingBottom = false
+                            }
+                        }
+                )
                 .onChange(of: voice.transcripts.last?.text) { _, _ in
+                    guard followsLatest, !isInteractingWithConversation else { return }
                     proxy.scrollTo("conversationBottom", anchor: .bottom)
                 }
                 .onChange(of: model.currentAccountPlans.count) { _, _ in
+                    guard followsLatest, !isInteractingWithConversation else { return }
                     proxy.scrollTo("conversationBottom", anchor: .bottom)
+                }
+                .onChange(of: voice.threadID) { _, _ in
+                    followsLatest = true
+                    resumesWhenReachingBottom = false
+                    proxy.scrollTo("conversationBottom", anchor: .bottom)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !followsLatest && !isInteractingWithConversation {
+                        Button {
+                            followsLatest = true
+                            resumesWhenReachingBottom = false
+                            proxy.scrollTo("conversationBottom", anchor: .bottom)
+                        } label: {
+                            Label("回到最新", systemImage: "arrow.down")
+                                .font(.caption.weight(.medium))
+                        }
+                        .buttonStyle(.borderedProminent).tint(AppStyle.accent)
+                        .padding(12)
+                    }
+                }
                 }
             }
             Divider()
@@ -174,6 +245,14 @@ struct VoiceSidebar: View {
         }
         .background(.white)
         .sheet(isPresented: $showsDiagnostics) { VoiceDiagnosticsView(voice: voice) }
+        .sheet(isPresented: $showsVoiceSettings) { VoiceSettingsView(model: model) }
         .task(id: model.planScopeID) { await model.refreshPlans() }
+    }
+}
+
+private struct ConversationBottomPosition: PreferenceKey {
+    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }

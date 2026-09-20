@@ -241,7 +241,11 @@ final class AnnotationStore: ObservableObject {
             }
             if annotation.kind == .note {
                 guard let point = points.first, containsPlotPoint(point) else { return nil }
-                return ProjectedAnnotation(annotation: annotation, points: points, visibleSegments: [])
+                // Keep the original time anchor's visibility and price, but
+                // place labels over older data rather than the latest candles.
+                // Drawing, erasing and voice context share this display anchor.
+                let labelPoint = CGPoint(x: 0.025, y: point.y)
+                return ProjectedAnnotation(annotation: annotation, points: [labelPoint], visibleSegments: [])
             }
             let segments = zip(points, points.dropFirst()).compactMap { clippedPlotSegment($0.0, $0.1) }
             guard !segments.isEmpty else { return nil }
@@ -545,12 +549,17 @@ struct NativeAnnotationCanvas: View {
         case .note:
             let origin = CGPoint(x: first.x * size.width, y: first.y * size.height)
             let value = annotation.text ?? "标注"
-            let width = min(max(CGFloat(value.count) * 13 + 22, 76), 220)
-            let bubble = CGRect(x: min(origin.x, max(0, size.width - width)),
-                                y: min(origin.y, max(0, size.height - 34)), width: width, height: 30)
-            context.fill(Path(roundedRect: bubble, cornerRadius: 8), with: .color(tint.opacity(0.92)))
             let text = context.resolve(Text(value).font(.caption2.weight(.semibold)).foregroundStyle(.white))
-            context.draw(text, at: CGPoint(x: bubble.minX + 10, y: bubble.midY), anchor: .leading)
+            let maximumWidth = min(220, max(24, size.width * 0.45))
+            let measured = text.measure(in: CGSize(width: max(1, maximumWidth - 16), height: .greatestFiniteMagnitude))
+            let width = min(max(measured.width + 16, 48), maximumWidth)
+            let height = min(max(measured.height + 12, 26), 44)
+            let bubble = CGRect(x: min(origin.x, max(0, size.width - width)),
+                                y: min(origin.y, max(0, size.height - height)), width: width, height: height)
+            context.fill(Path(roundedRect: bubble, cornerRadius: 8), with: .color(tint.opacity(0.92)))
+            var labelContext = context
+            labelContext.clip(to: Path(bubble))
+            labelContext.draw(text, in: bubble.insetBy(dx: 8, dy: 6))
         }
     }
 

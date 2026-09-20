@@ -408,7 +408,8 @@ struct MonitoringStockRow: View {
         }
         .padding(.horizontal, 12)
         .sheet(isPresented: $showingResearch) {
-            StockRowResearchView(code: record.code, name: record.name, research: research)
+            StockRowResearchView(code: record.code, name: record.name, research: research,
+                                 onOpenStock: isSelected == nil ? { _ in onOpen() } : nil)
         }
     }
 

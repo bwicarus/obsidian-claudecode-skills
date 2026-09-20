@@ -110,13 +110,25 @@ struct StockPlanCard: View {
     var onChoose: ((StockPlanVariant) -> Void)? = nil
     var activationBusy = false
     var adoptedVariantID: String? = nil
+    var onOpenStock: ((String) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(plan.title).font(.subheadline.weight(.semibold))
                 Spacer(minLength: 0)
-                Text(plan.code).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                if let onOpenStock {
+                    Button { onOpenStock(plan.code) } label: {
+                        HStack(spacing: 3) {
+                            Text(plan.code).font(.caption.monospacedDigit())
+                            Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
+                        }.padding(.vertical, 4).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).foregroundStyle(AppStyle.accent)
+                    .fixedSize().accessibilityLabel("打开 \(plan.code) 个股详情")
+                } else {
+                    Text(plan.code).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
                 if isArchiving {
                     ProgressView().controlSize(.mini)
                 } else if plan.status != "archived", let onArchive {
@@ -213,6 +225,7 @@ struct StockPlanDetailPanel: View {
     var error: String? = nil
     var archivingIDs: Set<String> = []
     var onArchive: ((StockPlan) -> Void)? = nil
+    var onOpenStock: ((String) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -230,7 +243,8 @@ struct StockPlanDetailPanel: View {
             }
             ForEach(plans) { plan in
                 StockPlanCard(plan: plan, isArchiving: archivingIDs.contains(plan.id),
-                              onArchive: onArchive.map { action in { action(plan) } })
+                              onArchive: onArchive.map { action in { action(plan) } },
+                              onOpenStock: onOpenStock)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -250,9 +264,9 @@ struct StockPlanHistoryView: View {
         NavigationStack {
             ScrollView {
                 StockPlanDetailPanel(plans: plans, isLoading: model.isLoadingPlans, error: model.planError,
-                                     archivingIDs: model.archivingPlanIDs) { plan in
-                    Task { await model.archivePlan(plan) }
-                }
+                                     archivingIDs: model.archivingPlanIDs,
+                                     onArchive: { plan in Task { await model.archivePlan(plan) } },
+                                     onOpenStock: { code in dismiss(); model.openStock(code) })
                 .padding(20)
             }
             .background(AppStyle.canvas)

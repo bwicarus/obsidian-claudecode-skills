@@ -134,6 +134,18 @@ struct APIClient {
         try await request("api/research/legacy", query: code.map { [URLQueryItem(name: "code", value: $0)] } ?? [])
     }
 
+    func voiceSettings() async throws -> VoiceSettingsResponse {
+        try await request("api/voice/settings")
+    }
+
+    func saveVoiceSettings(_ settings: VoiceSettingsValues) async throws -> VoiceSettingsResponse {
+        try await request("api/voice/settings", method: "POST", body: JSONEncoder().encode(settings))
+    }
+
+    func voiceCatalog() async throws -> VoiceSettingsCatalog {
+        try await request("api/voice/catalog")
+    }
+
     func webSocketURL(deviceID: String) throws -> URL {
         var components = URLComponents(url: baseURL.appendingPathComponent("voice"), resolvingAgainstBaseURL: false)!
         components.scheme = "wss"

@@ -160,10 +160,11 @@ final class AppModel: ObservableObject {
     }
 
     var unattachedSidebarPlans: [StockPlan] {
+        guard let selectedCode else { return [] }
         let attached = Set(voice.transcripts.flatMap { plans(for: $0).map(\.id) })
         return Array(currentAccountPlans.filter { plan in
             !attached.contains(plan.id) && plan.status != "archived" &&
-                (plan.code == selectedCode || (plan.source.threadId != nil && plan.source.threadId == voice.threadID))
+                plan.code == selectedCode
         }.prefix(5))
     }
 

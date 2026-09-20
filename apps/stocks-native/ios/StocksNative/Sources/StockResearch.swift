@@ -253,13 +253,25 @@ final class StockResearchStore: ObservableObject {
 struct StockReportCard: View {
     let report: StockReport
     @ObservedObject var research: StockResearchStore
+    var onOpenStock: ((String) -> Void)? = nil
     @State private var expanded = false
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(report.title).font(.headline)
                 Spacer(minLength: 4)
-                Text(report.code).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                if let onOpenStock {
+                    Button { onOpenStock(report.code) } label: {
+                        HStack(spacing: 3) {
+                            Text(report.code).font(.caption.monospacedDigit())
+                            Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
+                        }.padding(.vertical, 4).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).foregroundStyle(AppStyle.accent)
+                    .fixedSize().accessibilityLabel("打开 \(report.code) 个股详情")
+                } else {
+                    Text(report.code).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
             }
             HStack(spacing: 8) {
                 Text(ResearchStyle.direction(report.direction)).foregroundStyle(AppStyle.accent)
@@ -282,7 +294,7 @@ struct StockReportCard: View {
                 }.font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
             }.font(.caption).tint(AppStyle.accent)
             if let plan = report.plan {
-                ResearchPlanCard(plan: plan, research: research)
+                ResearchPlanCard(plan: plan, research: research, onOpenStock: onOpenStock)
             }
         }
         .padding(14).frame(maxWidth: .infinity, alignment: .leading)
@@ -295,6 +307,7 @@ struct ResearchPlanCard: View {
     @ObservedObject var research: StockResearchStore
     var isArchiving = false
     var onArchive: (() -> Void)? = nil
+    var onOpenStock: ((String) -> Void)? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             let adoption = research.adoptions[plan.id]
@@ -302,7 +315,8 @@ struct ResearchPlanCard: View {
             StockPlanCard(plan: plan, isArchiving: isArchiving, onArchive: onArchive,
                           onChoose: { variant in Task { await research.activate(plan, variant: variant) } },
                           activationBusy: research.busyPlans.contains(plan.id),
-                          adoptedVariantID: incomplete ? nil : adoption?.variantId)
+                          adoptedVariantID: incomplete ? nil : adoption?.variantId,
+                          onOpenStock: onOpenStock)
             if let adoption = research.adoptions[plan.id] {
                 Label(adoption.label, systemImage: "waveform.path.ecg").font(.caption).foregroundStyle(AppStyle.accent)
             }
@@ -315,6 +329,8 @@ struct ConversationReports: View {
     let transcript: Transcript
     @ObservedObject var research: StockResearchStore
     @ObservedObject var voice: VoiceSession
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.isPresented) private var isPresented
     var body: some View {
         let reports = research.reports.filter {
             transcript.role == "assistant" && $0.source.turnId == transcript.turnID && transcript.turnID != nil &&
@@ -322,7 +338,11 @@ struct ConversationReports: View {
             voice.transcripts.last(where: { $0.role == "assistant" && $0.turnID == transcript.turnID })?.id == transcript.id
         }.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
         ConversationCardPager(items: reports, title: "分析报告", label: { "\($0.code) · \($0.title)" }) { report in
-            StockReportCard(report: report, research: research)
+            StockReportCard(report: report, research: research,
+                            onOpenStock: { code in
+                                if isPresented { dismiss() }
+                                voice.onStockSelected?(code)
+                            })
         }
     }
 }
@@ -331,6 +351,8 @@ struct ConversationPlans: View {
     let transcript: Transcript
     @ObservedObject var model: AppModel
     @ObservedObject var research: StockResearchStore
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.isPresented) private var isPresented
     var body: some View {
         let reportPlanIDs = Set(research.reports.compactMap(\.planId))
         let plans = model.plans(for: transcript).filter { !reportPlanIDs.contains($0.id) }
@@ -338,7 +360,11 @@ struct ConversationPlans: View {
         ConversationCardPager(items: plans, title: "操作方案", label: { "\($0.code) · \($0.title)" }) { plan in
             ResearchPlanCard(plan: plan, research: research,
                              isArchiving: model.archivingPlanIDs.contains(plan.id),
-                             onArchive: { Task { await model.archivePlan(plan) } })
+                             onArchive: { Task { await model.archivePlan(plan) } },
+                             onOpenStock: { code in
+                                 if isPresented { dismiss() }
+                                 model.openStock(code)
+                             })
         }
     }
 }
@@ -482,6 +508,7 @@ struct StockRowResearchView: View {
     let code: String
     let name: String
     @ObservedObject var research: StockResearchStore
+    var onOpenStock: ((String) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
@@ -491,8 +518,14 @@ struct StockRowResearchView: View {
                     let reportPlans = Set(reports.compactMap(\.planId))
                     let plans = research.plans.filter { $0.code == code && $0.status != "archived" && !reportPlans.contains($0.id) }
                     if let error = research.error { Text(error).font(.caption).foregroundStyle(.red) }
-                    ForEach(plans) { plan in ResearchPlanCard(plan: plan, research: research) }
-                    ForEach(reports) { report in StockReportCard(report: report, research: research) }
+                    ForEach(plans) { plan in
+                        ResearchPlanCard(plan: plan, research: research,
+                                         onOpenStock: onOpenStock.map { open in { code in dismiss(); open(code) } })
+                    }
+                    ForEach(reports) { report in
+                        StockReportCard(report: report, research: research,
+                                        onOpenStock: onOpenStock.map { open in { code in dismiss(); open(code) } })
+                    }
                     if plans.isEmpty && reports.isEmpty && !research.isLoading {
                         ContentUnavailableView("暂无报告与策略", systemImage: "doc.text")
                     }
@@ -514,6 +547,8 @@ struct SidebarResearchCards: View {
     @ObservedObject var model: AppModel
     @ObservedObject var research: StockResearchStore
     @ObservedObject var voice: VoiceSession
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.isPresented) private var isPresented
     @State private var expanded = false
     private var reports: [StockReport] {
         let visibleTurns = Set(voice.transcripts.filter { $0.role == "assistant" }.compactMap(\.turnID))
@@ -529,11 +564,20 @@ struct SidebarResearchCards: View {
         if !reports.isEmpty || !plans.isEmpty {
             DisclosureGroup("当前股票 · 已存报告与策略", isExpanded: $expanded) {
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(reports) { report in StockReportCard(report: report, research: research) }
+                    ForEach(reports) { report in
+                        StockReportCard(report: report, research: research, onOpenStock: { code in
+                            if isPresented { dismiss() }
+                            model.openStock(code)
+                        })
+                    }
                     ForEach(plans) { plan in
                         ResearchPlanCard(plan: plan, research: research,
                                          isArchiving: model.archivingPlanIDs.contains(plan.id),
-                                         onArchive: { Task { await model.archivePlan(plan) } })
+                                         onArchive: { Task { await model.archivePlan(plan) } },
+                                         onOpenStock: { code in
+                                             if isPresented { dismiss() }
+                                             model.openStock(code)
+                                         })
                     }
                 }.padding(.top, 8)
             }.font(.caption).tint(AppStyle.accent)
@@ -561,7 +605,10 @@ struct StockResearchHistoryView: View {
                         if tab == "报告" {
                             let values = research.reports.filter { $0.code == model.selectedCode }
                             if values.isEmpty && !research.isLoading { ContentUnavailableView("还没有分析报告", systemImage: "doc.text", description: Text("可以请助手分析当前股票并保存报告。")) }
-                            ForEach(values) { report in StockReportCard(report: report, research: research) }
+                            ForEach(values) { report in
+                                StockReportCard(report: report, research: research,
+                                                onOpenStock: { code in dismiss(); model.openStock(code) })
+                            }
                             if research.nextCursors[model.selectedCode ?? "*"] != nil {
                                 Button("更早的报告") { Task { await research.refresh(code: model.selectedCode, more: true) } }
                             }
@@ -569,7 +616,8 @@ struct StockResearchHistoryView: View {
                             ForEach(model.selectedStockPlans) { plan in
                                 ResearchPlanCard(plan: plan, research: research,
                                                  isArchiving: model.archivingPlanIDs.contains(plan.id),
-                                                 onArchive: { Task { await model.archivePlan(plan) } })
+                                                 onArchive: { Task { await model.archivePlan(plan) } },
+                                                 onOpenStock: { code in dismiss(); model.openStock(code) })
                             }
                             if model.selectedStockPlans.isEmpty { Text("暂无保存的方案").foregroundStyle(.secondary) }
                         } else {
