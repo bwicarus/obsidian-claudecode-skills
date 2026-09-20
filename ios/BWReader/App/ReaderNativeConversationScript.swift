@@ -172,7 +172,7 @@ enum ReaderNativeConversationScript {
       function liveArtifacts(messages) {
         for (const message of messages) {
         for (const part of message.parts) {
-          if (part.kind === 'tool') continue;
+          if (part.kind === 'tool' || part.id.endsWith('-original')) continue;
           const target = actions.get(part.actionId), node = target?.node;
           if (!node?.isConnected) continue;
           const group = flashGroup(node);
