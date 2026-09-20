@@ -111,7 +111,7 @@ struct MonitoringSummary: Codable, Equatable {
 
     var title: String {
         if unreadCount > 0 { return "\(unreadCount) 条提醒" }
-        if ruleCount == 0 { return "通知记录" }
+        if ruleCount == 0 { return "盯盘" }
         if enabledCount == 0 { return "已暂停 · \(ruleCount)" }
         return "\(Self.title(for: state)) · \(enabledCount)"
     }

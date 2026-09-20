@@ -336,13 +336,14 @@ struct StockSelectionSidebar: View {
     }
 
     private var screenerHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
                 Picker("选股方案", selection: Binding(get: { model.selectedPresetID }, set: { model.usePreset($0) })) {
                     Text("临时方案").tag(Optional<String>.none)
                     ForEach(model.library?.presets ?? []) { preset in Text(preset.name).tag(Optional(preset.id)) }
                 }
-                .labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                .labelsHidden().pickerStyle(.menu).font(.subheadline).lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if let preset = model.selectedPreset {
                     Menu {
                         Button("编辑方案") { editorPresented = true }
@@ -350,14 +351,11 @@ struct StockSelectionSidebar: View {
                     } label: { Image(systemName: "ellipsis.circle").font(.title3).frame(width: 36, height: 36) }
                     .disabled(!model.canWrite)
                 }
-            }
-            HStack {
-                Text("上方切换条件，点股票展开详情").font(.caption2).foregroundStyle(.secondary)
-                Spacer(minLength: 4)
                 Button { Task { await model.run() } } label: {
                     if model.isEvaluating { ProgressView() } else { Label("选股", systemImage: "play.fill") }
                 }
-                .buttonStyle(.borderedProminent).disabled(model.isEvaluating || model.catalog == nil || model.validationMessage != nil || model.requiresPresetConfirmation)
+                .font(.caption).controlSize(.small).buttonStyle(.borderedProminent)
+                .disabled(model.isEvaluating || model.catalog == nil || model.validationMessage != nil || model.requiresPresetConfirmation)
             }
             if model.evaluation != nil && !model.resultsAreCurrent {
                 Text("条件已修改，以下仍为上次结果。").font(.caption).foregroundStyle(.orange)
@@ -367,7 +365,7 @@ struct StockSelectionSidebar: View {
                 Text("旧方案需要确认：请编辑条件并保存后再运行。").font(.caption).foregroundStyle(.orange)
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12).padding(.vertical, 4)
     }
 
     private var activeEvaluation: SelectionEvaluation? { section == .watchlist ? model.watchEvaluation : model.evaluation }
@@ -545,6 +543,13 @@ private struct SelectionWarnings: View {
     }
 }
 
+private struct SelectionDropFrames: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
 @MainActor
 private struct SelectionRuleEditor: View {
     @ObservedObject var model: StockSelectionModel
@@ -553,6 +558,10 @@ private struct SelectionRuleEditor: View {
     @State private var selectedCriterionID: String?
     @State private var selectedTargetID: String?
     @State private var hoveredTargetID: String?
+    @State private var immediateDragID: String?
+    @State private var immediateDragPoint = CGPoint.zero
+    @State private var editorWindowFrame = CGRect.zero
+    @State private var dropFrames: [String: CGRect] = [:]
     @State private var parameterCriterionID: String?
     @State private var parametersExpanded = false
     @State private var savingPreset = false
@@ -572,16 +581,32 @@ private struct SelectionRuleEditor: View {
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
-                let libraryWidth = min(260, max(180, geometry.size.width * 0.27))
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 0) {
-                        criterionLibrary.frame(width: libraryWidth)
-                        Divider()
-                        ruleCanvas.frame(width: max(320, geometry.size.width - libraryWidth - 1))
-                    }
-                    .frame(height: geometry.size.height)
+                let libraryWidth = min(260, max(132, geometry.size.width * 0.27))
+                let canvasWidth = max(1, geometry.size.width - libraryWidth - 1)
+                HStack(spacing: 0) {
+                    criterionLibrary.frame(width: libraryWidth).clipped()
+                    Divider()
+                    ruleCanvas(width: canvasWidth).frame(width: canvasWidth).clipped()
                 }
-                .scrollBounceBehavior(.basedOnSize)
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .coordinateSpace(name: "selection-editor")
+                .background(NativeCriterionEditorFrame { frame in editorWindowFrame = frame })
+                .onPreferenceChange(SelectionDropFrames.self) { frames in
+                    dropFrames = frames
+                    if immediateDragID != nil { hoveredTargetID = dropTarget(at: immediateDragPoint) }
+                }
+                .overlay(alignment: .topLeading) {
+                    if let id = immediateDragID {
+                        dragPreview(id)
+                            .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                            .frame(width: min(280, geometry.size.width))
+                            .position(x: min(max(140, immediateDragPoint.x), max(140, geometry.size.width - 140)),
+                                      y: max(20, immediateDragPoint.y - 30))
+                            .allowsHitTesting(false)
+                    }
+                }
+                .clipped()
+                .onDisappear { finishImmediateDrag(at: nil) }
             }
             .background(AppStyle.canvas)
             .safeAreaInset(edge: .bottom, spacing: 0) { actionBar }
@@ -629,7 +654,7 @@ private struct SelectionRuleEditor: View {
     private var criterionLibrary: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("条件库").font(.headline)
-            Text("拖到右侧方框，或先点条件再点方框")
+            Text("横向拖动即可放入；上下滑动浏览条件")
                 .font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -658,38 +683,42 @@ private struct SelectionRuleEditor: View {
                 .padding(.bottom, 12)
             }
             .scrollBounceBehavior(.basedOnSize)
+            .scrollDisabled(immediateDragID != nil)
         }
         .padding(14).background(.white)
     }
 
     private func libraryItem(_ criterion: SelectionCriterion) -> some View {
         let selected = selectedCriterionID == criterion.id
-        return Button {
-            selectedCriterionID = selected ? nil : criterion.id
-        } label: {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(criterionTitle(criterion.id)).font(.subheadline).foregroundStyle(AppStyle.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let description = criterion.description, !description.isEmpty {
-                        Text(description).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                    }
+        return HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(criterionTitle(criterion.id)).font(.subheadline).foregroundStyle(AppStyle.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let description = criterion.description, !description.isEmpty {
+                    Text(description).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                 }
-                Spacer(minLength: 0)
-                Image(systemName: selected ? "checkmark.circle.fill" : "line.3.horizontal")
-                    .font(.caption).foregroundStyle(selected ? AppStyle.accent : Color.secondary)
             }
-            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? AppStyle.accent.opacity(0.1) : AppStyle.canvas, in: RoundedRectangle(cornerRadius: 10))
-            .contentShape(Rectangle())
+            Spacer(minLength: 0)
+            Image(systemName: selected ? "checkmark.circle.fill" : "line.3.horizontal")
+                .font(.caption).foregroundStyle(selected ? AppStyle.accent : Color.secondary)
         }
-        .buttonStyle(.plain)
-        .draggable(SelectionCriterionTransfer(criterionID: criterion.id).stringValue) { dragPreview(criterion.id) }
+        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? AppStyle.accent.opacity(0.1) : AppStyle.canvas, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            NativeCriterionDrag(
+                onTap: { selectedCriterionID = selectedCriterionID == criterion.id ? nil : criterion.id },
+                onDrag: { point in updateImmediateDrag(criterion.id, at: point) },
+                onEnd: { point in finishImmediateDrag(at: point) }
+            )
+        }
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(criterionTitle(criterion.id))
-        .accessibilityValue(selected ? "已选中，点右侧方框放入" : "可拖动或点选")
+        .accessibilityValue(selected ? "已选中，点右侧方框放入" : "可直接横向拖动或点选")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { selectedCriterionID = selectedCriterionID == criterion.id ? nil : criterion.id }
     }
 
-    private var ruleCanvas: some View {
+    private func ruleCanvas(width: CGFloat) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 SelectionStatusView(model: model)
@@ -715,7 +744,7 @@ private struct SelectionRuleEditor: View {
                         HStack { Rectangle().frame(height: 1); Text("或者 · OR").fixedSize(); Rectangle().frame(height: 1) }
                             .font(.caption.weight(.medium)).foregroundStyle(.secondary.opacity(0.65))
                     }
-                    ruleGroup(group)
+                    ruleGroup(group, width: max(1, width - 36))
                 }
                 Button {
                     let group = SelectionRuleGroup(name: "条件组 \(model.draft.groups.count + 1)")
@@ -740,7 +769,7 @@ private struct SelectionRuleEditor: View {
         .scrollDismissesKeyboard(.interactively)
     }
 
-    private func ruleGroup(_ group: SelectionRuleGroup) -> some View {
+    private func ruleGroup(_ group: SelectionRuleGroup, width: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 TextField("条件组名称", text: Binding(get: { model.draft.groups.first { $0.id == group.id }?.name ?? "" }, set: { value in
@@ -752,11 +781,12 @@ private struct SelectionRuleEditor: View {
                 Button(role: .destructive) { model.removeRuleGroup(group.id) } label: { Image(systemName: "trash") }
                     .buttonStyle(.plain).accessibilityLabel("删除条件组 \(group.name)")
             }
-            ViewThatFits(in: .horizontal) {
+            if width >= 548 {
                 HStack(alignment: .top, spacing: 10) {
-                    conditionZone(group, excluded: false).frame(minWidth: 250)
-                    conditionZone(group, excluded: true).frame(minWidth: 250)
+                    conditionZone(group, excluded: false).frame(width: (width - 38) / 2)
+                    conditionZone(group, excluded: true).frame(width: (width - 38) / 2)
                 }
+            } else {
                 VStack(spacing: 10) {
                     conditionZone(group, excluded: false)
                     conditionZone(group, excluded: true)
@@ -816,6 +846,12 @@ private struct SelectionRuleEditor: View {
                 .strokeBorder(tint.opacity(highlighted ? 0.7 : 0.25), style: StrokeStyle(lineWidth: highlighted ? 2 : 1, dash: highlighted ? [] : [5, 4]))
                 .allowsHitTesting(false)
         }
+        .background {
+            GeometryReader { geometry in
+                Color.clear.preference(key: SelectionDropFrames.self,
+                    value: [zoneID: geometry.frame(in: .named("selection-editor"))])
+            }
+        }
         .dropDestination(for: String.self) { items, _ in
             acceptDrop(items, groupID: group.id, excluded: excluded)
         } isTargeted: { targeted in
@@ -864,6 +900,32 @@ private struct SelectionRuleEditor: View {
         Text(criterionTitle(id)).font(.subheadline.weight(.medium))
             .padding(.horizontal, 12).padding(.vertical, 9)
             .foregroundStyle(AppStyle.accent).background(.white, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func updateImmediateDrag(_ id: String, at windowPoint: CGPoint) {
+        guard editorWindowFrame.width > 0, editorWindowFrame.height > 0 else { return }
+        let local = CGPoint(x: windowPoint.x - editorWindowFrame.minX, y: windowPoint.y - editorWindowFrame.minY)
+        immediateDragID = id
+        immediateDragPoint = local
+        hoveredTargetID = dropTarget(at: local)
+    }
+
+    private func dropTarget(at point: CGPoint) -> String? {
+        guard CGRect(origin: .zero, size: editorWindowFrame.size).contains(point) else { return nil }
+        return dropFrames.first { $0.value.contains(point) }?.key
+    }
+
+    private func finishImmediateDrag(at windowPoint: CGPoint?) {
+        defer { immediateDragID = nil; hoveredTargetID = nil }
+        guard let id = immediateDragID, let windowPoint else { return }
+        let local = CGPoint(x: windowPoint.x - editorWindowFrame.minX, y: windowPoint.y - editorWindowFrame.minY)
+        guard let target = dropTarget(at: local) else { return }
+        for group in model.draft.groups {
+            for excluded in [false, true] where target == group.id + (excluded ? "|not" : "|and") {
+                _ = acceptDrop([SelectionCriterionTransfer(criterionID: id).stringValue], groupID: group.id, excluded: excluded)
+                return
+            }
+        }
     }
 
     private func placeSelected(in groupID: String, excluded: Bool) {
