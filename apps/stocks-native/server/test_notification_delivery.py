@@ -236,9 +236,125 @@ class DeliveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.service.mutate("alice", {"requestId": "finish", "operation": "notification.resolve", "id": notice["id"]})
         self.now -= 400
         self.notice("old-event")
+        self.now += 400
         await self.runtime.deliver()
         self.assertEqual(self.call_count(), 0)
         self.delivery.push.assert_not_awaited()
+
+    async def test_explicit_call_dials_foreground_even_when_severity_is_normal(self):
+        notice = self.notice(deliveryMode="call", severity="normal")
+        self.delivery.presence("alice", "ipad", True)
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 1)
+        self.delivery.push.assert_awaited_once()
+        self.assertEqual(len(self.delivery.push.await_args.args), 3)
+        current = self.service.get_notification("alice", notice["id"])
+        self.assertEqual(current["status"], "unread")
+        self.assertEqual(current["delivery"]["call"], "push_accepted")
+
+    async def test_explicit_call_waits_for_local_voice_without_announcing_or_hanging_up(self):
+        notice = self.notice(deliveryMode="call")
+        self.delivery.presence("alice", "ipad", True)
+        session = SimpleNamespace(closed=False, selection_owner="alice", last_activity=10,
+            can_announce_notification=Mock(return_value=True), announce_notification=AsyncMock(), close=AsyncMock())
+        self.app["voices"]["ipad"] = (SimpleNamespace(closed=False), session)
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 0)
+        session.announce_notification.assert_not_awaited()
+        session.close.assert_not_awaited()
+        self.assertEqual(self.service.get_notification("alice", notice["id"])["delivery"]["call"], "queued_busy")
+        self.app["voices"].clear()
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 1)
+        session.announce_notification.assert_not_awaited()
+        session.close.assert_not_awaited()
+
+    async def test_explicit_call_waits_for_shared_voice_even_when_notice_is_read(self):
+        notice = self.notice(deliveryMode="call")
+        self.delivery.presence("alice", "ipad", True)
+        other = NotificationDelivery(self.directory.name, clock=lambda: self.now)
+        other.voice_presence("alice", "ipad")
+        self.service.mutate("alice", {"requestId": "read", "operation": "notification.read", "id": notice["id"]})
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 0)
+        self.assertEqual(self.service.get_notification("alice", notice["id"])["delivery"]["call"], "queued_busy")
+        other.voice_presence("alice", "ipad", False)
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 1)
+        self.assertEqual(self.service.get_notification("alice", notice["id"])["status"], "read")
+
+    async def test_resolving_explicit_call_cancels_queued_delivery(self):
+        notice = self.notice(deliveryMode="call")
+        self.delivery.presence("alice", "ipad", True)
+        self.delivery.voice_presence("alice", "ipad")
+        await self.runtime.deliver()
+        self.service.mutate("alice", {"requestId": "resolve", "operation": "notification.resolve", "id": notice["id"]})
+        self.delivery.voice_presence("alice", "ipad", False)
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 0)
+        self.delivery.push.assert_not_awaited()
+
+    async def test_explicit_call_rechecks_resolution_after_pending_snapshot(self):
+        notice = self.notice(deliveryMode="call")
+        self.delivery.presence("alice", "ipad", True)
+        pending = self.service.pending_notifications()
+        self.service.mutate("alice", {"requestId": "resolve", "operation": "notification.resolve", "id": notice["id"]})
+        with patch.object(self.service, "pending_notifications", return_value=pending):
+            await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 0)
+        self.delivery.push.assert_not_awaited()
+
+    async def test_explicit_call_can_wait_past_five_minutes_but_expires_at_ten(self):
+        first = self.notice(deliveryMode="call")
+        self.now += 599
+        self.delivery.presence("alice", "ipad", True)
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 1)
+        self.assertEqual(self.service.get_notification("alice", first["id"])["delivery"]["call"], "push_accepted")
+        self.service.mutate("alice", {"requestId": "resolve-first", "operation": "notification.resolve", "id": first["id"]})
+        second = self.notice("second", deliveryMode="call")
+        self.now += 600
+        await self.runtime.deliver()
+        current = self.service.get_notification("alice", second["id"])
+        self.assertEqual(self.call_count(), 1)
+        self.assertEqual(current["status"], "unread")
+        self.assertEqual(current["delivery"]["call"], "expired")
+
+    async def test_explicit_call_expired_while_voice_active_never_dials_after_disconnect(self):
+        notice = self.notice(deliveryMode="call")
+        self.delivery.presence("alice", "ipad", True)
+        self.delivery.voice_presence("alice", "ipad")
+        await self.runtime.deliver()
+        self.now += 600
+        self.delivery.voice_presence("alice", "ipad", False)
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 0)
+        self.assertEqual(self.service.get_notification("alice", notice["id"])["delivery"]["call"], "expired")
+        self.delivery.push.assert_not_awaited()
+
+    async def test_explicit_call_never_redials_after_failed_push_or_an_expired_ring(self):
+        for success in (False, True):
+            with self.subTest(success=success):
+                notice = self.notice("once-" + str(success), deliveryMode="call")
+                self.delivery.presence("alice", "ipad", True)
+                self.delivery.push.return_value = success
+                self.delivery.push.reset_mock()
+                await self.runtime.deliver()
+                self.now += 46
+                self.delivery.presence("alice", "ipad", True)
+                await self.runtime.deliver()
+                self.delivery.push.assert_awaited_once()
+                self.assertEqual(self.service.get_notification("alice", notice["id"])["delivery"]["call"],
+                                 "push_accepted" if success else "failed")
+                self.service.mutate("alice", {"requestId": "resolve-" + str(success),
+                    "operation": "notification.resolve", "id": notice["id"]})
+
+    async def test_auto_normal_notice_pushes_without_calling(self):
+        self.notice(deliveryMode="auto", severity="normal")
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 0)
+        self.delivery.push.assert_awaited_once()
+        self.assertEqual(len(self.delivery.push.await_args.args), 2)
 
 
 class PushBindingTests(unittest.IsolatedAsyncioTestCase):

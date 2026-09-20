@@ -199,6 +199,59 @@ class VoiceSelectionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tool["dataReturned"])
         self.assertFalse(tool["actionApplied"])
 
+    async def test_call_request_has_verified_receipt_and_one_monitor_refresh(self):
+        self.session.turn_state("call-turn")["requestId"] = "voice-request"
+        item = {
+            "id": "call-request", "type": "mcpToolCall", "server": "stocks_monitor",
+            "tool": "stocks_call", "status": "completed", "arguments": {"action": "request"},
+            "result": {"structuredContent": {"ok": True, "action": "request", "result": {
+                "success": True, "revision": 3, "requestId": "call-intent",
+                "operation": "notification.create", "notificationId": "notice-1",
+                "state": "waiting_for_current_voice", "answered": False,
+            }}},
+        }
+        await self.session.capture_selection_tool("call-turn", item)
+        await self.session.capture_selection_tool("call-turn", item)
+        receipts = self.session.turn_state("call-turn")["tools"]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["name"], "stocks_call")
+        self.assertTrue(receipts[0]["success"])
+        self.assertTrue(receipts[0]["actionApplied"])
+        self.assertFalse(receipts[0]["dataReturned"])
+        self.assertEqual(receipts[0]["requestId"], "voice-request")
+        self.assertEqual(receipts[0]["mutationRequestId"], "call-intent")
+        changes = [event for event in self.events if event.get("type") in ("monitor.changed", "selection.changed")]
+        self.assertEqual(changes, [{"type": "monitor.changed", "revision": 3,
+                                    "requestId": "call-intent", "operation": "notification.create"}])
+
+    async def test_call_status_is_verified_data_without_mutation(self):
+        item = {
+            "id": "call-status", "type": "mcpToolCall", "server": "stocks_monitor",
+            "tool": "stocks_call", "status": "completed", "arguments": '{"action":"status"}',
+            "result": {"content": [{"type": "text", "text":
+                '{"ok":true,"action":"status","result":{"available":true,"state":"push_accepted","answered":false}}'}]},
+        }
+        await self.session.capture_selection_tool("status-turn", item)
+        receipt = self.session.turn_state("status-turn")["tools"][0]
+        self.assertTrue(receipt["success"])
+        self.assertTrue(receipt["dataReturned"])
+        self.assertFalse(receipt["actionApplied"])
+        self.assertFalse(any(event.get("type", "").endswith(".changed") for event in self.events))
+
+    async def test_failed_call_request_does_not_claim_action_or_emit_refresh(self):
+        item = {
+            "id": "call-failure", "type": "mcpToolCall", "server": "stocks_monitor",
+            "tool": "stocks_call", "status": "completed", "arguments": {"action": "request"},
+            "result": {"structuredContent": {"ok": False, "action": "request",
+                                               "error": {"code": "call_unavailable"}}},
+        }
+        await self.session.capture_selection_tool("failed-call-turn", item)
+        receipt = self.session.turn_state("failed-call-turn")["tools"][0]
+        self.assertFalse(receipt["success"])
+        self.assertFalse(receipt["dataReturned"])
+        self.assertFalse(receipt["actionApplied"])
+        self.assertFalse(any(event.get("type", "").endswith(".changed") for event in self.events))
+
 
 if __name__ == "__main__":
     unittest.main()

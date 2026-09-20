@@ -237,12 +237,16 @@ class MonitorService:
         severity = value.get("severity", "normal")
         if severity not in ("normal", "important", "urgent"):
             raise MonitorError("invalid_notification", "提醒等级无效")
+        delivery_mode = value.get("deliveryMode", "auto")
+        if delivery_mode not in ("auto", "call"):
+            raise MonitorError("invalid_notification", "投递方式无效")
         now, nid = self.clock(), uuid.uuid4().hex
         notice = {"id": nid, "ruleId": rule_id, "code": code,
                   "title": _text(value.get("title"), "提醒标题", 120),
                   "body": _text(value.get("body"), "提醒内容", 8000), "severity": severity,
                   "aiState": "pending" if pending else "complete", "createdAt": _iso(now),
                   "status": "unread", "evidence": evidence or {}, "delivery": {}}
+        notice["deliveryMode"] = delivery_mode
         notice["originalBody"] = notice["body"]
         db.execute("INSERT INTO notifications(id,owner,document,created,ai_state) VALUES (?,?,?,?,?)",
                    (nid, owner, _canonical(notice), now, notice["aiState"]))
@@ -304,7 +308,7 @@ class MonitorService:
                     db.execute("UPDATE rules SET document=?,runtime=? WHERE owner=? AND id=?", (_canonical(rule), _canonical(runtime), owner, rid))
             elif operation == "notification.create":
                 # AI-created text is already a finished notice: do not feed it back to AI.
-                self._insert_notice(db, owner, payload.get("notification"), pending=False)
+                notice = self._insert_notice(db, owner, payload.get("notification"), pending=False)
             else:
                 nid = _identifier(payload.get("id"))
                 row = db.execute("SELECT document FROM notifications WHERE owner=? AND id=?", (owner, nid)).fetchone()
@@ -318,6 +322,8 @@ class MonitorService:
             self._bump(db, owner)
             result = {"success": True, "requestId": request_id, "revision": self._revision(db, owner),
                       "operation": operation, "replayed": False, "library": self._library(db, owner)}
+            if operation == "notification.create":
+                result["notificationId"] = notice["id"]
             db.execute("INSERT INTO receipts(owner,request_id,digest,response) VALUES (?,?,?,?)", (owner, request_id, digest, _canonical(result)))
             return result
 

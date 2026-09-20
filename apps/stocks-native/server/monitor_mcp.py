@@ -7,7 +7,8 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 
 from monitoring import MonitorService
-from monitor_tools import dispatch_monitor_safe
+from monitor_tools import dispatch_monitor_safe, dispatch_call_safe
+from notification_delivery import NotificationDelivery
 
 
 server = FastMCP("stocks_monitor")
@@ -37,6 +38,21 @@ def _runtime():
 def stocks_monitor(action: Literal["catalog", "library", "mutate"], request: dict[str, Any] | None = None) -> dict[str, Any]:
     service, owner = _runtime()
     return dispatch_monitor_safe(service, owner, action, request)
+
+
+@server.tool(description=(
+    "给当前账户的股票 App 发起系统来电，接听后播报 text。用户明确说打给我/给我来电/打电话告诉我时使用；"
+    "这是 App 网络语音来电，不是拨打手机号。request 动作的 request 参数为 {requestId:唯一意图编号,text:接听后要说的话,title?:标题,code?:六位股票代码}。"
+    "当前有语音则排队，告知用户关闭当前通话后等待来电；不会强行挂断，最多等10分钟且只拨一次。"
+    "status 动作不传 request 查询能力，或传 {notificationId:此前回执编号} 查询投递结果。"
+    "queued/waiting_for_current_voice仅表示排队，push_accepted仅表示推送被接受，answered才是接听，audioSubmitted也不保证听见。"
+    "重试必须复用requestId，结果不明先查status，禁止反复创建来电。账户由会话固定，不接受owner或手机号。"
+))
+def stocks_call(action: Literal["status", "request"], request: dict[str, Any] | None = None) -> dict[str, Any]:
+    service, owner = _runtime()
+    delivery = NotificationDelivery(os.environ["STOCKS_MONITOR_STATE_DIR"])
+    return dispatch_call_safe(service, delivery, owner, action, request,
+                              push_configured=os.environ.get("STOCKS_MONITOR_CALLS_CONFIGURED") == "1")
 
 
 if __name__ == "__main__":

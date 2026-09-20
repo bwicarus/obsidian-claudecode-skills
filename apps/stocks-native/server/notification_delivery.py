@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -139,6 +140,42 @@ class NotificationDelivery:
         with self.db() as c:
             return [dict(r) for r in c.execute("SELECT * FROM devices WHERE owner=? ORDER BY seen DESC LIMIT 20", (owner,))]
 
+    def call_status(self, owner, notification=None, *, push_configured=None):
+        """Model-visible capability and receipts, without device IDs or push credentials."""
+        now = self.clock()
+        eligible = any(d["enabled"] and d["voip"] for d in self.devices(owner))
+        configured = self.configured() if push_configured is None else push_configured
+        active_voice = self.has_voice(owner)
+        result = {"available": bool(configured and eligible), "activeVoice": active_voice,
+                  "reason": None if configured and eligible else
+                  "push_not_configured" if not configured else "no_registered_call_device",
+                  "singleAttempt": True, "waitForCurrentVoice": True, "maxWaitSeconds": 600}
+        if notification is None:
+            return result
+        nid = notification["id"]
+        with self.db() as c:
+            row = c.execute("SELECT * FROM calls WHERE owner=? AND notice=?", (owner, nid)).fetchone()
+        result["notificationId"] = nid
+        result["answered"] = bool(row and row["answered"] is not None)
+        speech = self.receipt_for(owner, nid, "spoken", "account")
+        result["audioSubmitted"] = bool(speech and speech["outcome"] == "submitted")
+        if row:
+            state = row["status"]
+            if state == "ringing":
+                state = "missed" if now >= row["expires"] else (
+                    "push_accepted" if notification.get("delivery", {}).get("call") == "push_accepted" else "submitting")
+            elif state == "answered" and now >= (row["answered"] or row["created"]) + 600:
+                state = "ended"
+            result.update(callId=row["id"], state=state)
+        elif notification.get("status") == "resolved":
+            result["state"] = "cancelled"
+        else:
+            created = datetime.fromisoformat(notification["createdAt"].replace("Z", "+00:00")).timestamp()
+            result["expiresAt"] = created + 600
+            result["state"] = ("expired" if now >= created + 600 else "unavailable" if not result["available"]
+                               else "waiting_for_current_voice" if active_voice else "queued")
+        return result
+
     def receipt(self, owner, notice, channel, target, outcome):
         if channel not in ("visual", "push", "spoken", "call"):
             raise ValueError("通知通道无效")
@@ -176,6 +213,8 @@ class NotificationDelivery:
             c.execute("BEGIN IMMEDIATE")
             binding = c.execute("SELECT owner,enabled,voip FROM devices WHERE device=?", (device,)).fetchone()
             if not binding or binding['owner'] != owner or not binding['enabled'] or not binding['voip']:
+                return None
+            if c.execute("SELECT 1 FROM voices WHERE owner=? AND seen>?", (owner, now-30)).fetchone():
                 return None
             c.execute("UPDATE calls SET status='missed' WHERE status='ringing' AND expires<=?", (now,))
             c.execute("UPDATE calls SET status='ended' WHERE status='answered' AND answered+600<=?", (now,))

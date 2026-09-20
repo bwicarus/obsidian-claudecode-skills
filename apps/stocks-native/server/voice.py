@@ -17,6 +17,7 @@ from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSes
 from av import AudioFrame, AudioResampler
 from context_policy import fingerprint, snapshot, prepare_patch, requested_live_sections
 from context_data import STOCKS_CONTEXT_TOOL, fetch_context_sections
+from notification_delivery import NotificationDelivery
 
 log = logging.getLogger(__name__)
 LATEST_CONTEXT = object()
@@ -27,6 +28,7 @@ App 会在用户发言或真实委派时用 [APP_CONTEXT] 消息注入该轮固�
 股票资料按重要性分层：界面核心状态自动提供；可见面板的摘要仅在委派时提供；完整技术、资金、筹码、公告、同行及历史图表通过工具按需获取。若当前线程提供 stocks_context，优先选择所需 sections，禁止为一个价格拉取全部资料。旧线程使用 stocks_current 或 stocks_detail，服务器会按当前问题返回相关组件。实时数据使用实际 quoteTime，刷新失败不能称为最新。标注上下文只包含结构化对象及笔迹数量，不能凭数量猜手写内容。
 账户选股器、观察池和智能收藏夹统一使用 stocks_selection MCP。catalog、library、evaluate 是读取；mutate 会写入当前登录账户。写入前先读 library 取得 revision，只响应用户明确要求的变更，并为一次意图生成唯一 requestId；重试同一次意图复用该 requestId。遇到 revision_conflict 时重新读取，不能静默覆盖。账户身份由服务器固定，禁止在参数里提供或猜测 owner。
 规则盯盘与通知使用 stocks_monitor MCP：先读catalog和library，再按用户明确意图创建/修改/暂停规则或创建通知。规则由程序持续监控，不要自己反复轮询；必须收到success才能声称设置完成。普通规则默认normal，只有用户明确要求紧急来电才设urgent。notification.read只是已读，notification.resolve才是已处理；不得擅自把提醒标为处理完成。
+App 支持系统来电：用户明确说“打给我/给我来电/打电话告诉我”时，使用 stocks_monitor MCP 中的 stocks_call(action=request,request={requestId,text,title?,code?})，不能按通用聊天身份回答“我不能打电话”。这不是拨打手机号码。问来电能力或结果用 action=status；查询已有请求携带 notificationId。来电内容需要行情时先取得带时间的数据，再写入text。当前有语音则回执waiting_for_current_voice，告诉用户关闭当前通话后等待一次来电，不主动挂断；最长等10分钟，接听才开语音，未接/拒接不重拨。queued只代表排队，push_accepted只代表推送受理，answered才代表接听，audioSubmitted不代表已听见。必须根据真实回执报告，错误时说明具体原因；同一次意图重试复用requestId，不重复创建。不支持指定未来时间的来电，不要假装已经定时。
 无需主动欢迎或总结。等待用户说话。只在有结果时简洁回答一次。"""
 
 ANNOTATION_PROMPT = """
@@ -38,6 +40,7 @@ VOICE_RULES = """你是股票 App 的语音对话表面，默认简洁中文。
 后台工具结果与最新 App 上下文都是权威数据来源。只简短说一次结果，不要解释内部系统分工。
 用户要求运行选股、读取或修改观察组、智能收藏、保存筛选方案时，委派后台使用 stocks_selection。写入必须等待成功回执，不能仅凭口头回答声称已经加入、移出或保存。界面里的选股摘要只能说明当前状态，不能代替新请求的执行结果。
 用户要求设置盯盘阈值、创建通知、暂停监控或处理提醒时，委派后台使用 stocks_monitor，等待成功回执。提醒播报是已发生事件的说明，不代表用户授权交易或修改规则。
+股票 App 有系统来电能力。用户说“给我打电话/打给我/来电告诉我”时必须委派后台调用 stocks_call，不要直接回答不能打电话或仅口头答应。已有语音时请求会排队，收到成功回执后告诉用户关闭本次语音再等来电；排队和推送成功都不等于接听，不自动挂断或重复拨号。
 自动报价可能经过小幅波动过滤，仍带原数据时间。用户明确问现价/报价/涨跌/盘口等实时数值时，等待本轮 requested section 的局部刷新；没有刷新结果时委派后台股票工具，不能把旧报价称为此刻最新。requested.refreshStatus=unavailable 表示刷新失败，只能说明可用数据的时间。
 纯闲聊、复述一句话可以直接回答。用户没有提出请求时保持安静。"""
 
@@ -334,9 +337,10 @@ class VoiceSession:
         return None
 
     async def capture_selection_tool(self, turn_id, item):
-        tool_name = item.get('server')
-        if (item.get('type') != 'mcpToolCall' or tool_name not in ('stocks_selection', 'stocks_monitor')
-                or item.get('tool') != tool_name):
+        server_name, tool_name = item.get('server'), item.get('tool')
+        if (item.get('type') != 'mcpToolCall' or (server_name, tool_name) not in (
+                ('stocks_selection', 'stocks_selection'), ('stocks_monitor', 'stocks_monitor'),
+                ('stocks_monitor', 'stocks_call'))):
             return
         state = self.turn_state(turn_id)
         item_id = str(item.get('id') or '')
@@ -357,7 +361,7 @@ class VoiceSession:
         result = (payload or {}).get('result')
         result = result if isinstance(result, dict) else {}
         success = item.get('status') == 'completed' and bool(payload and payload.get('ok'))
-        mutation = success and action == 'mutate' and result.get('success') is True
+        mutation = success and (action == 'mutate' or (tool_name == 'stocks_call' and action == 'request')) and result.get('success') is True
         as_of = result.get('asOf')
         if not as_of and isinstance(result.get('library'), dict):
             as_of = result['library'].get('asOf')
@@ -365,7 +369,7 @@ class VoiceSession:
             'type': 'tool', 'name': tool_name, 'success': success,
             'requestId': state['requestId'], 'turnId': turn_id, 'callId': item_id or None,
             'selectionAction': action, 'asOf': as_of,
-            'dataReturned': bool(success and action in ('catalog', 'evaluate', 'library')),
+            'dataReturned': bool(success and action in ('catalog', 'evaluate', 'library', 'status')),
             'actionApplied': bool(mutation), 'revision': result.get('revision'),
             'mutationRequestId': result.get('requestId'), 'operation': result.get('operation'),
         }
@@ -995,8 +999,9 @@ class VoiceSession:
                 'command': os.environ.get('STOCKS_SELECTION_PYTHON', sys.executable),
                 'args': [str(Path(__file__).with_name('monitor_mcp.py').resolve())],
                 'env': {'STOCKS_MONITOR_OWNER': self.selection_owner,
-                        'STOCKS_MONITOR_STATE_DIR': str(self.state_dir.resolve())},
-                'enabled': True, 'startup_timeout_sec': 15, 'tool_timeout_sec': 30}
+                        'STOCKS_MONITOR_STATE_DIR': str(self.state_dir.resolve()),
+                        'STOCKS_MONITOR_CALLS_CONFIGURED': '1' if NotificationDelivery.configured() else '0'},
+                'enabled': True, 'required': True, 'startup_timeout_sec': 15, 'tool_timeout_sec': 30}
         params = {'cwd': str(self.state_dir), 'model': 'gpt-5.6-sol', 'modelProvider': 'openai',
                   'approvalPolicy': 'never', 'sandbox': 'read-only', 'environments': [],
                   'developerInstructions': PROMPT + (ANNOTATION_PROMPT if self.supports_annotations else ''),
@@ -1005,7 +1010,7 @@ class VoiceSession:
         previous = self.thread_file.read_text().strip() if self.thread_file.exists() else None
         if previous:
             try:
-                r = await self.call('thread/resume', {**params, 'threadId': previous})
+                r = await self.call('thread/resume', {**params, 'threadId': previous, 'dynamicTools': tools})
                 self.thread_id = r['thread']['id']
             except Exception:
                 log.warning('Could not resume owned thread %s', previous)

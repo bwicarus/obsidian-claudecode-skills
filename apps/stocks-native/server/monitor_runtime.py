@@ -104,20 +104,24 @@ class MonitorRuntime:
         notifications = await asyncio.to_thread(self.service.pending_notifications)
         for notice in notifications:
             owner, notice_id = notice["ownerId"], notice["id"]
-            if notice.get("status") != "unread":
+            explicit_call = notice.get("deliveryMode") == "call"
+            if notice.get("status") == "resolved" or (not explicit_call and notice.get("status") != "unread"):
                 continue
             try:
-                age = time.time() - datetime.fromisoformat(notice["createdAt"].replace("Z", "+00:00")).timestamp()
+                created = datetime.fromisoformat(notice["createdAt"].replace("Z", "+00:00")).timestamp()
+                age = self.delivery.clock() - created
             except (ValueError, KeyError):
                 continue
             # Old unread events remain visible but never call hours later after a restart.
-            if age > 300:
+            if (explicit_call and age >= 600) or (not explicit_call and age > 300):
+                if explicit_call and notice.get("delivery", {}).get("call") in (None, "queued", "queued_busy"):
+                    await asyncio.to_thread(self.service.mark_delivery, owner, notice_id, {"call": "expired"})
                 continue
             if notice.get("aiState") in ("pending", "running") and age < 20:
                 continue
             devices = await asyncio.to_thread(self.delivery.devices, owner)
             voices = self.voices(owner)
-            if voices:
+            if voices and not explicit_call:
                 session = voices[0]
                 if session.can_announce_notification():
                     reserved = await asyncio.to_thread(self.delivery.reserve_delivery, owner, notice_id, "spoken", "account")
@@ -131,7 +135,7 @@ class MonitorRuntime:
             if not remote:
                 continue
             for device in devices:
-                foreground = bool(device["foreground"] and time.time() - device["seen"] < 30)
+                foreground = bool(device["foreground"] and self.delivery.clock() - device["seen"] < 30)
                 if foreground or not device["enabled"] or not device["push"] or not self.delivery.configured():
                     continue
                 if await asyncio.to_thread(self.delivery.reserve_delivery, owner, notice_id, "push", device["device"]):
@@ -142,12 +146,28 @@ class MonitorRuntime:
                     await asyncio.to_thread(self.delivery.receipt, owner, notice_id, "push", device["device"],
                                             "accepted" if success else "failed")
                     await asyncio.to_thread(self.service.mark_delivery, owner, notice_id, {"push": "accepted" if success else "failed"})
-            if voices or await asyncio.to_thread(self.delivery.has_voice, owner) or notice.get("severity") != "urgent" or any(d["foreground"] and time.time()-d["seen"] < 30 for d in devices):
+            if voices or await asyncio.to_thread(self.delivery.has_voice, owner):
+                if explicit_call and notice.get("delivery", {}).get("call") in (None, "queued", "queued_busy"):
+                    await asyncio.to_thread(self.service.mark_delivery, owner, notice_id, {"call": "queued_busy"})
+                # Explicit requests wait for the current call to end; they must not
+                # silently turn into speech or disconnect an existing voice session.
+                continue
+            if not explicit_call and (notice.get("severity") != "urgent" or any(
+                    d["foreground"] and self.delivery.clock()-d["seen"] < 30 for d in devices)):
                 continue
             if not self.delivery.configured():
                 continue
             candidates = [d for d in devices if d["enabled"] and d["voip"]]
             if candidates:
+                # A user may resolve a notice while this delivery pass awaits I/O.
+                current = await asyncio.to_thread(self.service.get_notification, owner, notice_id)
+                if not current or current.get("status") == "resolved" or (
+                        not explicit_call and current.get("status") != "unread"):
+                    continue
+                if explicit_call and self.delivery.clock() - created >= 600:
+                    if current.get("delivery", {}).get("call") in (None, "queued", "queued_busy"):
+                        await asyncio.to_thread(self.service.mark_delivery, owner, notice_id, {"call": "expired"})
+                    continue
                 target = candidates[0]
                 call = await asyncio.to_thread(self.delivery.create_call, owner, target["device"], notice_id)
                 if call:
@@ -157,4 +177,4 @@ class MonitorRuntime:
                         success = False
                     if not success:
                         await asyncio.to_thread(self.delivery.call_receipt, owner, target["device"], notice_id, call["callId"], "failed")
-                    await asyncio.to_thread(self.service.mark_delivery, owner, notice_id, {"call": "ringing" if success else "failed"})
+                    await asyncio.to_thread(self.service.mark_delivery, owner, notice_id, {"call": "push_accepted" if success else "failed"})
