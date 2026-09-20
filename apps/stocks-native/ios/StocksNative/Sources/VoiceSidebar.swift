@@ -98,8 +98,14 @@ struct VoiceSidebar: View {
                         }
                         ForEach(voice.transcripts) { message in
                             VStack(alignment: .leading, spacing: 7) {
-                                Text(message.role == "user" ? "你" : "助手")
-                                    .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                                HStack(spacing: 8) {
+                                    Text(message.role == "user" ? "你" : "助手")
+                                    if !message.isFinal && voice.isConnected {
+                                        Text(message.role == "user" ? "正在识别…" : "正在回复…")
+                                            .font(.caption2)
+                                    }
+                                }
+                                .font(.caption.weight(.medium)).foregroundStyle(.secondary)
                                 Text(message.text)
                                     .font(.subheadline).lineSpacing(5).textSelection(.enabled)
                                     .foregroundStyle(AppStyle.ink)
@@ -115,7 +121,7 @@ struct VoiceSidebar: View {
                     .padding(20)
                 }
                 .onChange(of: voice.transcripts.last?.text) { _, _ in
-                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("conversationBottom", anchor: .bottom) }
+                    proxy.scrollTo("conversationBottom", anchor: .bottom)
                 }
             }
             Divider()

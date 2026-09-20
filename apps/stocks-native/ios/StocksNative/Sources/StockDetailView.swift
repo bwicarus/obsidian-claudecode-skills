@@ -77,7 +77,7 @@ struct StockDetailView: View {
             }
             HStack(spacing: 8) {
                 Text(stock.code).monospaced().tracking(1.2)
-                Text(asOf.map { "资料 \($0)" } ?? "等待资料时间").lineLimit(1)
+                Text(asOf.map { "资料 \(StockChartLabels.detail($0))" } ?? "等待资料时间").lineLimit(1)
             }
             .font(.caption2).foregroundStyle(.secondary)
         }
@@ -208,9 +208,8 @@ struct CandleChart: View {
     private var xDomain: ClosedRange<Double> {
         (Double(visibleRange.lowerBound) - 0.6)...max(0.6, Double(visibleRange.upperBound) - 0.4)
     }
-    private var tickPositions: [Double] {
-        guard visible.count > 1 else { return [Double(visibleRange.lowerBound)] }
-        return [Double(visibleRange.lowerBound), Double((visibleRange.lowerBound + visibleRange.upperBound - 1) / 2), Double(visibleRange.upperBound - 1)]
+    private var timeTicks: [StockChartTick] {
+        StockChartLabels.ticks(times: visible.map(\.candle.time), positions: visible.map(\.x), maxCount: 4)
     }
 
     private var annotationViewport: ChartAnnotationViewport {
@@ -285,7 +284,7 @@ struct CandleChart: View {
                     Text("旧版笔迹仍保留在本机；因缺少行情坐标，暂不叠加显示。")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
-                Text(annotationMode ? "使用手指或 Apple Pencil 绘制；新标注随行情缩放和平移。" : "拖动图表查看单根数据；拖动下方范围条调整视野。")
+                Text(annotationMode ? "使用手指或 Apple Pencil 绘制；新标注随行情缩放和平移。" : "拖动图表查看单根数据；顶部范围条调整所有图表视野。")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
@@ -362,10 +361,11 @@ struct CandleChart: View {
                         }
                     }
                     .chartXAxis {
-                        AxisMarks(values: tickPositions) { value in
-                            AxisValueLabel {
-                                if let x = value.as(Double.self), candles.indices.contains(Int(x)) {
-                                    Text(shortDate(candles[Int(x)].time)).font(.caption2)
+                        let ticks = timeTicks
+                        AxisMarks(values: ticks.map(\.position)) { value in
+                            AxisValueLabel(collisionResolution: .greedy) {
+                                if let x = value.as(Double.self), let tick = ticks.first(where: { $0.position == x }) {
+                                    Text(tick.label).font(.caption2).monospacedDigit()
                                 }
                             }
                         }
@@ -488,7 +488,7 @@ struct CandleChart: View {
 
     private func candleSummary(_ candle: Candle) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(shortDate(candle.time)).font(.caption).foregroundStyle(.secondary)
+            Text(StockChartLabels.detail(candle.time)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 16) { candleValues(candle) }
                 LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)],
@@ -506,12 +506,4 @@ struct CandleChart: View {
         Text("收 \(AppStyle.price(candle.close))")
     }
 
-    private func shortDate(_ time: String) -> String {
-        let normalized = time.replacingOccurrences(of: "T", with: " ")
-        let parts = normalized.split(separator: " ")
-        if parts.count >= 2, parts[1].contains(":") {
-            return "\(parts[0].suffix(5)) \(parts[1].prefix(5))"
-        }
-        return String(normalized.prefix(10))
-    }
 }

@@ -43,7 +43,6 @@ final class StockWorkspaceInkSettings: ObservableObject {
     @Published var color: Color = .red
     @Published var width: Double = 3
     @Published var storageError: String?
-    weak var activeSurface: StockWorkspaceInkSurface?
     private var previousMode: Mode = .pen
     private var lastDoubleTap: TimeInterval = 0
 
@@ -57,12 +56,12 @@ final class StockWorkspaceInkSettings: ObservableObject {
         previousMode = mode
     }
 
-    func pencilDoubleTap(from surface: StockWorkspaceInkSurface) {
-        guard activeSurface === surface else { return }
+    func pencilDoubleTap() {
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastDoubleTap > 0.25 else { return }
         lastDoubleTap = now
         toggleEraser()
+        UISelectionFeedbackGenerator().selectionChanged()
     }
 }
 
@@ -100,17 +99,9 @@ struct StockWorkspaceInkPalette: View {
     }
 }
 
-/// Apple Pencil alone participates in hit testing; fingers reach the card/chart below.
-private final class StockPencilCanvas: PKCanvasView {
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        guard super.point(inside: point, with: event) else { return false }
-        return event?.type == .hover || event?.allTouches?.contains(where: { $0.type == .pencil }) == true
-    }
-}
-
 @MainActor
-final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIPencilInteractionDelegate, UIGestureRecognizerDelegate {
-    private let pencil = StockPencilCanvas()
+final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIGestureRecognizerDelegate {
+    private let pencil = PKCanvasView()
     private let selectionLayer = CAShapeLayer()
     private let settings: StockWorkspaceInkSettings
     private var settingsObservation: AnyCancellable?
@@ -136,7 +127,10 @@ final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIPencilInte
         pencil.backgroundColor = .clear
         pencil.isOpaque = false
         pencil.isScrollEnabled = false
+        pencil.contentInsetAdjustmentBehavior = .never
+        pencil.bounces = false
         pencil.drawingPolicy = .pencilOnly
+        pencil.drawingGestureRecognizer.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
         pencil.delegate = self
         addSubview(pencil)
         selectionLayer.strokeColor = UIColor.systemBlue.cgColor
@@ -152,14 +146,9 @@ final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIPencilInte
         hold.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
         hold.minimumPressDuration = 0.65
         hold.allowableMovement = 6
+        hold.cancelsTouchesInView = false
         hold.delegate = self
         pencil.addGestureRecognizer(hold)
-        let hover = UIHoverGestureRecognizer(target: self, action: #selector(pencilHovered(_:)))
-        hover.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
-        pencil.addGestureRecognizer(hover)
-        let interaction = UIPencilInteraction()
-        interaction.delegate = self
-        pencil.addInteraction(interaction)
         settingsObservation = settings.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { [weak self] in self?.applyTool() }
         }
@@ -173,11 +162,23 @@ final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIPencilInte
         return event?.type == .hover || event?.allTouches?.contains(where: { $0.type == .pencil }) == true
     }
 
+    /// The host activates ink synchronously after it has a real content rectangle.
+    /// Initial visibility must not depend on a hidden, zero-sized view being laid out later.
+    func layoutInContentFrame(_ frame: CGRect) {
+        guard !isDrawing else { return }
+        self.frame = frame
+        pencil.frame = bounds
+        pencil.contentSize = bounds.size
+        selectionLayer.frame = bounds
+        applyIdentity()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         // Keep the same screen coordinate system until PencilKit commits the stroke.
         guard !isDrawing else { return }
         pencil.frame = bounds
+        pencil.contentSize = bounds.size
         selectionLayer.frame = bounds
         applyIdentity()
     }
@@ -185,6 +186,10 @@ final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIPencilInte
     func configure(scope: String?) {
         guard self.scope != scope else { return }
         self.scope = scope
+        if !isDrawing {
+            isHidden = scope == nil
+            isUserInteractionEnabled = scope != nil
+        }
         applyIdentity()
     }
 
@@ -207,6 +212,7 @@ final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIPencilInte
         clearSelection()
         applying = false
         isHidden = key == nil
+        isUserInteractionEnabled = key != nil
         applyTool()
         if key != nil { scheduleChange(saveDrawing: false) }
     }
@@ -260,7 +266,6 @@ final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIPencilInte
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
         guard !applying else { return }
         pendingChange?.cancel()
-        settings.activeSurface = self
         drawingActive = true
         awaitingToolCommit = true
         strokeStart = canvasView.drawing
@@ -298,20 +303,8 @@ final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIPencilInte
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
     }
 
-    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) { settings.pencilDoubleTap(from: self) }
-
-    @available(iOS 17.5, *)
-    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
-        settings.pencilDoubleTap(from: self)
-    }
-
-    @objc private func pencilHovered(_ hover: UIHoverGestureRecognizer) {
-        if hover.state == .began || hover.state == .changed { settings.activeSurface = self }
-    }
-
     @objc private func showSettings(_ hold: UILongPressGestureRecognizer) {
         guard hold.state == .began else { return }
-        settings.activeSurface = self
         let wasDrawing = drawingActive
         applying = true
         pencil.drawingGestureRecognizer.isEnabled = false
@@ -332,7 +325,6 @@ final class StockWorkspaceInkSurface: UIView, PKCanvasViewDelegate, UIPencilInte
         switch gesture.state {
         case .began:
             pendingChange?.cancel()
-            settings.activeSurface = self
             selectionPoints = [point]
             onDrawingStateChanged?(true)
         case .changed:

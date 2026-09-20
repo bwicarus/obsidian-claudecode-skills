@@ -429,11 +429,12 @@ final class VoiceSession: ObservableObject {
             let role = event.role ?? "assistant"
             if let messageID = event.messageId,
                let index = transcripts.firstIndex(where: { $0.id == messageID }) {
+                guard transcripts[index].role == role,
+                      !(transcripts[index].isFinal && event.final == false) else { return }
                 transcripts[index].text = text
                 transcripts[index].isFinal = event.final ?? true
-            } else if let index = transcripts.indices.last,
+            } else if event.messageId == nil, let index = transcripts.indices.last,
                       !transcripts[index].isFinal, transcripts[index].role == role {
-                if let messageID = event.messageId { transcripts[index].id = messageID }
                 transcripts[index].text = text
                 transcripts[index].isFinal = event.final ?? true
             } else {

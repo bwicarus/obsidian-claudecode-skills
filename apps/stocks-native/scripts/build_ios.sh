@@ -33,6 +33,17 @@ if [[ "$MODE" == simulator ]]; then
     "$PROJECT_DIR/../Tests/StockTimelineChecks.swift" \
     -o "$BUILD_ROOT/stock-timeline-checks"
   "$BUILD_ROOT/stock-timeline-checks"
+  swiftc -swift-version 5 -parse-as-library \
+    "$PROJECT_DIR/Sources/NativeIndicatorScale.swift" \
+    "$PROJECT_DIR/../Tests/NativeIndicatorScaleChecks.swift" \
+    -o "$BUILD_ROOT/native-indicator-scale-checks"
+  "$BUILD_ROOT/native-indicator-scale-checks"
+  swiftc -swift-version 5 -parse-as-library \
+    "$PROJECT_DIR/Sources/StockTimelineState.swift" \
+    "$PROJECT_DIR/Sources/StockChartLabels.swift" \
+    "$PROJECT_DIR/../Tests/StockChartLabelChecks.swift" \
+    -o "$BUILD_ROOT/stock-chart-label-checks"
+  "$BUILD_ROOT/stock-chart-label-checks"
   xcodebuild build -project "$PROJECT_FILE" -scheme StocksNative \
     -configuration Debug -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$BUILD_ROOT/DerivedData-simulator" \

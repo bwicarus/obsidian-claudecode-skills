@@ -27,7 +27,7 @@ struct NativeWorkspaceCanvas: UIViewControllerRepresentable {
 }
 
 @MainActor
-final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecognizerDelegate {
+final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecognizerDelegate, UIPencilInteractionDelegate {
     private let scrollView = UIScrollView()
     private let canvas = UIView()
     private let previewLayer = CAShapeLayer()
@@ -73,7 +73,16 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         scrollView.isDirectionalLockEnabled = true
         scrollView.contentInsetAdjustmentBehavior = .never
         scrollView.keyboardDismissMode = .onDrag
+        // Pencil belongs to the card's ink canvas; only fingers/trackpads scroll.
+        scrollView.panGestureRecognizer.allowedTouchTypes = [
+            NSNumber(value: UITouch.TouchType.direct.rawValue),
+            NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)
+        ]
+        scrollView.delaysContentTouches = false
         view.addSubview(scrollView)
+        let pencilInteraction = UIPencilInteraction()
+        pencilInteraction.delegate = self
+        view.addInteraction(pencilInteraction)
         canvas.backgroundColor = .clear
         scrollView.addSubview(canvas)
         previewLayer.fillColor = UIColor(AppStyle.accent).withAlphaComponent(0.06).cgColor
@@ -128,6 +137,20 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     }
 
     deinit { displayLink?.invalidate() }
+
+    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) { inkSettings.pencilDoubleTap() }
+
+    @available(iOS 17.5, *)
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+        inkSettings.pencilDoubleTap()
+    }
+
+    @available(iOS 17.5, *)
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        guard squeeze.phase == .ended, view.window != nil else { return }
+        // Reader routes Pencil Pro squeeze separately from tip long-press.
+        showInkSettings(source: view, point: CGPoint(x: view.bounds.midX, y: view.bounds.midY))
+    }
 
     func update(page: WorkspacePage, layoutEditing: Bool, content: @escaping (WorkspaceCard) -> AnyView,
                 minimumContentSize: @escaping (WorkspaceCard, CGFloat) -> CGSize,
@@ -191,8 +214,6 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                 host.accessibilityIdentifier = "workspace.card.\(page.id).\(card.id)"
                 canvas.addSubview(host)
                 controller.didMove(toParent: self)
-                let move = makePan(.move(card.id))
-                host.moveSurface.addGestureRecognizer(move)
                 host.grip.addGestureRecognizer(makePan(.move(card.id)))
                 let resize = makePan(.resize(card.id))
                 host.resizeGrip.addGestureRecognizer(resize)
@@ -809,8 +830,7 @@ private final class WorkspaceCanvasDisplayLinkProxy: NSObject {
 
 private final class WorkspaceCardHost: UIView {
     let controller: UIHostingController<AnyView>
-    let grip = UIView()
-    let moveSurface = WorkspaceCardMoveSurface()
+    let grip = WorkspaceCardDragGrip()
     let resizeGrip = UIView()
     let ink: StockWorkspaceInkSurface
     private let gripMark = UIView()
@@ -836,11 +856,8 @@ private final class WorkspaceCardHost: UIView {
         clipsToBounds = true
         controller.view.backgroundColor = .clear
         addSubview(controller.view)
-        addSubview(moveSurface)
-        moveSurface.backgroundColor = .clear
-        moveSurface.accessibilityLabel = "拖动卡片主体调整位置"
         addSubview(grip)
-        grip.accessibilityLabel = "拖动移动卡片"
+        grip.accessibilityLabel = "拖动卡片顶部调整位置"
         grip.isAccessibilityElement = true
         gripMark.backgroundColor = UIColor.secondaryLabel.withAlphaComponent(0.28)
         gripMark.layer.cornerRadius = 2
@@ -890,7 +907,6 @@ private final class WorkspaceCardHost: UIView {
         guard editing != self.editing else { return }
         self.editing = editing
         grip.isHidden = !editing
-        moveSurface.isHidden = !editing
         resizeGrip.isHidden = !editing
         setNeedsLayout()
     }
@@ -902,18 +918,17 @@ private final class WorkspaceCardHost: UIView {
         let headerHeight: CGFloat = editing ? contentInset : 0
         controller.view.frame = CGRect(x: 0, y: headerHeight, width: bounds.width,
                                        height: max(1, bounds.height - headerHeight))
-        if frozenContent == nil { ink.frame = controller.view.frame }
-        moveSurface.frame = bounds
+        if frozenContent == nil { ink.layoutInContentFrame(controller.view.frame) }
         // Data cards already have top padding: the extra touch area only covers that padding.
-        grip.frame = CGRect(x: max(0, (bounds.width - 120) / 2), y: 0, width: min(120, bounds.width), height: editing ? 24 : 0)
+        grip.frame = CGRect(x: 16, y: 0, width: max(0, bounds.width - 32), height: editing ? 24 : 0)
         gripMark.frame = CGRect(x: (grip.bounds.width - 30) / 2, y: contentInset == 16 ? 5 : 8, width: 30, height: 4)
         resizeGrip.frame = CGRect(x: max(0, bounds.width - 44), y: max(0, bounds.height - 44), width: 44, height: 44)
         resizeMark.frame = CGRect(x: 20, y: 20, width: 14, height: 14)
     }
 }
 
-/// In layout mode fingers move the card; Pencil input still reaches annotations.
-private final class WorkspaceCardMoveSurface: UIView {
+/// Only the top handle moves a card; Pencil input passes through to its ink layer.
+private final class WorkspaceCardDragGrip: UIView {
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         if event?.allTouches?.contains(where: { $0.type == .pencil }) == true { return false }
         return super.point(inside: point, with: event)
@@ -935,6 +950,10 @@ private final class WorkspaceJunctionView: UIView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if event?.allTouches?.contains(where: { $0.type == .pencil }) == true { return false }
+        return super.point(inside: point, with: event)
+    }
     func setMarkVisible(_ visible: Bool) { mark.alpha = visible ? 1 : 0 }
 
     override func layoutSubviews() {
@@ -958,6 +977,10 @@ private final class WorkspaceSplitterView: UIView {
         accessibilityLabel = vertical ? "拖动调整左右卡片比例" : "拖动调整上下卡片比例"
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if event?.allTouches?.contains(where: { $0.type == .pencil }) == true { return false }
+        return super.point(inside: point, with: event)
+    }
     func setLineVisible(_ visible: Bool) { line.alpha = visible ? 1 : 0 }
     override func layoutSubviews() {
         super.layoutSubviews()

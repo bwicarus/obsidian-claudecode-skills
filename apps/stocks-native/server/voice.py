@@ -18,6 +18,7 @@ from av import AudioFrame, AudioResampler
 from context_policy import fingerprint, snapshot, prepare_patch, requested_live_sections
 from context_data import STOCKS_CONTEXT_TOOL, fetch_context_sections
 from ink_context import InkStandby
+from voice_transcripts import TranscriptStreams
 from notification_delivery import NotificationDelivery
 from assistant_contract import ASSISTANT_ROOT, contract, sync_contract
 
@@ -109,6 +110,10 @@ class VoiceSession:
         self.emit_json = emit_json
         self.emit_audio = emit_audio
         self.session_id = str(uuid.uuid4())
+        self.transcript_streams = TranscriptStreams(self.session_id)
+        self.transcript_updates = {}
+        self.transcript_flush = None
+        self.transcript_send_lock = asyncio.Lock()
         self.thread_id = None
         self.stock_code = None
         self.proc = None
@@ -270,6 +275,58 @@ class VoiceSession:
         if not self.closed:
             await self.emit_json(event)
 
+    def queue_transcript(self, event, persist=False):
+        if not event or not event.get('text') or self.closed:
+            return
+        if persist:
+            self.record(event)
+        if event.get('final'):
+            self.transcript_updates.pop(event['messageId'], None)
+            self.task(self.emit_transcript(event))
+            return
+        self.transcript_updates[event['messageId']] = event
+        if self.transcript_flush is None or self.transcript_flush.done():
+            self.transcript_flush = self.task(self.flush_transcripts())
+
+    async def flush_transcripts(self):
+        # Reader uses cumulative snapshots and one pending update per message.
+        # Coalesce bursts instead of creating a task / WebSocket frame per token.
+        while self.transcript_updates and not self.closed:
+            longest = max((len(item['text']) for item in self.transcript_updates.values()), default=0)
+            await asyncio.sleep(0.25 if longest > 4000 else 0.12)
+            updates, self.transcript_updates = self.transcript_updates, {}
+            for event in updates.values():
+                await self.emit_transcript(event)
+
+    async def emit_transcript(self, event):
+        async with self.transcript_send_lock:
+            # A final can overtake a throttled draft, including one waiting for
+            # a slow WebSocket write. Never let that draft undo the final text.
+            current = self.transcript_streams.entries.get(event['messageId'])
+            if not event.get('final') and current and current['final']:
+                return
+            await self.event(event)
+
+    def is_backend_speech_echo(self, text, complete=False):
+        normalized = re.sub(r'\W+', '', text).casefold()
+        if not normalized:
+            return False
+        for receipt in self.speech_receipts:
+            state = self.turns.get(receipt.get('turnId'))
+            if not state or not state.get('transcriptPublished'):
+                continue
+            answer = re.sub(r'\W+', '', receipt['text']).casefold()
+            if normalized == answer or (not complete and answer.startswith(normalized)):
+                return True
+        return False
+
+    def stream_realtime(self, params, completed_segment=False):
+        role = params.get('role')
+        event = (self.transcript_streams.realtime_segment(role, params.get('text')) if completed_segment
+                 else self.transcript_streams.realtime_delta(role, params.get('delta')))
+        if event and not (role == 'assistant' and self.is_backend_speech_echo(event['text'])):
+            self.queue_transcript(event)
+
     async def send(self, obj):
         async with self.write_lock:
             self.proc.stdin.write((json.dumps(obj, ensure_ascii=False) + '\n').encode())
@@ -390,6 +447,8 @@ class VoiceSession:
 
     async def fail_turn(self, state, message):
         state['finished'] = True
+        for event in self.transcript_streams.finish_backend(state.get('turnId'), failure=message):
+            self.queue_transcript(event, persist=True)
         receipt = {'type': 'task', 'state': 'failed', 'requestId': state['requestId'],
                    'turnId': state.get('turnId'), 'source': state['source'],
                    'dataVerified': False, 'message': message}
@@ -404,6 +463,8 @@ class VoiceSession:
         try:
             for item in turn.get('items', []):
                 self.capture_final(turn_id, item)
+                if item.get('type') == 'agentMessage':
+                    self.transcript_streams.backend_item(turn_id, item.get('id'), text=item.get('text'))
                 await self.capture_selection_tool(turn_id, item)
             if turn.get('status') != 'completed':
                 await self.fail_turn(state, '后台请求未完成：' + safe_error(turn.get('error') or turn.get('status')))
@@ -429,6 +490,10 @@ class VoiceSession:
             if state['source'] == 'text' and has_number and stock_claim and not verified:
                 await self.fail_turn(state, '本轮没有取得成功的行情数据回执，股票数值尚未核实，请重试。')
                 return
+            final_events = self.transcript_streams.finish_backend(turn_id)
+            for event in final_events:
+                self.queue_transcript(event, persist=True)
+            state['transcriptPublished'] = bool(final_events)
             # All background results, including automatic audio delegations, use
             # this single outlet. Do not also append user text to Realtime.
             async with self.reply_lock:
@@ -485,6 +550,10 @@ class VoiceSession:
                     await self.event({'type': 'error', 'fatal': True, 'message': safe_error(p)})
                 elif method == 'thread/realtime/closed' and not self.closed:
                     await self.event({'type': 'state', 'state': 'closed', 'reason': p.get('reason')})
+                elif method == 'thread/realtime/transcript/delta':
+                    self.stream_realtime(p)
+                elif method == 'thread/realtime/transcript/done':
+                    self.stream_realtime(p, completed_segment=True)
                 elif method == 'turn/started':
                     turn_id = p['turn']['id']
                     state = self.turn_state(turn_id)
@@ -497,9 +566,20 @@ class VoiceSession:
                                'turnId': turn_id, 'source': state['source']}
                     self.record(receipt)
                     await self.event(receipt)
+                elif method == 'item/agentMessage/delta':
+                    self.queue_transcript(self.transcript_streams.backend_item(
+                        p.get('turnId'), p.get('itemId'), delta=p.get('delta')))
+                elif method == 'item/started':
+                    item = p.get('item') or {}
+                    if item.get('type') == 'agentMessage':
+                        self.queue_transcript(self.transcript_streams.backend_item(
+                            p.get('turnId'), item.get('id'), text=item.get('text') or ''))
                 elif method == 'item/completed':
                     item = p.get('item') or {}
                     self.capture_final(p['turnId'], item)
+                    if item.get('type') == 'agentMessage':
+                        self.queue_transcript(self.transcript_streams.backend_item(
+                            p.get('turnId'), item.get('id'), text=item.get('text')))
                     await self.capture_selection_tool(p['turnId'], item)
                 elif method == 'turn/completed':
                     turn = p['turn']
@@ -885,6 +965,7 @@ class VoiceSession:
             turn = obj.get('turn') or {}
             self.last_activity = time.monotonic()
             role = turn.get('role')
+            self.transcript_streams.realtime_start(role, turn.get('id'))
             if role == 'user':
                 self.user_speaking = True
                 pinned = self.pin_voice_turn_context()
@@ -904,10 +985,12 @@ class VoiceSession:
                 self.user_speaking = False
             elif role == 'assistant':
                 self.assistant_speaking = False
-            text = turn.get('transcript')
+            streamed = self.transcript_streams.realtime_final(role, turn.get('transcript'), turn.get('id'))
+            text = streamed.get('text') if streamed else None
             if text:
                 self.last_activity = time.monotonic()
-                event = {'type': 'transcript', 'role': role, 'text': text, 'final': True}
+                event = streamed
+                backend_echo = role == 'assistant' and self.is_backend_speech_echo(text, complete=True)
                 if role == 'user':
                     if self.voice_turn_context is None:
                         self.pin_voice_turn_context()
@@ -932,12 +1015,8 @@ class VoiceSession:
                                     receipt['notificationId'], {'spoken': 'transcript_complete'}))
                             self.speech_receipts.remove(receipt)
                             break
-                if turn.get('id'):
-                    event['messageId'] = f"{turn['id']}:{role}"
-                else:
-                    event['messageId'] = self.transcript_message_id(event)
-                self.record(event)
-                self.task(self.event(event))
+                if not backend_echo:
+                    self.queue_transcript(event, persist=True)
         elif kind == 'error':
             self.task(self.event({'type': 'error', 'fatal': True,
                                   'message': safe_error(obj.get('error'))}))

@@ -29,7 +29,7 @@ struct StockWorkspaceView: View {
                 ContentUnavailableView {
                     Label("这个页签还没有显示的卡片", systemImage: "rectangle.grid.2x2")
                 } description: {
-                    Text("从卡片库添加行情、指标或资料，再直接拖动卡片排布。")
+                    Text("从卡片库添加行情、指标或资料，再拖动卡片顶部调整排布。")
                 } actions: {
                     Button("添加卡片") { showingEditor = true }.buttonStyle(.bordered)
                 }
@@ -76,8 +76,8 @@ struct StockWorkspaceView: View {
                 .background(layoutLocked ? AppStyle.canvas : AppStyle.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(.plain).foregroundStyle(AppStyle.accent)
-            .accessibilityLabel(layoutLocked ? "解锁卡片布局" : "完成布局，恢复图表操作")
-            .help(layoutLocked ? "解锁后直接拖动卡片主体，预览落点后松手" : "卡片主体用于移动；空白处或双指滚动，完成后恢复图表操作")
+            .accessibilityLabel(layoutLocked ? "解锁卡片布局" : "完成布局并锁定卡片")
+            .help(layoutLocked ? "解锁后拖动卡片顶部，预览落点后松手" : "拖动顶部移动卡片；正文可照常滚动和操作图表")
             Button { showingEditor = true } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.subheadline.weight(.medium))

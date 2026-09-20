@@ -214,9 +214,9 @@ final class AppModel: ObservableObject {
         guard let window = requestedTimelineWindow else { return nil }
         if chartPeriod == .intraday {
             guard let data = displayedIntraday, let last = data.rows.last else { return "分时仅提供当前交易日，正在读取可用数据。" }
-            if linkedIntradayRange.isEmpty { return "分时仅提供 \(data.tradeDate)，所选历史区间没有分时数据。" }
-            if window.calendarDays > 1.01 { return "分时仅提供 \(data.tradeDate)，其余所选日期没有分时数据。" }
-            return last.time < "15:00" ? "\(data.tradeDate) 分时截至 \(last.time)" : nil
+            if linkedIntradayRange.isEmpty { return "分时仅提供 \(StockChartLabels.day(data.tradeDate))，所选历史区间没有分时数据。" }
+            if window.calendarDays > 1.01 { return "分时仅提供 \(StockChartLabels.day(data.tradeDate))，其余所选日期没有分时数据。" }
+            return last.time < "15:00" ? "分时截至 \(StockChartLabels.detail(last.time, tradeDate: data.tradeDate))" : nil
         }
         guard let first = displayedKlineCandles.first?.time, let last = displayedKlineCandles.last?.time,
               let firstKey = StockTimelineTime.key(first), let lastKey = StockTimelineTime.key(last, endOfDay: true) else {
@@ -225,7 +225,7 @@ final class AppModel: ObservableObject {
         let tolerance: TimeInterval = klinePeriod == .month ? 32 * 86400 : (klinePeriod == .week ? 8 * 86400 : 4 * 86400)
         let missingStart = (StockTimelineTime.date(firstKey)?.timeIntervalSince(StockTimelineTime.date(window.lower) ?? .distantFuture) ?? 0) > tolerance
         if linkedKlineRange.isEmpty || missingStart || window.upper < firstKey || window.lower > lastKey {
-            return "当前已载入 \(first) – \(last)；所选范围未完全覆盖。"
+            return "当前已载入 \(StockChartLabels.detail(first)) – \(StockChartLabels.detail(last))；所选范围未完全覆盖。"
         }
         return nil
     }

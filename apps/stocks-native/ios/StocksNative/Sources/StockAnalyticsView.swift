@@ -167,7 +167,7 @@ struct StockValuationCard: View {
     let detail: StockResponse
 
     var body: some View {
-        card(title: "估值与表现", subtitle: detail.asOf ?? "最新资料") {
+        card(title: "估值与表现", subtitle: StockChartLabels.detail(detail.asOf)) {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading),
                                     count: availableWidth >= 500 ? 2 : 1),
                       alignment: .leading, spacing: 8) {
@@ -368,14 +368,15 @@ struct IntradayChart: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("当日分时").font(.headline)
-                    Text(data.tradeDate.isEmpty ? "常规交易时段" : "\(data.tradeDate) · 常规交易时段")
+                    Text("\(StockChartLabels.day(data.tradeDate)) · 常规交易时段")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let latest = inspected?.point {
                     VStack(alignment: .trailing, spacing: 3) {
                         Text(AppStyle.price(latest.price)).font(.title3.weight(.semibold)).monospacedDigit()
-                        Text(latest.time).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                        Text(StockChartLabels.detail(latest.time, tradeDate: data.tradeDate))
+                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                     }
                 }
             }
@@ -542,28 +543,31 @@ struct TechnicalCard: View {
     }
     private var inspected: NativeIndicatorPoint? { NativeChartIndicators.inspected(points, context: visibleContext) }
     private var xDomain: ClosedRange<Double> { indicatorDomain(points) }
+    private var scale: NativeIndicatorScale {
+        NativeIndicatorScale.macd(points.flatMap { [$0.dif, $0.dea, $0.histogram].compactMap { $0 } })
+    }
 
     var body: some View {
         card(title: "MACD", subtitle: "\(period.title) · 12 / 26 / 9") {
             if points.isEmpty { indicatorEmpty }
             else {
                 HStack(spacing: 12) {
-                    indicatorValue("DIF", inspected?.dif, color: AppStyle.accent)
-                    indicatorValue("DEA", inspected?.dea, color: .orange)
-                    indicatorValue("MACD", inspected?.histogram, color: AppStyle.movement(inspected?.histogram))
+                    indicatorValue("DIF", inspected?.dif, color: AppStyle.accent, scale: scale)
+                    indicatorValue("DEA", inspected?.dea, color: .orange, scale: scale)
+                    indicatorValue("MACD", inspected?.histogram, color: AppStyle.movement(inspected?.histogram), scale: scale)
                 }
                 Chart {
-                    RuleMark(y: .value("零轴", 0)).foregroundStyle(.secondary.opacity(0.3))
+                    RuleMark(y: .value("零轴", 0.0)).foregroundStyle(.secondary.opacity(0.3))
                     ForEach(points) { point in
-                        if let histogram = point.histogram {
+                        if let histogram = point.histogram, histogram.isFinite {
                             BarMark(x: .value("时间", Double(point.id)), y: .value("MACD", histogram), width: .ratio(0.6))
                                 .foregroundStyle(AppStyle.movement(histogram).opacity(0.55))
                         }
-                        if let dif = point.dif {
+                        if let dif = point.dif, dif.isFinite {
                             LineMark(x: .value("时间", Double(point.id)), y: .value("DIF", dif), series: .value("指标", "DIF"))
                                 .foregroundStyle(AppStyle.accent).lineStyle(StrokeStyle(lineWidth: 1.4))
                         }
-                        if let dea = point.dea {
+                        if let dea = point.dea, dea.isFinite {
                             LineMark(x: .value("时间", Double(point.id)), y: .value("DEA", dea), series: .value("指标", "DEA"))
                                 .foregroundStyle(.orange).lineStyle(StrokeStyle(lineWidth: 1.4))
                         }
@@ -574,7 +578,9 @@ struct TechnicalCard: View {
                     }
                 }
                 .chartXScale(domain: xDomain, range: .plotDimension(padding: 0))
-                .chartXAxis(.hidden).chartYAxis { indicatorAxis }.chartLegend(.hidden)
+                .chartYScale(domain: scale.domain)
+                .chartXAxis { indicatorTimeAxis(points) }
+                .chartYAxis { indicatorAxis(scale) }.chartLegend(.hidden)
                 .frame(height: availableHeight > 0 ? max(100, availableHeight - 118) : 130)
                 indicatorDate(inspected?.time)
             }
@@ -593,9 +599,8 @@ struct KDJCard: View {
         NativeChartIndicators.visible(NativeChartIndicators.series(candles: candles, panel: period == .day ? panel : nil), context: visibleContext)
     }
     private var inspected: NativeIndicatorPoint? { NativeChartIndicators.inspected(points, context: visibleContext) }
-    private var yDomain: ClosedRange<Double> {
-        let values = points.flatMap { [$0.k, $0.d, $0.j].compactMap { $0 } }
-        return min(0, (values.min() ?? 0) - 5)...max(100, (values.max() ?? 100) + 5)
+    private var scale: NativeIndicatorScale {
+        NativeIndicatorScale.kdj(points.flatMap { [$0.k, $0.d, $0.j].compactMap { $0 } })
     }
 
     var body: some View {
@@ -603,9 +608,9 @@ struct KDJCard: View {
             if points.isEmpty { indicatorEmpty }
             else {
                 HStack(spacing: 18) {
-                    indicatorValue("K", inspected?.k, color: AppStyle.accent)
-                    indicatorValue("D", inspected?.d, color: .orange)
-                    indicatorValue("J", inspected?.j, color: .purple)
+                    indicatorValue("K", inspected?.k, color: AppStyle.accent, scale: scale)
+                    indicatorValue("D", inspected?.d, color: .orange, scale: scale)
+                    indicatorValue("J", inspected?.j, color: .purple, scale: scale)
                 }
                 Chart {
                     ForEach([20.0, 80.0], id: \.self) { value in
@@ -613,15 +618,15 @@ struct KDJCard: View {
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
                     }
                     ForEach(points) { point in
-                        if let k = point.k {
+                        if let k = point.k, k.isFinite {
                             LineMark(x: .value("时间", Double(point.id)), y: .value("K", k), series: .value("指标", "K"))
                                 .foregroundStyle(AppStyle.accent).lineStyle(StrokeStyle(lineWidth: 1.4))
                         }
-                        if let d = point.d {
+                        if let d = point.d, d.isFinite {
                             LineMark(x: .value("时间", Double(point.id)), y: .value("D", d), series: .value("指标", "D"))
                                 .foregroundStyle(.orange).lineStyle(StrokeStyle(lineWidth: 1.4))
                         }
-                        if let j = point.j {
+                        if let j = point.j, j.isFinite {
                             LineMark(x: .value("时间", Double(point.id)), y: .value("J", j), series: .value("指标", "J"))
                                 .foregroundStyle(.purple).lineStyle(StrokeStyle(lineWidth: 1.2))
                         }
@@ -632,7 +637,9 @@ struct KDJCard: View {
                     }
                 }
                 .chartXScale(domain: indicatorDomain(points), range: .plotDimension(padding: 0))
-                .chartYScale(domain: yDomain).chartXAxis(.hidden).chartYAxis { indicatorAxis }.chartLegend(.hidden)
+                .chartYScale(domain: scale.domain)
+                .chartXAxis { indicatorTimeAxis(points) }
+                .chartYAxis { indicatorAxis(scale) }.chartLegend(.hidden)
                 .frame(height: availableHeight > 0 ? max(100, availableHeight - 118) : 130)
                 indicatorDate(inspected?.time)
             }
@@ -644,12 +651,24 @@ private func indicatorDomain(_ points: [NativeIndicatorPoint]) -> ClosedRange<Do
     (Double(points.first?.id ?? 0) - 0.6)...(Double(points.last?.id ?? 1) + 0.6)
 }
 
-private var indicatorAxis: some AxisContent {
-    AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
+private func indicatorTimeAxis(_ points: [NativeIndicatorPoint]) -> some AxisContent {
+    let ticks = StockChartLabels.ticks(times: points.map(\.time),
+                                       positions: points.map { Double($0.id) }, maxCount: 4)
+    return AxisMarks(position: .bottom, values: ticks.map(\.position)) { value in
+        AxisValueLabel {
+            if let position = value.as(Double.self), let tick = ticks.first(where: { $0.position == position }) {
+                Text(tick.label).font(.caption2).monospacedDigit().multilineTextAlignment(.center)
+            }
+        }
+    }
+}
+
+private func indicatorAxis(_ scale: NativeIndicatorScale) -> some AxisContent {
+    AxisMarks(position: .trailing, values: scale.ticks) { value in
         AxisGridLine().foregroundStyle(.secondary.opacity(0.1))
         AxisValueLabel {
             if let value = value.as(Double.self) {
-                Text(value.formatted(.number.precision(.fractionLength(0...2))))
+                Text(scale.label(value))
                     .font(.caption2).monospacedDigit().frame(width: 52, alignment: .trailing)
             }
         }
@@ -660,13 +679,13 @@ private var indicatorEmpty: some View {
     Text("暂无指标数据").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 140)
 }
 
-private func indicatorValue(_ title: String, _ value: Double?, color: Color) -> some View {
-    Text("\(title) \(value.map { String(format: "%.3f", $0) } ?? "—")")
+private func indicatorValue(_ title: String, _ value: Double?, color: Color, scale: NativeIndicatorScale) -> some View {
+    Text("\(title) \(scale.valueLabel(value))")
         .font(.caption).monospacedDigit().foregroundStyle(color).fixedSize(horizontal: false, vertical: true)
 }
 
 private func indicatorDate(_ time: String?) -> some View {
-    Text(time ?? "最新数据").font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+    Text(StockChartLabels.detail(time)).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
 }
 
 private struct FundSizeFlow: Identifiable {
@@ -695,6 +714,20 @@ struct FundCard: View {
     @State private var selectedDate: String?
     private var history: [FundHistory] {
         Array(panel.history.sorted { $0.tradeDate < $1.tradeDate }.suffix(5))
+    }
+    private var historyTicks: [StockChartTick] {
+        StockChartLabels.ticks(times: history.map(\.tradeDate), maxCount: 4)
+    }
+    private var historyAxisDates: [String] {
+        historyTicks.compactMap { tick in
+            let index = Int(tick.position)
+            return history.indices.contains(index) ? history[index].tradeDate : nil
+        }
+    }
+    private func historyAxisLabel(_ date: String) -> String {
+        guard let index = history.firstIndex(where: { $0.tradeDate == date }),
+              let tick = historyTicks.first(where: { $0.position == Double(index) }) else { return StockChartLabels.day(date) }
+        return tick.label
     }
     private var selected: FundHistory? {
         history.first { $0.tradeDate == selectedDate } ?? history.last
@@ -783,7 +816,7 @@ struct FundCard: View {
             }
             if hasHistoryFlows {
                 Chart {
-                    RuleMark(y: .value("零轴", 0)).foregroundStyle(.secondary.opacity(0.3))
+                    RuleMark(y: .value("零轴", 0.0)).foregroundStyle(.secondary.opacity(0.3))
                     ForEach(history) { point in
                         ForEach(flows(point)) { flow in
                             if let value = flow.net {
@@ -796,10 +829,10 @@ struct FundCard: View {
                 .chartXScale(domain: history.map(\.tradeDate))
                 .chartXSelection(value: dateSelection)
                 .chartXAxis {
-                    AxisMarks(values: history.map(\.tradeDate)) { value in
+                    AxisMarks(values: historyAxisDates) { value in
                         AxisValueLabel {
                             if let date = value.as(String.self) {
-                                Text(String(date.suffix(5))).font(.caption2).monospacedDigit()
+                                Text(historyAxisLabel(date)).font(.caption2).monospacedDigit()
                             }
                         }
                     }
@@ -843,7 +876,7 @@ struct FundCard: View {
     private var detailsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("\(inspectedDate ?? "日期未知") · 所选交易日")
+                Text("\(StockChartLabels.day(inspectedDate)) · 所选交易日")
                     .font(.caption2).foregroundStyle(.secondary)
                 HStack {
                     Text("主力净流入").font(.caption.weight(.medium))
@@ -863,7 +896,7 @@ struct FundCard: View {
             }
             Divider()
             VStack(alignment: .leading, spacing: 6) {
-                Text("最新汇总 · \(panel.asOf ?? "日期未知")")
+                Text("最新汇总 · \(StockChartLabels.day(panel.asOf))")
                     .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                 fundValueLine("当日主力", panel.metrics.latestMainInflow)
                 fundValueLine("五日主力合计", panel.metrics.mainInflow5d)
@@ -953,7 +986,7 @@ struct ChipCard: View {
          ChipCostLevel(title: "95% 套牢线", value: panel.cost95, color: AppStyle.down)]
     }
     var body: some View {
-        card(title: "筹码成本", subtitle: panel.asOf ?? "最新") {
+        card(title: "筹码成本", subtitle: StockChartLabels.day(panel.asOf)) {
             Chart(levels) { level in
                 if let value = level.value {
                     BarMark(x: .value("成本", value), y: .value("成本分位", level.title), height: .fixed(12))
@@ -982,7 +1015,7 @@ struct ChipDistributionCard: View {
     let data: ChipDistributionResponse?
     let currentPrice: Double?
     var body: some View {
-        card(title: "筹码峰", subtitle: data?.end ?? "最新分布") {
+        card(title: "筹码峰", subtitle: StockChartLabels.day(data?.end)) {
             ChipDistributionPlot(data: data, currentPrice: currentPrice)
                 .frame(height: availableHeight > 0 ? max(150, availableHeight - 155) : 240)
             if let data, !data.rows.isEmpty {
@@ -1166,7 +1199,7 @@ private struct AnnouncementsCard: View {
             Text(item.title ?? "公告").font(.subheadline).foregroundStyle(AppStyle.ink)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
-                Text(item.date ?? "")
+                Text(StockChartLabels.day(item.date))
                 if let category = item.category { Text("· \(category)") }
                 Spacer()
                 Image(systemName: "arrow.up.right").font(.caption2)

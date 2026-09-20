@@ -29,16 +29,16 @@ extension AppModel {
                 }
             case .macd:
                 let values = visibleIndicators.flatMap { [$0.dif, $0.dea, $0.histogram].compactMap { $0 } }.filter(\.isFinite)
-                // Swift Charts chooses tick rounding, but its automatic domain's inputs
-                // are these extrema plus the visible zero-axis RuleMark.
+                let domain = NativeIndicatorScale.macd(values).domain
                 material += [kind.rawValue, klinePeriod.rawValue]
                     + StockInkDomainValues.times(visibleIndicators.map(\.time))
-                    + StockInkDomainValues.bounds(min(0, values.min() ?? 0), max(0, values.max() ?? 0))
+                    + StockInkDomainValues.bounds(domain.lowerBound, domain.upperBound)
             case .kdj:
                 let values = visibleIndicators.flatMap { [$0.k, $0.d, $0.j].compactMap { $0 } }.filter(\.isFinite)
+                let domain = NativeIndicatorScale.kdj(values).domain
                 material += [kind.rawValue, klinePeriod.rawValue]
                     + StockInkDomainValues.times(visibleIndicators.map(\.time))
-                    + StockInkDomainValues.bounds(min(0, (values.min() ?? 0) - 5), max(100, (values.max() ?? 100) + 5))
+                    + StockInkDomainValues.bounds(domain.lowerBound, domain.upperBound)
             case .chipDistribution:
                 material += [kind.rawValue] + StockInkDomainValues.chips(chipDistribution)
             default:
