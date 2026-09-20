@@ -6,16 +6,19 @@ struct NativeWorkspaceCanvas: UIViewControllerRepresentable {
     let page: WorkspacePage
     var isEditing = true
     let content: (WorkspaceCard) -> AnyView
+    let minimumContentSize: (WorkspaceCard, CGFloat) -> CGSize
     let onCommit: ([WorkspaceCard]) -> Void
 
     func makeUIViewController(context: Context) -> NativeWorkspaceCanvasController {
         let controller = NativeWorkspaceCanvasController()
-        controller.update(page: page, layoutEditing: isEditing, content: content, onCommit: onCommit)
+        controller.update(page: page, layoutEditing: isEditing, content: content,
+                          minimumContentSize: minimumContentSize, onCommit: onCommit)
         return controller
     }
 
     func updateUIViewController(_ controller: NativeWorkspaceCanvasController, context: Context) {
-        controller.update(page: page, layoutEditing: isEditing, content: content, onCommit: onCommit)
+        controller.update(page: page, layoutEditing: isEditing, content: content,
+                          minimumContentSize: minimumContentSize, onCommit: onCommit)
     }
 }
 
@@ -32,6 +35,8 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     private var cards: [WorkspaceCard] = []
     private var layoutEditing = true
     private var content: ((WorkspaceCard) -> AnyView)?
+    private var minimumContentSize: ((WorkspaceCard, CGFloat) -> CGSize)?
+    private var constraints = WorkspaceGridConstraints.unrestricted
     private var onCommit: (([WorkspaceCard]) -> Void)?
     private var interaction: WorkspaceCanvasInteraction?
     private var displayLink: CADisplayLink?
@@ -82,6 +87,8 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         if abs(laidOutWidth - canvasWidth) > 0.5 {
             if interaction != nil { finishInteraction(commit: false) }
             laidOutWidth = canvasWidth
+            constraints = makeConstraints(for: cards)
+            cards = WorkspaceGridEngine.normalized(cards, constraints: constraints)
             layoutHosts()
         } else if interaction == nil {
             updateContentSize()
@@ -96,12 +103,14 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     deinit { displayLink?.invalidate() }
 
     func update(page: WorkspacePage, layoutEditing: Bool, content: @escaping (WorkspaceCard) -> AnyView,
+                minimumContentSize: @escaping (WorkspaceCard, CGFloat) -> CGSize,
                 onCommit: @escaping ([WorkspaceCard]) -> Void) {
         let changedPage = self.page?.id != page.id
         if interaction != nil, changedPage || !layoutEditing { finishInteraction(commit: false) }
         self.page = page
         self.layoutEditing = layoutEditing
         self.content = content
+        self.minimumContentSize = minimumContentSize
         self.onCommit = onCommit
         if interaction != nil {
             // Market updates continue inside observed SwiftUI cards; replacing roots while
@@ -109,7 +118,8 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             pendingUpdate = true
             return
         }
-        cards = WorkspaceGridEngine.normalized(page.cards)
+        constraints = makeConstraints(for: page.cards)
+        cards = WorkspaceGridEngine.normalized(page.cards, constraints: constraints)
         guard isViewLoaded else { return }
         if changedPage { scrollView.setContentOffset(.zero, animated: false) }
         installHosts()
@@ -163,6 +173,25 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                height: max(1, CGFloat(rect.height) * rowPitch - gap))
     }
 
+    private func makeConstraints(for cards: [WorkspaceCard]) -> WorkspaceGridConstraints {
+        guard let minimumContentSize else { return .unrestricted }
+        var result = WorkspaceGridConstraints(columnPitch: columnPitch, rowPitch: rowPitch)
+        for card in cards {
+            let minimumWidth = minimumContentSize(card, canvasWidth - margin * 2).width
+            result.minimumColumns[card.id] = min(WorkspaceGridEngine.columnCount,
+                max(1, Int(ceil((minimumWidth + gap) / columnPitch))))
+            var rows: [Int: Int] = [:]
+            for columns in 1...WorkspaceGridEngine.columnCount {
+                let width = max(1, CGFloat(columns) * columnPitch - gap)
+                // Keep the same content budget when locking/unlocking the 24pt handle.
+                let height = minimumContentSize(card, width).height + 24
+                rows[columns] = max(1, Int(ceil((height + gap) / rowPitch)))
+            }
+            result.minimumRows[card.id] = rows
+        }
+        return result
+    }
+
     private func continuousGrid(_ frame: CGRect) -> CGRect {
         CGRect(x: (frame.minX - margin) / columnPitch, y: (frame.minY - margin) / rowPitch,
                width: (frame.width + gap) / columnPitch, height: (frame.height + gap) / rowPitch)
@@ -193,7 +222,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         splitters.forEach { $0.removeFromSuperview() }
         splitters.removeAll()
         guard layoutEditing, interaction == nil else { return }
-        for edge in WorkspaceGridEngine.sharedEdges(cards) {
+        for edge in WorkspaceGridEngine.sharedEdges(cards, constraints: constraints) {
             let splitter = WorkspaceSplitterView(vertical: edge.axis == .vertical)
             if edge.axis == .vertical {
                 let x = margin + CGFloat(edge.coordinate) * columnPitch - gap / 2
@@ -209,7 +238,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             splitters.append(splitter)
         }
         // Install last so a junction wins hit testing over either one-axis edge.
-        for junction in WorkspaceGridEngine.sharedJunctions(cards) {
+        for junction in WorkspaceGridEngine.sharedJunctions(cards, constraints: constraints) {
             let handle = WorkspaceJunctionView()
             let x = margin + CGFloat(junction.vertical.coordinate) * columnPitch - gap / 2
             let y = margin + CGFloat(junction.horizontal.coordinate) * rowPitch - gap / 2
@@ -316,11 +345,12 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             interaction.ghosts[id]?.frame = proposed
             let grid = continuousGrid(proposed)
             snap = WorkspaceGridEngine.snapTarget(for: grid, in: interaction.initialCards, excluding: id,
-                                                 columnTolerance: Double(28 / columnPitch), rowTolerance: Double(28 / rowPitch))
+                                                 columnTolerance: Double(28 / columnPitch), rowTolerance: Double(28 / rowPitch),
+                                                 constraints: constraints)
             if let snap, snap.primaryID != nil {
                 // Dock against the original peer coordinates. Moving first would push
                 // an overlapping peer away before its edge can be used as the anchor.
-                preview = WorkspaceGridEngine.dock(interaction.initialCards, id: id, target: snap)
+                preview = WorkspaceGridEngine.dock(interaction.initialCards, id: id, target: snap, constraints: constraints)
             } else {
                 var proposedRect = roundedGrid(grid)
                 if let snap {
@@ -328,7 +358,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                     else if snap.edge == .right { proposedRect.column = WorkspaceGridEngine.columnCount - proposedRect.width }
                     else if snap.edge == .top { proposedRect.row = 0 }
                 }
-                preview = WorkspaceGridEngine.move(interaction.initialCards, id: id, to: proposedRect)
+                preview = WorkspaceGridEngine.move(interaction.initialCards, id: id, to: proposedRect, constraints: constraints)
             }
         case .resize(let id):
             guard let original = interaction.initialCards.first(where: { $0.id == id })?.grid else { return }
@@ -347,19 +377,19 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                 grid.size.width = CGFloat(resizeSnap.coordinate) - grid.minX
                 snap = resizeSnap
             }
-            preview = WorkspaceGridEngine.resize(interaction.initialCards, id: id, to: roundedGrid(grid))
+            preview = WorkspaceGridEngine.resize(interaction.initialCards, id: id, to: roundedGrid(grid), constraints: constraints)
             if let resolved = preview.first(where: { $0.id == id })?.grid { interaction.ghosts[id]?.frame = frame(for: resolved) }
         case .split(let edge):
             let shift = edge.axis == .vertical ? delta.x / columnPitch : delta.y / rowPitch
             preview = WorkspaceGridEngine.resizeSharedEdge(interaction.initialCards, edge: edge,
-                                                           to: edge.coordinate + Int(shift.rounded()))
+                                                           to: edge.coordinate + Int(shift.rounded()), constraints: constraints)
             for id in edge.leadingIDs + edge.trailingIDs {
                 if let rect = preview.first(where: { $0.id == id })?.grid { interaction.ghosts[id]?.frame = frame(for: rect) }
             }
         case .junction(let junction):
             preview = WorkspaceGridEngine.resizeSharedJunction(interaction.initialCards, junction: junction,
                 column: junction.vertical.coordinate + Int((delta.x / columnPitch).rounded()),
-                row: junction.horizontal.coordinate + Int((delta.y / rowPitch).rounded()))
+                row: junction.horizontal.coordinate + Int((delta.y / rowPitch).rounded()), constraints: constraints)
             for id in junction.cardIDs {
                 if let rect = preview.first(where: { $0.id == id })?.grid { interaction.ghosts[id]?.frame = frame(for: rect) }
             }
@@ -457,7 +487,10 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         }
         if pendingUpdate {
             pendingUpdate = false
+            constraints = makeConstraints(for: cards)
+            cards = WorkspaceGridEngine.normalized(cards, constraints: constraints)
             installHosts()
+            layoutHosts()
         }
     }
 

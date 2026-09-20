@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Range controls belong to the card viewport, outside the scrolling chart details.
+/// The chart shares the remaining card height; range controls stay at its bottom.
 struct ChartCardViewport<Content: View, Navigator: View>: View {
     @Environment(\.workspaceCardHeight) private var availableHeight
     private let content: (CGFloat) -> Content
@@ -16,26 +16,23 @@ struct ChartCardViewport<Content: View, Navigator: View>: View {
             if availableHeight > 0 {
                 VStack(spacing: 0) {
                     GeometryReader { geometry in
-                        ScrollView(.vertical) {
-                            content(max(0, geometry.size.height - 32))
-                                .frame(maxWidth: .infinity, alignment: .topLeading)
-                                .padding(.horizontal, 22).padding(.vertical, 16)
-                        }
-                        .scrollBounceBehavior(.basedOnSize)
+                        content(max(0, geometry.size.height - 24))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .padding(.horizontal, 18).padding(.vertical, 12)
                     }
                     Divider()
                     navigator
-                        .padding(.horizontal, 22).padding(.top, 8).padding(.bottom, 22)
+                        .padding(.horizontal, 18).padding(.top, 6).padding(.bottom, 12)
                         .fixedSize(horizontal: false, vertical: true)
                         .layoutPriority(1)
                 }
                 .frame(height: availableHeight, alignment: .top)
             } else {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
                     content(0)
                     navigator
                 }
-                .padding(22)
+                .padding(18)
             }
         }
         .background(.white, in: RoundedRectangle(cornerRadius: 22))

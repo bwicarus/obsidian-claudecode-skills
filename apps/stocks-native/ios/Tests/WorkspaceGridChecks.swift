@@ -99,7 +99,50 @@ struct WorkspaceGridChecks {
         let moved = WorkspaceGridEngine.move(original, id: "quote", to: destination)
         try require(try rect(.quote, in: moved) == destination, "The moved card did not remain at its chosen position")
         try require(try rect(.orderBook, in: moved).row >= 4, "The occupied landing area did not push its neighbor down")
+        try require(try rect(.fund, in: moved).row == 0, "Moving a card away left its old column empty above the next card")
         try require(moved.count == original.count, "Free movement lost a card")
+        try requireValid(moved)
+    }
+
+    static func shrinkingCardClosesVerticalGaps() throws {
+        let original = [card(.quote, 0, 0, 6, 8), card(.orderBook, 6, 0, 6, 5),
+                        card(.fund, 0, 8, 6, 3), card(.macd, 0, 11, 12, 4)]
+        let resized = WorkspaceGridEngine.resize(original, id: "quote",
+            to: WorkspaceGridRect(column: 0, row: 0, width: 6, height: 3))
+        try require(try rect(.fund, in: resized).row == 3, "The lower card did not fill the space freed by shrinking")
+        try require(try rect(.macd, in: resized).row == 6, "A spanning card did not settle against its tallest blocker")
+        try require(try rect(.orderBook, in: resized) == original[1].grid, "Compaction changed a neighboring column's size")
+        try requireValid(resized)
+    }
+
+    static func compactionPreservesBlockersAndHiddenHomes() throws {
+        let original = [card(.quote, 0, 0, 6, 8), card(.orderBook, 6, 0, 6, 2),
+                        card(.fund, 0, 12, 12, 2), card(.macd, 6, 16, 6, 2),
+                        card(.kdj, 6, 3, 6, 9, visible: false)]
+        let settled = WorkspaceGridEngine.move(original, id: "quote", to: try rect(.quote, in: original))
+        try require(try rect(.fund, in: settled).row == 8, "The spanning card did not stop at the taller column")
+        try require(try rect(.macd, in: settled).row == 10,
+                    "Compaction jumped a card above its spanning blocker into a disconnected hole")
+        try require(try rect(.kdj, in: settled) == original[4].grid, "Compaction moved a hidden card's saved home")
+        try require(settled.map(\.id) == original.map(\.id), "Compaction reordered the stored card list")
+        for card in settled where card.isVisible {
+            let before = try rect(card.kind, in: original), after = try rect(card.kind, in: settled)
+            try require(after.column == before.column && after.width == before.width && after.height == before.height,
+                        "Compaction changed a card's horizontal position or size")
+            try require(after.row <= before.row, "Compaction moved a card downward")
+        }
+        let repeated = WorkspaceGridEngine.move(settled, id: "quote", to: try rect(.quote, in: settled))
+        try require(repeated == settled, "Repeated compaction drifted the layout")
+        try requireValid(settled)
+    }
+
+    static func floatingDropSettlesBeforeSaving() throws {
+        let original = [card(.quote, 0, 0, 6, 4), card(.orderBook, 6, 0, 6, 4), card(.fund, 0, 4, 6, 3)]
+        let moved = WorkspaceGridEngine.move(original, id: "fund",
+            to: WorkspaceGridRect(column: 6, row: 30, width: 6, height: 3))
+        try require(try rect(.fund, in: moved) == WorkspaceGridRect(column: 6, row: 4, width: 6, height: 3),
+                    "Dropping into empty lower space left a floating card")
+        try require(WorkspaceGridEngine.normalized(moved) == moved, "Saving changed the preview's settled positions")
         try requireValid(moved)
     }
 
@@ -190,8 +233,10 @@ struct WorkspaceGridChecks {
                     "The bottom-left card did not follow both junction axes")
         try require(try rect(.macd, in: resized) == WorkspaceGridRect(column: 8, row: 6, width: 4, height: 2),
                     "The bottom-right outer boundaries changed")
-        try require(try rect(.kdj, in: resized) == original[4].grid, "A remote left card moved with the junction")
-        try require(try rect(.peers, in: resized) == original[5].grid, "A remote right card moved with the junction")
+        try require(try rect(.kdj, in: resized) == WorkspaceGridRect(column: 0, row: 8, width: 6, height: 3),
+                    "A remote left card did not settle without resizing with the junction")
+        try require(try rect(.peers, in: resized) == WorkspaceGridRect(column: 6, row: 8, width: 6, height: 3),
+                    "A remote right card did not settle without resizing with the junction")
         try requireValid(resized)
     }
 
@@ -246,11 +291,81 @@ struct WorkspaceGridChecks {
                     "Separated seams produced a junction in their empty bounding-box intersection")
     }
 
+    static func minimumContentSizesApplyToSavedCardsAndResize() throws {
+        let constraints = WorkspaceGridConstraints(minimumColumns: ["quote": 4],
+            minimumRows: ["quote": [4: 8, 6: 4]])
+        let original = [card(.quote, 0, 0, 2, 1), card(.orderBook, 6, 0, 6, 4),
+                        card(.fund, 0, 9, 2, 1, visible: false)]
+        let loaded = WorkspaceGridEngine.normalized(original, constraints: constraints)
+        try require(try rect(.quote, in: loaded) == WorkspaceGridRect(column: 0, row: 0, width: 4, height: 8),
+                    "A saved undersized card was not expanded to its readable content size")
+        try require(try rect(.fund, in: loaded) == original[2].grid, "Minimum content sizes changed a hidden card's home")
+        let resized = WorkspaceGridEngine.resize(loaded, id: "quote",
+            to: WorkspaceGridRect(column: 0, row: 0, width: 6, height: 1), constraints: constraints)
+        try require(try rect(.quote, in: resized).height == 4, "Wider content did not use its new height minimum")
+        try requireValid(resized)
+    }
+
+    static func sharedDividerRespectsWidthDependentHeight() throws {
+        let quoteRows = Dictionary(uniqueKeysWithValues: (1...12).map { ($0, $0 < 6 ? 8 : 4) })
+        let constraints = WorkspaceGridConstraints(minimumColumns: ["quote": 4, "orderBook": 3],
+            minimumRows: ["quote": quoteRows])
+        let original = [card(.quote, 0, 0, 6, 6), card(.orderBook, 6, 0, 6, 6)]
+        guard let edge = WorkspaceGridEngine.sharedEdges(original, constraints: constraints).first(where: { $0.axis == .vertical }) else {
+            throw CheckFailure(description: "Missing divider for minimum-content checks")
+        }
+        let narrowed = WorkspaceGridEngine.resizeSharedEdge(original, edge: edge, to: 4, constraints: constraints)
+        try require(try rect(.quote, in: narrowed).width == 6,
+                    "A divider made the card too narrow for its fixed shared-edge height")
+        let widened = WorkspaceGridEngine.resizeSharedEdge(original, edge: edge, to: 11, constraints: constraints)
+        try require(try rect(.orderBook, in: widened).width == 3, "A divider bypassed the other card's minimum width")
+        try requireValid(narrowed)
+        try requireValid(widened)
+    }
+
+    static func junctionCouplesWidthAndHeightMinimums() throws {
+        let quoteRows = Dictionary(uniqueKeysWithValues: (1...12).map { ($0, $0 < 6 ? 8 : 4) })
+        let otherRows = Dictionary(uniqueKeysWithValues: (1...12).map { ($0, 4) })
+        let constraints = WorkspaceGridConstraints(
+            minimumColumns: ["quote": 4, "orderBook": 4, "fund": 4, "macd": 4],
+            minimumRows: ["quote": quoteRows, "orderBook": otherRows, "fund": otherRows, "macd": otherRows],
+            columnPitch: 60, rowPitch: 36)
+        let original = [card(.quote, 0, 0, 6, 6), card(.orderBook, 6, 0, 6, 6),
+                        card(.fund, 0, 6, 6, 6), card(.macd, 6, 6, 6, 6)]
+        guard let junction = WorkspaceGridEngine.sharedJunctions(original, constraints: constraints).first else {
+            throw CheckFailure(description: "Missing junction for coupled content checks")
+        }
+        let resized = WorkspaceGridEngine.resizeSharedJunction(original, junction: junction, column: 4, row: 6,
+                                                                constraints: constraints)
+        try require(try rect(.quote, in: resized) == WorkspaceGridRect(column: 0, row: 0, width: 4, height: 8),
+                    "The junction failed to allocate the extra height required by a narrower card")
+        let fund = try rect(.fund, in: resized), macd = try rect(.macd, in: resized)
+        try require(fund.maxRow == 12 && macd.maxColumn == 12,
+                    "Coupled constraints moved the outer bounds")
+        for card in resized {
+            try require(constraints.accepts(try rect(card.kind, in: resized), id: card.id),
+                        "A junction left content below its readable minimum")
+        }
+        try requireValid(resized)
+    }
+
+    static func dockingRejectsUnreadableGaps() throws {
+        let original = [card(.quote, 3, 0, 9, 4), card(.fund, 0, 4, 6, 4)]
+        let constraints = WorkspaceGridConstraints(minimumColumns: ["fund": 4])
+        let target = WorkspaceGridSnapTarget(edge: .left, coordinate: 3, peerIDs: ["quote"], primaryID: "quote")
+        let docked = WorkspaceGridEngine.dock(original, id: "fund", target: target, constraints: constraints)
+        try require(docked == original, "Docking shrank a card into a gap below its minimum width")
+        try requireValid(docked)
+    }
+
     static func main() throws {
         let checks: [(String, () throws -> Void)] = [
             ("schema 1 migration", migrationPreservesUserChoices),
             ("repeat save stability", repeatedSavePreservesCoordinates),
             ("free move and collision", freeMoveKeepsAnchorAndPushesNeighbors),
+            ("resize fills vertical gaps", shrinkingCardClosesVerticalGaps),
+            ("compaction blockers and hidden homes", compactionPreservesBlockersAndHiddenHomes),
+            ("floating drop settles before save", floatingDropSettlesBeforeSaving),
             ("facing edge group dock", facingEdgeSnapDocksToWholeGroup),
             ("parallel edge rejection", parallelEdgesDoNotPretendToDock),
             ("vertical shared edge", verticalSharedEdgeResizesAllPeers),
@@ -259,7 +374,11 @@ struct WorkspaceGridChecks {
             ("four-card diagonal junction", fourCardJunctionMovesBothAxes),
             ("junction independent limits", junctionLimitsBothAxesIndependently),
             ("T-shaped junction", tJunctionResizesOnlyParticipatingDimensions),
-            ("disconnected seam rejection", disconnectedSeamsDoNotCreateJunctions)
+            ("disconnected seam rejection", disconnectedSeamsDoNotCreateJunctions),
+            ("saved and resized content minimums", minimumContentSizesApplyToSavedCardsAndResize),
+            ("divider content minimums", sharedDividerRespectsWidthDependentHeight),
+            ("junction coupled content minimums", junctionCouplesWidthAndHeightMinimums),
+            ("readable dock minimum", dockingRejectsUnreadableGaps)
         ]
         for (name, check) in checks {
             try check()

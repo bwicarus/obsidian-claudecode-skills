@@ -12,6 +12,22 @@ struct WorkspaceGridRect: Codable, Equatable, Hashable {
     var maxRow: Int { row + height }
 }
 
+/// Precomputed from the canvas's pixel geometry, never from layout measurements.
+struct WorkspaceGridConstraints {
+    var minimumColumns: [String: Int] = [:]
+    var minimumRows: [String: [Int: Int]] = [:]
+    var columnPitch: CGFloat = 1
+    var rowPitch: CGFloat = 1
+    static let unrestricted = WorkspaceGridConstraints()
+
+    func columns(for id: String) -> Int { min(12, max(1, minimumColumns[id] ?? 1)) }
+    func rows(for id: String, width: Int) -> Int { max(1, minimumRows[id]?[width] ?? 1) }
+
+    func accepts(_ rect: WorkspaceGridRect, id: String) -> Bool {
+        rect.width >= columns(for: id) && rect.height >= rows(for: id, width: rect.width)
+    }
+}
+
 enum WorkspaceGridEdge: String, Codable { case top, bottom, left, right }
 enum WorkspaceGridAxis: String, Codable { case horizontal, vertical }
 
@@ -42,7 +58,7 @@ struct WorkspaceGridJunction: Equatable, Identifiable {
 }
 
 /// Integer-grid geometry shared by the editor and the live native workspace.
-/// As in the original canvas, a moving anchor stays put and collisions flow downward.
+/// Moving anchors resolve collisions first; the resulting cards then settle upward.
 enum WorkspaceGridEngine {
     static let columnCount = 12
     static let rowHeight: CGFloat = 30
@@ -55,12 +71,21 @@ enum WorkspaceGridEngine {
                                  width: width, height: min(max(rect.height, 1), 1_000_000))
     }
 
+    private static func clamped(_ rect: WorkspaceGridRect, id: String,
+                                constraints: WorkspaceGridConstraints) -> WorkspaceGridRect {
+        var result = clamped(rect)
+        result.width = max(result.width, constraints.columns(for: id))
+        result.column = min(result.column, columnCount - result.width)
+        result.height = max(result.height, constraints.rows(for: id, width: result.width))
+        return result
+    }
+
     static func overlaps(_ lhs: WorkspaceGridRect, _ rhs: WorkspaceGridRect) -> Bool {
         lhs.column < rhs.maxColumn && rhs.column < lhs.maxColumn
             && lhs.row < rhs.maxRow && rhs.row < lhs.maxRow
     }
 
-    static func normalized(_ cards: [WorkspaceCard]) -> [WorkspaceCard] {
+    static func normalized(_ cards: [WorkspaceCard], constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceCard] {
         var result = cards
         // Migrate the former half/full rows in their original order, including hidden cards.
         if !result.isEmpty && result.allSatisfy({ $0.grid == nil }) {
@@ -85,6 +110,11 @@ enum WorkspaceGridEngine {
                 result[index].grid = firstAvailable(width: width, height: result[index].kind.defaultGridHeight, in: result)
             }
         }
+        for index in result.indices where result[index].isVisible {
+            if let rect = result[index].grid {
+                result[index].grid = clamped(rect, id: result[index].id, constraints: constraints)
+            }
+        }
         return resolveCollisions(result, anchors: [])
     }
 
@@ -103,27 +133,31 @@ enum WorkspaceGridEngine {
                                  width: size.width, height: size.height)
     }
 
-    static func move(_ cards: [WorkspaceCard], id: String, to rect: WorkspaceGridRect) -> [WorkspaceCard] {
-        var result = normalized(cards)
+    static func move(_ cards: [WorkspaceCard], id: String, to rect: WorkspaceGridRect,
+                     constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceCard] {
+        var result = normalized(cards, constraints: constraints)
         guard let index = result.firstIndex(where: { $0.id == id }) else { return result }
-        result[index].grid = clamped(rect)
-        return resolveCollisions(result, anchors: [id])
+        result[index].grid = clamped(rect, id: id, constraints: constraints)
+        return compactVertically(resolveCollisions(result, anchors: [id]))
     }
 
-    static func resize(_ cards: [WorkspaceCard], id: String, to rect: WorkspaceGridRect) -> [WorkspaceCard] {
-        move(cards, id: id, to: rect)
+    static func resize(_ cards: [WorkspaceCard], id: String, to rect: WorkspaceGridRect,
+                       constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceCard] {
+        move(cards, id: id, to: rect, constraints: constraints)
     }
 
     static func snapTarget(for rect: WorkspaceGridRect, in cards: [WorkspaceCard], excluding id: String,
-                           columnTolerance: Double = 0.5, rowTolerance: Double = 0.75) -> WorkspaceGridSnapTarget? {
+                           columnTolerance: Double = 0.5, rowTolerance: Double = 0.75,
+                           constraints: WorkspaceGridConstraints = .unrestricted) -> WorkspaceGridSnapTarget? {
         snapTarget(for: CGRect(x: CGFloat(rect.column), y: CGFloat(rect.row), width: CGFloat(rect.width), height: CGFloat(rect.height)),
-                   in: cards, excluding: id, columnTolerance: columnTolerance, rowTolerance: rowTolerance)
+                   in: cards, excluding: id, columnTolerance: columnTolerance, rowTolerance: rowTolerance, constraints: constraints)
     }
 
     static func snapTarget(for rect: CGRect, in cards: [WorkspaceCard], excluding id: String,
-                           columnTolerance: Double = 0.5, rowTolerance: Double = 0.75) -> WorkspaceGridSnapTarget? {
+                           columnTolerance: Double = 0.5, rowTolerance: Double = 0.75,
+                           constraints: WorkspaceGridConstraints = .unrestricted) -> WorkspaceGridSnapTarget? {
         guard rect.minX.isFinite, rect.minY.isFinite, rect.width.isFinite, rect.height.isFinite else { return nil }
-        let peers = normalized(cards).filter { $0.id != id && $0.isVisible }
+        let peers = normalized(cards, constraints: constraints).filter { $0.id != id && $0.isVisible }
         var best: WorkspaceGridSnapTarget?
         var bestScore = Double.infinity
         func consider(_ edge: WorkspaceGridEdge, coordinate: Int, distance: Double,
@@ -159,8 +193,9 @@ enum WorkspaceGridEngine {
         return best
     }
 
-    static func dock(_ cards: [WorkspaceCard], id: String, target: WorkspaceGridSnapTarget) -> [WorkspaceCard] {
-        var result = normalized(cards)
+    static func dock(_ cards: [WorkspaceCard], id: String, target: WorkspaceGridSnapTarget,
+                     constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceCard] {
+        var result = normalized(cards, constraints: constraints)
         guard let movingIndex = result.firstIndex(where: { $0.id == id }), var moving = result[movingIndex].grid else { return result }
         guard let primaryID = target.primaryID else {
             switch target.edge {
@@ -169,7 +204,7 @@ enum WorkspaceGridEngine {
             case .top: moving.row = 0
             case .bottom: return result
             }
-            return move(result, id: id, to: moving)
+            return move(result, id: id, to: moving, constraints: constraints)
         }
         guard let primary = result.first(where: { $0.id == primaryID && $0.isVisible })?.grid else { return result }
         let group = result.filter { $0.id != id && $0.isVisible && target.peerIDs.contains($0.id) }
@@ -209,12 +244,14 @@ enum WorkspaceGridEngine {
             }
             moving.row = lower; moving.height = max(1, upper - lower)
         }
+        // Reject an undersized docking gap instead of shrinking content to fit it.
+        guard constraints.accepts(moving, id: id) else { return result }
         result[movingIndex].grid = clamped(moving)
-        return resolveCollisions(result, anchors: groupIDs.union([id]))
+        return compactVertically(resolveCollisions(result, anchors: groupIDs.union([id])))
     }
 
-    static func sharedEdges(_ cards: [WorkspaceCard]) -> [WorkspaceGridSharedEdge] {
-        let visible = normalized(cards).filter(\.isVisible)
+    static func sharedEdges(_ cards: [WorkspaceCard], constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceGridSharedEdge] {
+        let visible = normalized(cards, constraints: constraints).filter(\.isVisible)
         var result: [WorkspaceGridSharedEdge] = []
         for axis in [WorkspaceGridAxis.horizontal, .vertical] {
             let coordinates = Set(visible.flatMap { card -> [Int] in
@@ -241,14 +278,43 @@ enum WorkspaceGridEngine {
         return result
     }
 
-    static func resizeSharedEdge(_ cards: [WorkspaceCard], edge: WorkspaceGridSharedEdge, to coordinate: Int) -> [WorkspaceCard] {
-        var result = normalized(cards)
+    static func resizeSharedEdge(_ cards: [WorkspaceCard], edge: WorkspaceGridSharedEdge, to coordinate: Int,
+                                 constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceCard] {
+        var result = normalized(cards, constraints: constraints)
         let before = result.indices.filter { edge.leadingIDs.contains(result[$0].id) && result[$0].isVisible }
         let after = result.indices.filter { edge.trailingIDs.contains(result[$0].id) && result[$0].isVisible }
         guard !before.isEmpty, !after.isEmpty else { return result }
         let minBefore = before.compactMap { result[$0].grid }.map { edge.axis == .horizontal ? $0.height : $0.width }.min() ?? 1
         let minAfter = after.compactMap { result[$0].grid }.map { edge.axis == .horizontal ? $0.height : $0.width }.min() ?? 1
-        let delta = min(max(coordinate - edge.coordinate, -(minBefore - 1)), minAfter - 1)
+        let lower = edge.coordinate - (minBefore - 1), upper = edge.coordinate + minAfter - 1
+        let requested = min(max(coordinate, lower), upper)
+        let delta: Int
+        if edge.axis == .horizontal {
+            let minimum = before.compactMap { index -> Int? in
+                guard let rect = result[index].grid else { return nil }
+                return edge.coordinate + constraints.rows(for: result[index].id, width: rect.width) - rect.height
+            }.max() ?? lower
+            let maximum = after.compactMap { index -> Int? in
+                guard let rect = result[index].grid else { return nil }
+                return edge.coordinate + rect.height - constraints.rows(for: result[index].id, width: rect.width)
+            }.min() ?? upper
+            guard minimum <= maximum else { return result }
+            delta = min(max(requested, minimum), maximum) - edge.coordinate
+        } else {
+            let legal = (lower...upper).filter { candidate in
+                let shift = candidate - edge.coordinate
+                return (before + after).allSatisfy { index in
+                    guard var rect = result[index].grid else { return false }
+                    rect.width += before.contains(index) ? shift : -shift
+                    return constraints.accepts(rect, id: result[index].id)
+                }
+            }
+            guard let selected = legal.min(by: {
+                let lhs = abs($0 - requested), rhs = abs($1 - requested)
+                return lhs == rhs ? abs($0 - edge.coordinate) < abs($1 - edge.coordinate) : lhs < rhs
+            }) else { return result }
+            delta = selected - edge.coordinate
+        }
         for index in before {
             guard var rect = result[index].grid else { continue }
             if edge.axis == .horizontal { rect.height += delta } else { rect.width += delta }
@@ -260,12 +326,12 @@ enum WorkspaceGridEngine {
             else { rect.column += delta; rect.width -= delta }
             result[index].grid = rect
         }
-        return resolveCollisions(result, anchors: Set(edge.leadingIDs + edge.trailingIDs))
+        return compactVertically(resolveCollisions(result, anchors: Set(edge.leadingIDs + edge.trailingIDs)))
     }
 
-    static func sharedJunctions(_ cards: [WorkspaceCard]) -> [WorkspaceGridJunction] {
-        let positioned = normalized(cards)
-        let edges = sharedEdges(positioned)
+    static func sharedJunctions(_ cards: [WorkspaceCard], constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceGridJunction] {
+        let positioned = normalized(cards, constraints: constraints)
+        let edges = sharedEdges(positioned, constraints: constraints)
         let verticals = edges.filter { $0.axis == .vertical }
         let horizontals = edges.filter { $0.axis == .horizontal }
         var junctions: [WorkspaceGridJunction] = []
@@ -283,9 +349,10 @@ enum WorkspaceGridEngine {
     }
 
     static func resizeSharedJunction(_ cards: [WorkspaceCard], junction: WorkspaceGridJunction,
-                                     column: Int, row: Int) -> [WorkspaceCard] {
-        var result = normalized(cards)
-        guard let current = sharedJunctions(result).first(where: { $0.id == junction.id }) else { return result }
+                                     column: Int, row: Int,
+                                     constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceCard] {
+        var result = normalized(cards, constraints: constraints)
+        guard let current = sharedJunctions(result, constraints: constraints).first(where: { $0.id == junction.id }) else { return result }
         let vertical = current.vertical, horizontal = current.horizontal
         let left = Set(vertical.leadingIDs), right = Set(vertical.trailingIDs)
         let above = Set(horizontal.leadingIDs), below = Set(horizontal.trailingIDs)
@@ -299,8 +366,35 @@ enum WorkspaceGridEngine {
         let maximumColumn = vertical.coordinate + (minimumSpan(right, axis: .vertical) - 1)
         let minimumRow = horizontal.coordinate - (minimumSpan(above, axis: .horizontal) - 1)
         let maximumRow = horizontal.coordinate + (minimumSpan(below, axis: .horizontal) - 1)
-        let dx = min(max(column, minimumColumn), maximumColumn) - vertical.coordinate
-        let dy = min(max(row, minimumRow), maximumRow) - horizontal.coordinate
+        let targetColumn = min(max(column, minimumColumn), maximumColumn)
+        let targetRow = min(max(row, minimumRow), maximumRow)
+        var best: (column: Int, row: Int, distance: Double, movement: Int)?
+        for candidateColumn in minimumColumn...maximumColumn {
+            let shift = candidateColumn - vertical.coordinate
+            var lower = minimumRow, upper = maximumRow
+            var valid = true
+            for card in result where card.isVisible && current.cardIDs.contains(card.id) {
+                guard var rect = card.grid else { valid = false; break }
+                if left.contains(card.id) { rect.width += shift }
+                if right.contains(card.id) { rect.width -= shift }
+                guard rect.width >= constraints.columns(for: card.id) else { valid = false; break }
+                let height = constraints.rows(for: card.id, width: rect.width)
+                if above.contains(card.id) { lower = max(lower, horizontal.coordinate + height - rect.height) }
+                else if below.contains(card.id) { upper = min(upper, horizontal.coordinate + rect.height - height) }
+                else if rect.height < height { valid = false; break }
+            }
+            guard valid, lower <= upper else { continue }
+            let candidateRow = min(max(targetRow, lower), upper)
+            let xDistance = Double(candidateColumn - targetColumn) * Double(constraints.columnPitch)
+            let yDistance = Double(candidateRow - targetRow) * Double(constraints.rowPitch)
+            let distance = xDistance * xDistance + yDistance * yDistance
+            let movement = abs(shift) + abs(candidateRow - horizontal.coordinate)
+            if best == nil || distance < best!.distance || (distance == best!.distance && movement < best!.movement) {
+                best = (candidateColumn, candidateRow, distance, movement)
+            }
+        }
+        guard let best else { return result }
+        let dx = best.column - vertical.coordinate, dy = best.row - horizontal.coordinate
         for index in result.indices where result[index].isVisible {
             guard var rect = result[index].grid else { continue }
             let id = result[index].id
@@ -310,7 +404,7 @@ enum WorkspaceGridEngine {
             if below.contains(id) { rect.row += dy; rect.height -= dy }
             result[index].grid = rect
         }
-        return resolveCollisions(result, anchors: current.cardIDs)
+        return compactVertically(resolveCollisions(result, anchors: current.cardIDs))
     }
 
     private struct SharedSegment {
@@ -370,6 +464,27 @@ enum WorkspaceGridEngine {
         case .left: rect.column
         case .right: rect.maxColumn
         }
+    }
+
+    private static func compactVertically(_ cards: [WorkspaceCard]) -> [WorkspaceCard] {
+        var result = cards
+        let visible = result.indices.filter { result[$0].isVisible && result[$0].grid != nil }.sorted {
+            let lhs = result[$0].grid!, rhs = result[$1].grid!
+            if lhs.row != rhs.row { return lhs.row < rhs.row }
+            if lhs.column != rhs.column { return lhs.column < rhs.column }
+            return $0 < $1
+        }
+        var columnBottoms = Array(repeating: 0, count: columnCount)
+        for index in visible {
+            guard var rect = result[index].grid else { continue }
+            // Preserve horizontal placement and the vertical order in each column.
+            // A spanning card stops at the tallest blocker instead of jumping past it.
+            let columns = rect.column..<rect.maxColumn
+            rect.row = columns.map { columnBottoms[$0] }.max() ?? 0
+            result[index].grid = rect
+            for column in columns { columnBottoms[column] = rect.maxRow }
+        }
+        return result
     }
 
     private static func resolveCollisions(_ cards: [WorkspaceCard], anchors: Set<String>) -> [WorkspaceCard] {

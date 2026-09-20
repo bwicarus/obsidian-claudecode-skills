@@ -21,7 +21,7 @@ struct StockWorkspaceView: View {
         VStack(spacing: 0) {
             if let page, !page.visibleCards.isEmpty {
                 NativeWorkspaceCanvas(page: page, isEditing: !layoutLocked,
-                                      content: canvasCard, onCommit: saveCards)
+                                      content: canvasCard, minimumContentSize: minimumContentSize, onCommit: saveCards)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ContentUnavailableView {
@@ -147,22 +147,83 @@ struct StockWorkspaceView: View {
 
     private func canvasCard(_ card: WorkspaceCard) -> AnyView {
         AnyView(GeometryReader { geometry in
-            Group {
-                switch card.kind {
-                case .chart, .kline, .intraday, .klineChips:
-                    // Chart cards own their scrollable body and pinned range controls.
-                    workspaceCard(card.kind)
-                default:
-                    ScrollView(.vertical) {
-                        workspaceCard(card.kind)
-                            .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .topLeading)
-                    }
-                    .scrollBounceBehavior(.basedOnSize)
-                }
-            }
-            .environment(\.workspaceCardHeight, geometry.size.height)
-            .environment(\.workspaceCardWidth, geometry.size.width)
+            workspaceCard(card.kind)
+                .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+                .environment(\.workspaceCardHeight, geometry.size.height)
+                .environment(\.workspaceCardWidth, geometry.size.width)
         })
+    }
+
+    private func minimumContentSize(_ card: WorkspaceCard, width: CGFloat) -> CGSize {
+        let minimumWidth: CGFloat
+        let minimumHeight: CGFloat
+        switch card.kind {
+        case .chart:
+            minimumWidth = 320
+            minimumHeight = model.chartPeriod == .intraday ? 440 : (width < 420 ? 580 : 560)
+        case .kline:
+            minimumWidth = 320; minimumHeight = width < 420 ? 580 : 560
+        case .intraday:
+            minimumWidth = 320; minimumHeight = 440
+        case .klineChips:
+            minimumWidth = 500; minimumHeight = 660
+        case .macd, .kdj:
+            minimumWidth = 300; minimumHeight = 240
+        case .fund:
+            minimumWidth = 300
+            minimumHeight = width < 332 ? 730 : (width < 660 ? 620 : 450)
+        case .quote:
+            minimumWidth = 260
+            let columns = max(1, Int((width - 32 + 12) / 94))
+            let rows = Int(ceil(9.0 / Double(columns)))
+            minimumHeight = 64 + CGFloat(rows * 42 + max(0, rows - 1) * 12)
+        case .orderBook:
+            minimumWidth = 220; minimumHeight = width < 420 ? 420 : 270
+        case .valuation:
+            minimumWidth = 260; minimumHeight = width < 500 ? 260 : 180
+        case .chipCosts:
+            minimumWidth = 300; minimumHeight = 280
+        case .chipDistribution:
+            minimumWidth = 320; minimumHeight = 340
+        case .peers:
+            minimumWidth = 300
+            let peers = Array((detail.peers ?? []).prefix(7))
+            minimumHeight = max(180, 64 + peers.reduce(CGFloat.zero) { total, peer in
+                total + textHeight(peer.name, width: width - 177, glyph: 17, line: 21) + 17
+            } + CGFloat(max(0, peers.count - 1)) * 21)
+        case .announcements:
+            minimumWidth = 320
+            let items = Array((detail.announcements ?? []).prefix(7))
+            minimumHeight = items.isEmpty ? 330 : 110 + items.reduce(CGFloat.zero) { total, item in
+                total + textHeight(item.title ?? "公告", width: width - 32, glyph: 17, line: 21)
+                    + textHeight([item.date, item.category].compactMap { $0 }.joined(separator: " · "),
+                                 width: width - 60, glyph: 12, line: 16) + 4
+            } + CGFloat(max(0, items.count - 1)) * 21
+        case .concepts:
+            minimumWidth = 260
+            let columns = max(1, Int((width - 32 + 8) / 128))
+            let cellWidth = (width - 32 - CGFloat(columns - 1) * 8) / CGFloat(columns)
+            let items = detail.concepts ?? []
+            var contentHeight: CGFloat = 64
+            for start in stride(from: 0, to: items.count, by: columns) {
+                contentHeight += items[start..<min(start + columns, items.count)].map {
+                    textHeight($0, width: cellWidth - 20, glyph: 14, line: 17) + 12
+                }.max() ?? 0
+                if start + columns < items.count { contentHeight += 8 }
+            }
+            minimumHeight = max(150, contentHeight)
+        case .signals:
+            minimumWidth = 280
+            minimumHeight = WorkspaceSignalsCard.minimumHeight(signals: detail.signals, width: width)
+        }
+        return CGSize(width: minimumWidth, height: minimumHeight)
+    }
+
+    private func textHeight(_ text: String, width: CGFloat, glyph: CGFloat, line: CGFloat) -> CGFloat {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).reduce(0) {
+            $0 + max(1, Int(ceil(CGFloat($1.count) * glyph / max(40, width))))
+        }
+        return CGFloat(lines) * line
     }
 
     private func saveCards(_ cards: [WorkspaceCard]) {
@@ -207,11 +268,11 @@ private struct WorkspaceCardSurface<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             Text(title).font(.headline).foregroundStyle(AppStyle.ink)
             content
         }
-        .padding(20).frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
         .background(.white, in: RoundedRectangle(cornerRadius: 20))
     }
 }
@@ -222,7 +283,7 @@ private struct WorkspaceQuoteCard: View {
     var body: some View {
         WorkspaceCardSurface(title: "行情指标") {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 82), spacing: 12, alignment: .leading)],
-                      alignment: .leading, spacing: 16) {
+                      alignment: .leading, spacing: 12) {
                 metric("今开", AppStyle.price(stock.open), color: priceColor(stock.open))
                 metric("最高", AppStyle.price(stock.high), color: priceColor(stock.high))
                 metric("最低", AppStyle.price(stock.low), color: priceColor(stock.low))
@@ -251,10 +312,36 @@ private struct WorkspaceQuoteCard: View {
 }
 
 private struct WorkspaceSignalsCard: View {
+    @Environment(\.workspaceCardWidth) private var availableWidth
     let signals: StockSignals?
+
+    private static func columns(for width: CGFloat) -> Int { min(3, max(1, Int((width - 32 + 14) / 274))) }
+
+    static func minimumHeight(signals: StockSignals?, width: CGFloat) -> CGFloat {
+        let count = columns(for: width)
+        let groupWidth = max(100, (width - 32 - CGFloat(count - 1) * 14) / CGFloat(count))
+        func groupHeight(_ rows: [StockSignal], kind: Int) -> CGFloat {
+            guard !rows.isEmpty else { return 60 }
+            return 30 + rows.prefix(kind == 2 ? 1 : 3).reduce(CGFloat.zero) { total, item in
+                let reasonLines = Int(ceil(CGFloat(item.reason?.count ?? 0) * 14 / groupWidth))
+                let values = kind == 0 ? 2 : (kind == 1 ? 4 : 2)
+                return total + 36 + CGFloat(values) * 24 + CGFloat(reasonLines) * 20
+            }
+        }
+        let heights = [groupHeight(signals?.topList ?? [], kind: 0),
+                       groupHeight(signals?.northbound ?? [], kind: 1),
+                       groupHeight(signals?.limits ?? [], kind: 2)]
+        var total: CGFloat = 64
+        for start in stride(from: 0, to: heights.count, by: count) {
+            total += (heights[start..<min(start + count, heights.count)].max() ?? 0) + 14
+        }
+        return total
+    }
 
     var body: some View {
         WorkspaceCardSurface(title: "市场信号") {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top),
+                                    count: Self.columns(for: availableWidth)), alignment: .leading, spacing: 14) {
             signalGroup("龙虎榜", rows: signals?.topList ?? []) { item in
                 if let reason = item.reason, !reason.isEmpty {
                     Text(reason).font(.caption).foregroundStyle(AppStyle.ink)
@@ -262,17 +349,16 @@ private struct WorkspaceSignalsCard: View {
                 value("净买入", item.netAmount, compact: true)
                 if item.netRate != nil { value("净买入占比", item.netRate, suffix: "%") }
             }
-            Divider()
             signalGroup("北向交易", rows: signals?.northbound ?? []) { item in
                 if let rank = item.rank { textValue("成交排名", "\(rank)") }
                 value("成交额", item.amount, compact: true)
                 if item.buy != nil { value("买入额", item.buy, compact: true) }
                 if item.sell != nil { value("卖出额", item.sell, compact: true) }
             }
-            Divider()
             signalGroup("涨跌停价格", rows: Array((signals?.limits ?? []).prefix(1))) { item in
                 value("涨停价", item.upLimit)
                 value("跌停价", item.downLimit)
+            }
             }
         }
     }

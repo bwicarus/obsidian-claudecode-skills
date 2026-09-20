@@ -145,7 +145,6 @@ private struct CandlePriceMarks: ChartContent {
 }
 
 struct CandleChart: View {
-    @Environment(\.workspaceCardHeight) private var availableHeight
     let candles: [Candle]
     let stockCode: String
     let period: ChartPeriod
@@ -233,8 +232,8 @@ struct CandleChart: View {
     }
 
     var body: some View {
-        ChartCardViewport { _ in
-            chartContent
+        ChartCardViewport { height in
+            chartContent(contentHeight: height)
         } navigator: {
             if !visible.isEmpty { rangeNavigator }
         }
@@ -262,8 +261,8 @@ struct CandleChart: View {
         }
     }
 
-    private var chartContent: some View {
-        VStack(alignment: .leading, spacing: 18) {
+    private func chartContent(contentHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("价格走势").font(.headline)
                 Spacer(minLength: 12)
@@ -276,14 +275,13 @@ struct CandleChart: View {
             } else {
                 if let item = inspected { candleSummary(item.candle) }
                 movingAverageLegend
-                HStack(alignment: .top, spacing: 12) {
-                    priceAndVolumeCharts.frame(maxWidth: .infinity)
-                    if showsChips {
-                        ChipDistributionPlot(data: chipDistribution, currentPrice: currentPrice ?? chipDistribution?.currentPrice ?? candles.last?.close,
-                                             priceDomain: priceDomain, compact: true)
-                            .frame(width: 130, height: pricePlotFrame.height > 0 ? pricePlotFrame.height : 268)
-                            .padding(.top, pricePlotFrame.minY)
+                if contentHeight > 0 {
+                    GeometryReader { geometry in
+                        priceAndChips(height: geometry.size.height)
                     }
+                    .frame(minHeight: 168)
+                } else {
+                    priceAndChips(height: 403)
                 }
                 if showsChips, let chipDistribution, !chipDistribution.rows.isEmpty {
                     ChipDistributionSummary(data: chipDistribution, currentPrice: currentPrice ?? chipDistribution.currentPrice ?? candles.last?.close)
@@ -294,6 +292,19 @@ struct CandleChart: View {
                 }
                 Text(annotationMode ? "使用手指或 Apple Pencil 绘制；新标注随行情缩放和平移。" : "拖动图表查看单根数据；拖动下方范围条调整视野。")
                     .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .frame(height: contentHeight > 0 ? contentHeight : nil, alignment: .top)
+    }
+
+    private func priceAndChips(height: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            priceAndVolumeCharts(height: height).frame(maxWidth: .infinity)
+            if showsChips {
+                ChipDistributionPlot(data: chipDistribution, currentPrice: currentPrice ?? chipDistribution?.currentPrice ?? candles.last?.close,
+                                     priceDomain: priceDomain, compact: true)
+                    .frame(width: 110, height: pricePlotFrame.height > 0 ? pricePlotFrame.height : max(100, height * 0.7))
+                    .padding(.top, pricePlotFrame.minY)
             }
         }
     }
@@ -311,8 +322,10 @@ struct CandleChart: View {
         Text("\(title) \(AppStyle.price(value))").foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.7)
     }
 
-    private var priceAndVolumeCharts: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    private func priceAndVolumeCharts(height: CGFloat) -> some View {
+        let volumeHeight = min(100, max(40, (height - 28) * 0.22))
+        let priceHeight = max(100, height - volumeHeight - 28)
+        return VStack(alignment: .leading, spacing: 6) {
                 ZStack {
                     Chart {
                         ForEach(visible) { item in
@@ -379,7 +392,7 @@ struct CandleChart: View {
                         .allowsHitTesting(annotationMode)
                     }
                 }
-                .frame(height: availableHeight > 0 ? max(150, availableHeight - (showsChips ? 445 : 385)) : 290)
+                .frame(height: priceHeight)
                 .accessibilityLabel("原生蜡烛图，\(visible.count) 根 K 线。拖动查看开盘、最高、最低、收盘。")
                 HStack {
                     Text("成交量").font(.caption).foregroundStyle(.secondary)
@@ -409,7 +422,7 @@ struct CandleChart: View {
                         }
                     }
                 }
-                .frame(height: 85)
+                .frame(height: volumeHeight)
         }
     }
 
@@ -525,11 +538,12 @@ struct CandleChart: View {
     }
 
     private func candleSummary(_ candle: Candle) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(shortDate(candle.time)).font(.caption).foregroundStyle(.secondary)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 16) { candleValues(candle) }
-                VStack(alignment: .leading, spacing: 6) { candleValues(candle) }
+                LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)],
+                          alignment: .leading, spacing: 4) { candleValues(candle) }
             }
             .font(.caption).monospacedDigit().foregroundStyle(AppStyle.ink)
         }

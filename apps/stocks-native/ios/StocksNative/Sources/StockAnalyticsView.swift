@@ -82,17 +82,19 @@ struct StockMarketWorkspace: View {
 }
 
 struct OrderBookPanel: View {
+    @Environment(\.workspaceCardWidth) private var availableWidth
     let stock: Stock
     let compact: Bool
+    private var showsColumns: Bool { availableWidth > 0 ? availableWidth >= 420 : compact }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("五档盘口").font(.headline)
             if (stock.asks ?? []).isEmpty && (stock.bids ?? []).isEmpty {
                 Text("暂无五档数据").font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 90)
-            } else if compact {
-                HStack(alignment: .top, spacing: 22) {
+            } else if showsColumns {
+                HStack(alignment: .top, spacing: 16) {
                     bookSection("买盘", rows: stock.bids ?? [], tint: AppStyle.up)
                     bookSection("卖盘", rows: stock.asks ?? [], tint: AppStyle.down)
                 }
@@ -115,7 +117,7 @@ struct OrderBookPanel: View {
     }
 
     private func bookSection(_ title: String, rows: [OrderLevel], tint: Color, reversed: Bool = false) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             HStack {
                 Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer()
@@ -130,7 +132,7 @@ struct OrderBookPanel: View {
                     Text(AppStyle.compact(row.volume)).foregroundStyle(.secondary)
                         .frame(minWidth: 42, alignment: .trailing)
                 }
-                .font(.caption.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.8)
+                .font(.caption.monospacedDigit()).lineLimit(1)
             }
         }
         .frame(maxWidth: .infinity)
@@ -145,10 +147,14 @@ struct OrderBookPanel: View {
 }
 
 struct StockValuationCard: View {
+    @Environment(\.workspaceCardWidth) private var availableWidth
     let detail: StockResponse
 
     var body: some View {
         card(title: "估值与表现", subtitle: detail.asOf ?? "最新资料") {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading),
+                                    count: availableWidth >= 500 ? 2 : 1),
+                      alignment: .leading, spacing: 10) {
             valueLine("市盈率", detail.stock.peDynamic, color: AppStyle.ink)
             valueLine("市净率", detail.stock.pb, color: AppStyle.ink)
             valueLine("总市值", detail.stock.marketCap, compact: true, color: AppStyle.ink)
@@ -157,6 +163,7 @@ struct StockValuationCard: View {
             valueLine("年内涨跌", detail.stock.changeYtd, suffix: "%")
             if let ratio = detail.technical?.metrics.profitRatio {
                 valueLine("技术获利盘", abs(ratio) <= 1 ? ratio * 100 : ratio, suffix: "%", color: AppStyle.ink)
+            }
             }
         }
     }
@@ -176,7 +183,7 @@ struct MarketChartSection: View {
     private var candles: [Candle] { model.displayedKlineCandles }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 if mode == .adaptive {
                 Picker("图表类型", selection: Binding(get: { model.chartPeriod == .intraday }, set: {
@@ -397,7 +404,7 @@ struct IntradayChart: View {
     }
 
     private func chartContent(contentHeight: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("当日分时").font(.headline)
@@ -493,7 +500,7 @@ struct IntradayChart: View {
                         .allowsHitTesting(false)
                 }
             }
-            .frame(height: contentHeight > 0 ? min(220, max(110, contentHeight - 150)) : 220)
+            .frame(height: contentHeight > 0 ? max(110, contentHeight - 132) : 200)
             HStack(spacing: 18) {
                 Label("价格", systemImage: "minus").foregroundStyle(AppStyle.accent)
                 Label("均价", systemImage: "minus").foregroundStyle(.orange)
@@ -520,7 +527,7 @@ struct IntradayChart: View {
                     }
                 }
             }
-            .frame(height: 56)
+            .frame(height: 48)
         }
     }
 
@@ -628,7 +635,7 @@ struct TechnicalCard: View {
                 }
                 .chartXScale(domain: xDomain, range: .plotDimension(padding: 0))
                 .chartXAxis(.hidden).chartYAxis { indicatorAxis }.chartLegend(.hidden)
-                .frame(height: availableHeight > 0 ? max(90, availableHeight - 125) : 130)
+                .frame(height: availableHeight > 0 ? max(100, availableHeight - 118) : 130)
                 indicatorDate(inspected?.time)
             }
         }
@@ -686,7 +693,7 @@ struct KDJCard: View {
                 }
                 .chartXScale(domain: indicatorDomain(points), range: .plotDimension(padding: 0))
                 .chartYScale(domain: yDomain).chartXAxis(.hidden).chartYAxis { indicatorAxis }.chartLegend(.hidden)
-                .frame(height: availableHeight > 0 ? max(90, availableHeight - 125) : 130)
+                .frame(height: availableHeight > 0 ? max(100, availableHeight - 118) : 130)
                 indicatorDate(inspected?.time)
             }
         }
@@ -715,7 +722,7 @@ private var indicatorEmpty: some View {
 
 private func indicatorValue(_ title: String, _ value: Double?, color: Color) -> some View {
     Text("\(title) \(value.map { String(format: "%.3f", $0) } ?? "—")")
-        .font(.caption).monospacedDigit().foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.7)
+        .font(.caption).monospacedDigit().foregroundStyle(color).fixedSize(horizontal: false, vertical: true)
 }
 
 private func indicatorDate(_ time: String?) -> some View {
@@ -789,28 +796,28 @@ struct FundCard: View {
     private var hasHistoryFlows: Bool { history.contains { flows($0).contains { $0.net != nil } } }
 
     private var usesColumns: Bool {
-        availableWidth >= 560 && (availableHeight <= 0 || availableWidth / availableHeight >= 1.35)
+        availableWidth >= 660
     }
-    private var contentWidth: CGFloat { max(0, availableWidth - 40) }
+    private var contentWidth: CGFloat { max(0, availableWidth - 32) }
     private var detailsWidth: CGFloat {
-        usesColumns ? min(390, max(220, contentWidth * 0.43)) : contentWidth
+        usesColumns ? min(400, max(300, contentWidth * 0.49)) : contentWidth
     }
     private var historyHeight: CGFloat {
         guard availableHeight > 0 else { return 150 }
-        if usesColumns { return max(150, availableHeight - 130) }
-        let detailsAllowance: CGFloat = detailsWidth >= 330 ? 500 : 620
-        return max(120, availableHeight - detailsAllowance)
+        if usesColumns { return max(110, availableHeight - 138) }
+        let detailsAllowance: CGFloat = detailsWidth >= 300 ? 510 : 620
+        return max(110, availableHeight - detailsAllowance)
     }
     private var mainLayout: AnyLayout {
-        usesColumns ? AnyLayout(HStackLayout(alignment: .top, spacing: 24))
-                    : AnyLayout(VStackLayout(alignment: .leading, spacing: 18))
+        usesColumns ? AnyLayout(HStackLayout(alignment: .top, spacing: 16))
+                    : AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
     }
     private var distributionLayout: AnyLayout {
-        detailsWidth >= 330 || availableWidth <= 0
-            ? AnyLayout(HStackLayout(alignment: .center, spacing: 14))
-            : AnyLayout(VStackLayout(alignment: .center, spacing: 12))
+        detailsWidth >= 300 || availableWidth <= 0
+            ? AnyLayout(HStackLayout(alignment: .center, spacing: 10))
+            : AnyLayout(VStackLayout(alignment: .center, spacing: 8))
     }
-    private var donutSize: CGFloat { detailsWidth >= 370 ? 124 : 108 }
+    private var donutSize: CGFloat { 100 }
 
     var body: some View {
         card(title: "资金动向", subtitle: "最近 \(history.count) 个交易日") {
@@ -894,7 +901,7 @@ struct FundCard: View {
     }
 
     private var detailsSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("\(inspectedDate ?? "日期未知") · 所选交易日")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -911,11 +918,11 @@ struct FundCard: View {
                 distributionLegend.frame(maxWidth: .infinity)
             }
             .frame(maxWidth: .infinity)
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 ForEach(selectedFlows) { flow in fundValueLine("\(flow.name)净流入", flow.net) }
             }
             Divider()
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text("最新汇总 · \(panel.asOf ?? "日期未知")")
                     .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                 fundValueLine("当日主力", panel.metrics.latestMainInflow)
@@ -946,7 +953,7 @@ struct FundCard: View {
     }
 
     private var distributionLegend: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 4) {
             ForEach(slices) { slice in
                 HStack(spacing: 5) {
                     Circle().fill(slice.color).frame(width: 5, height: 5)
@@ -956,8 +963,7 @@ struct FundCard: View {
                     Text(share(slice.amount))
                         .lineLimit(1).frame(width: 38, alignment: .trailing)
                 }
-                .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
-                .minimumScaleFactor(0.8)
+                .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
             }
         }
     }
@@ -997,6 +1003,7 @@ struct FundCard: View {
 }
 
 struct ChipCard: View {
+    @Environment(\.workspaceCardHeight) private var availableHeight
     let panel: ChipPanel
     private var levels: [ChipCostLevel] {
         [ChipCostLevel(title: "5% 深获利", value: panel.cost5, color: AppStyle.up),
@@ -1016,7 +1023,7 @@ struct ChipCard: View {
                         }
                 }
             }
-            .chartXAxis(.hidden).frame(height: 150)
+            .chartXAxis(.hidden).frame(height: availableHeight > 0 ? max(140, availableHeight - 116) : 150)
             valueLine("平均成本", panel.average, color: AppStyle.ink)
             valueLine("获利比例", panel.winnerRate.map { $0 * 100 }, suffix: "%", color: AppStyle.up)
         }
@@ -1216,7 +1223,8 @@ private struct AnnouncementsCard: View {
 
     private func announcementRow(_ item: Announcement) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(item.title ?? "公告").font(.subheadline).foregroundStyle(AppStyle.ink).lineLimit(2)
+            Text(item.title ?? "公告").font(.subheadline).foregroundStyle(AppStyle.ink)
+                .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Text(item.date ?? "")
                 if let category = item.category { Text("· \(category)") }
@@ -1231,28 +1239,34 @@ private struct AnnouncementsCard: View {
 private struct FlowTags: View {
     let items: [String]
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8, alignment: .leading)],
+                  alignment: .leading, spacing: 8) {
                 ForEach(items, id: \.self) { item in
-                    Text(item).font(.caption).padding(.horizontal, 10).padding(.vertical, 6)
+                    Text(item).font(.caption).fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(AppStyle.canvas, in: Capsule())
                 }
-            }
         }
     }
 }
 
 private func card<Content: View>(title: String, subtitle: String,
                                  @ViewBuilder content: () -> Content) -> some View {
-    VStack(alignment: .leading, spacing: 14) {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title).font(.headline)
-            Spacer()
-            Text(subtitle).font(.caption2).foregroundStyle(.secondary)
+    VStack(alignment: .leading, spacing: 10) {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.headline)
+                Spacer()
+                Text(subtitle).font(.caption2).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.headline)
+                Text(subtitle).font(.caption2).foregroundStyle(.secondary)
+            }
         }
         content()
     }
-    .padding(20).frame(maxWidth: .infinity, alignment: .leading)
+    .padding(16).frame(maxWidth: .infinity, alignment: .leading)
     .background(.white, in: RoundedRectangle(cornerRadius: 20))
 }
 
