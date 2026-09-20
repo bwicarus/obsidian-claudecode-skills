@@ -484,7 +484,7 @@ function _fillGrammarBlock(block, d, sentence) {
   const hasStruct = components.length || tokens.length;
   const gvHtml = GV_MODES.map(([m, l]) => `<button type="button" data-gv="${m}" class="${m === _grammarViewMode ? 'active' : ''}">${l}</button>`).join('');
   const diagramHtml = hasStruct
-    ? `<div class="gb-diagram-wrap"><div class="gb-diagram-toggle">📐 句子结构<span class="gv-switch">${gvHtml}</span><span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>`
+    ? `<div class="gb-diagram-wrap"><div class="gb-diagram-toggle"><span class="rc-i rc-i-ruler"></span> 句子结构<span class="gv-switch">${gvHtml}</span><span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>`
     : '';
   // 语法点区：AI 路径直接渲染；spaCy 路径先占位等 SSE
   const anaHtml = analyses.length

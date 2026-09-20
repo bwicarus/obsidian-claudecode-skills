@@ -296,7 +296,7 @@ function _showSentMenu(btn, s, pw) {
   document.querySelectorAll('.sent-menu').forEach(m => m.remove());
   const menu = document.createElement('div');
   menu.className = 'sent-menu';
-  let html = '<button type="button" data-act="re">🔄 重新翻译</button>';
+  let html = '<button type="button" data-act="re"><span class="rc-i rc-i-sync"></span> 重新翻译</button>';
   if (s.manual) html += '<button type="button" data-act="del"><span class="rc-i rc-i-trash"></span> 删除标记</button>';
   menu.innerHTML = html;
   document.body.appendChild(menu);

@@ -75,7 +75,7 @@ try {
          color:#cfe6ff;border-radius:8px;padding:9px 16px;font-size:14px;text-decoration:none;cursor:pointer">← 返回书架</a>
       <div style="width:34px;height:34px;border:3px solid #2d5a8a;border-top-color:#7dd3fc;
            border-radius:50%;animation:pdfspin .8s linear infinite;"></div>
-      <div id="pdf-loading-text">📄 加载中…</div>
+      <div id="pdf-loading-text"><span class="rc-i rc-i-doc"></span> 加载中…</div>
       <div style="width:200px;height:6px;background:#1c232c;border-radius:3px;overflow:hidden;">
         <div id="pdf-loading-bar" style="height:100%;width:0%;background:#7dd3fc;
              transition:width .25s;"></div>
@@ -201,7 +201,7 @@ try {
       <!-- ════ pane: AI·翻译 ════ -->
       <div class="set-pane" data-pane="ai">
         <div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin-bottom:16px">
-          <div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">🤖 AI 引擎：脱壳 Claude CLI + Gemini（双后端自动兜底）</div>
+          <div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px"><span class="rc-i rc-i-sparkles"></span> AI 引擎：脱壳 Claude CLI + Gemini（双后端自动兜底）</div>
           <div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-bottom:10px">解释 / 问 AI / 选中查询 / 翻译・例句 / 字典 AI・日语深入讲解 等所有 AI 调用，都走跟侧边栏助手同一套脱壳 Claude + Gemini 引擎（一边失败自动切另一边）。点下面按钮可按功能分别选 后端（Claude/Gemini）、型号、思考深度（Gemini 免费档优先、过载自动落付费）。</div>
           <button type="button" onclick="(window.openModelSettings?window.openModelSettings():(window._toast&&_toast('助手模块未就绪，刷新重试')))" style="width:100%;background:#23406e;border:1px solid #3a5891;color:#dfe9ff;border-radius:6px;padding:9px 10px;font-size:13px;cursor:pointer"><span class="rc-i rc-i-gear"></span> 打开 AI 模型设置（按功能配 后端 / 型号 / 深度）</button>
         </div>
@@ -274,11 +274,11 @@ try {
         <div style="font-size:11px;color:#7a8497;margin-bottom:14px"><span id="set-pg-cur-off">当前偏移：0</span> · <a href="javascript:void 0" onclick="applyPageOffset(0)" style="color:#7dd3fc">重置</a></div>
         <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">
-          <input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" style="width:16px;height:16px"> 📷 本书插图描述（图区放徽标，点开看 AI 说明）
+          <input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" style="width:16px;height:16px"> <span class="rc-i rc-i-camera"></span> 本书插图描述（图区放徽标，点开看 AI 说明）
         </label>
         <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后翻到的页会<b>逐页让 AI 识别插图并描述</b>（首次每页几秒、消耗 AI 配额），描述结果存服务器跨端共用。不需要插图说明的书保持关闭即可。<b>每本书独立</b>。</div>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">
-          <input type="checkbox" id="set-conceptnet" onchange="saveConceptNetToggle(this.checked)" style="width:16px;height:16px"> 🌱 本书自动生长概念笔记（概念网）
+          <input type="checkbox" id="set-conceptnet" onchange="saveConceptNetToggle(this.checked)" style="width:16px;height:16px"> <span class="rc-i rc-i-leaf"></span> 本书自动生长概念笔记（概念网）
         </label>
         <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后夜间流水线会对你在本书反复关注的<b>学科概念</b>自动生成 Obsidian 概念笔记（引原文定义 + 自动连边,单词仍归词汇本)。<b>每本书独立</b>,即改即存。</div>
         <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
@@ -313,7 +313,7 @@ try {
         </div>
         <button onclick="_applyCropSettings()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">应用去边并开启</button>
         <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🔧 文字层校准（扫描/OCR 书的文字层跟画面没对齐时用；<b>每页独立</b>）</label>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px"><span class="rc-i rc-i-wrench"></span> 文字层校准（扫描/OCR 书的文字层跟画面没对齐时用；<b>每页独立</b>）</label>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:8px">
           <input type="checkbox" id="set-charbox" onchange="_charboxToggle(this)" style="width:16px;height:16px"> 可视化文字框（红框叠在页面上，直观看哪里偏）
         </label>
@@ -344,7 +344,7 @@ try {
 
       <!-- ════ pane: 语法 ════ -->
       <div class="set-pane" data-pane="grammar" style="display:none">
-        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📐 长句结构显示</label>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px"><span class="rc-i rc-i-ruler"></span> 长句结构显示</label>
         <select id="set-grammar-view" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px" onchange="setGrammarView(this.value)">
           <option value="tree">成分树（成分名+颜色+层次缩进+折叠，融合）</option>
           <option value="components">成分分块（主谓宾定状从句彩色块）</option>

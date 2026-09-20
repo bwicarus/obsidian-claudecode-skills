@@ -737,7 +737,7 @@
     var viewMode = getViewMode(viewModeKey);
     var gvHtml = GV_MODES.map(function (m) { return '<button type="button" data-gv="' + m[0] + '" class="' + (m[0] === viewMode ? 'active' : '') + '">' + m[1] + '</button>'; }).join('');
     var diagramHtml = hasStruct
-      ? '<div class="gb-diagram-wrap"><div class="gb-diagram-toggle">📐 句子结构<span class="gv-switch">' + gvHtml + '</span><span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>'
+      ? '<div class="gb-diagram-wrap"><div class="gb-diagram-toggle"><span class="rc-i rc-i-ruler"></span> 句子结构<span class="gv-switch">' + gvHtml + '</span><span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>'
       : '';
     var anaHtml = analyses.length
       ? '<div class="gb-analyses">' + analyses.map(function (a, i) {

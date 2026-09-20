@@ -1149,7 +1149,7 @@
       if (ev === 'meta') return;                       // rid 确认,不计数
       evSeen++;
       if (ev === 'done') { done = true; return; }
-      if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
+      if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool"><span class="rc-i rc-i-wrench"></span> ' + esc(parsed) + '…</span>'; scrollDown(); }
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
         answer = parsed; var _at = _splitFollowups(answer).text;

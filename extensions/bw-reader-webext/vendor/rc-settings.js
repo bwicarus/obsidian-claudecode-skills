@@ -692,7 +692,7 @@ if (window.__bwPwaProviderOnly) return;
       // ⚠ 项目多时允许横滑（分段控件本身不换行），而不是折成两行。
       '.rc-set-mask .set-tabs{display:flex;flex:0 0 auto;flex-wrap:nowrap;gap:2px;padding:2px;margin-bottom:16px;border:0;border-radius:var(--rc-radius-md,9px);background:var(--rc-bg-control);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}' +
       '.rc-set-mask .set-tabs::-webkit-scrollbar{display:none}' +
-      '.rc-set-mask .set-tab{flex:1 0 auto;margin:0;background:transparent;border:0;border-radius:calc(var(--rc-radius-md,9px) - 2px);color:var(--rc-text-muted);font-size:13px;font-weight:500;padding:7px 14px;cursor:pointer;white-space:nowrap;transition:background var(--rc-motion-fast) var(--rc-ease),color var(--rc-motion-fast) var(--rc-ease)}' +
+      '.rc-set-mask .set-tab{flex:1 0 auto;margin:0;background:transparent;border:0;border-radius:calc(var(--rc-radius-md,9px) - 2px);color:var(--rc-text-muted);font-size:13px;font-weight:500;padding:7px 10px;cursor:pointer;white-space:nowrap;transition:background var(--rc-motion-fast) var(--rc-ease),color var(--rc-motion-fast) var(--rc-ease)}' +
       '.rc-set-mask .set-tab:focus{outline:none}' +
       '.rc-set-mask .set-tab:focus-visible{outline:2px solid var(--rc-accent);outline-offset:-2px}' +
       '.rc-set-mask .set-tab.active{color:var(--rc-text);font-weight:600;background:var(--rc-bg-raised);box-shadow:0 1px 3px rgba(0,0,0,.28)}' +
@@ -1002,8 +1002,8 @@ if (window.__bwPwaProviderOnly) return;
     var paneAi =
       '<div class="set-pane" data-pane="ai">' +
         '<div style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin-bottom:16px">' +
-          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🤖 AI 模型（按功能配 后端 / 型号 / 深度）</div>' +
-          '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">解释 / 问 AI / 翻译・例句 / 字典 AI / 语法分析 / 助手 等所有 AI 调用，都走同一套脱壳 Claude + Gemini 双后端（一边失败自动切另一边）。下面按功能分别选：改完即时生效、服务端保存全设备共用；Gemini 免费档优先、过载自动落付费，「💰仅付费」型号（如 3.1-pro）每次调用按量计费。</div>' +
+          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px"><span class="rc-i rc-i-sparkles"></span> AI 模型（按功能配 后端 / 型号 / 深度）</div>' +
+          '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">解释 / 问 AI / 翻译・例句 / 字典 AI / 语法分析 / 助手 等所有 AI 调用，都走同一套脱壳 Claude + Gemini 双后端（一边失败自动切另一边）。下面按功能分别选：改完即时生效、服务端保存全设备共用；Gemini 免费档优先、过载自动落付费，「<span class="rc-i rc-i-money"></span>仅付费」型号（如 3.1-pro）每次调用按量计费。</div>' +
           '<div id="rcset-ai-inline"></div>' +
         '</div>' +
         '<label style="' + LBL + '"><span class="rc-i rc-i-globe"></span> 句子翻译源</label>' +
@@ -1038,7 +1038,7 @@ if (window.__bwPwaProviderOnly) return;
         // 143(用户设计):语音工具的**调用前垫话**总策略。单个工具可在「长按工具卡 → 详情窗」里单独覆盖。
         //   实测垫话和 function_call 同属一个 response ⇒ 这是体验旋钮不是省钱旋钮(见 REALTIME_2_1_API_GUIDE)。
         '<div style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
-          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🗣 语音·调用前垫话</div>' +
+          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px"><span class="rc-i rc-i-waveform"></span> 语音·调用前垫话</div>' +
           '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">AI 调工具前要不要先说一句「我去查一下」。<b>自动</b> = 按这个工具在账本里的<b>真实中位耗时</b>判：慢过阈值才垫话，秒回的静默直接调（免得啰嗦）。单个工具想固定，长按它的工具卡 → 详情窗里单独设。</div>' +
           '<select class="rc-ui-select" id="set-filler-mode" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
             '<option value="auto">自动（按实测耗时判，推荐）</option>' +
@@ -1051,7 +1051,7 @@ if (window.__bwPwaProviderOnly) return;
           '</div>' +
         '</div>' +
         '<div id="rcset-sync-section" data-sec="pwa-sync" style="display:none;background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
-          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🔄 跨设备同步</div>' +
+          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px"><span class="rc-i rc-i-sync"></span> 跨设备同步</div>' +
           '<div id="rcset-sync-status" style="font-size:12px;color:var(--rc-text-muted);line-height:1.55;white-space:pre-wrap">正在读取同步状态……</div>' +
           '<ul id="rcset-sync-conflicts" style="display:none;margin:8px 0 0;padding-left:18px;color:var(--rc-text-muted);font-size:11px;line-height:1.5"></ul>' +
         '</div>' +
@@ -1075,7 +1075,7 @@ if (window.__bwPwaProviderOnly) return;
           '</div>' +
           '<div id="set-bridge-voice-msg" style="font-size:11px;color:var(--rc-warn);margin-top:6px;display:none"></div>' +
           '<label id="set-readerpc-no-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer;margin-top:10px">' +
-            '<input type="checkbox" id="set-readerpc-no-voice" class="rc-ui-switch"> 🔇 无语音功能（其它 Reader 功能保持在线）' +
+            '<input type="checkbox" id="set-readerpc-no-voice" class="rc-ui-switch"> <span class="rc-i rc-i-mute"></span> 无语音功能（其它 Reader 功能保持在线）' +
           '</label>' +
           '<div id="set-readerpc-no-voice-help" style="display:none;font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '开启后不自动拉起 Codex Voice，不启用 F24 保活与音频路由；实时快照、视觉读取、浏览器控制、卡片、Anki、词典、OCR 与历史工具继续在线。' +
@@ -1084,7 +1084,7 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         '<div id="set-ctx-sync-card" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
           '<label id="set-ctx-sync-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer">' +
-            '<input type="checkbox" id="set-ctx-sync" class="rc-ui-switch"> 🔁 旧版文字注入同步' +
+            '<input type="checkbox" id="set-ctx-sync" class="rc-ui-switch"> <span class="rc-i rc-i-reload"></span> 旧版文字注入同步' +
           '</label>' +
           '<label id="set-ctx-legacy-row" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--rc-text-strong);cursor:pointer;margin-top:10px">' +
             '<input type="checkbox" id="set-ctx-legacy" class="rc-ui-switch"> 测试旧版文字注入' +
@@ -1108,7 +1108,7 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         // [EPUB] 侧边栏外观(直接驱动 RC.sidedrawer)
         '<div data-sec="epub-side">' +
-          '<label class="set-lbl">🪟 侧边栏</label>' +
+          '<label class="set-lbl"><span class="rc-i rc-i-sidebar"></span> 侧边栏</label>' +
           '<label class="ep-set-chk"><input type="checkbox" id="eph2-side-floating"> 悬浮显示（盖在正文上，不挤压正文）</label>' +
           '<div class="ep-set-slrow"><span>背景模糊度 <small id="eph2-side-blur-val">20</small> px</span><input type="range" id="eph2-side-blur" min="0" max="40" step="1" value="20"></div>' +
           '<div class="ep-set-note" style="margin:-2px 0 8px">关=抽屉挤压正文（左侧仍可读）；开=磨砂抽屉悬浮盖在正文上。模糊度调抽屉背后的虚化强度。</div>' +
@@ -1129,13 +1129,13 @@ if (window.__bwPwaProviderOnly) return;
         // [PDF] 本书插图描述(逐字照搬,onchange=原生 saveFigToggle)
         '<div data-sec="pdf-figures">' +
           '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
-            '<input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" class="rc-ui-switch"> 📷 本书插图描述（图区放徽标，点开看 AI 说明）' +
+            '<input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" class="rc-ui-switch"> <span class="rc-i rc-i-camera"></span> 本书插图描述（图区放徽标，点开看 AI 说明）' +
           '</label>' +
           '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后翻到的页会<b>逐页让 AI 识别插图并描述</b>（首次每页几秒、消耗 AI 配额），描述结果存服务器跨端共用。不需要插图说明的书保持关闭即可。<b>每本书独立</b>。</div>' +
           // [PDF] 概念网按书开火(用户定:读哪本书时决定哪本;默认隐藏,PDF 的 _fillSettings 揭示+回填)
           '<div data-sec="pdf-conceptnet" style="display:none">' +
             '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
-              '<input type="checkbox" id="set-conceptnet" onchange="window.saveConceptNetToggle&&saveConceptNetToggle(this.checked)" class="rc-ui-switch"> 🌱 本书自动生长概念笔记（概念网）' +
+              '<input type="checkbox" id="set-conceptnet" onchange="window.saveConceptNetToggle&&saveConceptNetToggle(this.checked)" class="rc-ui-switch"> <span class="rc-i rc-i-leaf"></span> 本书自动生长概念笔记（概念网）' +
             '</label>' +
             '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后夜间流水线对你在本书反复关注的<b>学科概念</b>自动生成概念笔记（引原文定义+自动连边,单词仍归词汇本）。<b>每本书独立</b>,即改即存。</div>' +
           '</div>' +
@@ -1167,7 +1167,7 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         // [EPUB] 插图徽标显隐(纯 UI,即改即生效,window.toggleFigBadge)
         '<div data-sec="epub-figbadge">' +
-          '<label class="ep-set-chk" style="margin-bottom:14px"><input type="checkbox" id="eph2-fig-badge"> 📷 显示插图说明徽标（关闭只隐藏徽标 UI，不影响 AI 描述功能本身）</label>' +
+          '<label class="ep-set-chk" style="margin-bottom:14px"><input type="checkbox" id="eph2-fig-badge"> <span class="rc-i rc-i-camera"></span> 显示插图说明徽标（关闭只隐藏徽标 UI，不影响 AI 描述功能本身）</label>' +
         '</div>' +
         // [PDF] 旋转屏幕自动切换排版(逐字照搬;保存时由原生 saveSettings 读)
         '<div data-sec="pdf-orient">' +
@@ -1191,7 +1191,7 @@ if (window.__bwPwaProviderOnly) return;
         // [PDF] 文字层校准(逐字照搬,onclick/onchange=原生 _charboxToggle/_nudgeChars/_resetCharOffset/_reocrPage/_clearReocr)
         '<div data-sec="pdf-charofs">' +
           HR +
-          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px">🔧 文字层校准（扫描/OCR 书的文字层跟画面没对齐时用；<b>每页独立</b>）</label>' +
+          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px"><span class="rc-i rc-i-wrench"></span> 文字层校准（扫描/OCR 书的文字层跟画面没对齐时用；<b>每页独立</b>）</label>' +
           '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:8px">' +
             '<input type="checkbox" id="set-charbox" onchange="_charboxToggle(this)" class="rc-ui-switch"> 可视化文字框（红框叠在页面上，直观看哪里偏）' +
           '</label>' +
@@ -1206,7 +1206,7 @@ if (window.__bwPwaProviderOnly) return;
           '</div>' +
           '<div id="charofs-cur" style="font-size:11px;color:var(--rc-text-dim);margin-bottom:8px">第 — 页　dx 0.0 · dy 0.0</div>' +
           '<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center">' +
-            '<button onclick="_reocrPage()" id="reocr-btn" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">🔁 单页重扫(Google Vision)</button>' +
+            '<button onclick="_reocrPage()" id="reocr-btn" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer"><span class="rc-i rc-i-reload"></span> 单页重扫(Google Vision)</button>' +
             '<button onclick="_clearReocr()" style="background:#2a1a1a;border:1px solid #5a3030;color:var(--rc-danger-text);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">撤销重扫</button>' +
             '<span id="reocr-status" style="font-size:11px;color:var(--rc-text-dim)"></span>' +
           '</div>' +
@@ -1225,7 +1225,7 @@ if (window.__bwPwaProviderOnly) return;
         // [EPUB] 转 PDF
         '<div data-sec="epub-convert">' +
           '<hr class="ep-set-hr">' +
-          '<button id="eph2-full-btn" class="ep-full-btn">📄 完整功能版（转 PDF）</button>' +
+          '<button id="eph2-full-btn" class="ep-full-btn"><span class="rc-i rc-i-doc"></span> 完整功能版（转 PDF）</button>' +
           '<div class="ep-set-note" style="margin-top:6px">需要 OCR / 手写 等 PDF 专属功能时，转成 PDF 用完整阅读器打开（后台转换，可关页面）。</div>' +
         '</div>' +
       '</div>';
@@ -1234,7 +1234,7 @@ if (window.__bwPwaProviderOnly) return;
     //      RC.grammar.renderTrackList 填,EPUB 由 open() 按 opts.grammarFile 填同一容器)════
     var paneGrammar =
       '<div class="set-pane" data-pane="grammar" data-sec="grammar-tab" style="display:none">' +
-        '<label style="' + LBL + '">📐 长句结构显示</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-ruler"></span> 长句结构显示</label>' +
         '<select class="rc-ui-select" id="set-grammar-view" style="' + SEL + '">' +
           '<option value="tree">成分树（成分名+颜色+层次缩进+折叠，融合）</option>' +
           '<option value="components">成分分块（主谓宾定状从句彩色块）</option>' +
@@ -1246,7 +1246,9 @@ if (window.__bwPwaProviderOnly) return;
         '<div style="font-size:10px;color:var(--rc-text-dim);margin-bottom:6px;line-height:1.5">' +
           '勾选本书用哪些语法 KG。具体跟踪哪些语法点请去' +
           '<a href="/skilltree/grammar-demo/" target="_blank" style="color:var(--rc-accent)">技能树页面</a>' +
-          '点节点详情里的「👁 跟踪」按钮设置。' +
+          // ⭐️ 这句说明指代的是知识点卡上那个按钮，而它已经是星了（☆跟踪 / ★跟踪中）——
+          // 这里还写着眼睛就是两边对不上（预览里扫出来的）。
+          '点节点详情里的「<span class="rc-i rc-i-star"></span> 跟踪」按钮设置。' +
         '</div>' +
         '<div id="set-grammar-list" style="max-height:240px;overflow-y:auto;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);border-radius:6px;padding:8px;font-size:12px">' +
           '<div style="color:var(--rc-text-dim)">加载中…</div>' +
@@ -1281,7 +1283,7 @@ if (window.__bwPwaProviderOnly) return;
         '<div class="ep-set-note">关：隐藏页面右缘那排锚定卡片的圆点角标（卡片与词上的标记不受影响）。保存后立即生效。</div>' +
         '<div class="ep-set-note">开：按便签底色深浅自动选前景色——浅色便签配深字深笔，深色便签（石墨/墨绿）配浅字浅笔；<b>已画的笔迹不改色</b>，只影响文字显示和新笔画。关：固定深色文字＋红笔。</div>' +
         '<hr class="ep-set-hr">' +
-        '<label style="' + LBL + '">👆 触屏双击动作</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-tap"></span> 触屏双击动作</label>' +
         '<select id="rcset-ink-double-tap" style="' + SEL + '">' +
           '<option value="eraser">切换画笔与临时橡皮</option>' +
           '<option value="selection">切换画笔与选区笔</option>' +
@@ -1293,7 +1295,7 @@ if (window.__bwPwaProviderOnly) return;
         '<div class="ep-set-note" style="margin:-2px 0 0">按住便签（任意部分）多久进入编辑模式（移动 / 缩放 / 换色 / 删除）。越短越灵敏，太短容易误触。保存后下次长按生效。</div>' +
         '<div data-sec="native-app-notes" style="display:none">' +
           '<hr class="ep-set-hr">' +
-          '<label style="' + LBL + '">📚 App / 扩展共享 Markdown 笔记</label>' +
+          '<label style="' + LBL + '"><span class="rc-i rc-i-books"></span> App / 扩展共享 Markdown 笔记</label>' +
           '<div class="ep-set-note" style="margin:-2px 0 8px">开启本机线路后，网页扩展与 App 都能创建、查看和读取笔记；扩展创建的内容先进入共享队列，再由 App 自动写入 Obsidian。关闭时保留原有服务器线路。</div>' +
           '<div id="rcset-native-notes-status" role="status" aria-live="polite" style="font-size:11px;color:var(--rc-text-muted);line-height:1.55;white-space:pre-wrap;margin-bottom:8px">尚未读取</div>' +
           '<button id="rcset-native-notes-refresh" type="button" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:6px;padding:8px;font-size:12px;cursor:pointer">查看 / 刷新</button>' +
@@ -1358,7 +1360,7 @@ if (window.__bwPwaProviderOnly) return;
         HR +
         '</div>' +
         '<div data-sec="nat-vault">' +
-        '<label class="set-lbl">📁 本机 Obsidian Vault</label>' +
+        '<label class="set-lbl"><span class="rc-i rc-i-folder"></span> 本机 Obsidian Vault</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:6px">' +
           '<input type="checkbox" id="rcset-nat-vault-on" class="rc-ui-switch"> 写入 iPad 本地 Vault' +
         '</label>' +
@@ -1384,7 +1386,7 @@ if (window.__bwPwaProviderOnly) return;
         HR +
         '</div>' +
         '<div data-sec="nat-credentials">' +
-        '<label class="set-lbl">🔑 凭据</label>' +
+        '<label class="set-lbl"><span class="rc-i rc-i-key"></span> 凭据</label>' +
         '<div id="rcset-nat-key-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
           '<button type="button" id="rcset-nat-key-set" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">输入 / 替换 OpenAI Key</button>' +
@@ -1444,7 +1446,7 @@ if (window.__bwPwaProviderOnly) return;
         '</label>' +
         // 语法分析(web host 时独立「语法」tab 隐藏,内容并到这里;逻辑复用 rc-grammar，容器实例 web-* id)
         '<hr class="ep-set-hr">' +
-        '<label style="' + LBL + '">📐 语法分析</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-ruler"></span> 语法分析</label>' +
         '<label style="display:block;font-size:13px;color:var(--rc-text-strong);margin:4px 0 4px">长句结构显示方式</label>' +
         '<select id="web-grammar-view" style="' + SEL + '">' +
           '<option value="tree">成分树</option>' +
@@ -2032,6 +2034,15 @@ if (window.__bwPwaProviderOnly) return;
     var _t = _opts.tab || lsGet(_tabKey) || 'read';
     // 'hl' 并进了「标注」(note)。老用户的记忆键里可能还存着它，不映射就会落到一个不存在的 pane —— 表现是设置页打开一片空白。
     if (_t === 'hl') _t = 'note';
+    // ⚠ 兜底：选中的 tab 必须在可视区内。分段控件的滚动条是隐藏的，
+    //   一旦溢出，用户既看不见也不知道能滑（2026-09-20 实测 6 个 tab
+    //   要 387px 而容器只有 379px，「设备」正好被切掉）。
+    setTimeout(function () {
+      try {
+        var on = document.querySelector('.rc-set-mask .set-tab.active');
+        if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      } catch (_) {}
+    }, 0);
     if (_t === 'web' && _host !== 'web') _t = 'ai';   // 记忆键停在 web 但当前非 web host → 回落 ai(不显隐藏 pane)
     if (_t === 'grammar' && _host === 'web') _t = 'web';   // web host:语法并入网页 tab,记忆停在 grammar 时改指 web
     setTab(_t);

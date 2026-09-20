@@ -3894,7 +3894,7 @@ function _showSentMenu(btn, s, pw) {
   document.querySelectorAll('.sent-menu').forEach(m => m.remove());
   const menu = document.createElement('div');
   menu.className = 'sent-menu';
-  let html = '<button type="button" data-act="re">🔄 重新翻译</button>';
+  let html = '<button type="button" data-act="re"><span class="rc-i rc-i-sync"></span> 重新翻译</button>';
   if (s.manual) html += '<button type="button" data-act="del"><span class="rc-i rc-i-trash"></span> 删除标记</button>';
   menu.innerHTML = html;
   document.body.appendChild(menu);
@@ -8800,7 +8800,7 @@ function _fillGrammarBlock(block, d, sentence) {
   const hasStruct = components.length || tokens.length;
   const gvHtml = GV_MODES.map(([m, l]) => `<button type="button" data-gv="${m}" class="${m === _grammarViewMode ? 'active' : ''}">${l}</button>`).join('');
   const diagramHtml = hasStruct
-    ? `<div class="gb-diagram-wrap"><div class="gb-diagram-toggle">📐 句子结构<span class="gv-switch">${gvHtml}</span><span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>`
+    ? `<div class="gb-diagram-wrap"><div class="gb-diagram-toggle"><span class="rc-i rc-i-ruler"></span> 句子结构<span class="gv-switch">${gvHtml}</span><span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>`
     : '';
   // 语法点区：AI 路径直接渲染；spaCy 路径先占位等 SSE
   const anaHtml = analyses.length
@@ -12450,7 +12450,7 @@ async function _connProbe() {
       if (ev === 'meta') return;                       // rid 确认,不计数
       evSeen++;
       if (ev === 'done') { done = true; return; }
-      if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
+      if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool"><span class="rc-i rc-i-wrench"></span> ' + esc(parsed) + '…</span>'; scrollDown(); }
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
         answer = parsed; var _at = _splitFollowups(answer).text;
