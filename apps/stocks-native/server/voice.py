@@ -276,10 +276,12 @@ class VoiceSession:
             await self.emit_json(event)
 
     def queue_transcript(self, event, persist=False):
-        if not event or not event.get('text') or self.closed:
+        if not event or not event.get('text'):
             return
         if persist:
             self.record(event)
+        if self.closed:
+            return
         if event.get('final'):
             self.transcript_updates.pop(event['messageId'], None)
             self.task(self.emit_transcript(event))

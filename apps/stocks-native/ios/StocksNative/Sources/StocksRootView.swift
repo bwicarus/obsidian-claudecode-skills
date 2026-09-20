@@ -199,9 +199,6 @@ struct StocksRootView: View {
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             StockNotificationCoordinator.shared.sceneChanged(active: phase == .active)
-            if phase == .background, model.voice.isStarted, !StockNotificationCoordinator.shared.isCallActive {
-                Task { await model.voice.stop() }
-            }
         }
     }
 

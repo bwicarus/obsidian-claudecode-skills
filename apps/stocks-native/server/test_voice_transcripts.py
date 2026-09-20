@@ -147,6 +147,20 @@ class TranscriptDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.events), 2)
         self.assertEqual(len(self.session.recent_transcripts()), 1)
 
+    async def test_final_tail_after_close_is_persisted_without_sending_or_new_tasks(self):
+        self.session.transcript_streams.realtime_start('assistant', 'tail')
+        self.session.closed = True
+        self.session.on_dc(json.dumps({'type': 'turn.done', 'turn': {
+            'role': 'assistant', 'id': 'tail', 'transcript': '通话结束时的最后一句。'}}))
+        self.assertEqual(len(self.session.tasks), 0)
+        self.assertIsNone(self.session.transcript_flush)
+        self.assertEqual(self.session.transcript_updates, {})
+        await asyncio.sleep(0)
+        self.assertEqual(self.events, [])
+        restored = self.session.recent_transcripts()
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0]['text'], '通话结束时的最后一句。')
+
     async def test_read_forwards_only_visible_deltas_and_canonical_item(self):
         reader = asyncio.StreamReader()
         self.session.proc = SimpleNamespace(stdout=reader)
