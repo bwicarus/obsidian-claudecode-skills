@@ -669,7 +669,7 @@
     if (!text) { s.hidden = true; return; }
     s.hidden = false;
     s.className = 'rc-turn-status' + (done ? ' done' : '');
-    s.innerHTML = (done ? '✓ ' : '<span class="vc-spin vc-spin-s"></span> ') + _esc(text);
+    s.innerHTML = (done ? '<span class="rc-i rc-i-check"></span> ' : '<span class="vc-spin vc-spin-s"></span> ') + _esc(text);
   }
   // busy = 某个工具在跑:标题=工具名 + 状态行"处理中"(兼容既有调用点;进度一律落在标题区,不进 body)。
   function busy(tid, label) {

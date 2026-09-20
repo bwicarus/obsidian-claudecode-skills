@@ -636,15 +636,15 @@
     var summary = sentence.slice(0, 60) + (sentence.length > 60 ? '…' : '');
     return '<div class="gb-header">' +
       '<span class="gb-title" title="' + esc(sentence) + '">' + esc(summary) + '</span>' +
-      '<span class="gb-del" title="删除这条（同句下次重新分析）">🗑</span>' +
+      '<span class="gb-del" title="删除这条（同句下次重新分析）"><span class="rc-i rc-i-trash"></span></span>' +
       '<span class="gb-caret">▶</span></div>' +
-      '<div class="gb-trans' + (pending ? ' gb-pending' : '') + '">' + (pending ? '🌐 翻译中…' : '') + '</div>' +
+      '<div class="gb-trans' + (pending ? ' gb-pending' : '') + '">' + (pending ? '<span class="rc-i rc-i-globe"></span> 翻译中…' : '') + '</div>' +
       '<div class="gb-content">' + (pending ? '<div class="gb-loading">⏳ 结构 / 语法分析中…</div>' : '') + '</div>' +
       '<div class="gb-fu-answers"></div>' +
       '<div class="gb-followup">' +
       '<input class="gb-fu-input" placeholder="继续追问这句的语法…">' +
       '<button class="gb-fu-btn">追问</button>' +
-      '<button class="gb-anki-btn" title="整句+译文+分析做成 Anki 卡">🎴</button></div>';
+      '<button class="gb-anki-btn" title="整句+译文+分析做成 Anki 卡"><span class="rc-i rc-i-card"></span></button></div>';
   }
   function _wireBlockChrome(block, spec) {
     block.querySelector('.gb-header').addEventListener('click', function () { block.classList.toggle('open'); });
@@ -702,8 +702,8 @@
     if (!arr.length) { wrap.remove(); return; }
     wrap.classList.remove('gb-pending');
     wrap.innerHTML = arr.map(function (a) {
-      return '<div class="gb-ana"><div class="a-head">📊 ' + esc(a.point || a.node_name || '') + '</div>' +
-        (a.phrase ? '<div class="a-phrase">📍 ' + esc(a.phrase) + '</div>' : '') +
+      return '<div class="gb-ana"><div class="a-head"><span class="rc-i rc-i-chart"></span> ' + esc(a.point || a.node_name || '') + '</div>' +
+        (a.phrase ? '<div class="a-phrase"><span class="rc-i rc-i-pin"></span> ' + esc(a.phrase) + '</div>' : '') +
         '<div class="a-body">' + esc(a.explanation || '') + ((a.examples || []).length ? '<ul class="a-ex">' + (a.examples || []).map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul>' : '') + '</div></div>';
     }).join('');
     var anaEls = wrap.querySelectorAll('.gb-ana');
@@ -741,8 +741,8 @@
       : '';
     var anaHtml = analyses.length
       ? '<div class="gb-analyses">' + analyses.map(function (a, i) {
-          return '<div class="gb-ana" data-i="' + i + '"><div class="a-head">📊 ' + esc(a.node_name || a.node_id || '') + '</div>' +
-            (a.phrase ? '<div class="a-phrase">📍 ' + esc(a.phrase) + '</div>' : '') +
+          return '<div class="gb-ana" data-i="' + i + '"><div class="a-head"><span class="rc-i rc-i-chart"></span> ' + esc(a.node_name || a.node_id || '') + '</div>' +
+            (a.phrase ? '<div class="a-phrase"><span class="rc-i rc-i-pin"></span> ' + esc(a.phrase) + '</div>' : '') +
             '<div class="a-body">' + esc(a.explanation || '') + ((a.examples || []).length ? '<ul class="a-ex">' + (a.examples || []).map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul>' : '') + '</div></div>';
         }).join('') + '</div>'
       : (isSpacy ? '<div class="gb-analyses gb-pending"><div class="gb-ana"><div class="a-head" style="color:#7a8497;font-weight:400">⏳ 语法点分析中…</div></div></div>' : '');

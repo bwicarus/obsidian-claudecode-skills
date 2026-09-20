@@ -49,7 +49,7 @@ if (window.__bwPwaProviderOnly) return;
     closePop(); _badge = badge;
     var esc = (window.RC && RC.esc) || function (s) { return s == null ? '' : String(s); };
     var pop = document.createElement('div'); pop.id = 'rc-fig-pop'; pop.className = 'rc-fig-pop';
-    pop.innerHTML = '<span class="rc-fig-x">✕</span><h4>' + esc(caption || '图') + '</h4><div class="b">' + bodyHtml + '</div>';
+    pop.innerHTML = '<span class="rc-fig-x"><span class="rc-i rc-i-close"></span></span><h4>' + esc(caption || '图') + '</h4><div class="b">' + bodyHtml + '</div>';
     document.body.appendChild(pop);
     pop.querySelector('.rc-fig-x').addEventListener('click', closePop);
     // ignoreSelector(可选,宿主给):点这些元素也不关弹层。PDF 徽标是 .fig-badge(非 .rc-fig-badge),

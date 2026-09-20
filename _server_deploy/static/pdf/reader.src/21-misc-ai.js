@@ -163,7 +163,7 @@ window.loadTocStatus = async () => {
     const d = await (await fetch('/pdf/api/toc?file=' + encodeURIComponent(FILE_REL))).json();
     if (d.ok && d.exists) {
       const src = d.source === 'native' ? '书籍自带' : 'AI 建立';
-      st.innerHTML = '✓ 已存在目录（' + src + '，' + d.count + ' 条）<a href="javascript:void 0" onclick="showTocBuild()" style="color:#7dd3fc;margin-left:8px">重建/覆盖</a>';
+      st.innerHTML = '<span class="rc-i rc-i-check"></span> 已存在目录（' + src + '，' + d.count + ' 条）<a href="javascript:void 0" onclick="showTocBuild()" style="color:#7dd3fc;margin-left:8px">重建/覆盖</a>';
       if (box) box.style.display = 'none';
     } else {
       st.textContent = '本书暂无目录。可指定目录页范围让 AI 抽取：';
@@ -372,10 +372,10 @@ async function aiCall(path, body, label) {
     const res = await _aiStream(path, { method: 'POST', body, onText: render });
     if (myReq !== _resultReqId) return;
     render(res.text);
-    if (!res.ok) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>';
+    if (!res.ok) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px"><span class="rc-i rc-i-close"></span> ' + (res.error || '失败') + '</div>';
     addResultPickers();   // 完成后给标题加 +
   } catch (e) {
-    if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+    if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00"><span class="rc-i rc-i-close"></span> ' + e.message + '</div>';
   }
 }
 
@@ -441,7 +441,7 @@ window.onOcrSel = async () => {
     const j = await r.json();
     if (j && j.ok && j.text) {
       lastSelText = j.text;                     // 校正后的文字回填,下游(复制/翻译/解释/对话)全用它
-      if (prev) prev.innerHTML = _esc(j.text) + ' <span class="len">OCR ✓ 已写入</span>';
+      if (prev) prev.innerHTML = _esc(j.text) + ' <span class="len">OCR <span class="rc-i rc-i-check"></span> 已写入</span>';
       // 持久化已落库:更新本页 cv(让重渲第一拉就命中新版)+ 立即重渲本页 → 校正注入字符层、永久生效
       if (j.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + selPage, j.cv); } catch (_) {} }
       if (typeof _rerenderLoadedPages === 'function') { try { _rerenderLoadedPages(); } catch (_) {} }
@@ -659,12 +659,12 @@ async function _runExplainBg(hl, text, context) {
     const res = await _aiStream('/pdf/api/explain', { method: 'POST', body, onText: (t) => { acc = t; _fillPanel(md(t || ' '), false); } });
     if (hl.canceled) return;   // 被新解释替换 → 丢弃
     const full = res.text || acc;
-    hl.html = md(full || ' ') + (res.ok ? '' : '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>');
+    hl.html = md(full || ' ') + (res.ok ? '' : '<div style="color:#c00;margin-top:8px"><span class="rc-i rc-i-close"></span> ' + (res.error || '失败') + '</div>');
     hl.ready = true;
     _fillPanel(hl.html, true);
   } catch (e) {
     if (hl.canceled) return;
-    hl.html = '<div style="color:#c00">✗ ' + (e.message || '失败') + '</div>'; hl.ready = true;
+    hl.html = '<div style="color:#c00"><span class="rc-i rc-i-close"></span> ' + (e.message || '失败') + '</div>'; hl.ready = true;
     _fillPanel(hl.html, false);
   }
 }
@@ -699,10 +699,10 @@ window.onChat = () => {
 // 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
 function _openChat(lastSelText, context) {
   let html = '<div style="font-size:12.5px;line-height:1.65">'
-    + '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px">📌 原文</div>'
+    + '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px"><span class="rc-i rc-i-pin"></span> 原文</div>'
     + '<div style="color:var(--rc-text-strong);white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
   if (context && context.trim() !== lastSelText.trim()) {
-    html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px">📖 上下文</div>'
+    html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px"><span class="rc-i rc-i-book"></span> 上下文</div>'
       + '<div style="color:var(--rc-text-muted);white-space:pre-wrap">' + _esc(context) + '</div>';
   }
   html += '<div style="margin-top:12px;color:var(--rc-text-dim)">↓ 在下方输入问题，AI 会结合原文和上下文回答</div></div>';
@@ -734,7 +734,7 @@ window.onToNote = async () => {
   if (name === null) return;
   const trimmed = (name || '').trim();
   if (!trimmed) return;
-  openResult('📝 创建笔记', lastSelText, '<div class="loading">⏳ 正在写入…</div>');
+  openResult('<span class="rc-i rc-i-note"></span> 创建笔记', lastSelText, '<div class="loading">⏳ 正在写入…</div>');
   try {
     const r = await fetch('/pdf/api/to-note', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -744,13 +744,13 @@ window.onToNote = async () => {
     if (d.ok) {
       const safeUrl = (d.obsidian_url || '').replace(/'/g,"\\'");
       document.getElementById('result-content').innerHTML =
-        '<div>✓ 笔记已创建：<code>' + d.note_path + '</code>（含 PDF 来源引用）</div>' +
+        '<div><span class="rc-i rc-i-check"></span> 笔记已创建：<code>' + d.note_path + '</code>（含 PDF 来源引用）</div>' +
         '<div style="margin-top:10px"><button onclick="location.href=\'' + safeUrl + '\'" style="background:#1a2540;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:6px;padding:6px 14px;cursor:pointer">📂 在 Obsidian 中打开</button></div>';
     } else {
-      document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
+      document.getElementById('result-content').innerHTML = '<div style="color:#c00"><span class="rc-i rc-i-close"></span> ' + (d.error || '失败') + '</div>';
     }
   } catch (e) {
-    document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+    document.getElementById('result-content').innerHTML = '<div style="color:#c00"><span class="rc-i rc-i-close"></span> ' + e.message + '</div>';
   }
 };
 

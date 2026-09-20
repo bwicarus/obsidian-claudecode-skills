@@ -30,7 +30,74 @@ if (window.__bwPwaProviderOnly) return;
     danger: 'rgba(255,69,58,.20)', dangerText: '#ff453a',
     warn: '#ff9f0a', purple: '#bf5af2', indigo: '#5e5ce6', yellow: '#ffd60a'
   };
+  // ── SF Symbols 图标桥（用户 2026-09-20：「不能直接使用苹果提供的页面元素容器么」）──
+  //
+  // 界面上原本有 357 个 emoji 当图标用，这是「整体还是像网页」最大的单一来源：
+  // emoji 是彩色的、笔画粗细各异、跟文字基线也对不齐；苹果自家一个都不用。
+  //
+  // 做法：图标是一个 <span>，靠 CSS mask + currentColor 上色，所以它跟着按钮的
+  // 文字颜色走（选中变蓝、危险变红），不必为每种颜色存一份。mask 的来源两档：
+  //   · App 内 → 环回服务把 UIImage(systemName:) 渲染成图发来，**是真的 SF Symbols**
+  //   · 扩展/桌面 → 回落到下面这份手绘 SVG（同样的 1.8 描边、圆头圆角）
+  // 两边同一份 CSS、同一个调用，**不分叉**。
+  var ICONS = {
+    check:{s:'checkmark',d:'M4.5 12.5l5 5 10-11'},
+    close:{s:'xmark',d:'M6 6l12 12M18 6L6 18'},
+    trash:{s:'trash',d:'M4 7h16M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1zM6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13'},
+    gear:{s:'gearshape',d:'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM12 3v2.5M12 18.5V21M21 12h-2.5M5.5 12H3M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8M18.4 18.4l-1.8-1.8M7.4 7.4L5.6 5.6'},
+    search:{s:'magnifyingglass',d:'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16 16l4.5 4.5'},
+    book:{s:'book',d:'M5 4h9a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2V4zM5 4a2 2 0 0 0-2 2v12a2 2 0 0 1 2-2h11'},
+    pencil:{s:'pencil',d:'M4 20h5L20 9l-5-5L4 15v5z'},
+    star:{s:'star',d:'M12 3.8l2.6 5.3 5.8.9-4.2 4.1 1 5.8L12 17.2 6.8 19.9l1-5.8-4.2-4.1 5.8-.9L12 3.8z'},
+    starFill:{s:'star.fill',d:'M12 3.8l2.6 5.3 5.8.9-4.2 4.1 1 5.8L12 17.2 6.8 19.9l1-5.8-4.2-4.1 5.8-.9L12 3.8z' ,f:1},
+    bolt:{s:'bolt',d:'M13.5 3L5 13.5h6L10.5 21 19 10.5h-6L13.5 3z'},
+    speaker:{s:'speaker.wave.2',d:'M4 9.5v5h3.5L12 19V5L7.5 9.5H4zM16 9a4 4 0 0 1 0 6M18.8 6.5a8 8 0 0 1 0 11'},
+    chart:{s:'chart.bar',d:'M4 20h16M7.5 20v-6M12 20V7M16.5 20v-9'},
+    note:{s:'note.text',d:'M5 4h14v16H5zM8 9h8M8 13h8M8 17h5'},
+    pin:{s:'mappin',d:'M12 21s6.5-7 6.5-11a6.5 6.5 0 1 0-13 0C5.5 14 12 21 12 21zM12 8.5a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6z'},
+    shuffle:{s:'shuffle',d:'M4 7h3.5l9 10H20M4 17h3.5l9-10H20M17.5 4.5L20 7l-2.5 2.5M17.5 14.5L20 17l-2.5 2.5'},
+    arrowRight:{s:'arrow.right',d:'M4.5 12h14M13 6.5l5.5 5.5-5.5 5.5'},
+    clipboard:{s:'doc.on.clipboard',d:'M9 4h6v3H9zM7 6H6a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-1'},
+    brush:{s:'paintbrush',d:'M16 4l4 4-8 8H8v-4l8-8zM8 16l-3 4 4-3'},
+    eye:{s:'eye',d:'M2.5 12S6 6 12 6s9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6zM12 9.3a2.7 2.7 0 1 0 0 5.4 2.7 2.7 0 0 0 0-5.4z'},
+    scissors:{s:'scissors',d:'M6.5 4.5L17 17M17.5 4.5L7 17M6 17.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z'},
+    globe:{s:'globe',d:'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17zM3.7 12h16.6M12 3.5c2.2 2.3 3.3 5.3 3.3 8.5s-1.1 6.2-3.3 8.5c-2.2-2.3-3.3-5.3-3.3-8.5S9.8 5.8 12 3.5z'},
+    plus:{s:'plus',d:'M12 5v14M5 12h14'},
+    minus:{s:'minus',d:'M5 12h14'},
+    chevronDown:{s:'chevron.down',d:'M6 9.5l6 6 6-6'},
+    ellipsis:{s:'ellipsis',d:'M6 12h.01M12 12h.01M18 12h.01'},
+    card:{s:'rectangle.on.rectangle',d:'M8 4h12v12H8zM4 8v12h12'},
+    bookFill:{s:'book.closed.fill',d:'M6 4h11a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z',f:1},
+    reload:{s:'arrow.clockwise',d:'M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5'},
+    lightbulb:{s:'lightbulb',d:'M9 17h6M10 20h4M12 3a6 6 0 0 0-3.5 10.9V16h7v-2.1A6 6 0 0 0 12 3z'},
+    chat:{s:'bubble.left',d:'M20 5H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3v4l4.5-4H20a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1z'},
+    eraser:{s:'eraser',d:'M8 20h12M15.5 4.5l4 4L10 18H6l-1.5-1.5L15.5 4.5z'},
+    lasso:{s:'lasso',d:'M12 4c4.4 0 8 2.2 8 5s-3.6 5-8 5c-1.3 0-2.6-.2-3.7-.6M8.3 13.4C6.3 12.5 5 11.1 5 9.5M7 15.5c0 2 1 3 1 4M8 19.5a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 0 0 0-2.4z'},
+    books:{s:'books.vertical',d:'M5 4h3v16H5zM10 4h3v16h-3zM16.2 4.6l2.9.8-4 14.6-2.9-.8z'},
+    bell:{s:'bell',d:'M12 4a5 5 0 0 0-5 5v4l-1.5 3h13L17 13V9a5 5 0 0 0-5-5zM10 20a2 2 0 0 0 4 0'}
+  };
+  function _sfBase() {
+    try {
+      var v = String(window.__BW_NATIVE_LOCAL_BASE_PATH__ || '');
+      return /^\/r\/[a-f0-9]{64}$/.test(v) ? v + '/native-api/sf-symbol' : '';
+    } catch (_) { return ''; }
+  }
+  function _iconCss() {
+    var sf = _sfBase(), out = [];
+    Object.keys(ICONS).forEach(function (k) {
+      var ic = ICONS[k];
+      // ⚠ mask 看的是 alpha，所以回落 SVG 用不透明描边即可，颜色无所谓。
+      var fallback = "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg'"
+        + " viewBox='0 0 24 24' fill='" + (ic.f ? 'black' : 'none') + "' stroke='black' stroke-width='1.8'"
+        + " stroke-linecap='round' stroke-linejoin='round'><path d='" + ic.d + "'/></svg>\")";
+      var src = sf ? ('url("' + sf + '?name=' + ic.s + '&size=20")') : fallback;
+      out.push('.rc-i-' + k + '{-webkit-mask-image:' + src + ';mask-image:' + src + '}');
+    });
+    return out.join('');
+  }
+
   var injected = false;
+  var _iconStyle = null;
   function inject() {
     if (injected) return; injected = true;
     var s = document.createElement('style'); s.id = 'rc-ui-kit';
@@ -89,6 +156,13 @@ if (window.__bwPwaProviderOnly) return;
   background-repeat:no-repeat;background-position:right 10px center;
   touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 @media (pointer:coarse){.rc-ui-select{min-height:var(--rc-hit)}}
+/* 图标：一个 span，用 mask + currentColor 上色，所以它跟着文字颜色走。
+   尺寸按 em，跟着所在文字一起缩放 —— 这正是 SF Symbols 与文字的关系。 */
+.rc-i{display:inline-block;width:1.15em;height:1.15em;vertical-align:-.19em;flex:none;
+  background-color:currentColor;
+  -webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
+  -webkit-mask-position:center;mask-position:center;
+  -webkit-mask-size:contain;mask-size:contain}
 /* iOS 拨动开关。设置里的 checkbox 在 iOS 上就是这个样子，不是方形勾选框。
    尺寸按苹果的 51×31 缩了一档（44×26）—— 原尺寸会把这套本来紧凑的设置行撑开。
    拨到「开」是 systemGreen，这是 iOS 的约定，不是蓝。 */
@@ -123,7 +197,13 @@ body.fs-mode .rc-topbar-pill{display:none!important}
 /* 选区浮条：对标 iOS 的编辑菜单 —— 材质底、细描边、更圆。 */
 .rc-selection-toolbar{background:var(--rc-material-thick)!important;backdrop-filter:var(--rc-blur);-webkit-backdrop-filter:var(--rc-blur);border:.5px solid var(--rc-border-popover)!important;border-radius:var(--rc-radius-popover)!important;box-shadow:var(--rc-shadow-pop)!important;color:var(--rc-text)!important}
 `;
+    // 图标规则单独一张表：App 里要用真 SF Symbols，而 __BW_NATIVE_LOCAL_BASE_PATH__
+    // 是 App 注入的，注入时机不一定早于这里 —— 分开一张表，取不到就先用回落，
+    // 之后 RC.ui.refreshIcons() 能只换这一张，不动其它样式。
     document.head.appendChild(s);
+    _iconStyle = document.createElement('style'); _iconStyle.id = 'rc-ui-icons';
+    _iconStyle.textContent = _iconCss();
+    document.head.appendChild(_iconStyle);
   }
   function placeSelectionToolbar(el, rect, opts) {
     if (!el) return null; opts = opts || {}; rect = rect || {};
@@ -304,6 +384,20 @@ body.fs-mode .rc-topbar-pill{display:none!important}
     version: 'reader-ui/2', tokens: TOKENS,
     inject: inject,
     token: function (name) { return TOKENS[name]; },
+    /** 一个图标。App 内是真 SF Symbols，别处回落手绘 SVG；两边同一个调用。 */
+    icon: function (name, opts) {
+      if (!ICONS[name]) return '';
+      opts = opts || {};
+      var cls = 'rc-i rc-i-' + name + (opts.cls ? ' ' + opts.cls : '');
+      var t = opts.title ? ' title="' + String(opts.title).replace(/"/g, '&quot;') + '"' : '';
+      var st = opts.style ? ' style="' + String(opts.style).replace(/"/g, '&quot;') + '"' : '';
+      return '<span class="' + cls + '"' + t + st + ' aria-hidden="true"></span>';
+    },
+    /** App 注入环回路径晚于样式注入时，调它把图标换成真 SF Symbols。 */
+    refreshIcons: function () {
+      if (_iconStyle) _iconStyle.textContent = _iconCss();
+    },
+    iconNames: function () { return Object.keys(ICONS); },
     isDictionaryWord: isDictionaryWord,
     rangeHitTest: rangeHitTest,
     placeSelectionToolbar: placeSelectionToolbar,

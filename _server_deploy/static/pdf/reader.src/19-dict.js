@@ -5,7 +5,7 @@ async function dictStream(word, ctx) {
   });
   window.dlog?.(`dictStream word="${word}" file=${FILE_REL?'Y':'N'} page=${currentPage} ctxLen=${ctx?.length||0}`);
   // 立刻 openResult 占位，避免空等
-  openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
+  openResult('<span class="rc-i rc-i-book"></span> ' + word, word, '<div class="loading">⏳ 查词中…</div>');
   const _optPw = _charSel?.pw;   // 乐观下划线目标页（查词时所在页）
   const myReq = _resultReqId;    // 本次查词的请求序号；被新结果框作废后，后到的 SSE 渲染一律丢弃
   // 无论 SSE / JSON / 失败：1.8s 后无条件触发一次下划线刷新（vocab note 写盘耗时）
@@ -32,7 +32,7 @@ async function dictStream(word, ctx) {
     if (s.phon_us) head.push(`<span style="font-style:italic">US ${esc(s.phon_us)}</span>`);
     if (s.phon_uk) head.push(`<span style="font-style:italic">UK ${esc(s.phon_uk)}</span>`);
     if (s.freq_bnc) head.push(`<span style="color:#5a6680;font-size:11px">BNC #${s.freq_bnc}</span>`);
-    if (s.audio_us) head.push(`<button onclick="new Audio('${esc(s.audio_us)}').play()" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>`);
+    if (s.audio_us) head.push(`<button onclick="new Audio('${esc(s.audio_us)}').play()" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0"><span class="rc-i rc-i-speaker"></span></button>`);
     html += `<div style="display:flex;gap:8px;align-items:center;color:var(--rc-text-strong);font-size:13px">${head.join(' · ')}</div>`;
     if (s.lemma && s.lemma !== word) {
       html += `<div style="margin-top:4px;color:var(--rc-text-dim);font-size:11px">原型：<code>${esc(s.lemma)}</code>${s.forms?.length?'（'+s.forms.map(esc).join('/')+'）':''}</div>`;
@@ -68,8 +68,8 @@ async function dictStream(word, ctx) {
     if (va) {
       va.className = 'show';
       va.innerHTML =
-        `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>` +
-        `<button onclick="markVocabKnown('${esc(s.lemma||word)}', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词">✓ 已掌握</button>` +
+        `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px"><span class="rc-i rc-i-card"></span> 加入 Anki</button>` +
+        `<button onclick="markVocabKnown('${esc(s.lemma||word)}', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词"><span class="rc-i rc-i-check"></span> 已掌握</button>` +
         (s.sources_hit.length
           ? `<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`
           : `<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>`);
@@ -186,7 +186,7 @@ window.markVocabKnown = async (lemma, btn) => {
     });
     const d = await r.json().catch(() => ({}));
     if (d.ok) {
-      btn.textContent = '✓ 已掌握 100%';
+      btn.innerHTML = _mi('check') + ' 已掌握 100%';
       btn.style.background = '#1f5132'; btn.style.borderColor = '#3ba566'; btn.style.color = '#cdf5d9';
       btn.style.opacity = '1';
       refreshVocabUnderlinesForAllPages?.();   // 掌握后该词不再标生词下划线
@@ -265,14 +265,14 @@ function _openHlPopoverNative(h, anchorDiv, pw) {
     <div class="hl-snip-wrap" data-id="${escHtml(h.id)}">
       <div class="hl-snip">
         <div class="hl-snip-content">
-          ${h.text ? `<div class="hl-snip-row text"><span class="row-lbl">📌 选中</span>${escHtml(h.text)}</div>` : ''}
-          ${h.sentence ? `<div class="hl-snip-row sentence"><span class="row-lbl">📖 所在句</span>${escHtml(h.sentence)}</div>` : ''}
+          ${h.text ? `<div class="hl-snip-row text"><span class="row-lbl"><span class="rc-i rc-i-pin"></span> 选中</span>${escHtml(h.text)}</div>` : ''}
+          ${h.sentence ? `<div class="hl-snip-row sentence"><span class="row-lbl"><span class="rc-i rc-i-book"></span> 所在句</span>${escHtml(h.sentence)}</div>` : ''}
           ${h.body ? `<div class="hl-snip-row body"><span class="row-lbl">${kindLbl}</span>${escHtml(h.body)}</div>` : ''}
           ${(!h.text && !h.sentence && !h.body) ? `<div class="hl-snip-row text" style="color:#7a8497">（无文字内容）</div>` : ''}
         </div>
         <div class="hl-snip-circle" title="按住左滑显示删除"></div>
       </div>
-      <button class="hl-snip-del-row" type="button" title="删除高亮">🗑</button>
+      <button class="hl-snip-del-row" type="button" title="删除高亮"><span class="rc-i rc-i-trash"></span></button>
     </div>
     <div class="row"><span class="row-lbl">🎨 颜色</span>${colorsHtml}</div>
     <textarea id="hl-note" placeholder="自定义备注（可空）">${escHtml(h.note || '')}</textarea>
@@ -540,7 +540,7 @@ function _jpPollZh(word) {
 }
 async function dictStreamJP(word, ctx) {
   clearInterval(_jpPollTimer);   // 取消上一个词的中译轮询，避免串到当前词
-  openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
+  openResult('<span class="rc-i rc-i-book"></span> ' + word, word, '<div class="loading">⏳ 查词中…</div>');
   const myReq = _resultReqId;
   const contentEl = document.getElementById('result-content');
   let d;
@@ -595,9 +595,9 @@ async function dictStreamJP(word, ctx) {
     va.className = 'show';
     const bs = 'border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px';
     va.innerHTML =
-      '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '">🔊 朗读</button>' +
-      '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '">🎴 加入 Anki</button>' +
-      '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%">✓ 已掌握</button>';
+      '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '"><span class="rc-i rc-i-speaker"></span> 朗读</button>' +
+      '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '"><span class="rc-i rc-i-card"></span> 加入 Anki</button>' +
+      '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%"><span class="rc-i rc-i-check"></span> 已掌握</button>';
   }
   return true;
 }

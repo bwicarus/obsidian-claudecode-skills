@@ -835,9 +835,9 @@ window._followupAsk = async () => {
     });
     if (myReq !== _resultReqId) return;
     if (res.ok && res.text) render(res.text);
-    else if (!res.ok) aDiv.innerHTML = '<span style="color:#c00">✗ ' + (res.error || '失败') + '</span>';
+    else if (!res.ok) aDiv.innerHTML = '<span style="color:#c00"><span class="rc-i rc-i-close"></span> ' + (res.error || '失败') + '</span>';
     else aDiv.innerHTML = '(无回答)';
-  } catch (e) { aDiv.innerHTML = '<span style="color:#c00">✗ ' + e.message + '</span>'; }
+  } catch (e) { aDiv.innerHTML = '<span style="color:#c00"><span class="rc-i rc-i-close"></span> ' + e.message + '</span>'; }
   contentEl.scrollTop = contentEl.scrollHeight;
   try { addResultPickers(); } catch (_) {}   // 追问回答也加「+ 选段」，制 Anki(ankiFromResult)含全框选中
 };

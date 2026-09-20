@@ -274,7 +274,7 @@ if (window.__bwPwaProviderOnly) return;
     _injectCss();
     box = document.createElement('div'); box.id = 'rc-vplayer';
     box.innerHTML =
-      '<div class="rcvp-bar"><span class="rcvp-grip">⠿</span><span class="rcvp-title"></span><button class="rcvp-list" title="字幕列表(按时间轴显示全文,点句子跳转)">📜</button><button class="rcvp-x" title="关闭">✕</button></div>' +
+      '<div class="rcvp-bar"><span class="rcvp-grip">⠿</span><span class="rcvp-title"></span><button class="rcvp-list" title="字幕列表(按时间轴显示全文,点句子跳转)">📜</button><button class="rcvp-x" title="关闭"><span class="rc-i rc-i-close"></span></button></div>' +
       '<div class="rcvp-body">' +
         '<div class="rcvp-left">' +
           '<div class="rcvp-stage"><div class="rcvp-fallback"><div class="rcvp-fallback-msg">正在加载内置播放器…</div><button type="button" class="rcvp-external">在视频平台打开</button></div><div class="rcvp-sub" style="display:none"><div class="rcvp-zh"></div><div class="rcvp-en"></div></div></div>' +

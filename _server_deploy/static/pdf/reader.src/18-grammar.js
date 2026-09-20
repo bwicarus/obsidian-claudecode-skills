@@ -215,8 +215,8 @@ function _setBlockPoints(block, jsonStr) {
   wrap.classList.remove('gb-pending');
   wrap.innerHTML = arr.map(a => `
     <div class="gb-ana">
-      <div class="a-head">📊 ${_esc(a.point || a.node_name || '')}</div>
-      ${a.phrase ? `<div class="a-phrase">📍 ${_esc(a.phrase)}</div>` : ''}
+      <div class="a-head"><span class="rc-i rc-i-chart"></span> ${_esc(a.point || a.node_name || '')}</div>
+      ${a.phrase ? `<div class="a-phrase"><span class="rc-i rc-i-pin"></span> ${_esc(a.phrase)}</div>` : ''}
       <div class="a-body">${_esc(a.explanation || '')}${(a.examples||[]).length ? `<ul class="a-ex">${(a.examples||[]).map(e=>'<li>'+_esc(e)+'</li>').join('')}</ul>` : ''}</div>
     </div>`).join('');
   wrap.querySelectorAll('.gb-ana').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
@@ -362,16 +362,16 @@ function _addLoadingBlock(id, sentence, text) {
   block.innerHTML =
     `<div class="gb-header">
        <span class="gb-title" title="${_esc(sentence)}">${_esc(summary)}</span>
-       <span class="gb-del" title="删除这条（同句下次重新分析）">🗑</span>
+       <span class="gb-del" title="删除这条（同句下次重新分析）"><span class="rc-i rc-i-trash"></span></span>
        <span class="gb-caret">▶</span>
      </div>
-     <div class="gb-trans gb-pending">🌐 翻译中…</div>
+     <div class="gb-trans gb-pending"><span class="rc-i rc-i-globe"></span> 翻译中…</div>
      <div class="gb-content"><div class="gb-loading">⏳ 结构 / 语法分析中…</div></div>
      <div class="gb-fu-answers"></div>
      <div class="gb-followup">
        <input class="gb-fu-input" placeholder="继续追问这句的语法…" onkeydown="if(event.key==='Enter'){event.preventDefault();_grammarFollowup('${id}');}">
        <button onclick="_grammarFollowup('${id}')">追问</button>
-       <button class="gb-anki-btn" onclick="_grammarAnki('${id}')" title="整句+译文+分析做成 Anki 卡">🎴</button>
+       <button class="gb-anki-btn" onclick="_grammarAnki('${id}')" title="整句+译文+分析做成 Anki 卡"><span class="rc-i rc-i-card"></span></button>
      </div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => {
@@ -490,8 +490,8 @@ function _fillGrammarBlock(block, d, sentence) {
   const anaHtml = analyses.length
     ? `<div class="gb-analyses">${analyses.map((a,i)=>`
         <div class="gb-ana" data-i="${i}">
-          <div class="a-head">📊 ${_esc(a.node_name||a.node_id||'')}</div>
-          ${a.phrase?`<div class="a-phrase">📍 ${_esc(a.phrase)}</div>`:''}
+          <div class="a-head"><span class="rc-i rc-i-chart"></span> ${_esc(a.node_name||a.node_id||'')}</div>
+          ${a.phrase?`<div class="a-phrase"><span class="rc-i rc-i-pin"></span> ${_esc(a.phrase)}</div>`:''}
           <div class="a-body">${_esc(a.explanation||'')}${(a.examples||[]).length?`<ul class="a-ex">${(a.examples||[]).map(e=>'<li>'+_esc(e)+'</li>').join('')}</ul>`:''}</div>
         </div>`).join('')}</div>`
     : (isSpacy ? `<div class="gb-analyses gb-pending"><div class="gb-ana"><div class="a-head" style="color:#7a8497;font-weight:400">⏳ 语法点分析中…</div></div></div>` : '');

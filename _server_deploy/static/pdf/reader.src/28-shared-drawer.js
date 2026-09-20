@@ -174,7 +174,23 @@
     const act = panel.querySelector('.ep-side-pane.active');
     let anchor = bar ? bar.firstChild : null;
     sharedTabBtns.forEach(b => {
+      // ⚠ 只搬新 tab 栏**没有**的那些 —— 这段代码的本意是保住 rc-assistant 注入的
+      //   asst / 操作，不是把 init 里已经声明过的 grammar/vocab/kg/hist 也搬回来。
+      //   一起搬的结果是同一个 pane 两个按钮（2026-09-20 用户：「同一个内容出现两个
+      //   图标，有字和无字的」），而且两个都会被标成 active。
+      if (bar && bar.querySelector('.ep-side-tab[data-pane="' + b.dataset.pane + '"]')) {
+        return;
+      }
       b.classList.remove('side-tab'); b.classList.add('ep-side-tab');
+      // ⚠ 旧按钮的标签是**裸文本节点**（`<svg…/>助手`），不在 .ep-side-tab-lb 里，
+      //   于是窄屏那条「只显图标」的规则对它无效 —— 旧的永远带字、新的永远不带，
+      //   并排就是不一致。搬进来时统一包一层，让同一条规则管得到。
+      Array.from(b.childNodes).forEach(n => {
+        if (n.nodeType !== 3 || !n.textContent.trim()) return;
+        const lb = document.createElement('span');
+        lb.className = 'ep-side-tab-lb'; lb.textContent = n.textContent.trim();
+        b.replaceChild(lb, n);
+      });
       if (bar) bar.insertBefore(b, anchor);
       b.classList.toggle('active', !!(act && act.dataset.pane === b.dataset.pane));
     });

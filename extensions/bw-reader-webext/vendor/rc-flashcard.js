@@ -364,7 +364,7 @@ if (window.__bwPwaProviderOnly) return;
         ? '⏳ 评分待同步'
         : (c._ratingPending
           ? '⏳ 正在提交评分'
-          : '✓ 已复习 · 距下次复习 <b>' + esc(nextLabel(c._next)) + '</b>');
+          : '<span class="rc-i rc-i-check"></span> 已复习 · 距下次复习 <b>' + esc(nextLabel(c._next)) + '</b>');
       return '<div class="fc-card"><div class="fc-donehd">' + doneLabel + '</div>' + df + '<div class="fc-back">' + db + '</div></div>';
     }
     if (c._st === 'draft') {
@@ -377,8 +377,8 @@ if (window.__bwPwaProviderOnly) return;
       // 外层不滚、内层 .fc-draft-body 滚，按钮行在 flex 里是不缩的那一项。
       return '<div class="fc-card fc-draftcard">' +
         '<div class="fc-draft-body">' + b + '</div>' +
-        '<div class="fc-btns"><button class="fc-del" data-fc="del">🗑 删除</button>' +
-        '<button class="fc-add" data-fc="add">✓ 保存到 Reader 卡库</button></div>' +
+        '<div class="fc-btns"><button class="fc-del" data-fc="del"><span class="rc-i rc-i-trash"></span> 删除</button>' +
+        '<button class="fc-add" data-fc="add"><span class="rc-i rc-i-check"></span> 保存到 Reader 卡库</button></div>' +
       '</div>';
     }
     if (c._st === 'preview') {

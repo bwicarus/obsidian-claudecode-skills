@@ -141,7 +141,7 @@ if (window.__bwPwaProviderOnly) return;
     mask.addEventListener('click', function (e) { if (e.target === mask) closePicker(); });
     var pop = document.createElement('div'); pop.id = 'rc-fav-pop';
     pop.innerHTML =
-      '<div class="rc-fav-h"><span class="t">⭐ 收藏到…</span><span class="x" title="关闭">✕</span></div>' +
+      '<div class="rc-fav-h"><span class="t">⭐ 收藏到…</span><span class="x" title="关闭"><span class="rc-i rc-i-close"></span></span></div>' +
       '<div class="rc-fav-sub">' + esc(itemLabel(it)) + '</div>' +
       '<div id="rc-fav-list"><div class="rc-fav-empty"><span class="rc-fav-spin"></span> 加载收藏夹…</div></div>' +
       '<div id="rc-fav-new"><input type="text" placeholder="+ 新建收藏夹(输入名字回车)" maxlength="80" enterkeyhint="done"><button>新建</button></div>';

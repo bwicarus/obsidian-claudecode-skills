@@ -49,7 +49,7 @@ try {
     <button onclick="fitWidth()" title="按页宽自适应（取消手动缩放）">↔ 适应</button>
     <button id="ruby-toggle" onclick="toggleRuby()" title="振假名 / 英文音标叠加（汉字上方注假名读音、英文词上方注音标）">あ</button>
     <button id="pagetr-toggle" onclick="togglePageTranslate()" title="整页翻译：当前页所有句子就地显示中文（再按关闭）">译页</button>
-    <button id="crop-toggle" onclick="toggleCrop()" title="去边阅读模式：隐藏每页左/右/上/下边距（在 ⚙ 设置里配各边百分比）">✂️ 去边</button>
+    <button id="crop-toggle" onclick="toggleCrop()" title="去边阅读模式：隐藏每页左/右/上/下边距（在 ⚙ 设置里配各边百分比）"><span class="rc-i rc-i-scissors"></span> 去边</button>
     <button onclick="openSearch()" title="全文搜索（全书）"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6L20 20"/></svg></button>
     {% if ui_shared %}<button onclick="window._noteCreateAtCenter && _noteCreateAtCenter()" title="便签（在当前视野中央新建;单击短条折叠/展开,长按短条移动/删除,长按内容区编辑）"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5H19V14L14 19H5Z"/><path d="M14 19V14H19"/><path d="M8 9.5H15.5"/><path d="M8 12.5H12"/></svg></button>{% endif %}
     {% if ui_shared %}<button onclick="window._upCreate && _upCreate()" title="插入我的页（真正写进 PDF:页数变化、所有阅读器可见;已有高亮/便签/墨迹等页锚自动迁移,原书先备份;页角 📝 可编辑/删除）"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="3.5" width="13" height="17" rx="2"/><path d="M12 8.5V15.5"/><path d="M8.5 12H15.5"/></svg></button>{% endif %}
@@ -64,7 +64,7 @@ try {
   </div>
   <!-- 全屏阅读时浮出的恢复按钮（点它显示顶栏） -->
   <button id="fs-restore" onclick="toggleFullscreen()" title="退出全屏：显示顶栏">⤢</button>
-  <!-- 本书语言选择已移入 ⚙ 设置面板 -->
+  <!-- 本书语言选择已移入 <span class="rc-i rc-i-gear"></span> 设置面板 -->
   <div id="main">
     <div id="pdf-loading" style="display:none;position:fixed;inset:0;z-index:1500;
          background:#0d1117ee;flex-direction:column;align-items:center;justify-content:center;
@@ -81,7 +81,7 @@ try {
              transition:width .25s;"></div>
       </div>
       <div id="pdf-loading-hint" class="dim" style="font-size:12px;color:#7d8590;"></div>
-      <button id="pdf-loading-switch" onclick="_switchToCompressed()" style="display:none;background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;margin-top:6px">⚡ 加载慢？切换到压缩版（更小更快，下次记住）</button>
+      <button id="pdf-loading-switch" onclick="_switchToCompressed()" style="display:none;background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;margin-top:6px"><span class="rc-i rc-i-bolt"></span> 加载慢？切换到压缩版（更小更快，下次记住）</button>
     </div>
     <div id="page-scrub-pop"><div class="psp-num">1 / 1</div><div class="psp-track"><div class="psp-fill"></div></div></div>
     <div id="page-container">{% if web_url %}<iframe id="wl-frame" name="bw-web-bridge:{{ web_bridge_nonce|default('')|e }}" src="/pdf/web/{% if web_rbi %}rbi{% else %}frame{% endif %}?url={{ web_url|urlencode }}&amp;__bwnav={{ web_navigation_ticket|default('')|urlencode }}" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-presentation" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;display:block;background:#fff"></iframe>{% endif %}</div>
@@ -90,33 +90,33 @@ try {
         <input id="search-input" type="search" placeholder="全文搜索（全书）…" autocomplete="off"
                oninput="_searchDebounced()" onkeydown="if(event.key==='Enter'){event.preventDefault();_runSearch();}else if(event.key==='Escape'){closeSearch();}">
         <span class="sp-stat" id="search-stat"></span>
-        <button class="sp-close" onclick="closeSearch()" title="关闭">✕</button>
+        <button class="sp-close" onclick="closeSearch()" title="关闭"><span class="rc-i rc-i-close"></span></button>
       </div>
       <div id="search-results"></div>
     </div>
     <div id="sel-toolbar">
-      <div id="hl-color-picker"><span class="lbl">🖌</span></div>
+      <div id="hl-color-picker"><span class="lbl"><span class="rc-i rc-i-brush"></span></span></div>
       <div id="sel-main">
         <div class="preview" id="sel-preview">—</div>
         <!-- 单词选中：查词（小框，第2步） -->
         <div class="btns" id="sel-btns-word" style="display:none">
-          <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
-          <button onclick="onLookupWord()" title="查词典">🔍 查词</button>
-          <button onclick="onOcrSel()" title="文字层坏掉(乱码/上标错/缺符号)时,用 Claude 视觉重新识别这块为正确文字">🔎 OCR</button>
-          <button onclick="onSearchSel()" title="用浏览器搜索选中内容">🔍 搜索</button>
+          <button onclick="onCopySel()" title="复制选中文本"><span class="rc-i rc-i-clipboard"></span> 复制</button>
+          <button onclick="onLookupWord()" title="查词典"><span class="rc-i rc-i-search"></span> 查词</button>
+          <button onclick="onOcrSel()" title="文字层坏掉(乱码/上标错/缺符号)时,用 Claude 视觉重新识别这块为正确文字"><span class="rc-i rc-i-search"></span> OCR</button>
+          <button onclick="onSearchSel()" title="用浏览器搜索选中内容"><span class="rc-i rc-i-search"></span> 搜索</button>
         </div>
         <!-- 多词/句子选中：翻译 + 解释；短词组额外显示「词组」按钮 -->
         <div class="btns" id="sel-btns-multi" style="display:none">
-          <button id="sel-phrase-btn" onclick="onPhrase()" title="当作词组：看释义/翻译 + 收藏作分词依据" style="display:none">📘 词组</button>
-          <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
-          <button onclick="onOcrSel()" title="文字层坏掉(选中是乱码/上标错/缺符号)时,用 Claude 视觉把选区重新识别成正确文字,之后复制/翻译/解释都用校正后的">🔎 OCR</button>
-          <button onclick="onTranslate()">🌐 翻译</button>
-          <button onclick="onExplain()">💡 解释</button>
-          <button onclick="onChat()">💬 对话</button>
-          <button onclick="onSearchSel()" title="用浏览器搜索选中内容">🔍 搜索</button>
+          <button id="sel-phrase-btn" onclick="onPhrase()" title="当作词组：看释义/翻译 + 收藏作分词依据" style="display:none"><span class="rc-i rc-i-bookFill"></span> 词组</button>
+          <button onclick="onCopySel()" title="复制选中文本"><span class="rc-i rc-i-clipboard"></span> 复制</button>
+          <button onclick="onOcrSel()" title="文字层坏掉(选中是乱码/上标错/缺符号)时,用 Claude 视觉把选区重新识别成正确文字,之后复制/翻译/解释都用校正后的"><span class="rc-i rc-i-search"></span> OCR</button>
+          <button onclick="onTranslate()"><span class="rc-i rc-i-globe"></span> 翻译</button>
+          <button onclick="onExplain()"><span class="rc-i rc-i-lightbulb"></span> 解释</button>
+          <button onclick="onChat()"><span class="rc-i rc-i-chat"></span> 对话</button>
+          <button onclick="onSearchSel()" title="用浏览器搜索选中内容"><span class="rc-i rc-i-search"></span> 搜索</button>
         </div>
         <div id="grammar-btn-row" style="display:none">
-          <button onclick="onGrammarAnalyze()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px" title="按跟踪的语法点分析选中片段">📊 语法分析</button>
+          <button onclick="onGrammarAnalyze()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px" title="按跟踪的语法点分析选中片段"><span class="rc-i rc-i-chart"></span> 语法分析</button>
         </div>
       </div>
     </div>
@@ -125,12 +125,12 @@ try {
 <!-- 手写笔：Apple Pencil 落笔自动画；点 FAB 开桌面手写模式 + 显示工具栏 -->
 <button id="ink-fab" onclick="inkToggle()" title="手写笔（Apple Pencil 直接画；点此开桌面/触屏手写模式）"><svg class="rc-fabi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.3 7.3L16.7 4.7L4.7 16.7L4 20L7.3 19.3Z"/><path d="M7.3 19.3L4.7 16.7"/></svg></button>
 <div id="ink-toolbar">
-  <button data-tool="pen" class="on" onclick="inkSetTool('pen',this)" title="笔">✒️</button>
+  <button data-tool="pen" class="on" onclick="inkSetTool('pen',this)" title="笔"><span class="rc-i rc-i-pencil"></span></button>
   <button data-tool="line" onclick="inkSetTool('line',this)" title="直线">／</button>
   <button data-tool="arrow" onclick="inkSetTool('arrow',this)" title="箭头">↗</button>
   <button data-tool="rect" onclick="inkSetTool('rect',this)" title="矩形">▭</button>
-  <button data-tool="region" onclick="inkSetTool('region',this)" title="共享选区笔（圈选后跨设备保存）">⬡</button>
-  <button data-tool="eraser" onclick="inkSetTool('eraser',this)" title="橡皮（点笔画删除整条）">🧹</button>
+  <button data-tool="region" onclick="inkSetTool('region',this)" title="共享选区笔（圈选后跨设备保存）"><span class="rc-i rc-i-lasso"></span></button>
+  <button data-tool="eraser" onclick="inkSetTool('eraser',this)" title="橡皮（点笔画删除整条）"><span class="rc-i rc-i-eraser"></span></button>
   <span class="ink-sep"></span>
   <button class="ink-color on" style="background:#e74c3c" onclick="inkSetColor('#e74c3c',this)" title="红"></button>
   <button class="ink-color" style="background:#3b82f6" onclick="inkSetColor('#3b82f6',this)" title="蓝"></button>
@@ -141,8 +141,8 @@ try {
   <span class="ink-sep"></span>
   <button onclick="inkUndo()" title="撤销">↶</button>
   <button onclick="inkRedo()" title="重做">↷</button>
-  <button id="ink-eye" onclick="inkToggleVisible()" title="显示/隐藏全部墨迹">👁</button>
-  <button onclick="inkClearPage()" title="清空本页墨迹" style="color:#ff8a8a">🗑</button>
+  <button id="ink-eye" onclick="inkToggleVisible()" title="显示/隐藏全部墨迹"><span class="rc-i rc-i-eye"></span></button>
+  <button onclick="inkClearPage()" title="清空本页墨迹" style="color:#ff8a8a"><span class="rc-i rc-i-trash"></span></button>
 </div>
 
 <!-- 屏幕右边缘把手：点击展开右侧面板（关闭时显示）-->
@@ -189,7 +189,7 @@ try {
 <!-- AI 设置 modal -->
 <div id="settings-mask" style="position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:2147483400" onclick="if(event.target===this) closeSettings()">
   <div style="background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:16px 20px;width:420px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column">
-    <h3 style="margin:0 0 10px;font-size:15px;color:#cfe6ff">⚙️ 设置</h3>
+    <h3 style="margin:0 0 10px;font-size:15px;color:#cfe6ff"><span class="rc-i rc-i-gear"></span> 设置</h3>
     <div class="set-tabs">
       <button type="button" class="set-tab active" data-pane="ai" onclick="_setSettingsTab('ai')">AI·翻译</button>
       <button type="button" class="set-tab" data-pane="read" onclick="_setSettingsTab('read')">阅读</button>
@@ -203,7 +203,7 @@ try {
         <div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin-bottom:16px">
           <div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">🤖 AI 引擎：脱壳 Claude CLI + Gemini（双后端自动兜底）</div>
           <div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-bottom:10px">解释 / 问 AI / 选中查询 / 翻译・例句 / 字典 AI・日语深入讲解 等所有 AI 调用，都走跟侧边栏助手同一套脱壳 Claude + Gemini 引擎（一边失败自动切另一边）。点下面按钮可按功能分别选 后端（Claude/Gemini）、型号、思考深度（Gemini 免费档优先、过载自动落付费）。</div>
-          <button type="button" onclick="(window.openModelSettings?window.openModelSettings():(window._toast&&_toast('助手模块未就绪，刷新重试')))" style="width:100%;background:#23406e;border:1px solid #3a5891;color:#dfe9ff;border-radius:6px;padding:9px 10px;font-size:13px;cursor:pointer">⚙ 打开 AI 模型设置（按功能配 后端 / 型号 / 深度）</button>
+          <button type="button" onclick="(window.openModelSettings?window.openModelSettings():(window._toast&&_toast('助手模块未就绪，刷新重试')))" style="width:100%;background:#23406e;border:1px solid #3a5891;color:#dfe9ff;border-radius:6px;padding:9px 10px;font-size:13px;cursor:pointer"><span class="rc-i rc-i-gear"></span> 打开 AI 模型设置（按功能配 后端 / 型号 / 深度）</button>
         </div>
         <div style="font-size:11px;color:#8a9bb4;margin-bottom:8px;line-height:1.6">下面两项（model / effort）是旧版逐次覆盖，已被上面的「AI 模型设置」取代，保留仅兼容；「句子翻译源」仍独立生效。</div>
         <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">模型 (model)</label>
@@ -228,7 +228,7 @@ try {
           <option value="high">high（深）</option>
           <option value="max">max（最深、最慢）</option>
         </select>
-        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">🌐 句子翻译源</label>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px"><span class="rc-i rc-i-globe"></span> 句子翻译源</label>
         <select id="set-sent-backend" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px" onchange="_toggleAiModelRow()">
           <option value="auto">auto（DeepL 有 key → MyMemory）</option>
           <option value="mymemory">MyMemory（5K/天匿名，50K/天 email 认证）</option>
@@ -304,7 +304,7 @@ try {
         </label>
         <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">开启后：在某方向改了排版(连续/双页)或去边开关，会记进该方向；旋转回来自动套用那个方向上次的设置。</div>
         <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">✂️ 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px"><span class="rc-i rc-i-scissors"></span> 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>
         <div style="display:flex;gap:8px;margin-bottom:8px">
           <label style="flex:1;font-size:11px;color:#8a9bb4">左<input type="number" id="set-crop-l" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
           <label style="flex:1;font-size:11px;color:#8a9bb4">右<input type="number" id="set-crop-r" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
@@ -328,13 +328,13 @@ try {
         </div>
         <div id="charofs-cur" style="font-size:11px;color:#7a8497;margin-bottom:8px">第 — 页　dx 0.0 · dy 0.0</div>
         <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center">
-          <button onclick="_reocrPage()" id="reocr-btn" style="background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">🔁 单页重扫(Google Vision)</button>
+          <button onclick="_reocrPage()" id="reocr-btn" style="background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer"><span class="rc-i rc-i-reload"></span> 单页重扫(Google Vision)</button>
           <button onclick="_clearReocr()" style="background:#2a1a1a;border:1px solid #5a3030;color:#e6b0b0;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">撤销重扫</button>
           <span id="reocr-status" style="font-size:11px;color:#7a8497"></span>
         </div>
         <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">没对齐：先「可视化文字框」看差多少 → 方向键微调推齐。识别错/漏/整页歪：「单页重扫」用 Google Vision 对当前页重新 OCR（~几秒，重扫后文字层即时更新）。</div>
         <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🌐 需要翻译的语言（勾选你想被<b>翻译/查词辅助</b>的语言：日语→中日词典+振假名，英语→英汉词典+语法）<br><b>没勾的语言（如中文母语）视为你已掌握 → 免于翻译查词</b>。每本书独立。</label>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px"><span class="rc-i rc-i-globe"></span> 需要翻译的语言（勾选你想被<b>翻译/查词辅助</b>的语言：日语→中日词典+振假名，英语→英汉词典+语法）<br><b>没勾的语言（如中文母语）视为你已掌握 → 免于翻译查词</b>。每本书独立。</label>
         <div id="lang-checks" style="display:flex;gap:16px;font-size:13px;color:#cfe6ff;margin-bottom:8px">
           <label style="cursor:pointer"><input type="checkbox" value="en" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">英语</label>
           <label style="cursor:pointer"><input type="checkbox" value="ja" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">日语</label>
@@ -352,7 +352,7 @@ try {
           <option value="deps">依存关系图（displaCy 弧线 + 从句切段）</option>
         </select>
         <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📊 启用语法分析（per-PDF）</label>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px"><span class="rc-i rc-i-chart"></span> 启用语法分析（per-PDF）</label>
         <div style="font-size:10px;color:#7a8497;margin-bottom:6px;line-height:1.5">
           勾选本 PDF 用哪些语法 KG。具体跟踪哪些语法点请去
           <a href="/skilltree/grammar-demo/" target="_blank" style="color:#60a5fa">技能树页面</a>
@@ -365,7 +365,7 @@ try {
 
       <!-- ════ pane: 高亮 ════ -->
       <div class="set-pane" data-pane="hl" style="display:none">
-        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px"><span class="rc-i rc-i-brush"></span> 高亮颜色（点击 <span class="rc-i rc-i-close"></span> 删除）</label>
         <div id="set-hl-colors" class="set-hl-row"></div>
         <div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">
           <input type="color" id="set-hl-new" value="#ffd166" style="width:42px;height:30px;border:none;background:transparent;cursor:pointer;padding:0">
@@ -393,8 +393,8 @@ try {
     </div>
     <div class="actions">
       <div id="vocab-actions"></div>
-      <button id="result-mark-btn" onclick="markFromResult()" title="给原始选中加 PDF 高亮（用上次颜色 + 把当前回答存到备注）" style="background:#244470;color:#fff;border-color:#3b6db5">🖌 标记到 PDF</button>
-      <button id="result-anki-btn" onclick="ankiFromResult()" title="把「选中原文 + 这条解释」做成 Anki 卡片（后台，不挡界面）" style="background:#13351f;color:#7ee2b8;border-color:#34d399">🎴 制 Anki</button>
+      <button id="result-mark-btn" onclick="markFromResult()" title="给原始选中加 PDF 高亮（用上次颜色 + 把当前回答存到备注）" style="background:#244470;color:#fff;border-color:#3b6db5"><span class="rc-i rc-i-brush"></span> 标记到 PDF</button>
+      <button id="result-anki-btn" onclick="ankiFromResult()" title="把「选中原文 + 这条解释」做成 Anki 卡片（后台，不挡界面）" style="background:#13351f;color:#7ee2b8;border-color:#34d399"><span class="rc-i rc-i-card"></span> 制 Anki</button>
       <button onclick="closeResult()">关闭</button>
     </div>
   </div>
@@ -409,7 +409,7 @@ try {
 <!-- 草稿 badge：永远在右下角；选中 snippets ≥ 1 时显示 -->
 <div id="draft-badge" onclick="openDraftModal()" title="已选段落">
   <div style="display:flex;flex-direction:column;align-items:center;line-height:1.1">
-    <span class="icon">📋</span>
+    <span class="icon"><span class="rc-i rc-i-clipboard"></span></span>
     <span class="count" id="draft-count">0</span>
   </div>
 </div>
@@ -418,14 +418,14 @@ try {
 <div id="draft-mask" onclick="if(event.target===this) closeDraftModal()">
   <div id="draft-modal">
     <h3>
-      <span>📋 已选段落 <span id="draft-modal-count" style="color:#7a8497;font-size:12px;font-weight:400"></span></span>
+      <span><span class="rc-i rc-i-clipboard"></span> 已选段落 <span id="draft-modal-count" style="color:#7a8497;font-size:12px;font-weight:400"></span></span>
       <button class="clear-all" onclick="clearAllDrafts()">全部清空</button>
     </h3>
     <div id="draft-list">…</div>
     <div id="draft-actions">
-      <button class="primary" onclick="createNoteFromDrafts()">📝 创建笔记</button>
-      <button onclick="createAnkiFromDrafts()">🎴 创建 Anki</button>
-      <button onclick="createBothFromDrafts()">📚 笔记 + Anki</button>
+      <button class="primary" onclick="createNoteFromDrafts()"><span class="rc-i rc-i-note"></span> 创建笔记</button>
+      <button onclick="createAnkiFromDrafts()"><span class="rc-i rc-i-card"></span> 创建 Anki</button>
+      <button onclick="createBothFromDrafts()"><span class="rc-i rc-i-books"></span> 笔记 + Anki</button>
     </div>
   </div>
 </div>
@@ -535,7 +535,7 @@ window.toggleGrammarPanel = function () {
       shown = true;
       var bar = document.createElement('div');
       bar.style.cssText = 'position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:3000;background:#244470;border:1px solid #3b6db5;border-top:none;color:#cfe6ff;border-radius:0 0 10px 10px;padding:7px 14px;font-size:13px;display:flex;gap:10px;align-items:center;box-shadow:0 4px 16px rgba(0,0,0,.4)';
-      bar.innerHTML = '界面有新版本 <button id="bw-upd-go" style="background:#3b6db5;border:0;color:#fff;border-radius:7px;padding:5px 12px;font-size:13px;cursor:pointer">⟳ 更新(数据全保留)</button><button id="bw-upd-x" style="background:transparent;border:0;color:#8a9bb4;font-size:14px;cursor:pointer">✕</button>';
+      bar.innerHTML = '界面有新版本 <button id="bw-upd-go" style="background:#3b6db5;border:0;color:#fff;border-radius:7px;padding:5px 12px;font-size:13px;cursor:pointer">⟳ 更新(数据全保留)</button><button id="bw-upd-x" style="background:transparent;border:0;color:#8a9bb4;font-size:14px;cursor:pointer"><span class="rc-i rc-i-close"></span></button>';
       document.body.appendChild(bar);
       document.getElementById('bw-upd-x').onclick = function () { bar.remove(); };
       document.getElementById('bw-upd-go').onclick = function () {

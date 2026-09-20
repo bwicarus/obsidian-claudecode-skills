@@ -43,6 +43,8 @@
   var _boundVocabularyState = null;
   var _unsubscribeVocabularyState = null;
   var _norm = function (s) { return String(s || '').trim().replace(/\s+/g, ' ').toLowerCase(); };
+  // 图标片段：RC.ui 还没注入时回落成空串（宁可没图标，也不要吐出半个标记）。
+  function _mi(n) { try { return (window.RC && RC.ui && RC.ui.icon(n)) || ''; } catch (_) { return ''; } }
 
   function _phraseSpec(text, isJa) {
     return { kind: 'phrase', language: isJa ? 'ja' : 'en', text: text };
@@ -57,13 +59,13 @@
   function _paintFavButton(btn, enabled) {
     if (!btn) return;
     btn.disabled = false;
-    btn.textContent = enabled ? '★ 已收藏' : '☆ 收藏为词组';
+    btn.innerHTML = enabled ? _mi('starFill') + ' 已收藏' : _mi('star') + ' 收藏为词组';
     if (btn.classList && btn.classList.toggle) btn.classList.toggle('wp-anki', enabled);
   }
   function _paintMasterButton(btn, enabled) {
     if (!btn) return;
     btn.disabled = false;
-    btn.textContent = enabled ? '✓ 已掌握 100' : '☆ 标记掌握';
+    btn.innerHTML = enabled ? _mi('check') + ' 已掌握 100' : _mi('star') + ' 标记掌握';
     btn.title = enabled ? '点击取消掌握（恢复词组下划线）' : '标记掌握 100（该词组不再标生词下划线）';
     if (btn.classList && btn.classList.toggle) btn.classList.toggle('wp-anki', enabled);
   }
@@ -668,10 +670,10 @@
         }).join('') + '</div>';
       }
       var grammarBtn = (_ctx && typeof _ctx.onGrammar === 'function')
-        ? '<button onclick="_epPhraseGrammar()" title="语法分析">📊 语法</button>' : '';
+        ? '<button onclick="_epPhraseGrammar()" title="语法分析"><span class="rc-i rc-i-chart"></span> 语法</button>' : '';
       pop.innerHTML =
         '<div class="wp-head"><span class="wp-word">' + esc(text) + '</span>' + phon +
-        (reading ? '<button class="wp-speak" onclick="_epPhraseSpeak()" title="发音">🔊</button>' : '') + '</div>' +
+        (reading ? '<button class="wp-speak" onclick="_epPhraseSpeak()" title="发音"><span class="rc-i rc-i-speaker"></span></button>' : '') + '</div>' +
         inflectHtml +
         '<div class="wp-def" onclick="_epPhraseExplain()" title="点开看 AI 完整讲解">' + (zh ? esc(zh) :
           '<span style="color:#c66">' + esc(result.error || 'App 本地日语词典未命中') + '</span>') +
@@ -679,9 +681,9 @@
         '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
         '<div class="wp-actions">' +
         '<button id="ep-phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_epPhraseFav(this)">' +
-        (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
+        (fav ? '<span class="rc-i rc-i-starFill"></span> 已收藏' : '<span class="rc-i rc-i-star"></span> 收藏为词组') + '</button>' +
         '<button id="ep-phrase-master-btn" class="' + (_state.mastered ? 'wp-anki' : '') + '" onclick="_epPhraseMaster(this)" title="' + (_state.mastered ? '点击取消掌握' : '掌握度设为100%') + '">' +
-        (_state.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
+        (_state.mastered ? '<span class="rc-i rc-i-check"></span> 已掌握 100' : '<span class="rc-i rc-i-star"></span> 标记掌握') + '</button>' +
         grammarBtn +
         '</div>';
       _position(pop, opts.rect);   // 内容定型后再夹一次进视口

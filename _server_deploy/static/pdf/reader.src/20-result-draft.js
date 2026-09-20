@@ -215,7 +215,7 @@ window.openDraftModal = () => {
           </div>
           <div class="sel-circle" title="${d.selected?'已选（点击取消）':'未选（点击勾选）'}"></div>
         </div>
-        <button class="draft-item-del-row" type="button" title="删除">🗑</button>
+        <button class="draft-item-del-row" type="button" title="删除"><span class="rc-i rc-i-trash"></span></button>
       </div>
     `).join('');
     // 绑定每条 draft 的交互

@@ -26,8 +26,8 @@
   // 快捷栏:共享构建器 rcBuildQuickBar(在则空容器等它填,与 EPUB 同一份来源 → 按钮永不分叉;
   //   历史「总结本页/本页生词」不再纳入)。legacy 模式(rc-assistant 未加载)→ native 兜底同款三按钮。
   var _quickNative = window.rcBuildQuickBar ? '' :
-      '<button data-q="clear">🗑 清空</button>' +
-      '<button data-q="models">⚙ 模型</button>';
+      '<button data-q="clear"><span class="rc-i rc-i-trash"></span> 清空</button>' +
+      '<button data-q="models"><span class="rc-i rc-i-gear"></span> 模型</button>';
   pane.innerHTML =
     '<div id="asst-thread"></div>' +
     '<div id="asst-quick">' + _quickNative + '</div>' +
@@ -1176,7 +1176,7 @@
       else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
       else if (ev === 'undo' && parsed && parsed.undo_id) {
         var _ujp = parsed.page ? ' <button class="asst-jump" data-page="' + esc(parsed.page) + '">↗ 跳转</button>' : '';
-        addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
+        addMsg('asst-a', '<span class="rc-i rc-i-check"></span> ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
       }
       else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
     }
@@ -1260,7 +1260,7 @@
         if (d.status === 'running') { if (d.step) line.innerHTML = '<span class="asst-tool">⏳ ' + esc(d.step) + '…</span>'; setTimeout(poll, 2000); return; }
         if (d.status === 'done') {
           var uid = d.result && d.result.undo_id;
-          line.innerHTML = '✓ ' + esc(d.speak || '完成') + (uid ? ' <button class="asst-undo" data-uid="' + esc(uid) + '">↩ 撤销</button>' : '');
+          line.innerHTML = '<span class="rc-i rc-i-check"></span> ' + esc(d.speak || '完成') + (uid ? ' <button class="asst-undo" data-uid="' + esc(uid) + '">↩ 撤销</button>' : '');
           notify('阅读助手 ✓', d.speak || '任务完成');
         } else { line.innerHTML = '✗ ' + esc(d.error || '没办成'); }
         scrollDown();
@@ -1522,7 +1522,7 @@
 
   function prewarm(off) { try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {} }
   window.__asstPrewarm = function () { try { prewarm(false); } catch (_) {} };   // 切到助手 tab 时也预热(减第二条起的冷启动)
-  function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>'); }
+  function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;<span class="rc-i rc-i-trash"></span> 清空)</span>'); }
   function loadHistory() {   // 开面板载入服务端保存的历史(跨设备续上)
     fetch('/api/assistant/history').then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok && d.messages && d.messages.length) {
@@ -1541,7 +1541,7 @@
             if (Array.isArray(m.undo_cards)) m.undo_cards.forEach(function (u) {   // H2:高亮撤销卡刷新回放(undo_id 服务端持久,撤销/跳转 handler 已复用)
               if (!u || !u.undo_id) return;
               var _ujp = u.page ? ' <button class="asst-jump" data-page="' + esc(u.page) + '">↗ 跳转</button>' : '';
-              addMsg('asst-a', '✓ ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
+              addMsg('asst-a', '<span class="rc-i rc-i-check"></span> ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
             });
           }
         });

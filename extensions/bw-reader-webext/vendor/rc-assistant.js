@@ -63,8 +63,8 @@ if (window.__bwPwaProviderOnly) return;
     container.__quickBuilt = 1;
     opts = opts || {};
     container.insertAdjacentHTML('beforeend',
-      '<button data-q="clear">🗑 清空</button>' +
-      '<button data-q="models">⚙ 模型</button>');
+      '<button data-q="clear"><span class="rc-i rc-i-trash"></span> 清空</button>' +
+      '<button data-q="models"><span class="rc-i rc-i-gear"></span> 模型</button>');
     try { if (window.rcBuildMediaRow) window.rcBuildMediaRow(container); } catch (e) {}   // 「配图/视频」偏好开关并入本栏
   };
 
@@ -914,8 +914,8 @@ if (window.__bwPwaProviderOnly) return;
   // 快捷栏:共享构建器 rcBuildQuickBar(在则空容器等它填,与 EPUB 同一份来源 → 按钮永不分叉;
   //   历史「总结本页/本页生词」不再纳入)。legacy 模式(rc-assistant 未加载)→ native 兜底同款三按钮。
   var _quickNative = window.rcBuildQuickBar ? '' :
-      '<button data-q="clear">🗑 清空</button>' +
-      '<button data-q="models">⚙ 模型</button>';
+      '<button data-q="clear"><span class="rc-i rc-i-trash"></span> 清空</button>' +
+      '<button data-q="models"><span class="rc-i rc-i-gear"></span> 模型</button>';
   pane.innerHTML =
     '<div id="asst-thread"></div>' +
     '<div id="asst-quick">' + _quickNative + '</div>' +
@@ -2649,7 +2649,7 @@ if (window.__bwPwaProviderOnly) return;
       if (ev === 'meta') return;                       // rid 确认,不计数
       evSeen++;
       if (ev === 'done') { done = true; return; }
-      if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); try { window.__vcCapStatus && window.__vcCapStatus('⚙︎ ' + parsed + '…'); } catch (_) {} }   // 朗读字幕兼状态显示(侧栏关着也能看到)
+      if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); try { window.__vcCapStatus && window.__vcCapStatus('<span class="rc-i rc-i-gear"></span>︎ ' + parsed + '…'); } catch (_) {} }   // 朗读字幕兼状态显示(侧栏关着也能看到)
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} try { window.__vcCapStatus && window.__vcCapStatus(null); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
         answer = parsed;
@@ -2693,7 +2693,7 @@ if (window.__bwPwaProviderOnly) return;
       else if (ev === 'action' && parsed && parsed.id) { try { HOST.showAction && HOST.showAction(parsed); HOST.queueAction && HOST.queueAction(parsed); } catch (_) {} }   // EPUB 同步写工具:持久撤销/重做卡 + 排队落库(PDF 后端不发此事件)
       else if (ev === 'undo' && parsed && parsed.undo_id) {
         var _ujp = parsed.page ? ' <button class="asst-jump" data-page="' + esc(parsed.page) + '">↗ 跳转</button>' : '';
-        addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
+        addMsg('asst-a', '<span class="rc-i rc-i-check"></span> ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
       }
       else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
     }
@@ -3035,7 +3035,7 @@ if (window.__bwPwaProviderOnly) return;
         if (info && info.srcs) rows.push('<div class="vc-inf-r"><span>搜索链路</span>' + esc(info.srcs) + '</div>');
         pop.innerHTML = rows.join('') +
           '<div class="vc-inf-r"><span>中间步骤</span>见对话流中各工具卡(点开看参数与结果)</div>' +
-          '<button type="button" class="vc-inf-set">⚙ 调整各环节 AI 模型</button>';
+          '<button type="button" class="vc-inf-set"><span class="rc-i rc-i-gear"></span> 调整各环节 AI 模型</button>';
         pop.querySelector('.vc-inf-set').addEventListener('click', function () {
           pop.remove();
           try {   // 91:有环节清单→只开该环节的直改面板;没有→退回总设置
@@ -3162,7 +3162,7 @@ if (window.__bwPwaProviderOnly) return;
             line.innerHTML = '✓ ' + esc(d.speak || '完成');
             try { HOST.taskAction(uid); } catch (_) {}
           } else {
-            line.innerHTML = '✓ ' + esc(d.speak || '完成') + (uid ? ' <button class="asst-undo" data-uid="' + esc(uid) + '">↩ 撤销</button>' : '');
+            line.innerHTML = '<span class="rc-i rc-i-check"></span> ' + esc(d.speak || '完成') + (uid ? ' <button class="asst-undo" data-uid="' + esc(uid) + '">↩ 撤销</button>' : '');
           }
           notify('阅读助手 ✓', d.speak || '任务完成');
         } else { line.innerHTML = '✗ ' + esc(d.error || '没办成'); }
@@ -3542,10 +3542,10 @@ if (window.__bwPwaProviderOnly) return;
   function greet() {
     var _n = (HOST.locNoun && HOST.locNoun()) || '页';   // 位置量词按 reader(PDF=页 / EPUB=章)
     if (_assistantMode === 'review') {
-      addMsg('asst-a', '现在是复习助手。上方会显示当前相关 Anki 卡片，我会围绕这张卡追问、诊断记忆漏洞，并能把你选中的回答段落送入“更新笔记 / 改进卡片 / 两者都做”的草稿流程。<br><span style="color:#7a8497">(复习记录与普通助手分开保存；联网时从 Pi 在线恢复，不属于离线同步包；这里的 🗑 只清复习对话)</span>');
+      addMsg('asst-a', '现在是复习助手。上方会显示当前相关 Anki 卡片，我会围绕这张卡追问、诊断记忆漏洞，并能把你选中的回答段落送入“更新笔记 / 改进卡片 / 两者都做”的草稿流程。<br><span style="color:#7a8497">(复习记录与普通助手分开保存；联网时从 Pi 在线恢复，不属于离线同步包；这里的 <span class="rc-i rc-i-trash"></span> 只清复习对话)</span>');
       return;
     }
-    addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这' + _n + '讲什么 / 总结这' + _n + '<br>· 翻译这段(先选中)<br>· 找讲XX的' + _n + '跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话联网时从 Pi 在线恢复，不属于离线同步包;🗑 清空)</span>');
+    addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这' + _n + '讲什么 / 总结这' + _n + '<br>· 翻译这段(先选中)<br>· 找讲XX的' + _n + '跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话联网时从 Pi 在线恢复，不属于离线同步包;<span class="rc-i rc-i-trash"></span> 清空)</span>');
   }
   // ── 87:气泡装饰(标题整行把手,voiceMsg 实时与 loadHistory 回放共用——"消息记录中的卡片永远是卡片")──
   function _bubDecor(el, label, textFn) {
@@ -3835,7 +3835,7 @@ if (window.__bwPwaProviderOnly) return;
     if (Array.isArray(m.undo_cards)) m.undo_cards.forEach(function (u) {   // H2:高亮撤销卡刷新回放(undo_id 服务端持久,撤销/跳转 handler 已复用)
       if (!u || !u.undo_id) return;
       var _ujp = u.page ? ' <button class="asst-jump" data-page="' + esc(u.page) + '">↗ 跳转</button>' : '';
-      addMsg('asst-a', '✓ ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
+      addMsg('asst-a', '<span class="rc-i rc-i-check"></span> ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
     });
     if (Array.isArray(m.actions) && HOST.showAction) m.actions.forEach(function (a) {   // EPUB 动作卡必须保持在原消息位置；commit 后让宿主创建，再移回占位点
       var marker = document.createElement('span'); marker.hidden = true; target.appendChild(marker);

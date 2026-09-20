@@ -1419,7 +1419,7 @@
       b.style.display = 'none'; b.className = ''; b.textContent = '';   // 完成/出错/中止 → 自动消失
       // 69:完成/失败在字幕停留一下再走(旧行为=立即清,侧栏关着的用户什么都看不见)
       if (_hasChip) { capStatus(null); }   // 完成/失败都由 chip 表达(方块/红长条)
-      else if (p.status === 'done') capStatus({ html: _ic + '<span>' + esc(p.label || '完成') + '</span><span class="vc-tks ok">✓</span>', cls: 'ok', hold: 2500 });
+      else if (p.status === 'done') capStatus({ html: _ic + '<span>' + esc(p.label || '完成') + '</span><span class="vc-tks ok"><span class="rc-i rc-i-check"></span></span>', cls: 'ok', hold: 2500 });
       else if (p.status === 'error') capStatus({ html: _ic + '<span>' + esc(p.label || '工具') + '</span><span class="vc-tks err">⚠</span>', cls: 'err', hold: 4000 });
       else capStatus(null);
       if (p.status === 'aborted') {
@@ -1447,7 +1447,7 @@
     try { if (p.args && Object.keys(p.args).length) rows.push(['参数', JSON.stringify(p.args)]); } catch (e) {}
     if (p.rag) rows.push(['喂回给它播报的结果', p.rag]);
     else if (p.result_brief) rows.push(['结果', p.result_brief]);
-    d.innerHTML = '<div class="vc-tc-h"><span class="vc-tc-st">' + (ok ? '✓' : '⚠') + '</span>' +
+    d.innerHTML = '<div class="vc-tc-h"><span class="vc-tc-st">' + (ok ? '<span class="rc-i rc-i-check"></span>' : '⚠') + '</span>' +
       '<span class="vc-tc-i">' + _toolIcon(p.tool || p.label) + '</span>' +
       '<span class="vc-tc-l">' + esc(p.label || p.tool || '工具') + '</span>' +
       (p.took_s != null ? '<span class="vc-tc-t">' + esc(p.took_s) + 's</span>' : '') +
@@ -2834,7 +2834,7 @@
         var mapUrl = _mapMetaFromUrl(it.url) ? it.url : '';
         return '<div class="vc-ig-cell" data-i="' + i + '"' +
           (mapUrl ? ' data-map-url="' + esc(mapUrl) + '"' : '') + '>' +
-          '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
+          '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除"><span class="rc-i rc-i-close"></span></button>' +
           (mapUrl ? '<button type="button" class="vc-ig-map" data-i="' + i + '" aria-label="全屏地图">⛶</button>' : '') +
           (media ? '<img class="vc-ig-img" data-i="' + i + '"' + (aid ? ' data-aid="' + esc(aid) + '"' : '') +
             ' data-source-url="' + esc(it.url || '') + '" src="' + esc(media) + '" alt="' + esc(it.title || '') + '">' :
@@ -2847,7 +2847,7 @@
         var ref = _videoCardRef(it), thumbSource = _videoCardThumbSource(it, ref), thumb = _videoCardThumb(it, ref);
         var isBili = ref.src === 'bili';
         return '<div class="vc-ig-cell" data-i="' + i + '">' +
-          '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
+          '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除"><span class="rc-i rc-i-close"></span></button>' +
           '<span class="vc-vg-tag' + (isBili ? ' bili' : '') + '">' + (isBili ? 'B站' : (ref.src === 'yt' ? 'YouTube' : esc(it.src || '视频'))) + '</span>' +
           '<div class="vc-vg-wrap">' + (thumb ? '<img class="vc-ig-img" data-i="' + i + '" loading="lazy" referrerpolicy="same-origin" data-source-url="' + esc(thumbSource) + '" src="' + esc(thumb) + '" alt="">' : '<div class="vc-vg-empty">无预览图</div>') +
           '<button type="button" class="vc-vg-play" data-i="' + i + '"' +
@@ -3109,7 +3109,7 @@
       '<span class="vc-map-attr">© Google</span>' +
       '<button type="button" class="vc-map-z" data-d="1">＋</button>' +
       '<button type="button" class="vc-map-z" data-d="-1">－</button>' +
-      '<button type="button" class="vc-map-x">✕</button></div>' +
+      '<button type="button" class="vc-map-x"><span class="rc-i rc-i-close"></span></button></div>' +
       '<div class="vc-map-vp"></div>';
     document.body.appendChild(ov);
     var attr = ov.querySelector('.vc-map-attr');
@@ -6026,7 +6026,7 @@
             _tcard.data.items.push(_dImg);
             var _ni = _tcard.data.items.length - 1;
             var _cellH = '<div class="vc-ig-cell" data-i="' + _ni + '">' +
-              '<button type="button" class="vc-ig-x" data-i="' + _ni + '" aria-label="移除">✕</button>' +
+              '<button type="button" class="vc-ig-x" data-i="' + _ni + '" aria-label="移除"><span class="rc-i rc-i-close"></span></button>' +
               '<img class="vc-ig-img" data-i="' + _ni + '"' + (_dImg.aid ? ' data-aid="' + esc(_dImg.aid) + '"' : '') + _sourceAttr + ' src="' + _asrc + '" alt="' + esc(_cap) + '">' +
               (_cap ? '<div class="vc-ig-t">' + esc(_cap) + '</div>' : '') + '</div>';
             _els.forEach(function (el2) { var ig = el2.querySelector('.vc-ig'); if (ig) ig.insertAdjacentHTML('beforeend', _cellH); else { var bd0 = el2.querySelector('.vc-card-bd') || el2; bd0.insertAdjacentHTML('beforeend', _ih); } });
@@ -6216,7 +6216,7 @@
     var sc = document.createElement('div'); sc.className = 'vc-dkp-sc';
     var items = _dock.trash ? (_dock.trashList || []) : _dock.list.slice();
     items.sort(function (a2, b2) { return (a2.ts || 0) - (b2.ts || 0); });
-    if (!items.length) { sc.innerHTML = '<div class="vc-dk-empty" style="align-self:center;width:100%">' + (_dock.trash ? '回收站是空的' : '空——把浮层卡拖到屏幕底边,或点卡片上的 ☆') + '</div>'; }
+    if (!items.length) { sc.innerHTML = '<div class="vc-dk-empty" style="align-self:center;width:100%">' + (_dock.trash ? '回收站是空的' : '空——把浮层卡拖到屏幕底边,或点卡片上的 <span class="rc-i rc-i-star"></span>') + '</div>'; }
     var lastDay = '';
     items.forEach(function (it) {
       var dt = new Date((it.ts || 0) * 1000);
@@ -6335,7 +6335,7 @@
       var k = item.label || item.id;
       var chip = document.createElement('div'); chip.className = 'asst-fig-chip vc-pin-chip';
       chip.innerHTML = '<span class="vc-pc-l">' + esc(k) + '</span><span class="vc-pc-s">' + esc((item.text || '').slice(0, 30)) + '</span>' +
-        '<button type="button" class="vc-pc-x" aria-label="移除">✕</button>';
+        '<button type="button" class="vc-pc-x" aria-label="移除"><span class="rc-i rc-i-close"></span></button>';
       chip.querySelector('.vc-pc-x').addEventListener('click', function () {
         var el0 = _pins.els[k];
         if (el0 && el0.classList) { el0.classList.remove('vc-picked'); delete el0.dataset.pinLabel; }

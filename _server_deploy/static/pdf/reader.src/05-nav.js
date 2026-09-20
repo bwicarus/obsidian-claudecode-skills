@@ -1,3 +1,8 @@
+  // 图标片段：RC.ui 还没注入时回落空串（宁可没图标，也不要半个标记）。
+  // ⚠ 整个 reader.src 拼成**一个 ES module**，所以这份只能有一处 —— 每个文件各放
+  //   一份会是「Identifier '_mi' has already been declared」。函数声明会提升，
+  //   后面的模块（15-phrase-wordpop / 19-dict）直接用即可。
+  function _mi(n) { try { return (window.RC && RC.ui && RC.ui.icon(n)) || ''; } catch (_) { return ''; } }
 function loadPageNodes(num) {
   // 共享模式(__uiShared)→ PdfAdapter.renderPageNodes → rc-knowledge.renderInto(知识点卡统一)。
   //   取数(page-nodes,页作用域)+ __lastPageNodes(语音上下文)+ 容器 #kg-nodes 都由 adapter 处理;
@@ -27,7 +32,7 @@ async function _loadPageNodesNative(num) {
       // 只有 grammar KG 的节点能跟踪（跟技能树 toggle-tracked 规则一致）
       const trackBtn = (n.kind === 'grammar')
         ? `<button class="kg-track-btn ${n.tracked ? 'on' : ''}" title="加入/取消语法跟踪"
-             onclick="event.stopPropagation(); toggleNodeTrack('${n.book}','${n.id}', this)">${n.tracked ? '★ 跟踪中' : '☆ 跟踪'}</button>`
+             onclick="event.stopPropagation(); toggleNodeTrack('${n.book}','${n.id}', this)">${n.tracked ? '<span class="rc-i rc-i-starFill"></span> 跟踪中' : '<span class="rc-i rc-i-star"></span> 跟踪'}</button>`
         : '';
       const lbl = n.numeric_label ? `[${n.numeric_label}] ` : '';
       return `<div class="kg-node ${n.state}">
@@ -55,7 +60,7 @@ window.toggleNodeTrack = async (book, nodeId, btn) => {
     const d = await r.json();
     if (d.ok) {
       btn.classList.toggle('on', d.tracked);
-      btn.textContent = d.tracked ? '★ 跟踪中' : '☆ 跟踪';
+      btn.innerHTML = d.tracked ? _mi('starFill') + ' 跟踪中' : _mi('star') + ' 跟踪';
       loadGrammarTracked();   // 刷新工具栏「📊 语法分析」按钮的可用状态
     } else {
       _toast?.(d.error || '操作失败');
@@ -344,7 +349,7 @@ function _addHistoryBlock(item) {
   block.innerHTML =
     `<div class="gb-header">
        <span class="gb-title" title="${_esc(sentence)}">${_esc(summary)}</span>
-       <span class="gb-del" title="删除这条（同句下次重新分析）">🗑</span>
+       <span class="gb-del" title="删除这条（同句下次重新分析）"><span class="rc-i rc-i-trash"></span></span>
        <span class="gb-caret">▶</span>
      </div>
      <div class="gb-trans"></div>
@@ -353,7 +358,7 @@ function _addHistoryBlock(item) {
      <div class="gb-followup">
        <input class="gb-fu-input" placeholder="继续追问这句的语法…" onkeydown="if(event.key==='Enter'){event.preventDefault();_grammarFollowup('${_hid}');}">
        <button onclick="_grammarFollowup('${_hid}')">追问</button>
-       <button class="gb-anki-btn" onclick="_grammarAnki('${_hid}')" title="整句+译文+分析做成 Anki 卡">🎴</button>
+       <button class="gb-anki-btn" onclick="_grammarAnki('${_hid}')" title="整句+译文+分析做成 Anki 卡"><span class="rc-i rc-i-card"></span></button>
      </div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => {
@@ -475,14 +480,14 @@ function _renderVocabItem(it) {
     <div class="vi-head">
       <span class="vi-word">${_esc(it.lemma)}</span>
       ${it.phonetic ? `<span class="vi-phon">${_esc(it.phonetic)}</span>` : ''}
-      <button class="vi-audio" title="发音">🔊</button>
+      <button class="vi-audio" title="发音"><span class="rc-i rc-i-speaker"></span></button>
       <span class="vi-mastery-badge" style="background:${col}22;color:${col}">${_esc(it.mastery_label || (pct + '%'))}</span>
     </div>
     <div class="vi-bar"><div style="width:${pct}%;background:${col}"></div></div>
     ${it.zh ? `<div class="vi-zh">${_esc(it.zh)}</div>` : ''}
     <div class="vi-foot">
       <span class="vi-pages">${pagesHtml}</span>
-      <button class="vi-anki">${it.has_card ? '✓ 已加' : '📇 加卡'}</button>
+      <button class="vi-anki">${it.has_card ? '<span class="rc-i rc-i-check"></span> 已加' : '📇 加卡'}</button>
     </div>`;
   if (it.has_card) div.querySelector('.vi-anki').classList.add('done');
   div.querySelector('.vi-word').addEventListener('click', () => dictStream(it.lemma, ''));

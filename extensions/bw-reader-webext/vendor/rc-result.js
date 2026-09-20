@@ -358,7 +358,7 @@ if (window.__bwPwaProviderOnly) return;
           '          </div>\n' +
           '          <div class="sel-circle" title="' + (d.selected ? '已选（点击取消）' : '未选（点击勾选）') + '"></div>\n' +
           '        </div>\n' +
-          '        <button class="draft-item-del-row" type="button" title="删除">🗑</button>\n' +
+          '        <button class="draft-item-del-row" type="button" title="删除"><span class="rc-i rc-i-trash"></span></button>\n' +
           '      </div>\n    ';
       }).join('');
       // 绑定每条 draft 的交互
@@ -710,10 +710,10 @@ if (window.__bwPwaProviderOnly) return;
     return _aiStream(url, { method: 'POST', body: body, onText: render }).then(function (res) {
       if (myReq !== _resultReqId) return;
       render(res.text);
-      if (!res.ok && contentEl) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>';
+      if (!res.ok && contentEl) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px"><span class="rc-i rc-i-close"></span> ' + (res.error || '失败') + '</div>';
       addResultPickers();   // 完成后给标题加 +
     }).catch(function (e) {
-      if (myReq === _resultReqId && contentEl) contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+      if (myReq === _resultReqId && contentEl) contentEl.innerHTML = '<div style="color:#c00"><span class="rc-i rc-i-close"></span> ' + e.message + '</div>';
     });
   }
 
@@ -723,10 +723,10 @@ if (window.__bwPwaProviderOnly) return;
     _applyOpts(opts);
     _curMeta = { text: text, sentence: ctx || text, kind: (opts && opts.kind) || 'note' };
     var html = '<div style="font-size:12.5px;line-height:1.65">' +
-      '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px">📌 原文</div>' +
+      '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px"><span class="rc-i rc-i-pin"></span> 原文</div>' +
       '<div style="color:var(--rc-text-strong);white-space:pre-wrap">' + _esc(text) + '</div>';
     if (ctx && ctx.trim() !== text.trim()) {
-      html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px">📖 上下文</div>' +
+      html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px"><span class="rc-i rc-i-book"></span> 上下文</div>' +
         '<div style="color:var(--rc-text-muted);white-space:pre-wrap">' + _esc(ctx) + '</div>';
     }
     html += '<div style="margin-top:12px;color:var(--rc-text-dim)">↓ 在下方输入问题，AI 会结合原文和上下文回答</div></div>';
@@ -770,12 +770,12 @@ if (window.__bwPwaProviderOnly) return;
     }).then(function (res) {
       if (myReq !== _resultReqId) return;
       if (res.ok && res.text) render(res.text);
-      else if (!res.ok) aDiv.innerHTML = '<span style="color:#c00">✗ ' + (res.error || '失败') + '</span>';
+      else if (!res.ok) aDiv.innerHTML = '<span style="color:#c00"><span class="rc-i rc-i-close"></span> ' + (res.error || '失败') + '</span>';
       else aDiv.innerHTML = '(无回答)';
       contentEl.scrollTop = contentEl.scrollHeight;
       try { addResultPickers(); } catch (_) {}   // 追问回答也加「+ 选段」,制 Anki 含全框选中
     }).catch(function (e) {
-      aDiv.innerHTML = '<span style="color:#c00">✗ ' + e.message + '</span>';
+      aDiv.innerHTML = '<span style="color:#c00"><span class="rc-i rc-i-close"></span> ' + e.message + '</span>';
       contentEl.scrollTop = contentEl.scrollHeight;
       // 照抄 native _followupAsk:native 用 try/catch,「+选段」补挂这行在 try/catch 之后必跑(含异常路径);
       // 这里是 promise 链,.catch() 分支之前漏了这行,补齐(_aiStream 本身从不 reject,实际触发概率极低,

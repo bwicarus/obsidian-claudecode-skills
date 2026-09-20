@@ -965,7 +965,7 @@ if (window.__bwPwaProviderOnly) return;
           '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">解释 / 问 AI / 翻译・例句 / 字典 AI / 语法分析 / 助手 等所有 AI 调用，都走同一套脱壳 Claude + Gemini 双后端（一边失败自动切另一边）。下面按功能分别选：改完即时生效、服务端保存全设备共用；Gemini 免费档优先、过载自动落付费，「💰仅付费」型号（如 3.1-pro）每次调用按量计费。</div>' +
           '<div id="rcset-ai-inline"></div>' +
         '</div>' +
-        '<label style="' + LBL + '">🌐 句子翻译源</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-globe"></span> 句子翻译源</label>' +
         '<select class="rc-ui-select" id="set-sent-backend" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
           '<option value="auto">auto（DeepL 有 key → MyMemory）</option>' +
           '<option value="mymemory">MyMemory（5K/天匿名，50K/天 email 认证）</option>' +
@@ -1027,7 +1027,7 @@ if (window.__bwPwaProviderOnly) return;
           '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">电脑图标按钮是唯一启动入口；普通电话按钮只负责豆包、GPT 或 Grok。查看状态不会启动应用、采音或发送快捷键。</div>' +
           '<div id="rcset-computer-inline"></div>' +
           '<label id="set-bridge-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer;margin-top:10px">' +
-            '<input type="checkbox" id="set-bridge-voice" class="rc-ui-switch"> 🔊 把语音也桥接进来' +
+            '<input type="checkbox" id="set-bridge-voice" class="rc-ui-switch"> <span class="rc-i rc-i-speaker"></span> 把语音也桥接进来' +
           '</label>' +
           '<div id="set-bridge-voice-help" style="display:none;font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '关闭 = 仅桥接：语音留在电脑（用电脑音频设备），通话不接到 App；上下文/快照/出卷照常。切换在数秒内由 ReaderPC 重启服务生效。' +
@@ -1075,7 +1075,7 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         // [PDF] 页码对齐(逐字照搬,内联 onclick=原生 window.applyPageOffset)
         '<div data-sec="pdf-pageoffset">' +
-          '<div style="font-size:13px;color:var(--rc-text-strong);margin-bottom:4px">📖 页码对齐</div>' +
+          '<div style="font-size:13px;color:var(--rc-text-strong);margin-bottom:4px"><span class="rc-i rc-i-book"></span> 页码对齐</div>' +
           '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:8px;line-height:1.5">让阅读器显示的页码＝书上印的页码（PDF 前几页常是封面/目录）。翻到当前这页，把它在书上印的页码填进去点「对齐」即可。<b>每本书独立、自动跨设备同步</b>。</div>' +
           '<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;flex-wrap:wrap">' +
             '当前 PDF 第 <b id="set-pg-pdf">–</b> 页 ＝ 书上第' +
@@ -1102,7 +1102,7 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         // [PDF] 书籍目录(逐字照搬,onclick=原生 buildToc/showTocBuild;状态区由原生 loadTocStatus 填)
         '<div data-sec="pdf-toc">' +
-          '<label style="display:block;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px">📖 书籍目录（章节 provenance，供图描述/助手定位「书的哪一章节」）</label>' +
+          '<label style="display:block;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px"><span class="rc-i rc-i-book"></span> 书籍目录（章节 provenance，供图描述/助手定位「书的哪一章节」）</label>' +
           '<div id="set-toc-status" style="font-size:11px;color:var(--rc-text-dim);margin-bottom:8px;line-height:1.5">检查中…</div>' +
           '<div id="set-toc-build" style="display:none">' +
             '<div style="font-size:11px;color:var(--rc-text-muted);margin-bottom:6px;line-height:1.5">填目录所在的 PDF 页范围（不是书上印的页码，是阅读器顶部显示的 PDF 第几页），AI 整页识图抽出目录（覆盖原生目录）。</div>' +
@@ -1138,7 +1138,7 @@ if (window.__bwPwaProviderOnly) return;
         // [PDF] 去边(逐字照搬,onclick=原生 _applyCropSettings)
         '<div data-sec="pdf-crop">' +
           HR +
-          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px">✂️ 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>' +
+          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px"><span class="rc-i rc-i-scissors"></span>️ 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>' +
           '<div style="display:flex;gap:8px;margin-bottom:8px">' +
             '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">左<input type="number" id="set-crop-l" min="0" max="45" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
             '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">右<input type="number" id="set-crop-r" min="0" max="45" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
@@ -1174,7 +1174,7 @@ if (window.__bwPwaProviderOnly) return;
         // [共有] 需要翻译的语言(文案逐字照搬 PDF;容器 id 按 host:PDF=lang-checks(原生 saveLangPicker 读),EPUB=eph-lang-checks)
         '<div data-sec="langs">' +
           HR +
-          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px">🌐 需要翻译的语言（勾选你想被<b>翻译/查词辅助</b>的语言：日语→中日词典+振假名，英语→英汉词典+语法）<br><b>没勾的语言（如中文母语）视为你已掌握 → 免于翻译查词</b>。每本书独立。</label>' +
+          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px"><span class="rc-i rc-i-globe"></span> 需要翻译的语言（勾选你想被<b>翻译/查词辅助</b>的语言：日语→中日词典+振假名，英语→英汉词典+语法）<br><b>没勾的语言（如中文母语）视为你已掌握 → 免于翻译查词</b>。每本书独立。</label>' +
           '<div id="' + _ids.langChecks + '" style="display:flex;gap:16px;font-size:13px;color:var(--rc-text-strong);margin-bottom:8px">' +
             '<label style="cursor:pointer"><input type="checkbox" value="en" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">英语</label>' +
             '<label style="cursor:pointer"><input type="checkbox" value="ja" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">日语</label>' +
@@ -1201,7 +1201,7 @@ if (window.__bwPwaProviderOnly) return;
           '<option value="deps">依存关系图（displaCy 弧线 + 从句切段）</option>' +
         '</select>' +
         HR +
-        '<label style="' + LBL + '">📊 启用语法分析（per-书）</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-chart"></span> 启用语法分析（per-书）</label>' +
         '<div style="font-size:10px;color:var(--rc-text-dim);margin-bottom:6px;line-height:1.5">' +
           '勾选本书用哪些语法 KG。具体跟踪哪些语法点请去' +
           '<a href="/skilltree/grammar-demo/" target="_blank" style="color:var(--rc-accent)">技能树页面</a>' +
@@ -1215,7 +1215,7 @@ if (window.__bwPwaProviderOnly) return;
     // ════ pane: 高亮(逐字照搬 PDF)════
     var paneHl =
       '<div class="set-pane" data-pane="hl" style="display:none">' +
-        '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>' +
+        '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px"><span class="rc-i rc-i-brush"></span> 高亮颜色（点击 <span class="rc-i rc-i-close"></span> 删除）</label>' +
         '<div id="set-hl-colors" class="set-hl-row"></div>' +
         '<div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">' +
           '<input type="color" id="set-hl-new" value="#ffd166" style="width:42px;height:30px;border:none;background:transparent;cursor:pointer;padding:0">' +
@@ -1228,7 +1228,7 @@ if (window.__bwPwaProviderOnly) return;
     //      「保存」时落盘 + RC.stickynote.refreshStyle() 即时应用,「取消」丢弃)════
     var paneNote =
       '<div class="set-pane" data-pane="note" style="display:none">' +
-        '<label style="' + LBL + '">🗒 便签外观（本设备）</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-note"></span> 便签外观（本设备）</label>' +
         '<div class="ep-set-slrow"><span>底色不透明度 <small id="rcset-note-op-val">72</small>%</span><input type="range" id="rcset-note-op" min="30" max="100" step="1" value="72"></div>' +
         '<div class="ep-set-note" style="margin:-2px 0 12px">便签底是<b>半透明磨砂玻璃</b>，能隐约看到下方正文；越低越透。上方操作条保持基本不透明。保存后立即应用到页面上已有的便签。</div>' +
         '<div class="ep-set-slrow"><span>磨砂强度 <small id="rcset-note-blur-val">10</small> px</span><input type="range" id="rcset-note-blur" min="0" max="24" step="2" value="10"></div>' +
@@ -1275,7 +1275,7 @@ if (window.__bwPwaProviderOnly) return;
     var paneNative =
       '<div class="set-pane" data-pane="native" style="display:none">' +
         '<div style="font-size:12px;color:var(--rc-text-muted);margin-bottom:12px">这些开关属于 iPad 上的 App 本体，改完即时生效。凭据、Vault 目录、书库仍在 App 的原生设置里（系统 UI 才能安全地管它们）。</div>' +
-        '<label style="' + LBL + '">📝 文字识别（设备端）</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-note"></span> 文字识别（设备端）</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:8px">' +
           '<input type="checkbox" id="rcset-nat-ocr" class="rc-ui-switch"> 启用设备端文字识别' +
         '</label>' +
@@ -1283,7 +1283,7 @@ if (window.__bwPwaProviderOnly) return;
           '<input type="checkbox" id="rcset-nat-ocr-auto" class="rc-ui-switch"> 打开书就自动识别（不必手动触发）' +
         '</label>' +
         HR +
-        '<label style="' + LBL + '">✏️ Apple Pencil 手势</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-pencil"></span>️ Apple Pencil 手势</label>' +
         '<div style="display:flex;gap:10px;margin-bottom:10px">' +
           '<div style="flex:1"><div style="font-size:12px;color:var(--rc-text-muted);margin-bottom:4px">笔身双击</div>' +
             '<select id="rcset-nat-pen-dtap" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px">' +
@@ -1298,7 +1298,7 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
         HR +
-        '<label style="' + LBL + '">📖 离线日语词典</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-book"></span> 离线日语词典</label>' +
         '<div id="rcset-nat-dict-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<div id="rcset-nat-dict-bar" style="height:4px;background:var(--rc-bg-raised);border-radius:2px;overflow:hidden;margin-bottom:8px;display:none">' +
           '<div id="rcset-nat-dict-fill" style="height:100%;width:0%;background:#4a9eff;transition:width .3s"></div></div>' +
@@ -1319,7 +1319,7 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">选文件夹必须走 App 的系统选择器 —— 只有它给出的授权能长期保存，网页拿不到也不该拿到你的文件路径。</div>' +
         HR +
-        '<label style="' + LBL + '">📍 学习地点记录</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-pin"></span> 学习地点记录</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:6px">' +
           '<input type="checkbox" id="rcset-nat-loc-on" class="rc-ui-switch"> 记录学习地点' +
         '</label>' +
@@ -1344,7 +1344,7 @@ if (window.__bwPwaProviderOnly) return;
 
     var paneWeb =
       '<div class="set-pane" data-pane="web" data-sec="web-tab" style="display:none">' +
-        '<label style="' + LBL + '">🌐 网页翻译（浏览器扩展 / 网页阅读专用）</label>' +
+        '<label style="' + LBL + '"><span class="rc-i rc-i-globe"></span> 网页翻译（浏览器扩展 / 网页阅读专用）</label>' +
         '<div style="font-size:12px;color:var(--rc-text-muted);margin:-4px 0 10px">我在学的语言：只对这些语言的网页做翻译和生词标注，纯中文母语页自动跳过（全不勾＝任何语言都翻）。</div>' +
         '<div id="web-lang-checks" style="display:flex;gap:18px;margin-bottom:14px">' +
           '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--rc-text-strong);cursor:pointer"><input type="checkbox" value="en" class="rc-ui-switch"> 英语</label>' +
@@ -1407,7 +1407,7 @@ if (window.__bwPwaProviderOnly) return;
     mask.setAttribute('data-rc', '1');   // pdf-adapter 据此区分 rc 面板 vs 原生模板面板(移除后者)
     mask.innerHTML =
       '<div class="ep-set-modal">' +
-        '<h3 class="ep-set-h3">⚙️ 设置</h3>' +
+        '<h3 class="ep-set-h3"><span class="rc-i rc-i-gear"></span>️ 设置</h3>' +
         '<div class="set-tabs">' +
           '<button type="button" class="set-tab active" data-pane="ai">AI·翻译</button>' +
           '<button type="button" class="set-tab" data-pane="computer">电脑客户端</button>' +
@@ -1607,7 +1607,7 @@ if (window.__bwPwaProviderOnly) return;
     if (_opts.grammarFile && window.RC && RC.grammar && RC.grammar.renderTrackList) {
       RC.grammar.renderTrackList('set-grammar-list', { file: _opts.grammarFile });
     } else {
-      box.innerHTML = '<div style="color:#7a8497">勾选本书用哪些语法 KG、跟踪哪些语法点，请在右侧抽屉「语法」tab 顶部的「⚙ 启用语法 KG」里设置（去技能树点节点的「👁 跟踪」开）。</div>';
+      box.innerHTML = '<div style="color:#7a8497">勾选本书用哪些语法 KG、跟踪哪些语法点，请在右侧抽屉「语法」tab 顶部的「<span class="rc-i rc-i-gear"></span> 启用语法 KG」里设置（去技能树点节点的「<span class="rc-i rc-i-eye"></span> 跟踪」开）。</div>';
     }
   }
 

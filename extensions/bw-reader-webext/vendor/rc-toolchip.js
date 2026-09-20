@@ -325,7 +325,7 @@ if (window.__bwPwaProviderOnly) return;
       '<div class="vc-dtl-h"><span class="vc-fn-i" style="width:24px;height:24px;border-radius:8px;--vc-tc:' +
         (TYPE_C[chip.type] || TYPE_C.text) + ';color:#dfe7f6;background:color-mix(in srgb,' +
         (TYPE_C[chip.type] || TYPE_C.text) + ' 24%,rgba(0,0,0,.32))">' + (SVG[chip.type] || SVG.text) + '</span>' +
-        '<b>' + esc(chip.label) + '</b><button type="button" class="vc-dtl-x">✕</button></div>' +
+        '<b>' + esc(chip.label) + '</b><button type="button" class="vc-dtl-x"><span class="rc-i rc-i-close"></span></button></div>' +
       '<div class="vc-dtl-b"></div></div>';
     var body = d.querySelector('.vc-dtl-b');
     sgs.forEach(function (sg, i) {
@@ -432,7 +432,7 @@ if (window.__bwPwaProviderOnly) return;
       '<div class="vc-md-t">模型 <em>· 这个工具用哪个 AI 去干活</em></div>' +
       '<div class="vc-md-r">' +
         '<select class="vc-md-b"></select><select class="vc-md-v"></select><select class="vc-md-d"></select>' +
-        '<button type="button" class="vc-md-fast">⚡ Fast</button>' +
+        '<button type="button" class="vc-md-fast"><span class="rc-i rc-i-bolt"></span> Fast</button>' +
       '</div>' +
       '<div class="vc-md-st"></div>';
     host.insertBefore(box, before);

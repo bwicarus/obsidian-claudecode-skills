@@ -434,6 +434,8 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             return await serveBookMeta(request)
         case "native-api/visual-capture":
             return await serveNativeVisualCapture(request)
+        case "native-api/sf-symbol":
+            return serveSFSymbol(request)
         default:
             if relative.hasPrefix("native-api/offline-dictionary/") {
                 return serveOfflineDictionary(
@@ -1659,6 +1661,65 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         return result
     }
 
+    /// SF Symbols 图标（用户 2026-09-20：「不能直接使用苹果提供的页面元素容器么」）。
+    ///
+    /// WKWebView 里拿不到 SF Symbols 字体，网页只能自己画图标 —— 界面上那 357 个
+    /// emoji 就是这么来的，也是「整体还是像网页」最大的单一来源。这里把系统符号
+    /// 渲染成图片发给网页：**App 内是真的 SF Symbols**，扩展/桌面回落到手绘 SVG，
+    /// 两边同一份 CSS，不分叉。
+    ///
+    /// ⚠ 渲染成**白色不透明**图，网页侧用 CSS mask + currentColor 上色 ——
+    ///   这样同一张图能跟着按钮的文字颜色走（选中态变蓝、危险态变红），
+    ///   不必为每种颜色各存一份。
+    /// ⚠ name 只允许 SF Symbol 的合法字符集；拿不到符号就 404，不猜也不兜底成别的图。
+    private func serveSFSymbol(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET || request.method == .HEAD else {
+            return response(
+                status: .methodNotAllowed,
+                text: "method not allowed",
+                headers: [HTTPHeader("Allow"): "GET"]
+            )
+        }
+        let name = request.query["name"] ?? ""
+        let allowed = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyz0123456789.")
+        guard !name.isEmpty, name.count <= 64,
+              name.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+            return response(status: .badRequest, text: "bad symbol name")
+        }
+        let size = max(8.0, min(64.0, Double(request.query["size"] ?? "") ?? 20))
+        let weightName = request.query["weight"] ?? "regular"
+        let weight: UIImage.SymbolWeight
+        switch weightName {
+        case "light": weight = .light
+        case "medium": weight = .medium
+        case "semibold": weight = .semibold
+        case "bold": weight = .bold
+        default: weight = .regular
+        }
+        let config = UIImage.SymbolConfiguration(
+            pointSize: CGFloat(size), weight: weight)
+        guard let symbol = UIImage(systemName: name, withConfiguration: config) else {
+            return response(status: .notFound, text: "unknown symbol")
+        }
+        // @3x 渲染：mask 会被缩放，低分辨率的边缘在 Retina 上很明显。
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 3
+        format.opaque = false
+        let white = symbol.withTintColor(.white, renderingMode: .alwaysOriginal)
+        let image = UIGraphicsImageRenderer(size: white.size, format: format)
+            .image { _ in white.draw(in: CGRect(origin: .zero, size: white.size)) }
+        guard let png = image.pngData() else {
+            return response(status: .internalServerError, text: "render failed")
+        }
+        // 同名同参永远是同一张图，可以放心长缓存。
+        return dataResponse(
+            request,
+            data: png,
+            contentType: "image/png",
+            cacheControl: "public, max-age=31536000, immutable"
+        )
+    }
     private func dataResponse(
         _ request: HTTPRequest,
         data: Data,

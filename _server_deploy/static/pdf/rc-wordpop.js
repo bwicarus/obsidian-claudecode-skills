@@ -51,6 +51,8 @@
   //   解析到的就是 reader.js 那份 window.X,委托调的也是同一个 → 行为零变化;扩展/EPUB 无 reader.js,
   //   window.X 就是本模块这份。(_jpKanjiTap/_jpAiDeep 例外:reader.js 覆盖后数据为空,故那两个用局部闭包
   //   经 addEventListener 绑,不在本委托表里,维持现状不动。)
+  // 图标片段：RC.ui 还没注入时回落成空串（宁可没图标，也不要吐出半个标记）。
+  function _mi(n) { try { return (window.RC && RC.ui && RC.ui.icon(n)) || ''; } catch (_) { return ''; } }
   function _wpDispatch(e) {
     var t = e.target;
     var el = (t && t.closest) ? t.closest('[data-wp-act]') : null;
@@ -443,7 +445,7 @@
     if (differs && inf.variant) {
       var lhs = (inf.variant === 'reading' ? '读音 <b>' : '写法 <b>') + esc(surface) + '</b>';
       var vm = marks.length ? '<span class="jp-inflect-mark">' + marks.map(esc).join('・') + '</span>' : '';
-      return '<div class="jp-inflect">🔀 ' + [lhs, '词头 <b>' + esc(base) + '</b>', vm].filter(Boolean).join('　') + '</div>';
+      return '<div class="jp-inflect"><span class="rc-i rc-i-shuffle"></span> ' + [lhs, '词头 <b>' + esc(base) + '</b>', vm].filter(Boolean).join('　') + '</div>';
     }
     // 只差分隔符 = 写法归一, 不是活用(2026-09-04 用户:プライマリー・ヘルス・ケア 那行「当前形/原形」很多余)。
     // 此时既不该打「活用→原形」的标, 整行也没有信息量 —— 外来语的信息在下面那条源词行里。
@@ -457,7 +459,7 @@
     var original = differs ? '原形 <b>' + esc(base) + '</b>' : '';
     var m = marks.length ? '<span class="jp-inflect-mark">' + marks.map(esc).join('・') + '</span>' : '';
     if (!current && !original && !m) return '';
-    return '<div class="jp-inflect">🔀 ' + [current, original, m].filter(Boolean).join('　') + '</div>';
+    return '<div class="jp-inflect"><span class="rc-i rc-i-shuffle"></span> ' + [current, original, m].filter(Boolean).join('　') + '</div>';
   }
   // 外来语源词 → HTML 行(用户 2026-09-04:「这种来自英文的词原型可以显示英文么」)。
   // **独立于变形行**:プライマリー・ヘルス・ケア 这类词没有活用,_jpInflectHtml 会整行返回空,
@@ -479,7 +481,7 @@
       ? '<span class="jp-inflect-mark' + (kind === 'wasei' ? ' jp-wasei' : '') + '">' + esc(label) + '</span>'
       : '';
     var body = word ? '源词 <b>' + esc(word) + '</b>' : '源词 <b>—</b>';
-    return '<div class="jp-inflect jp-source">🌐 ' + [body, mark].filter(Boolean).join('　') + '</div>';
+    return '<div class="jp-inflect jp-source"><span class="rc-i rc-i-globe"></span> ' + [body, mark].filter(Boolean).join('　') + '</div>';
   }
   // 英语原型 + 变形 → HTML 行(跟日语变形行同款样式)。
   function _enFormsHtml(lemma, forms, clicked) {
@@ -490,7 +492,7 @@
     var b = (lemma && c && c !== lemma) ? '原型 <b>' + esc(lemma) + '</b>' : '';
     var m = fs.length ? '变形 <span class="jp-inflect-mark">' + fs.map(esc).join('・') + '</span>' : '';
     if (!b && !m) return '';
-    return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
+    return '<div class="jp-inflect"><span class="rc-i rc-i-shuffle"></span> ' + [b, m].filter(Boolean).join('　') + '</div>';
   }
 
   // ─────────────────────────── 定位 ───────────────────────────
@@ -1188,7 +1190,7 @@
     pop.innerHTML =
       '<div class="wp-head"><span class="wp-word">' + esc(word) + '</span>' +
       phonHtml +
-      '<button class="wp-speak" data-wp-act="speak" title="发音">🔊</button>' +
+      '<button class="wp-speak" data-wp-act="speak" title="发音"><span class="rc-i rc-i-speaker"></span></button>' +
       (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
       inflectHtml +
       '<div class="wp-def" data-wp-act="expand" title="点开看完整释义/例句">' + posTag + defLines +
@@ -1196,10 +1198,10 @@
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
       '<div class="wp-actions">' +
       // 掌握 toggle:日英统一同一个按钮(onclick 内部按语言分流 store);✓掌握=下划线消失
-      '<button id="wp-master-btn" class="' + (_wordPopState.mastered ? 'wp-anki' : '') + '" data-wp-act="master" title="' + (_wordPopState.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (_wordPopState.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
-      (_ctx.showAnki ? '<button data-wp-act="anki" title="把该词加入 Anki">🎴 Anki</button>' : '') +
-      (_ctx.markHighlight ? '<button data-wp-act="mark" title="把该词标为高亮">🖌 标记</button>' : '') +
-      '<button data-wp-act="grammar" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
+      '<button id="wp-master-btn" class="' + (_wordPopState.mastered ? 'wp-anki' : '') + '" data-wp-act="master" title="' + (_wordPopState.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (_wordPopState.mastered ? '<span class="rc-i rc-i-check"></span> 已掌握 100' : '<span class="rc-i rc-i-star"></span> 标记掌握') + '</button>' +
+      (_ctx.showAnki ? '<button data-wp-act="anki" title="把该词加入 Anki"><span class="rc-i rc-i-card"></span> Anki</button>' : '') +
+      (_ctx.markHighlight ? '<button data-wp-act="mark" title="把该词标为高亮"><span class="rc-i rc-i-brush"></span> 标记</button>' : '') +
+      '<button data-wp-act="grammar" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）"><span class="rc-i rc-i-chart"></span> 语法</button>' +
       '</div>';
     if (d.jp) {
       _fillJapaneseExampleZh(pop, quickRows, smallExampleKey, function () {
@@ -1331,7 +1333,7 @@
   };
   function _paintMasterBtn(btn, on) {
     if (!btn) return;
-    btn.textContent = on ? '✓ 已掌握 100' : '☆ 标记掌握';
+    btn.innerHTML = on ? _mi('check') + ' 已掌握 100' : _mi('star') + ' 标记掌握';
     btn.title = on ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）';
     btn.classList.toggle('wp-anki', on);
   }
@@ -1528,7 +1530,7 @@
     var params = new URLSearchParams({
       word: word, file: _ctx.file || '', page: String(_ctx.page || 0), context: ctx || ''
     });
-    _openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');   // 立刻占位,避免空等
+    _openResult('<span class="rc-i rc-i-book"></span> ' + word, word, '<div class="loading">⏳ 查词中…</div>');   // 立刻占位,避免空等
     var myReq = _resReqId();    // 本次查词的请求序号;被新结果框作废后,后到的 SSE 渲染一律丢弃
     var contentEl = document.getElementById('result-content');
     var state = {
@@ -1546,7 +1548,7 @@
       if (s.phon_us) head.push('<span style="font-style:italic">US ' + esc(s.phon_us) + '</span>');
       if (s.phon_uk) head.push('<span style="font-style:italic">UK ' + esc(s.phon_uk) + '</span>');
       if (s.freq_bnc) head.push('<span style="color:#5a6680;font-size:11px">BNC #' + s.freq_bnc + '</span>');
-      if (s.audio_us) head.push('<button data-wp-act="audio" data-wp-audio="' + escAttr(s.audio_us) + '" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>');
+      if (s.audio_us) head.push('<button data-wp-act="audio" data-wp-audio="' + escAttr(s.audio_us) + '" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0"><span class="rc-i rc-i-speaker"></span></button>');
       html += '<div style="display:flex;gap:8px;align-items:center;color:var(--rc-text-strong);font-size:13px">' + head.join(' · ') + '</div>';
       if (s.lemma && s.lemma !== word) {
         html += '<div style="margin-top:4px;color:var(--rc-text-dim);font-size:11px">原型：<code>' + esc(s.lemma) + '</code>' + (s.forms && s.forms.length ? '（' + s.forms.map(esc).join('/') + '）' : '') + '</div>';
@@ -1587,8 +1589,8 @@
       if (va) {
         va.className = 'show';
         va.innerHTML =
-          '<button data-wp-act="vocabAnki" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>' +
-          '<button data-wp-act="vocabKnown" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词">✓ 已掌握</button>' +
+          '<button data-wp-act="vocabAnki" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px"><span class="rc-i rc-i-card"></span> 加入 Anki</button>' +
+          '<button data-wp-act="vocabKnown" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词"><span class="rc-i rc-i-check"></span> 已掌握</button>' +
           (s.sources_hit.length
             ? '<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">源：' + s.sources_hit.join(' + ') + (s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file=' + encodeURIComponent(s.vocab_note) + '" style="color:var(--rc-accent)">在 Obsidian 打开词条 →</a>' : '') + '</span>'
             : '<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">⏳ 加载更多源…</span>');
@@ -1703,7 +1705,7 @@
       : { lemma: lemma, word: lemma, forms: [] };
     _refreshUnderlines(lemma, true, meta);
     btn.disabled = true;
-    btn.textContent = '✓ 已掌握 100%';
+    btn.innerHTML = _mi('check') + ' 已掌握 100%';
     btn.style.background = '#1f5132'; btn.style.borderColor = '#3ba566'; btn.style.color = '#cdf5d9';
     btn.style.opacity = '1';
     try {
@@ -1770,7 +1772,7 @@
   }
   async function dictStreamJP(word, ctx) {
     clearInterval(_jpPollTimer);   // 取消上一个词的中译轮询,避免串到当前词
-    _openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
+    _openResult('<span class="rc-i rc-i-book"></span> ' + word, word, '<div class="loading">⏳ 查词中…</div>');
     var myReq = _resReqId();
     var contentEl = document.getElementById('result-content');
     var d;
@@ -1867,9 +1869,9 @@
       va.className = 'show';
       var bs = 'border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px';
       va.innerHTML =
-        '<button data-wp-act="tts" data-wp-arg="' + rq + '" data-wp-lang="ja-JP" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '">🔊 朗读</button>' +
-        '<button data-wp-act="vocabAnki" data-wp-arg="' + wq + '" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '">🎴 加入 Anki</button>' +
-        '<button data-wp-act="vocabKnown" data-wp-arg="' + wq + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%">✓ 已掌握</button>';
+        '<button data-wp-act="tts" data-wp-arg="' + rq + '" data-wp-lang="ja-JP" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '"><span class="rc-i rc-i-speaker"></span> 朗读</button>' +
+        '<button data-wp-act="vocabAnki" data-wp-arg="' + wq + '" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '"><span class="rc-i rc-i-card"></span> 加入 Anki</button>' +
+        '<button data-wp-act="vocabKnown" data-wp-arg="' + wq + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%"><span class="rc-i rc-i-check"></span> 已掌握</button>';
     }
     return true;
   }

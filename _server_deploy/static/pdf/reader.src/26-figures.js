@@ -120,7 +120,7 @@
     showHl(badge, fig);                                // 高亮该图范围
     var pop = document.createElement('div'); pop.id = 'fig-pop'; pop.className = 'fig-pop';
     var body = md(fig.desc);
-    pop.innerHTML = '<span class="fig-x">✕</span>' +
+    pop.innerHTML = '<span class="fig-x"><span class="rc-i rc-i-close"></span></span>' +
       (fig.caption ? '<h4>' + esc(fig.caption) + '</h4>' : '<h4>图</h4>') +
       '<div class="fig-body">' + (body != null ? body : ('<p>' + esc(fig.desc).replace(/\n/g, '<br>') + '</p>')) + '</div>';
     document.body.appendChild(pop);

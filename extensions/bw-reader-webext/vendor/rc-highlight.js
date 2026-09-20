@@ -101,7 +101,7 @@ if (window.__bwPwaProviderOnly) return;
     if (opts.preview || (opts.sentence && opts.sentence !== opts.preview) || opts.body) {
       var rows = '';
       if (opts.preview) { var pv = String(opts.preview); rows += '<div class="rc-hl-prev">' + esc(pv.length > 800 ? pv.slice(0, 800) + '…' : pv) + '</div>'; }
-      if (opts.sentence && opts.sentence !== opts.preview) { var st = String(opts.sentence); rows += '<div class="rc-hl-sent">📖 ' + esc(st.length > 800 ? st.slice(0, 800) + '…' : st) + '</div>'; }
+      if (opts.sentence && opts.sentence !== opts.preview) { var st = String(opts.sentence); rows += '<div class="rc-hl-sent"><span class="rc-i rc-i-book"></span> ' + esc(st.length > 800 ? st.slice(0, 800) + '…' : st) + '</div>'; }
       if (opts.body) {
         var bd = String(opts.body);
         var kindLbl = opts.kind === 'translate' ? '🌐 翻译' : opts.kind === 'explain' ? '💡 解释' : '📝 备注';
@@ -112,7 +112,7 @@ if (window.__bwPwaProviderOnly) return;
     // 照搬 PDF #hl-popover 的 <div class="row"><span class="row-lbl">🎨 颜色</span>...色板...</div>
     pop.innerHTML = prev + '<div class="rc-hl-sw"><span class="rc-hl-sw-lbl">🎨 颜色</span>' + sw + '</div>' +
       '<textarea class="rc-hl-note" placeholder="备注(可选)">' + esc(note) + '</textarea>' +
-      '<div class="rc-hl-row"><button class="rc-hl-del">🗑 删除</button><button class="rc-hl-save">保存</button></div>';
+      '<div class="rc-hl-row"><button class="rc-hl-del"><span class="rc-i rc-i-trash"></span> 删除</button><button class="rc-hl-save">保存</button></div>';
     document.body.appendChild(pop);
     // 预览块点击展开/收起(单行省略 ↔ 全文)
     var pbox = pop.querySelector('.rc-hl-prevbox');
@@ -223,10 +223,10 @@ if (window.__bwPwaProviderOnly) return;
       row.innerHTML = '<div class="rc-hl-slide">' +
           '<span class="rc-hl-dot" title="点这里 / 左滑显示删除" style="background:' + esc(getColor(h)) + '"></span>' +
           '<div class="rc-hl-tx">' + esc(txt.slice(0, 120)) + (txt.length > 120 ? '…' : '') +
-          (note ? '<span class="rc-hl-nt">📝 ' + esc(note) + '</span>' : '') + '</div>' +
+          (note ? '<span class="rc-hl-nt"><span class="rc-i rc-i-note"></span> ' + esc(note) + '</span>' : '') + '</div>' +
           '<div class="rc-hl-ops"><button class="rc-hl-go">跳转</button></div>' +
         '</div>' +
-        '<button class="rc-hl-swipe-del" type="button" title="删除高亮">🗑</button>';
+        '<button class="rc-hl-swipe-del" type="button" title="删除高亮"><span class="rc-i rc-i-trash"></span></button>';
       var slide = row.querySelector('.rc-hl-slide');
       row.querySelector('.rc-hl-go').onclick = function (e) { e.stopPropagation(); if (opts.onJump) opts.onJump(h); };
       // 等删除有了明确结果再移除这一行。

@@ -1138,6 +1138,11 @@ async function _renderPageInto(num, wrap) {
     loadPageNodes(num);
   }
 }
+  // 图标片段：RC.ui 还没注入时回落空串（宁可没图标，也不要半个标记）。
+  // ⚠ 整个 reader.src 拼成**一个 ES module**，所以这份只能有一处 —— 每个文件各放
+  //   一份会是「Identifier '_mi' has already been declared」。函数声明会提升，
+  //   后面的模块（15-phrase-wordpop / 19-dict）直接用即可。
+  function _mi(n) { try { return (window.RC && RC.ui && RC.ui.icon(n)) || ''; } catch (_) { return ''; } }
 function loadPageNodes(num) {
   // 共享模式(__uiShared)→ PdfAdapter.renderPageNodes → rc-knowledge.renderInto(知识点卡统一)。
   //   取数(page-nodes,页作用域)+ __lastPageNodes(语音上下文)+ 容器 #kg-nodes 都由 adapter 处理;
@@ -1167,7 +1172,7 @@ async function _loadPageNodesNative(num) {
       // 只有 grammar KG 的节点能跟踪（跟技能树 toggle-tracked 规则一致）
       const trackBtn = (n.kind === 'grammar')
         ? `<button class="kg-track-btn ${n.tracked ? 'on' : ''}" title="加入/取消语法跟踪"
-             onclick="event.stopPropagation(); toggleNodeTrack('${n.book}','${n.id}', this)">${n.tracked ? '★ 跟踪中' : '☆ 跟踪'}</button>`
+             onclick="event.stopPropagation(); toggleNodeTrack('${n.book}','${n.id}', this)">${n.tracked ? '<span class="rc-i rc-i-starFill"></span> 跟踪中' : '<span class="rc-i rc-i-star"></span> 跟踪'}</button>`
         : '';
       const lbl = n.numeric_label ? `[${n.numeric_label}] ` : '';
       return `<div class="kg-node ${n.state}">
@@ -1195,7 +1200,7 @@ window.toggleNodeTrack = async (book, nodeId, btn) => {
     const d = await r.json();
     if (d.ok) {
       btn.classList.toggle('on', d.tracked);
-      btn.textContent = d.tracked ? '★ 跟踪中' : '☆ 跟踪';
+      btn.innerHTML = d.tracked ? _mi('starFill') + ' 跟踪中' : _mi('star') + ' 跟踪';
       loadGrammarTracked();   // 刷新工具栏「📊 语法分析」按钮的可用状态
     } else {
       _toast?.(d.error || '操作失败');
@@ -1484,7 +1489,7 @@ function _addHistoryBlock(item) {
   block.innerHTML =
     `<div class="gb-header">
        <span class="gb-title" title="${_esc(sentence)}">${_esc(summary)}</span>
-       <span class="gb-del" title="删除这条（同句下次重新分析）">🗑</span>
+       <span class="gb-del" title="删除这条（同句下次重新分析）"><span class="rc-i rc-i-trash"></span></span>
        <span class="gb-caret">▶</span>
      </div>
      <div class="gb-trans"></div>
@@ -1493,7 +1498,7 @@ function _addHistoryBlock(item) {
      <div class="gb-followup">
        <input class="gb-fu-input" placeholder="继续追问这句的语法…" onkeydown="if(event.key==='Enter'){event.preventDefault();_grammarFollowup('${_hid}');}">
        <button onclick="_grammarFollowup('${_hid}')">追问</button>
-       <button class="gb-anki-btn" onclick="_grammarAnki('${_hid}')" title="整句+译文+分析做成 Anki 卡">🎴</button>
+       <button class="gb-anki-btn" onclick="_grammarAnki('${_hid}')" title="整句+译文+分析做成 Anki 卡"><span class="rc-i rc-i-card"></span></button>
      </div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => {
@@ -1615,14 +1620,14 @@ function _renderVocabItem(it) {
     <div class="vi-head">
       <span class="vi-word">${_esc(it.lemma)}</span>
       ${it.phonetic ? `<span class="vi-phon">${_esc(it.phonetic)}</span>` : ''}
-      <button class="vi-audio" title="发音">🔊</button>
+      <button class="vi-audio" title="发音"><span class="rc-i rc-i-speaker"></span></button>
       <span class="vi-mastery-badge" style="background:${col}22;color:${col}">${_esc(it.mastery_label || (pct + '%'))}</span>
     </div>
     <div class="vi-bar"><div style="width:${pct}%;background:${col}"></div></div>
     ${it.zh ? `<div class="vi-zh">${_esc(it.zh)}</div>` : ''}
     <div class="vi-foot">
       <span class="vi-pages">${pagesHtml}</span>
-      <button class="vi-anki">${it.has_card ? '✓ 已加' : '📇 加卡'}</button>
+      <button class="vi-anki">${it.has_card ? '<span class="rc-i rc-i-check"></span> 已加' : '📇 加卡'}</button>
     </div>`;
   if (it.has_card) div.querySelector('.vi-anki').classList.add('done');
   div.querySelector('.vi-word').addEventListener('click', () => dictStream(it.lemma, ''));
@@ -3890,7 +3895,7 @@ function _showSentMenu(btn, s, pw) {
   const menu = document.createElement('div');
   menu.className = 'sent-menu';
   let html = '<button type="button" data-act="re">🔄 重新翻译</button>';
-  if (s.manual) html += '<button type="button" data-act="del">🗑 删除标记</button>';
+  if (s.manual) html += '<button type="button" data-act="del"><span class="rc-i rc-i-trash"></span> 删除标记</button>';
   menu.innerHTML = html;
   document.body.appendChild(menu);
   const r = btn.getBoundingClientRect();
@@ -6407,13 +6412,13 @@ async function _showPhrasePopoverNative(text, opts) {
   const fav = _phraseFavSet.has(text);
   pop.innerHTML =
     '<div class="wp-head"><span class="wp-word">' + esc(text) + '</span>' + phon +
-    (reading ? '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' : '') + '</div>' +
+    (reading ? '<button class="wp-speak" onclick="_speakCurWord()" title="发音"><span class="rc-i rc-i-speaker"></span></button>' : '') + '</div>' +
     '<div class="wp-def">' + (zh ? esc(zh) : '<span style="color:#8a9bb4">（无翻译）</span>') + '</div>' +
     '<div class="wp-actions">' +
     '<button id="phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_phraseFav(this)">' +
-    (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
+    (fav ? '<span class="rc-i rc-i-starFill"></span> 已收藏' : '<span class="rc-i rc-i-star"></span> 收藏为词组') + '</button>' +
     '<button id="wp-master-btn" class="' + (_wordPopState.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (_wordPopState.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（该词组不再标生词下划线）') + '">' +
-    (_wordPopState.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
+    (_wordPopState.mastered ? '<span class="rc-i rc-i-check"></span> 已掌握 100' : '<span class="rc-i rc-i-star"></span> 标记掌握') + '</button>' +
     '<button onclick="onExplain()" title="详细解释这个词组">💡 解释</button>' +
     '</div>';
 }
@@ -6578,7 +6583,7 @@ window._phraseFav = (btn) => {
   const nowFav = !has;
   // ① local-first(2026-07-20 用户实锤"点收藏要等 Pi"):本地先翻集合+画面,零等待
   if (nowFav) _phraseFavSet.add(t); else _phraseFavSet.delete(t);
-  if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
+  if (btn) { btn.disabled = false; btn.innerHTML = nowFav ? _mi('starFill') + ' 已收藏' : _mi('star') + ' 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
   _toast?.(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
   if (nowFav) _removePhraseHighlight(t);   // 收藏后该词组变成划线(分词单元),只消除同文本的查询高亮(不动别的并存高亮)
   _applyPhraseMergesAll();   // 本地真分词(教义:服务器只做备份/中继;整本重算已撤,服务端结果下次自然加载幂等重套)
@@ -6741,7 +6746,7 @@ function _jpInflectHtml(inf, word) {
   const b = showBase ? '原形 <b>' + esc(inf.base) + '</b>' : '';
   const m = (inf.marks || []).length ? '<span class="jp-inflect-mark">' + inf.marks.map(esc).join('・') + '</span>' : '';
   if (!b && !m) return '';
-  return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
+  return '<div class="jp-inflect"><span class="rc-i rc-i-shuffle"></span> ' + [b, m].filter(Boolean).join('　') + '</div>';
 }
 // 英语原型 + 变形 → HTML 行（跟日语变形行同款样式）。clicked=用户点的词；lemma=ECDICT 还原的原型；
 // forms=该词的各种屈折(复数/过去式/比较级…)。点的是变形词时显「原型 run」，并列出其余变形 chip。
@@ -6754,7 +6759,7 @@ function _enFormsHtml(lemma, forms, clicked) {
   const b = (lemma && c && c !== lemma) ? '原型 <b>' + esc(lemma) + '</b>' : '';
   const m = fs.length ? '变形 <span class="jp-inflect-mark">' + fs.map(esc).join('・') + '</span>' : '';
   if (!b && !m) return '';
-  return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
+  return '<div class="jp-inflect"><span class="rc-i rc-i-shuffle"></span> ' + [b, m].filter(Boolean).join('　') + '</div>';
 }
 // ── 单击查词的"等待"表现（照「解释」那套，多个可并存）──────────────────────────
 // 快词(≤300ms 回，英语 ecdict / 已缓存日语)直接弹小框；慢词(日语 AI 等)不弹挡视线的"查词中"框，
@@ -6890,7 +6895,7 @@ function _renderWordPop(word, ctx, d, cs) {
   pop.innerHTML =
     '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
     phonHtml +
-    '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' +
+    '<button class="wp-speak" onclick="_speakCurWord()" title="发音"><span class="rc-i rc-i-speaker"></span></button>' +
     (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
     inflectHtml +
     '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + posTag + defLines +
@@ -6898,8 +6903,8 @@ function _renderWordPop(word, ctx, d, cs) {
     '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
     '<div class="wp-actions">' +
     // 掌握 toggle:日英统一同一个按钮(onclick 内部按语言分流 store);✓掌握=下划线消失
-    '<button id="wp-master-btn" class="' + (d.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (d.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (d.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
-    '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
+    '<button id="wp-master-btn" class="' + (d.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (d.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (d.mastered ? '<span class="rc-i rc-i-check"></span> 已掌握 100' : '<span class="rc-i rc-i-star"></span> 标记掌握') + '</button>' +
+    '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）"><span class="rc-i rc-i-chart"></span> 语法</button>' +
     '</div>';
   _positionWordPop(pop, cs);
   // 查过即记入生词库 → 刷新本页下划线（橙=新/黄=见过/淡绿=熟）
@@ -7060,7 +7065,7 @@ window._wordPopMaster = (btn) => {
       _phraseMarkSet = new Set(d.mastered || []);
       if (btn) {
         btn.disabled = false;
-        btn.textContent = s.mastered ? '✓ 已掌握 100' : '☆ 标记掌握';
+        btn.innerHTML = s.mastered ? _mi('check') + ' 已掌握 100' : _mi('star') + ' 标记掌握';
         btn.title = s.mastered ? '点击取消掌握（恢复词组下划线）' : '标记掌握 100（该词组不再标生词下划线）';
         btn.classList.toggle('wp-anki', s.mastered);
       }
@@ -7083,7 +7088,7 @@ window._wordPopMaster = (btn) => {
     try { const c = _dictCache.get(s.word); if (c) c.mastered = next; } catch (_) {}   // 同步缓存,再点不显旧掌握态
     if (btn) {
       btn.disabled = false;
-      btn.textContent = s.mastered ? '✓ 已掌握 100' : '☆ 标记掌握';
+      btn.innerHTML = s.mastered ? _mi('check') + ' 已掌握 100' : _mi('star') + ' 标记掌握';
       btn.title = s.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）';
       btn.classList.toggle('wp-anki', s.mastered);
     }
@@ -8303,9 +8308,9 @@ window._followupAsk = async () => {
     });
     if (myReq !== _resultReqId) return;
     if (res.ok && res.text) render(res.text);
-    else if (!res.ok) aDiv.innerHTML = '<span style="color:#c00">✗ ' + (res.error || '失败') + '</span>';
+    else if (!res.ok) aDiv.innerHTML = '<span style="color:#c00"><span class="rc-i rc-i-close"></span> ' + (res.error || '失败') + '</span>';
     else aDiv.innerHTML = '(无回答)';
-  } catch (e) { aDiv.innerHTML = '<span style="color:#c00">✗ ' + e.message + '</span>'; }
+  } catch (e) { aDiv.innerHTML = '<span style="color:#c00"><span class="rc-i rc-i-close"></span> ' + e.message + '</span>'; }
   contentEl.scrollTop = contentEl.scrollHeight;
   try { addResultPickers(); } catch (_) {}   // 追问回答也加「+ 选段」，制 Anki(ankiFromResult)含全框选中
 };
@@ -8526,8 +8531,8 @@ function _setBlockPoints(block, jsonStr) {
   wrap.classList.remove('gb-pending');
   wrap.innerHTML = arr.map(a => `
     <div class="gb-ana">
-      <div class="a-head">📊 ${_esc(a.point || a.node_name || '')}</div>
-      ${a.phrase ? `<div class="a-phrase">📍 ${_esc(a.phrase)}</div>` : ''}
+      <div class="a-head"><span class="rc-i rc-i-chart"></span> ${_esc(a.point || a.node_name || '')}</div>
+      ${a.phrase ? `<div class="a-phrase"><span class="rc-i rc-i-pin"></span> ${_esc(a.phrase)}</div>` : ''}
       <div class="a-body">${_esc(a.explanation || '')}${(a.examples||[]).length ? `<ul class="a-ex">${(a.examples||[]).map(e=>'<li>'+_esc(e)+'</li>').join('')}</ul>` : ''}</div>
     </div>`).join('');
   wrap.querySelectorAll('.gb-ana').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
@@ -8673,16 +8678,16 @@ function _addLoadingBlock(id, sentence, text) {
   block.innerHTML =
     `<div class="gb-header">
        <span class="gb-title" title="${_esc(sentence)}">${_esc(summary)}</span>
-       <span class="gb-del" title="删除这条（同句下次重新分析）">🗑</span>
+       <span class="gb-del" title="删除这条（同句下次重新分析）"><span class="rc-i rc-i-trash"></span></span>
        <span class="gb-caret">▶</span>
      </div>
-     <div class="gb-trans gb-pending">🌐 翻译中…</div>
+     <div class="gb-trans gb-pending"><span class="rc-i rc-i-globe"></span> 翻译中…</div>
      <div class="gb-content"><div class="gb-loading">⏳ 结构 / 语法分析中…</div></div>
      <div class="gb-fu-answers"></div>
      <div class="gb-followup">
        <input class="gb-fu-input" placeholder="继续追问这句的语法…" onkeydown="if(event.key==='Enter'){event.preventDefault();_grammarFollowup('${id}');}">
        <button onclick="_grammarFollowup('${id}')">追问</button>
-       <button class="gb-anki-btn" onclick="_grammarAnki('${id}')" title="整句+译文+分析做成 Anki 卡">🎴</button>
+       <button class="gb-anki-btn" onclick="_grammarAnki('${id}')" title="整句+译文+分析做成 Anki 卡"><span class="rc-i rc-i-card"></span></button>
      </div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => {
@@ -8801,8 +8806,8 @@ function _fillGrammarBlock(block, d, sentence) {
   const anaHtml = analyses.length
     ? `<div class="gb-analyses">${analyses.map((a,i)=>`
         <div class="gb-ana" data-i="${i}">
-          <div class="a-head">📊 ${_esc(a.node_name||a.node_id||'')}</div>
-          ${a.phrase?`<div class="a-phrase">📍 ${_esc(a.phrase)}</div>`:''}
+          <div class="a-head"><span class="rc-i rc-i-chart"></span> ${_esc(a.node_name||a.node_id||'')}</div>
+          ${a.phrase?`<div class="a-phrase"><span class="rc-i rc-i-pin"></span> ${_esc(a.phrase)}</div>`:''}
           <div class="a-body">${_esc(a.explanation||'')}${(a.examples||[]).length?`<ul class="a-ex">${(a.examples||[]).map(e=>'<li>'+_esc(e)+'</li>').join('')}</ul>`:''}</div>
         </div>`).join('')}</div>`
     : (isSpacy ? `<div class="gb-analyses gb-pending"><div class="gb-ana"><div class="a-head" style="color:#7a8497;font-weight:400">⏳ 语法点分析中…</div></div></div>` : '');
@@ -9155,7 +9160,7 @@ async function dictStream(word, ctx) {
   });
   window.dlog?.(`dictStream word="${word}" file=${FILE_REL?'Y':'N'} page=${currentPage} ctxLen=${ctx?.length||0}`);
   // 立刻 openResult 占位，避免空等
-  openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
+  openResult('<span class="rc-i rc-i-book"></span> ' + word, word, '<div class="loading">⏳ 查词中…</div>');
   const _optPw = _charSel?.pw;   // 乐观下划线目标页（查词时所在页）
   const myReq = _resultReqId;    // 本次查词的请求序号；被新结果框作废后，后到的 SSE 渲染一律丢弃
   // 无论 SSE / JSON / 失败：1.8s 后无条件触发一次下划线刷新（vocab note 写盘耗时）
@@ -9182,7 +9187,7 @@ async function dictStream(word, ctx) {
     if (s.phon_us) head.push(`<span style="font-style:italic">US ${esc(s.phon_us)}</span>`);
     if (s.phon_uk) head.push(`<span style="font-style:italic">UK ${esc(s.phon_uk)}</span>`);
     if (s.freq_bnc) head.push(`<span style="color:#5a6680;font-size:11px">BNC #${s.freq_bnc}</span>`);
-    if (s.audio_us) head.push(`<button onclick="new Audio('${esc(s.audio_us)}').play()" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>`);
+    if (s.audio_us) head.push(`<button onclick="new Audio('${esc(s.audio_us)}').play()" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0"><span class="rc-i rc-i-speaker"></span></button>`);
     html += `<div style="display:flex;gap:8px;align-items:center;color:var(--rc-text-strong);font-size:13px">${head.join(' · ')}</div>`;
     if (s.lemma && s.lemma !== word) {
       html += `<div style="margin-top:4px;color:var(--rc-text-dim);font-size:11px">原型：<code>${esc(s.lemma)}</code>${s.forms?.length?'（'+s.forms.map(esc).join('/')+'）':''}</div>`;
@@ -9218,8 +9223,8 @@ async function dictStream(word, ctx) {
     if (va) {
       va.className = 'show';
       va.innerHTML =
-        `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>` +
-        `<button onclick="markVocabKnown('${esc(s.lemma||word)}', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词">✓ 已掌握</button>` +
+        `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px"><span class="rc-i rc-i-card"></span> 加入 Anki</button>` +
+        `<button onclick="markVocabKnown('${esc(s.lemma||word)}', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词"><span class="rc-i rc-i-check"></span> 已掌握</button>` +
         (s.sources_hit.length
           ? `<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`
           : `<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>`);
@@ -9336,7 +9341,7 @@ window.markVocabKnown = async (lemma, btn) => {
     });
     const d = await r.json().catch(() => ({}));
     if (d.ok) {
-      btn.textContent = '✓ 已掌握 100%';
+      btn.innerHTML = _mi('check') + ' 已掌握 100%';
       btn.style.background = '#1f5132'; btn.style.borderColor = '#3ba566'; btn.style.color = '#cdf5d9';
       btn.style.opacity = '1';
       refreshVocabUnderlinesForAllPages?.();   // 掌握后该词不再标生词下划线
@@ -9415,14 +9420,14 @@ function _openHlPopoverNative(h, anchorDiv, pw) {
     <div class="hl-snip-wrap" data-id="${escHtml(h.id)}">
       <div class="hl-snip">
         <div class="hl-snip-content">
-          ${h.text ? `<div class="hl-snip-row text"><span class="row-lbl">📌 选中</span>${escHtml(h.text)}</div>` : ''}
-          ${h.sentence ? `<div class="hl-snip-row sentence"><span class="row-lbl">📖 所在句</span>${escHtml(h.sentence)}</div>` : ''}
+          ${h.text ? `<div class="hl-snip-row text"><span class="row-lbl"><span class="rc-i rc-i-pin"></span> 选中</span>${escHtml(h.text)}</div>` : ''}
+          ${h.sentence ? `<div class="hl-snip-row sentence"><span class="row-lbl"><span class="rc-i rc-i-book"></span> 所在句</span>${escHtml(h.sentence)}</div>` : ''}
           ${h.body ? `<div class="hl-snip-row body"><span class="row-lbl">${kindLbl}</span>${escHtml(h.body)}</div>` : ''}
           ${(!h.text && !h.sentence && !h.body) ? `<div class="hl-snip-row text" style="color:#7a8497">（无文字内容）</div>` : ''}
         </div>
         <div class="hl-snip-circle" title="按住左滑显示删除"></div>
       </div>
-      <button class="hl-snip-del-row" type="button" title="删除高亮">🗑</button>
+      <button class="hl-snip-del-row" type="button" title="删除高亮"><span class="rc-i rc-i-trash"></span></button>
     </div>
     <div class="row"><span class="row-lbl">🎨 颜色</span>${colorsHtml}</div>
     <textarea id="hl-note" placeholder="自定义备注（可空）">${escHtml(h.note || '')}</textarea>
@@ -9690,7 +9695,7 @@ function _jpPollZh(word) {
 }
 async function dictStreamJP(word, ctx) {
   clearInterval(_jpPollTimer);   // 取消上一个词的中译轮询，避免串到当前词
-  openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
+  openResult('<span class="rc-i rc-i-book"></span> ' + word, word, '<div class="loading">⏳ 查词中…</div>');
   const myReq = _resultReqId;
   const contentEl = document.getElementById('result-content');
   let d;
@@ -9745,9 +9750,9 @@ async function dictStreamJP(word, ctx) {
     va.className = 'show';
     const bs = 'border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px';
     va.innerHTML =
-      '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '">🔊 朗读</button>' +
-      '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '">🎴 加入 Anki</button>' +
-      '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%">✓ 已掌握</button>';
+      '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '"><span class="rc-i rc-i-speaker"></span> 朗读</button>' +
+      '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '"><span class="rc-i rc-i-card"></span> 加入 Anki</button>' +
+      '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%"><span class="rc-i rc-i-check"></span> 已掌握</button>';
   }
   return true;
 }
@@ -10015,7 +10020,7 @@ window.openDraftModal = () => {
           </div>
           <div class="sel-circle" title="${d.selected?'已选（点击取消）':'未选（点击勾选）'}"></div>
         </div>
-        <button class="draft-item-del-row" type="button" title="删除">🗑</button>
+        <button class="draft-item-del-row" type="button" title="删除"><span class="rc-i rc-i-trash"></span></button>
       </div>
     `).join('');
     // 绑定每条 draft 的交互
@@ -10421,7 +10426,7 @@ window.loadTocStatus = async () => {
     const d = await (await fetch('/pdf/api/toc?file=' + encodeURIComponent(FILE_REL))).json();
     if (d.ok && d.exists) {
       const src = d.source === 'native' ? '书籍自带' : 'AI 建立';
-      st.innerHTML = '✓ 已存在目录（' + src + '，' + d.count + ' 条）<a href="javascript:void 0" onclick="showTocBuild()" style="color:#7dd3fc;margin-left:8px">重建/覆盖</a>';
+      st.innerHTML = '<span class="rc-i rc-i-check"></span> 已存在目录（' + src + '，' + d.count + ' 条）<a href="javascript:void 0" onclick="showTocBuild()" style="color:#7dd3fc;margin-left:8px">重建/覆盖</a>';
       if (box) box.style.display = 'none';
     } else {
       st.textContent = '本书暂无目录。可指定目录页范围让 AI 抽取：';
@@ -10630,10 +10635,10 @@ async function aiCall(path, body, label) {
     const res = await _aiStream(path, { method: 'POST', body, onText: render });
     if (myReq !== _resultReqId) return;
     render(res.text);
-    if (!res.ok) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>';
+    if (!res.ok) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px"><span class="rc-i rc-i-close"></span> ' + (res.error || '失败') + '</div>';
     addResultPickers();   // 完成后给标题加 +
   } catch (e) {
-    if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+    if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00"><span class="rc-i rc-i-close"></span> ' + e.message + '</div>';
   }
 }
 
@@ -10699,7 +10704,7 @@ window.onOcrSel = async () => {
     const j = await r.json();
     if (j && j.ok && j.text) {
       lastSelText = j.text;                     // 校正后的文字回填,下游(复制/翻译/解释/对话)全用它
-      if (prev) prev.innerHTML = _esc(j.text) + ' <span class="len">OCR ✓ 已写入</span>';
+      if (prev) prev.innerHTML = _esc(j.text) + ' <span class="len">OCR <span class="rc-i rc-i-check"></span> 已写入</span>';
       // 持久化已落库:更新本页 cv(让重渲第一拉就命中新版)+ 立即重渲本页 → 校正注入字符层、永久生效
       if (j.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + selPage, j.cv); } catch (_) {} }
       if (typeof _rerenderLoadedPages === 'function') { try { _rerenderLoadedPages(); } catch (_) {} }
@@ -10917,12 +10922,12 @@ async function _runExplainBg(hl, text, context) {
     const res = await _aiStream('/pdf/api/explain', { method: 'POST', body, onText: (t) => { acc = t; _fillPanel(md(t || ' '), false); } });
     if (hl.canceled) return;   // 被新解释替换 → 丢弃
     const full = res.text || acc;
-    hl.html = md(full || ' ') + (res.ok ? '' : '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>');
+    hl.html = md(full || ' ') + (res.ok ? '' : '<div style="color:#c00;margin-top:8px"><span class="rc-i rc-i-close"></span> ' + (res.error || '失败') + '</div>');
     hl.ready = true;
     _fillPanel(hl.html, true);
   } catch (e) {
     if (hl.canceled) return;
-    hl.html = '<div style="color:#c00">✗ ' + (e.message || '失败') + '</div>'; hl.ready = true;
+    hl.html = '<div style="color:#c00"><span class="rc-i rc-i-close"></span> ' + (e.message || '失败') + '</div>'; hl.ready = true;
     _fillPanel(hl.html, false);
   }
 }
@@ -10957,10 +10962,10 @@ window.onChat = () => {
 // 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
 function _openChat(lastSelText, context) {
   let html = '<div style="font-size:12.5px;line-height:1.65">'
-    + '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px">📌 原文</div>'
+    + '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px"><span class="rc-i rc-i-pin"></span> 原文</div>'
     + '<div style="color:var(--rc-text-strong);white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
   if (context && context.trim() !== lastSelText.trim()) {
-    html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px">📖 上下文</div>'
+    html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px"><span class="rc-i rc-i-book"></span> 上下文</div>'
       + '<div style="color:var(--rc-text-muted);white-space:pre-wrap">' + _esc(context) + '</div>';
   }
   html += '<div style="margin-top:12px;color:var(--rc-text-dim)">↓ 在下方输入问题，AI 会结合原文和上下文回答</div></div>';
@@ -10992,7 +10997,7 @@ window.onToNote = async () => {
   if (name === null) return;
   const trimmed = (name || '').trim();
   if (!trimmed) return;
-  openResult('📝 创建笔记', lastSelText, '<div class="loading">⏳ 正在写入…</div>');
+  openResult('<span class="rc-i rc-i-note"></span> 创建笔记', lastSelText, '<div class="loading">⏳ 正在写入…</div>');
   try {
     const r = await fetch('/pdf/api/to-note', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -11002,13 +11007,13 @@ window.onToNote = async () => {
     if (d.ok) {
       const safeUrl = (d.obsidian_url || '').replace(/'/g,"\\'");
       document.getElementById('result-content').innerHTML =
-        '<div>✓ 笔记已创建：<code>' + d.note_path + '</code>（含 PDF 来源引用）</div>' +
+        '<div><span class="rc-i rc-i-check"></span> 笔记已创建：<code>' + d.note_path + '</code>（含 PDF 来源引用）</div>' +
         '<div style="margin-top:10px"><button onclick="location.href=\'' + safeUrl + '\'" style="background:#1a2540;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:6px;padding:6px 14px;cursor:pointer">📂 在 Obsidian 中打开</button></div>';
     } else {
-      document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
+      document.getElementById('result-content').innerHTML = '<div style="color:#c00"><span class="rc-i rc-i-close"></span> ' + (d.error || '失败') + '</div>';
     }
   } catch (e) {
-    document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+    document.getElementById('result-content').innerHTML = '<div style="color:#c00"><span class="rc-i rc-i-close"></span> ' + e.message + '</div>';
   }
 };
 
@@ -11322,8 +11327,8 @@ async function _connProbe() {
   // 快捷栏:共享构建器 rcBuildQuickBar(在则空容器等它填,与 EPUB 同一份来源 → 按钮永不分叉;
   //   历史「总结本页/本页生词」不再纳入)。legacy 模式(rc-assistant 未加载)→ native 兜底同款三按钮。
   var _quickNative = window.rcBuildQuickBar ? '' :
-      '<button data-q="clear">🗑 清空</button>' +
-      '<button data-q="models">⚙ 模型</button>';
+      '<button data-q="clear"><span class="rc-i rc-i-trash"></span> 清空</button>' +
+      '<button data-q="models"><span class="rc-i rc-i-gear"></span> 模型</button>';
   pane.innerHTML =
     '<div id="asst-thread"></div>' +
     '<div id="asst-quick">' + _quickNative + '</div>' +
@@ -12472,7 +12477,7 @@ async function _connProbe() {
       else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
       else if (ev === 'undo' && parsed && parsed.undo_id) {
         var _ujp = parsed.page ? ' <button class="asst-jump" data-page="' + esc(parsed.page) + '">↗ 跳转</button>' : '';
-        addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
+        addMsg('asst-a', '<span class="rc-i rc-i-check"></span> ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
       }
       else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
     }
@@ -12556,7 +12561,7 @@ async function _connProbe() {
         if (d.status === 'running') { if (d.step) line.innerHTML = '<span class="asst-tool">⏳ ' + esc(d.step) + '…</span>'; setTimeout(poll, 2000); return; }
         if (d.status === 'done') {
           var uid = d.result && d.result.undo_id;
-          line.innerHTML = '✓ ' + esc(d.speak || '完成') + (uid ? ' <button class="asst-undo" data-uid="' + esc(uid) + '">↩ 撤销</button>' : '');
+          line.innerHTML = '<span class="rc-i rc-i-check"></span> ' + esc(d.speak || '完成') + (uid ? ' <button class="asst-undo" data-uid="' + esc(uid) + '">↩ 撤销</button>' : '');
           notify('阅读助手 ✓', d.speak || '任务完成');
         } else { line.innerHTML = '✗ ' + esc(d.error || '没办成'); }
         scrollDown();
@@ -12818,7 +12823,7 @@ async function _connProbe() {
 
   function prewarm(off) { try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {} }
   window.__asstPrewarm = function () { try { prewarm(false); } catch (_) {} };   // 切到助手 tab 时也预热(减第二条起的冷启动)
-  function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>'); }
+  function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;<span class="rc-i rc-i-trash"></span> 清空)</span>'); }
   function loadHistory() {   // 开面板载入服务端保存的历史(跨设备续上)
     fetch('/api/assistant/history').then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok && d.messages && d.messages.length) {
@@ -12837,7 +12842,7 @@ async function _connProbe() {
             if (Array.isArray(m.undo_cards)) m.undo_cards.forEach(function (u) {   // H2:高亮撤销卡刷新回放(undo_id 服务端持久,撤销/跳转 handler 已复用)
               if (!u || !u.undo_id) return;
               var _ujp = u.page ? ' <button class="asst-jump" data-page="' + esc(u.page) + '">↗ 跳转</button>' : '';
-              addMsg('asst-a', '✓ ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
+              addMsg('asst-a', '<span class="rc-i rc-i-check"></span> ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
             });
           }
         });
@@ -12971,7 +12976,7 @@ async function _connProbe() {
     showHl(badge, fig);                                // 高亮该图范围
     var pop = document.createElement('div'); pop.id = 'fig-pop'; pop.className = 'fig-pop';
     var body = md(fig.desc);
-    pop.innerHTML = '<span class="fig-x">✕</span>' +
+    pop.innerHTML = '<span class="fig-x"><span class="rc-i rc-i-close"></span></span>' +
       (fig.caption ? '<h4>' + esc(fig.caption) + '</h4>' : '<h4>图</h4>') +
       '<div class="fig-body">' + (body != null ? body : ('<p>' + esc(fig.desc).replace(/\n/g, '<br>') + '</p>')) + '</div>';
     document.body.appendChild(pop);
@@ -14061,7 +14066,23 @@ if (window.PdfAdapter && PdfAdapter.bind) {
     const act = panel.querySelector('.ep-side-pane.active');
     let anchor = bar ? bar.firstChild : null;
     sharedTabBtns.forEach(b => {
+      // ⚠ 只搬新 tab 栏**没有**的那些 —— 这段代码的本意是保住 rc-assistant 注入的
+      //   asst / 操作，不是把 init 里已经声明过的 grammar/vocab/kg/hist 也搬回来。
+      //   一起搬的结果是同一个 pane 两个按钮（2026-09-20 用户：「同一个内容出现两个
+      //   图标，有字和无字的」），而且两个都会被标成 active。
+      if (bar && bar.querySelector('.ep-side-tab[data-pane="' + b.dataset.pane + '"]')) {
+        return;
+      }
       b.classList.remove('side-tab'); b.classList.add('ep-side-tab');
+      // ⚠ 旧按钮的标签是**裸文本节点**（`<svg…/>助手`），不在 .ep-side-tab-lb 里，
+      //   于是窄屏那条「只显图标」的规则对它无效 —— 旧的永远带字、新的永远不带，
+      //   并排就是不一致。搬进来时统一包一层，让同一条规则管得到。
+      Array.from(b.childNodes).forEach(n => {
+        if (n.nodeType !== 3 || !n.textContent.trim()) return;
+        const lb = document.createElement('span');
+        lb.className = 'ep-side-tab-lb'; lb.textContent = n.textContent.trim();
+        b.replaceChild(lb, n);
+      });
       if (bar) bar.insertBefore(b, anchor);
       b.classList.toggle('active', !!(act && act.dataset.pane === b.dataset.pane));
     });

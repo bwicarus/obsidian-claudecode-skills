@@ -297,13 +297,13 @@ async function _showPhrasePopoverNative(text, opts) {
   const fav = _phraseFavSet.has(text);
   pop.innerHTML =
     '<div class="wp-head"><span class="wp-word">' + esc(text) + '</span>' + phon +
-    (reading ? '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' : '') + '</div>' +
+    (reading ? '<button class="wp-speak" onclick="_speakCurWord()" title="发音"><span class="rc-i rc-i-speaker"></span></button>' : '') + '</div>' +
     '<div class="wp-def">' + (zh ? esc(zh) : '<span style="color:#8a9bb4">（无翻译）</span>') + '</div>' +
     '<div class="wp-actions">' +
     '<button id="phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_phraseFav(this)">' +
-    (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
+    (fav ? '<span class="rc-i rc-i-starFill"></span> 已收藏' : '<span class="rc-i rc-i-star"></span> 收藏为词组') + '</button>' +
     '<button id="wp-master-btn" class="' + (_wordPopState.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (_wordPopState.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（该词组不再标生词下划线）') + '">' +
-    (_wordPopState.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
+    (_wordPopState.mastered ? '<span class="rc-i rc-i-check"></span> 已掌握 100' : '<span class="rc-i rc-i-star"></span> 标记掌握') + '</button>' +
     '<button onclick="onExplain()" title="详细解释这个词组">💡 解释</button>' +
     '</div>';
 }
@@ -468,7 +468,7 @@ window._phraseFav = (btn) => {
   const nowFav = !has;
   // ① local-first(2026-07-20 用户实锤"点收藏要等 Pi"):本地先翻集合+画面,零等待
   if (nowFav) _phraseFavSet.add(t); else _phraseFavSet.delete(t);
-  if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
+  if (btn) { btn.disabled = false; btn.innerHTML = nowFav ? _mi('starFill') + ' 已收藏' : _mi('star') + ' 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
   _toast?.(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
   if (nowFav) _removePhraseHighlight(t);   // 收藏后该词组变成划线(分词单元),只消除同文本的查询高亮(不动别的并存高亮)
   _applyPhraseMergesAll();   // 本地真分词(教义:服务器只做备份/中继;整本重算已撤,服务端结果下次自然加载幂等重套)
@@ -631,7 +631,7 @@ function _jpInflectHtml(inf, word) {
   const b = showBase ? '原形 <b>' + esc(inf.base) + '</b>' : '';
   const m = (inf.marks || []).length ? '<span class="jp-inflect-mark">' + inf.marks.map(esc).join('・') + '</span>' : '';
   if (!b && !m) return '';
-  return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
+  return '<div class="jp-inflect"><span class="rc-i rc-i-shuffle"></span> ' + [b, m].filter(Boolean).join('　') + '</div>';
 }
 // 英语原型 + 变形 → HTML 行（跟日语变形行同款样式）。clicked=用户点的词；lemma=ECDICT 还原的原型；
 // forms=该词的各种屈折(复数/过去式/比较级…)。点的是变形词时显「原型 run」，并列出其余变形 chip。
@@ -644,7 +644,7 @@ function _enFormsHtml(lemma, forms, clicked) {
   const b = (lemma && c && c !== lemma) ? '原型 <b>' + esc(lemma) + '</b>' : '';
   const m = fs.length ? '变形 <span class="jp-inflect-mark">' + fs.map(esc).join('・') + '</span>' : '';
   if (!b && !m) return '';
-  return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
+  return '<div class="jp-inflect"><span class="rc-i rc-i-shuffle"></span> ' + [b, m].filter(Boolean).join('　') + '</div>';
 }
 // ── 单击查词的"等待"表现（照「解释」那套，多个可并存）──────────────────────────
 // 快词(≤300ms 回，英语 ecdict / 已缓存日语)直接弹小框；慢词(日语 AI 等)不弹挡视线的"查词中"框，
@@ -780,7 +780,7 @@ function _renderWordPop(word, ctx, d, cs) {
   pop.innerHTML =
     '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
     phonHtml +
-    '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' +
+    '<button class="wp-speak" onclick="_speakCurWord()" title="发音"><span class="rc-i rc-i-speaker"></span></button>' +
     (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
     inflectHtml +
     '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + posTag + defLines +
@@ -788,8 +788,8 @@ function _renderWordPop(word, ctx, d, cs) {
     '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
     '<div class="wp-actions">' +
     // 掌握 toggle:日英统一同一个按钮(onclick 内部按语言分流 store);✓掌握=下划线消失
-    '<button id="wp-master-btn" class="' + (d.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (d.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (d.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
-    '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
+    '<button id="wp-master-btn" class="' + (d.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (d.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (d.mastered ? '<span class="rc-i rc-i-check"></span> 已掌握 100' : '<span class="rc-i rc-i-star"></span> 标记掌握') + '</button>' +
+    '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）"><span class="rc-i rc-i-chart"></span> 语法</button>' +
     '</div>';
   _positionWordPop(pop, cs);
   // 查过即记入生词库 → 刷新本页下划线（橙=新/黄=见过/淡绿=熟）
@@ -950,7 +950,7 @@ window._wordPopMaster = (btn) => {
       _phraseMarkSet = new Set(d.mastered || []);
       if (btn) {
         btn.disabled = false;
-        btn.textContent = s.mastered ? '✓ 已掌握 100' : '☆ 标记掌握';
+        btn.innerHTML = s.mastered ? _mi('check') + ' 已掌握 100' : _mi('star') + ' 标记掌握';
         btn.title = s.mastered ? '点击取消掌握（恢复词组下划线）' : '标记掌握 100（该词组不再标生词下划线）';
         btn.classList.toggle('wp-anki', s.mastered);
       }
@@ -973,7 +973,7 @@ window._wordPopMaster = (btn) => {
     try { const c = _dictCache.get(s.word); if (c) c.mastered = next; } catch (_) {}   // 同步缓存,再点不显旧掌握态
     if (btn) {
       btn.disabled = false;
-      btn.textContent = s.mastered ? '✓ 已掌握 100' : '☆ 标记掌握';
+      btn.innerHTML = s.mastered ? _mi('check') + ' 已掌握 100' : _mi('star') + ' 标记掌握';
       btn.title = s.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）';
       btn.classList.toggle('wp-anki', s.mastered);
     }

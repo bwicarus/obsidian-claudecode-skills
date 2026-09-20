@@ -5338,10 +5338,10 @@
           '　' + esc(item.kind) + '</span>' +
           '<button type="button" data-ntf-act="resolve" style="background:var(--rc-bg-raised);' +
           'border:1px solid var(--rc-border);color:#9fe6b8;border-radius:6px;' +
-          'padding:4px 10px;cursor:pointer;font-size:12px">✔ 完成</button>' +
+          'padding:4px 10px;cursor:pointer;font-size:12px"><span class="rc-i rc-i-check"></span> 完成</button>' +
           '<button type="button" data-ntf-act="cancel" style="background:var(--rc-bg-raised);' +
           'border:1px solid var(--rc-border);color:var(--rc-text-muted);border-radius:6px;' +
-          'padding:4px 10px;cursor:pointer;font-size:12px">✕ 不再需要</button>' +
+          'padding:4px 10px;cursor:pointer;font-size:12px"><span class="rc-i rc-i-close"></span> 不再需要</button>' +
           '</div></div>';
       }).join('');
     }

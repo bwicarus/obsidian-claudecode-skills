@@ -129,9 +129,9 @@
     el.dataset.uid = p.id;
     el.dataset.after = String(p.after | 0);
     el.innerHTML =
-      '<div class="rc-up-bar"><span class="rc-up-badge">📝 我的页</span><span class="rc-up-title"></span>' +
-      '<span class="rc-up-sp"></span><button class="rc-up-e" title="编辑(markdown,支持 $公式$/列表/标题)">✏️</button>' +
-      '<button class="rc-up-d" title="删除这一页">🗑</button></div>' +
+      '<div class="rc-up-bar"><span class="rc-up-badge"><span class="rc-i rc-i-note"></span> 我的页</span><span class="rc-up-title"></span>' +
+      '<span class="rc-up-sp"></span><button class="rc-up-e" title="编辑(markdown,支持 $公式$/列表/标题)"><span class="rc-i rc-i-pencil"></span>️</button>' +
+      '<button class="rc-up-d" title="删除这一页"><span class="rc-i rc-i-trash"></span></button></div>' +
       '<div class="rc-up-body"></div>';
     el.querySelector('.rc-up-e').addEventListener('click', function (e) { e.stopPropagation(); openEditor(p); });
     el.querySelector('.rc-up-d').addEventListener('click', function (e) {
@@ -310,7 +310,7 @@
     var ed = document.createElement('div'); ed.className = 'rc-up-edit';
     ed.innerHTML =
       '<div class="rc-up-ebar"><input class="rc-up-ti" type="text" maxlength="120" placeholder="标题(可空)">' +
-      '<button class="rc-up-del" title="删除这一页">🗑</button><button class="rc-up-done">✓ 完成</button></div>' +
+      '<button class="rc-up-del" title="删除这一页"><span class="rc-i rc-i-trash"></span></button><button class="rc-up-done"><span class="rc-i rc-i-check"></span> 完成</button></div>' +
       '<textarea class="rc-up-ta" placeholder="正文…(markdown:# 标题 / 列表 / **粗体** / $..$ 公式;自动保存)"></textarea>' +
       '<div class="rc-up-savehint">自动保存,无需手动</div>';
     var ti = ed.querySelector('.rc-up-ti'), ta = ed.querySelector('.rc-up-ta');
@@ -374,7 +374,7 @@
     var ta = document.createElement('textarea'); ta.className = 'rc-up-ta';
     ta.placeholder = 'markdown 正文…(支持 $..$ 公式 / 列表 / 标题)'; ta.value = p.md || '';
     var bar = document.createElement('div'); bar.className = 'rc-up-ebar';
-    bar.innerHTML = '<button class="rc-up-cancel">✕ 取消</button><button class="rc-up-save">✓ 保存</button>';
+    bar.innerHTML = '<button class="rc-up-cancel"><span class="rc-i rc-i-close"></span> 取消</button><button class="rc-up-save"><span class="rc-i rc-i-check"></span> 保存</button>';
     ed.appendChild(ti); ed.appendChild(ta); ed.appendChild(bar);
     el.appendChild(ed); el.classList.add('editing');
     function close() { try { ed.remove(); } catch (_) {} el.classList.remove('editing'); }

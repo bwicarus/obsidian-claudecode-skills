@@ -13,6 +13,8 @@
   var _injected = false;
   var _loaded = false;          // 首次 load 标记(失败可重试)
   var _busy = false;            // load 进行中,防并发
+  // 图标片段：RC.ui 还没注入时回落空串（宁可没图标，也不要半个标记）。
+  function _mi(n) { try { return (window.RC && RC.ui && RC.ui.icon(n)) || ''; } catch (_) { return ''; } }
   function esc(s) {
     if (window.RC && RC.esc) return RC.esc(s);
     var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML;
@@ -118,7 +120,7 @@ body.ep-kg-open #ep-top{right:min(38vw,560px)}
       if (d && d.ok) {
         n.tracked = !!d.tracked;
         btn.classList.toggle('on', n.tracked);
-        btn.textContent = n.tracked ? '★ 跟踪中' : '☆ 跟踪';
+        btn.innerHTML = n.tracked ? _mi('starFill') + ' 跟踪中' : _mi('star') + ' 跟踪';
         // 跟踪态变了 → 刷新语法启用/按钮可见性(等价 PDF toggleNodeTrack 后 loadGrammarTracked)
         try { if (typeof window.loadGrammarTracked === 'function') window.loadGrammarTracked(); } catch (_) {}
       } else { toast((d && d.error) || '操作失败'); }
@@ -157,7 +159,7 @@ body.ep-kg-open #ep-top{right:min(38vw,560px)}
     if (isGrammar) {
       var btn = document.createElement('button');
       btn.className = 'kg-track-btn' + (n.tracked ? ' on' : '');
-      btn.textContent = n.tracked ? '★ 跟踪中' : '☆ 跟踪';
+      btn.innerHTML = n.tracked ? _mi('starFill') + ' 跟踪中' : _mi('star') + ' 跟踪';
       btn.title = '加入/取消语法跟踪';
       btn.addEventListener('click', function (ev) {
         ev.stopPropagation();

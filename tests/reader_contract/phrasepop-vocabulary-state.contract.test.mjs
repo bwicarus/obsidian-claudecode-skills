@@ -240,8 +240,8 @@ test("词组收藏与掌握同步更新共享状态，迟到服务器快照不�
 
   assert.deepEqual(Array.from(sandbox.RC.phrasepop.favList()), ["in spite of"]);
   harness.show();
-  assert.match(pop.innerHTML, /★ 已收藏/);
-  assert.match(pop.innerHTML, /✓ 已掌握 100/);
+  assert.match(pop.innerHTML, /rc-i-starFill"><\/span> 已收藏/);
+  assert.match(pop.innerHTML, /rc-i-check"><\/span> 已掌握 100/);
 
   const favoriteButton = button();
   sandbox._epPhraseFav(favoriteButton);
@@ -250,7 +250,9 @@ test("词组收藏与掌握同步更新共享状态，迟到服务器快照不�
     false,
   );
   assert.deepEqual(Array.from(sandbox.RC.phrasepop.favList()), []);
-  assert.equal(favoriteButton.textContent, "☆ 收藏为词组");
+  // 2026-09-20：按钮标签改成「图标 + 文字」，所以是 innerHTML 而不是 textContent。
+  // 这个桩里 innerHTML 只是个普通属性（不解析子节点），textContent 因此读不到。
+  assert.match(favoriteButton.innerHTML, /收藏为词组$/);
   assert.deepEqual(callbacks.favorite, [false]);
   assert.equal(
     state.isMastered({ kind: "phrase", language: "en", text: "In Spite Of" }),
@@ -264,7 +266,7 @@ test("词组收藏与掌握同步更新共享状态，迟到服务器快照不�
     state.isMastered({ kind: "phrase", language: "en", text: "In Spite Of" }),
     false,
   );
-  assert.equal(masterButton.textContent, "☆ 标记掌握");
+  assert.match(masterButton.innerHTML, /标记掌握$/);
   assert.deepEqual(callbacks.mastered, [false]);
 
   // 第一次取消收藏的服务器请求尚未返回时再次收藏；第二个本地动作仍立即生效。
@@ -273,7 +275,7 @@ test("词组收藏与掌握同步更新共享状态，迟到服务器快照不�
     state.isPhraseFavorite({ kind: "phrase", language: "en", text: "In Spite Of" }),
     true,
   );
-  assert.equal(favoriteButton.textContent, "★ 已收藏");
+  assert.match(favoriteButton.innerHTML, /已收藏$/);
 
   await flush();
   const removeRequest = harness.pending("DELETE", "/pdf/api/phrases");
@@ -311,8 +313,8 @@ test("词组收藏与掌握同步更新共享状态，迟到服务器快照不�
     false,
   );
   harness.show();
-  assert.match(pop.innerHTML, /★ 已收藏/);
-  assert.match(pop.innerHTML, /☆ 标记掌握/);
+  assert.match(pop.innerHTML, /rc-i-starFill"><\/span> 已收藏/);
+  assert.match(pop.innerHTML, /rc-i-star"><\/span> 标记掌握/);
 });
 
 test("兼容服务器断网只进入 outbox，不回滚本地词组状态", async () => {
@@ -337,7 +339,7 @@ test("兼容服务器断网只进入 outbox，不回滚本地词组状态", asyn
     state.isMastered({ kind: "phrase", language: "en", text: "In Spite Of" }),
     false,
   );
-  assert.equal(masterButton.textContent, "☆ 标记掌握");
+  assert.match(masterButton.innerHTML, /标记掌握$/);
   assert.equal(harness.outbox.length, 1);
   assert.equal(harness.outbox[0][0], "phrase");
 });

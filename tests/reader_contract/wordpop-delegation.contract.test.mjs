@@ -316,8 +316,8 @@ test("App v3 日语词典小框恢复当前形/原形、中文富字段且不混
     "词典内容区不得显示迁移后自创的 Pi 失败/手动提示",
   );
   assert.match(pop.innerHTML, /点这里展开完整字典/);
-  assert.match(pop.innerHTML, /☆ 标记掌握/);
-  assert.match(pop.innerHTML, /📊 语法/);
+  assert.match(pop.innerHTML, /rc-i-star"><\/span> 标记掌握/);
+  assert.match(pop.innerHTML, /rc-i-chart"><\/span> 语法/);
   assert.doesNotMatch(pop.innerHTML, /wp-pos-tag|一段动词 \/ 及物动词/);
   assert.doesNotMatch(pop.innerHTML, /🎴 Anki|🖌 标记/);
 
@@ -832,7 +832,7 @@ test("掌握与取消掌握先提交本地仓库，服务器失败也不回滚�
   await new Promise((resolve) => setImmediate(resolve));
 
   // 服务器 quick 响应故意说 mastered=false；本地事实源仍必须决定按钮。
-  assert.match(pop.innerHTML, /✓ 已掌握 100/);
+  assert.match(pop.innerHTML, /rc-i-check"><\/span> 已掌握 100/);
 
   const cancelButton = new FakeElement("wp-master-btn");
   sandbox._wordPopMaster(cancelButton);
@@ -843,7 +843,7 @@ test("掌握与取消掌握先提交本地仓库，服务器失败也不回滚�
     forms: [],
   });
   assert.equal(fullRefreshes, 0);
-  assert.equal(cancelButton.textContent, "☆ 标记掌握");
+  assert.match(cancelButton.innerHTML, /标记掌握$/);
 
   const masterButton = new FakeElement("wp-master-btn");
   sandbox._wordPopMaster(masterButton);
@@ -854,7 +854,7 @@ test("掌握与取消掌握先提交本地仓库，服务器失败也不回滚�
     forms: [],
   });
   assert.equal(fullRefreshes, 0);
-  assert.equal(masterButton.textContent, "✓ 已掌握 100");
+  assert.match(masterButton.innerHTML, /已掌握 100$/);
   await Promise.resolve();
   await Promise.resolve();
   assert.deepEqual(JSON.parse(JSON.stringify(repositoryChanges)), [
