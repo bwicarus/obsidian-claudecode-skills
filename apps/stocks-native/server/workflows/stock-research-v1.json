@@ -1,0 +1,12 @@
+{
+  "contract": "bw-reader-skill-flow/1",
+  "name": "stock-research",
+  "version": 1,
+  "steps": [
+    {"id": "selection", "tool": "selection.load_library", "args": {"selection": {"$from": "params", "path": "selection"}}},
+    {"id": "context", "tool": "context.fetch", "args": {"codes": {"$from": "selection", "path": "resolvedCodes"}, "sections": {"$from": "params", "path": "sections"}}},
+    {"id": "news", "tool": "news.feed", "args": {"codes": {"$from": "selection", "path": "resolvedCodes"}}},
+    {"id": "analysis", "needs_ai": true, "timeout": 120, "input": {"context": {"$from": "context"}, "news": {"$from": "news"}}, "prompt": {"$from": "params", "path": "prompt"}},
+    {"id": "reports", "tool": "reports.save", "args": {"items": {"$from": "analysis", "path": "items"}}}
+  ]
+}

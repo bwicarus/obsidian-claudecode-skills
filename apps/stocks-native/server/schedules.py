@@ -14,11 +14,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from monitoring import MonitorError
+from stock_research_workflow import normalize_workflow, workflow_catalog, workflow_template
 
 UTC = timezone.utc
 DAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
-OPERATIONS = ("task.upsert", "task.pause", "task.resume", "task.cancel")
+OPERATIONS = ("task.upsert", "task.pause", "task.resume", "task.cancel", "task.run")
 DUE_GRACE_SECONDS = 60
+MAX_DAILY_BATCHES = 20
 
 
 class ScheduleError(MonitorError):
@@ -141,7 +143,11 @@ class ScheduleService:
                     UNIQUE(owner,task_id,generation,scheduled_at));
                 CREATE INDEX IF NOT EXISTS run_history ON runs(owner,task_id,scheduled_at);
                 CREATE TABLE IF NOT EXISTS leases(name TEXT PRIMARY KEY,token TEXT NOT NULL,expires REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS analysis_budget(owner TEXT NOT NULL,day TEXT NOT NULL,
+                    batches INTEGER NOT NULL,PRIMARY KEY(owner,day));
             """)
+            if "origin" not in {row[1] for row in db.execute("PRAGMA table_info(runs)")}:
+                db.execute("ALTER TABLE runs ADD COLUMN origin TEXT NOT NULL DEFAULT 'scheduled'")
 
     @contextmanager
     def _db(self, write=False):
@@ -161,11 +167,13 @@ class ScheduleService:
 
     @staticmethod
     def catalog():
-        return {"protocolVersion": 1, "actions": ["catalog", "list", "get", "runs", "mutate"],
-                "operations": list(OPERATIONS), "kinds": ["reminder", "analysis"],
+        return {"protocolVersion": 2, "actions": ["catalog", "list", "get", "runs", "mutate"],
+                "operations": list(OPERATIONS), "kinds": ["reminder", "workflow", "analysis"],
                 "scheduleKinds": ["once", "daily", "weekly"], "timezoneRequired": True,
                 "deliveryModes": ["auto", "call"], "callRequiresExplicitUserRequest": True,
-                "analysisData": "到点读取指定股票最新可用报价及来源时间；不支持任意脚本、联网研究或交易",
+                "workflows": [workflow_catalog()], "dailyAIBatchesPerAccountUTC": MAX_DAILY_BATCHES,
+                "analysisData": "analysis+codes 仅兼容旧任务；新任务使用 workflow 引用已保存的原子工具流程。定时器不定义收藏夹分析专用工具。",
+                "runNowPolicy": "task.run 仅用于用户明确要求现在运行已保存流程，保留原定时；中断且没有持久结果的AI步骤不自动重复调用。",
                 "dueGraceSeconds": DUE_GRACE_SECONDS, "missedPolicy": "跳过已错过周期；错过一次标记 expired；不补跑",
                 "calendarPolicy": "每日/每周按指定时区的日历执行，不代表交易日；夏令时缺失时刻跳过，重复小时只执行一次",
                 "mutationReceipt": "success 仅表示计划已保存；查看 runs 和通知回执确认执行与交付"}
@@ -201,6 +209,7 @@ class ScheduleService:
                               (owner, task_id, limit)).fetchall()
             return {"taskId": task_id, "runs": [{"id": row["id"], "scheduledAt": _iso(row["scheduled_at"]),
                     "status": row["status"], "taskVersion": row["generation"], "attempts": row["attempts"],
+                    "origin": row["origin"],
                     "startedAt": _iso(row["started"]), "finishedAt": _iso(row["finished"]),
                     "body": row["body"], "error": row["error"], "notificationId": row["notification_id"],
                     "result": json.loads(row["result"]) if row["result"] else None} for row in rows]}
@@ -234,22 +243,51 @@ class ScheduleService:
                 raise ScheduleError("revision_conflict", "定时任务已更新，请刷新后重试", 409, {"currentRevision": revision})
             raw = request.get("task") if operation == "task.upsert" else None
             if operation == "task.upsert":
-                _keys(raw, ("id", "kind", "title", "prompt", "codes", "schedule", "deliveryMode"))
+                _keys(raw, ("id", "kind", "title", "prompt", "codes", "workflow", "schedule", "deliveryMode"))
             task_id = _id(raw.get("id", uuid.uuid4().hex) if raw is not None else request.get("id"))
             row = db.execute("SELECT * FROM tasks WHERE owner=? AND id=?", (owner, task_id)).fetchone()
             old = json.loads(row["document"]) if row else None
             generation = row["generation"] + 1 if row else 1
+            if operation == "task.run":
+                if not row or old["status"] != "active" or old["kind"] not in ("analysis", "workflow"):
+                    raise ScheduleError("task_not_active", "现在执行需要一个有效流程任务", 409)
+                if db.execute("SELECT 1 FROM runs WHERE owner=? AND task_id=? AND status IN ('pending','running','ready')",
+                              (owner, task_id)).fetchone():
+                    raise ScheduleError("task_busy", "此任务已有执行在进行，不重复启动", 409)
+                due = now
+                while db.execute("SELECT 1 FROM runs WHERE owner=? AND task_id=? AND generation=? AND scheduled_at=?",
+                                 (owner, task_id, row["generation"], due)).fetchone():
+                    due += 0.001
+                run_id = uuid.uuid4().hex
+                db.execute("INSERT INTO runs(id,owner,task_id,generation,scheduled_at,task,status,origin) VALUES(?,?,?,?,?,?,'pending','manual')",
+                           (run_id, owner, task_id, row["generation"], due, row["document"]))
+                response = {"success": True, "requestId": request_id, "operation": operation,
+                            "revision": revision, "replayed": False, "runId": run_id, "task": self._task(row)}
+                db.execute("INSERT INTO receipts VALUES(?,?,?,?)", (owner, request_id, digest, _json(response)))
+                return response
             if operation == "task.upsert":
                 if not row and db.execute("SELECT COUNT(*) FROM tasks WHERE owner=?", (owner,)).fetchone()[0] >= 200:
                     raise ScheduleError("task_limit", "最多保存 200 个定时任务")
                 kind = raw.get("kind")
-                if kind not in ("reminder", "analysis"):
-                    raise ScheduleError("invalid_kind", "kind 必须为 reminder 或 analysis")
-                codes = raw.get("codes", [])
-                if not isinstance(codes, list) or len(codes) > 10 or any(not isinstance(c, str) or not re.fullmatch(r"[0-9]{6}", c) for c in codes):
-                    raise ScheduleError("invalid_codes", "codes 最多为 10 个六位股票代码")
-                if kind == "analysis" and not codes:
-                    raise ScheduleError("codes_required", "分析任务必须明确 1–10 个股票代码")
+                if kind not in ("reminder", "analysis", "workflow"):
+                    raise ScheduleError("invalid_kind", "kind 必须为 reminder 或 workflow")
+                workflow = None
+                if kind == "workflow":
+                    if "codes" in raw or "prompt" in raw:
+                        raise ScheduleError("invalid_workflow", "流程参数应放在 workflow.params 中")
+                    try:
+                        workflow = normalize_workflow(raw.get("workflow"))
+                    except ValueError as exc:
+                        raise ScheduleError("invalid_workflow", str(exc)) from exc
+                    codes, prompt = [], workflow["params"]["prompt"]
+                else:
+                    if "workflow" in raw:
+                        raise ScheduleError("invalid_workflow", "workflow 需要 kind=workflow")
+                    codes, prompt = raw.get("codes", []), _text(raw.get("prompt"), "prompt", 4000)
+                    if not isinstance(codes, list) or len(codes) > 10 or any(not isinstance(c, str) or not re.fullmatch(r"[0-9]{6}", c) for c in codes):
+                        raise ScheduleError("invalid_codes", "旧 codes 字段最多支持10股；更多股票请使用 workflow")
+                    if kind == "analysis" and not codes:
+                        raise ScheduleError("codes_required", "旧分析任务必须明确股票代码")
                 mode = raw.get("deliveryMode", "auto")
                 if mode not in ("auto", "call"):
                     raise ScheduleError("invalid_delivery", "deliveryMode 仅支持 auto 或用户主动要求的 call")
@@ -258,9 +296,12 @@ class ScheduleService:
                 if due is None:
                     raise ScheduleError("schedule_in_past", "一次任务时间已过去，请提供未来时间")
                 document = {"id": task_id, "kind": kind, "title": _text(raw.get("title"), "title", 120),
-                            "prompt": _text(raw.get("prompt"), "prompt", 4000), "codes": list(dict.fromkeys(codes)),
+                            "prompt": prompt, "codes": list(dict.fromkeys(codes)),
                             "schedule": schedule, "deliveryMode": mode, "status": "active",
                             "createdAt": old["createdAt"] if old else _iso(now), "updatedAt": _iso(now)}
+                if workflow:
+                    document["workflow"] = workflow
+                    document["workflowDefinition"] = workflow_template()
             else:
                 if not row:
                     raise ScheduleError("task_not_found", "当前账户没有此定时任务", 404)
@@ -324,7 +365,7 @@ class ScheduleService:
                 if row["status"] == "ready" and row["lease_until"] and row["lease_until"] > now:
                     continue
                 task = json.loads(row["task"])
-                if task["kind"] == "analysis" and row["status"] != "ready":
+                if task["kind"] in ("analysis", "workflow") and row["status"] != "ready":
                     lease = db.execute("SELECT * FROM leases WHERE name='analysis'").fetchone()
                     if lease and lease["expires"] > now:
                         continue
@@ -334,12 +375,13 @@ class ScheduleService:
                     db.execute("UPDATE runs SET status='failed',finished=?,error='执行多次中断，请查询后重新安排' WHERE id=?", (now, row["id"]))
                     self._complete_once(db, row)
                     continue
-                if task["kind"] == "analysis" and not ready:
+                if task["kind"] in ("analysis", "workflow") and not ready:
                     db.execute("INSERT OR REPLACE INTO leases VALUES('analysis',?,?)", (token, now + lease_seconds))
                 db.execute("UPDATE runs SET status=?,token=?,lease_until=?,attempts=attempts+?,started=COALESCE(started,?) WHERE id=?",
                            ("ready" if ready else "running", token, now + lease_seconds, 0 if ready else 1, now, row["id"]))
                 return {"id": row["id"], "token": token, "ownerId": row["owner"], "task": task,
-                        "scheduledAt": _iso(row["scheduled_at"]), "ready": ready}
+                        "scheduledAt": _iso(row["scheduled_at"]), "ready": ready,
+                        "progress": json.loads(row["result"]) if row["result"] else {}, "origin": row["origin"]}
         return None
 
     def renew(self, job, lease_seconds=180):
@@ -362,8 +404,94 @@ class ScheduleService:
             db.execute("UPDATE leases SET expires=? WHERE name='analysis' AND token=?", (self.clock() + 30, job["token"]))
             return True
 
+    def _claimed(self, db, job):
+        row = db.execute("SELECT * FROM runs WHERE id=? AND token=? AND status IN ('running','ready')",
+                         (job["id"], job["token"])).fetchone()
+        return row if row and self._current(db, row) and row["lease_until"] > self.clock() else None
+
+    def checkpoint(self, job, progress):
+        encoded = _json(progress)
+        if len(encoded.encode()) > 2000000:
+            raise ScheduleError("progress_too_large", "流程结果超过保存上限")
+        with self._db(write=True) as db:
+            if not self._claimed(db, job):
+                return False
+            db.execute("UPDATE runs SET result=? WHERE id=?", (encoded, job["id"]))
+        job["progress"] = copy.deepcopy(progress)
+        return True
+
+    def begin_ai_step(self, job, batch_id, codes):
+        """Persist the attempt before AI. An ambiguous crashed attempt is never billed twice."""
+        with self._db(write=True) as db:
+            row = self._claimed(db, job)
+            if not row:
+                return False
+            progress = json.loads(row["result"]) if row["result"] else {}
+            batches = progress.setdefault("batches", {})
+            if batch_id in batches:
+                return False
+            day = datetime.fromtimestamp(self.clock(), UTC).date().isoformat()
+            budget = db.execute("SELECT batches FROM analysis_budget WHERE owner=? AND day=?", (row["owner"], day)).fetchone()
+            used = budget[0] if budget else 0
+            if used >= MAX_DAILY_BATCHES:
+                raise ScheduleError("daily_ai_limit", f"今日UTC模型批次已达上限 {MAX_DAILY_BATCHES}；剩余股票未调用AI，不会自动补跑")
+            db.execute("INSERT INTO analysis_budget VALUES(?,?,1) ON CONFLICT(owner,day) DO UPDATE SET batches=batches+1",
+                       (row["owner"], day))
+            batches[batch_id] = {"status": "started", "codes": codes, "startedAt": _iso(self.clock())}
+            progress["budget"] = {"dayUTC": day, "usedBatches": used + 1, "maxBatches": MAX_DAILY_BATCHES}
+            db.execute("UPDATE runs SET result=? WHERE id=?", (_json(progress), row["id"]))
+        job["progress"] = progress
+        return True
+
+    def publish_report(self, job, code, reports):
+        """Fence generation changes around local report writes, with a durable replay payload."""
+        for _ in range(3):
+            # Commit the exact request before calling the separate report database.
+            with self._db(write=True) as db:
+                row = self._claimed(db, job)
+                if not row:
+                    return False
+                progress = json.loads(row["result"])
+                item = progress["stocks"][code]
+                if item["status"] == "success":
+                    job["progress"] = progress
+                    return True
+                if item["status"] != "generated":
+                    return False
+                if not item.get("savePayload"):
+                    item["savePayload"] = {"requestId": "schedule-" + job["id"] + "-" + code,
+                        "expectedRevision": reports.list(row["owner"])["revision"], **item["output"]}
+                    db.execute("UPDATE runs SET result=? WHERE id=?", (_json(progress), row["id"]))
+            with self._db(write=True) as db:
+                row = self._claimed(db, job)
+                if not row:
+                    return False
+                progress = json.loads(row["result"])
+                item = progress["stocks"][code]
+                try:
+                    response = reports.save(row["owner"], item["savePayload"], source={
+                        "kind": "schedule", "scheduleId": row["task_id"], "runId": row["id"],
+                        "requestId": item["savePayload"]["requestId"]})
+                except Exception as exc:
+                    if getattr(exc, "code", None) != "revision_conflict":
+                        raise
+                    item["savePayload"]["expectedRevision"] = reports.list(row["owner"])["revision"]
+                    db.execute("UPDATE runs SET result=? WHERE id=?", (_json(progress), row["id"]))
+                    continue
+                if not response.get("success") or not response.get("reportId"):
+                    raise RuntimeError("报告保存没有返回成功回执")
+                item.update(status="success", reportId=response["reportId"])
+                item.pop("output", None)
+                item.pop("savePayload", None)
+                db.execute("UPDATE runs SET result=? WHERE id=?", (_json(progress), row["id"]))
+                job["progress"] = progress
+                return True
+        raise RuntimeError("报告库并发更新，请重试保存；已生成内容已保留")
+
     @staticmethod
     def _complete_once(db, row):
+        if row["origin"] == "manual":
+            return
         task_row = db.execute("SELECT * FROM tasks WHERE owner=? AND id=?", (row["owner"], row["task_id"])).fetchone()
         if task_row and task_row["generation"] == row["generation"]:
             task = json.loads(task_row["document"])
@@ -382,8 +510,10 @@ class ScheduleService:
             if not row or not self._current(db, row) or row["lease_until"] <= self.clock():
                 return None
             task = json.loads(row["task"])
+            progress = json.loads(row["result"]) if row["result"] else {}
+            codes = progress.get("resolvedCodes") or task.get("codes") or []
             response = monitor.mutate(row["owner"], {"requestId": "schedule-" + row["id"], "operation": "notification.create",
-                "notification": {"title": task["title"], "body": row["body"], "code": task["codes"][0] if task["codes"] else "",
+                "notification": {"title": task["title"], "body": row["body"], "code": codes[0] if codes else "",
                                  "severity": "urgent" if task["deliveryMode"] == "call" else "normal", "deliveryMode": task["deliveryMode"]}})
             if not response.get("success") or not response.get("notificationId"):
                 raise RuntimeError("定时通知没有成功保存回执")

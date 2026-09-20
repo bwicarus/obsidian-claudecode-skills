@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 class DataUnavailable(RuntimeError):
@@ -35,6 +36,22 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return result if math.isfinite(result) else None
+
+
+def _announcement_url(item: dict[str, Any]) -> str | None:
+    """Only link to the announcement publisher; legacy entries may have just an ID."""
+    article = str(item.get("art_code") or item.get("artCode") or "")
+    if re.fullmatch(r"AN[0-9]{12,24}", article):
+        return f"https://np-cnotice-stock.eastmoney.com/announcement.html?art_code={article}"
+    try:
+        value = urlsplit(str(item.get("url") or ""))
+        host = (value.hostname or "").lower()
+        if value.scheme in {"http", "https"} and (host == "eastmoney.com" or host.endswith(".eastmoney.com")) \
+                and not value.username and not value.password and value.port in {None, 80, 443}:
+            return urlunsplit(("https", host, value.path, value.query, ""))
+    except ValueError:
+        pass
+    return None
 
 
 def _limit(value: int, maximum: int) -> int:
@@ -350,7 +367,8 @@ class StockDataStore:
                 ).fetchone()
                 if news:
                     announcements = [{"title": item.get("title"), "date": item.get("date"),
-                                      "category": item.get("column"), "url": item.get("url")}
+                                      "category": item.get("column"), "url": _announcement_url(item),
+                                      "artCode": item.get("art_code")}
                                      for item in _json_array(news["items_json"])[:20]]
 
                 for key, sql in (

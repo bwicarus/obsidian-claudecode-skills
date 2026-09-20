@@ -161,7 +161,7 @@ def _normalize_plan(raw):
 
 
 def _source(value):
-    allowed = ("sessionId", "threadId", "turnId", "messageId", "requestId")
+    allowed = ("sessionId", "threadId", "turnId", "messageId", "requestId", "scheduleId", "runId", "kind", "reportId")
     source = _object(value or {}, allowed, "source")
     return {key: _text(val, "source." + key, 200) for key, val in source.items() if val is not None}
 
@@ -254,9 +254,9 @@ class PlanService:
                 raise PlanError("plan_not_found", "当前账户没有这份方案", 404)
             plan = json.loads(row[0])
             previous = plan.get("source", {})
-            if previous.get("sessionId") != source.get("sessionId") or previous.get("turnId"):
+            if not previous.get("sessionId") or previous.get("sessionId") != source.get("sessionId") or previous.get("turnId"):
                 return plan
-            plan["source"] = {**previous, **source}
+            plan["source"] = {**source, **previous}
             db.execute("UPDATE plans SET document=? WHERE owner=? AND id=?", (_json(plan), owner, plan_id))
             return plan
 

@@ -32,7 +32,7 @@ App 会在用户发言或真实委派时用 [APP_CONTEXT] 消息注入该轮固�
 账户选股器、观察池和智能收藏夹统一使用 stocks_selection MCP。catalog、library、evaluate 是读取；mutate 会写入当前登录账户。写入前先读 library 取得 revision，只响应用户明确要求的变更，并为一次意图生成唯一 requestId；重试同一次意图复用该 requestId。遇到 revision_conflict 时重新读取，不能静默覆盖。账户身份由服务器固定，禁止在参数里提供或猜测 owner。
 规则盯盘与通知使用 stocks_monitor MCP：先读catalog和library，再按用户明确意图创建/修改/暂停规则或创建通知。规则由程序持续监控，不要自己反复轮询；必须收到success才能声称设置完成。普通规则默认normal，只有用户明确要求紧急来电才设urgent。notification.read只是已读，notification.resolve才是已处理；不得擅自把提醒标为处理完成。
 App 支持系统来电：用户明确说“打给我/给我来电/打电话告诉我”时，使用 stocks_monitor MCP 中的 stocks_call(action=request,request={requestId,text,title?,code?})，不能按通用聊天身份回答“我不能打电话”。这不是拨打手机号码。问来电能力或结果用 action=status；查询已有请求携带 notificationId。来电内容需要行情时先取得带时间的数据，再写入text。当前有语音则回执waiting_for_current_voice，告诉用户关闭当前通话后等待一次来电，不主动挂断；最长等10分钟，接听才开语音，未接/拒接不重拨。queued只代表排队，push_accepted只代表推送受理，answered才代表接听，audioSubmitted不代表已听见。必须根据真实回执报告，错误时说明具体原因；同一次意图重试复用requestId，不重复创建。指定未来时间的来电或提醒使用 stocks_schedule，先查catalog的当前时间和clientTimeZone，再登记带IANA时区的一次/每日/每周任务；到点才生成通知，不要立即调用stocks_call排队等待未来时刻。
-需要可回看的操作方案时，用stocks_plan先查catalog/list，按本轮带时间的行情保存2至3档方案，侧栏与详情会同步显示。方案保存不等于启动盯盘或执行交易，无持仓和预算依据不要编造股数。定时任务用stocks_schedule，先catalog/list再登记，当前支持明确代码的报价分析或普通提醒。
+对话中需要操作卡时直接用stocks_plan先查catalog/list并保存，不必强制生成整份报告；需要正式分析报告时用stocks_report按股保存结构化结论、风险、来源和可选2至3档方案。新闻或旧版历史信号用stocks_news按需读取，不能把历史信号称为当前分析。方案保存不等于启用盯盘或执行交易，无持仓和预算依据不要编造股数。用户明确选档或要求按已展示条件启用时，stocks_plan_activation先preview再apply，按真实ruleIds/state回执报告，partial不能称全部成功。收藏夹分析是组合原子能力的流程：stocks_selection读取目标、stocks_context局部数据、stocks_news新闻、stocks_report或stocks_plan保存。未来运行用stocks_schedule登记catalog中的版本化workflow；先确认设备时区与用户指定时间，不创建专门的收藏夹分析工具。
 无需主动欢迎或总结。等待用户说话。只在有结果时简洁回答一次。"""
 
 ANNOTATION_PROMPT = """
@@ -47,7 +47,7 @@ VOICE_RULES = """你是股票 App 的语音对话表面，默认简洁中文。
 股票 App 有系统来电能力。用户要求现在“给我打电话/打给我/来电告诉我”时必须委派后台调用 stocks_call；指定明早或其他未来时刻时委派后台调用 stocks_schedule，不要直接回答不能打电话或仅口头答应。已有语音时请求会排队，收到成功回执后告诉用户关闭本次语音再等来电；排队和推送成功都不等于接听，不自动挂断或重复拨号。
 自动报价可能经过小幅波动过滤，仍带原数据时间。用户明确问现价/报价/涨跌/盘口等实时数值时，等待本轮 requested section 的局部刷新；没有刷新结果时委派后台股票工具，不能把旧报价称为此刻最新。requested.refreshStatus=unavailable 表示刷新失败，只能说明可用数据的时间。
 收到 [APP_INK] 时只知道用户在数据卡片勾画了；需要看圈画、笔迹或图中位置时立即委派后台，后台本轮会收到真实合成图。不能自己猜手写内容。收到笔迹状态本身不是提问，用户未提出请求时保持安静。
-需要保存操作方案或定时分析时委派后台使用stocks_plan或stocks_schedule，等待实际成功回执。不要为后续定时任务保持语音在线。
+需要操作卡时委派后台stocks_plan，正式报告用stocks_report，新闻用stocks_news；选卡开启盯盘用stocks_plan_activation并等真实成功回执。未来执行组合分析流程用stocks_schedule，不要为定时任务保持语音在线。保存报告或方案不代表已经启用盯盘或核实最新行情。
 纯闲聊、复述一句话可以直接回答。用户没有提出请求时保持安静。"""
 
 ANNOTATION_VOICE_RULES = """
@@ -134,6 +134,7 @@ class VoiceSession:
         self.selection_owner = selection_owner
         self.monitor_service = None
         self.plan_service = None
+        self.report_service = None
         self.client_time_zone = None
         self.notification_delivery = None
         self.emit_json = emit_json
@@ -479,6 +480,8 @@ class VoiceSession:
         if (item.get('type') != 'mcpToolCall' or (server_name, tool_name) not in (
                 ('stocks_selection', 'stocks_selection'), ('stocks_monitor', 'stocks_monitor'),
                 ('stocks_monitor', 'stocks_call'), ('stocks_monitor', 'stocks_plan'),
+                ('stocks_monitor', 'stocks_report'), ('stocks_monitor', 'stocks_plan_activation'),
+                ('stocks_monitor', 'stocks_news'),
                 ('stocks_monitor', 'stocks_schedule'))):
             return
         state = self.turn_state(turn_id)
@@ -499,10 +502,14 @@ class VoiceSession:
                   (args.get('action') if isinstance(args, dict) else None))
         result = (payload or {}).get('result')
         result = result if isinstance(result, dict) else {}
-        success = item.get('status') == 'completed' and bool(payload and payload.get('ok'))
+        success = item.get('status') == 'completed' and bool(payload and payload.get('ok')) and result.get('status') != 'unavailable'
         mutation = success and (action == 'mutate' or (tool_name == 'stocks_call' and action == 'request') or
-                               (tool_name == 'stocks_plan' and action in ('save', 'archive'))) and result.get('success') is True
-        non_market_tool = tool_name in ('stocks_plan', 'stocks_schedule')
+                               (tool_name == 'stocks_plan' and action in ('save', 'archive')) or
+                               (tool_name == 'stocks_report' and action == 'save') or
+                               (tool_name == 'stocks_plan_activation' and action == 'apply')) and result.get('success') is True
+        non_market_tool = tool_name in ('stocks_plan', 'stocks_schedule', 'stocks_report', 'stocks_plan_activation', 'stocks_news')
+        research_returned = bool(success and ((tool_name == 'stocks_report' and action in ('list', 'get', 'signals')) or
+                                 (tool_name == 'stocks_news' and action in ('feed', 'legacy'))) and (result.get('items') or result.get('report')))
         as_of = result.get('asOf')
         if not as_of and isinstance(result.get('library'), dict):
             as_of = result['library'].get('asOf')
@@ -512,11 +519,12 @@ class VoiceSession:
             'durationMs': self.tool_duration(state, item_id, item.get('durationMs')),
             'summary': tool_summary(result),
             'errorDetail': None if success else safe_error(item.get('error') or
-                (payload or {}).get('error') or result.get('error') or result.get('message') or '工具没有返回成功回执'),
+                (payload or {}).get('error') or result.get('error') or result.get('message') or result.get('warnings') or '工具没有返回成功回执'),
             'requestId': state['requestId'], 'turnId': turn_id, 'callId': item_id or None,
             'selectionAction': action, 'asOf': as_of,
             'dataReturned': bool(success and not non_market_tool and action in ('catalog', 'evaluate', 'library', 'status')),
             'nonMarketAction': non_market_tool,
+            'researchReturned': research_returned,
             'actionApplied': bool(mutation), 'revision': result.get('revision'),
             'mutationRequestId': result.get('requestId'), 'operation': result.get('operation'),
         }
@@ -524,10 +532,10 @@ class VoiceSession:
         self.record(receipt)
         await self.event(receipt)
         if mutation:
-            event_type = {'stocks_selection': 'selection.changed', 'stocks_plan': 'plan.changed',
+            event_type = {'stocks_selection': 'selection.changed', 'stocks_plan': 'plan.changed', 'stocks_report': 'report.changed',
                           'stocks_schedule': 'schedule.changed'}.get(tool_name, 'monitor.changed')
             changed = {'type': event_type, 'revision': result.get('revision'),
-                       'requestId': result.get('requestId'), 'operation': result.get('operation')}
+                       'requestId': result.get('requestId'), 'operation': result.get('operation') or action}
             if tool_name == 'stocks_plan':
                 plan = result.get('plan') or {}
                 changed.update(planId=result.get('planId'), code=plan.get('code'))
@@ -535,8 +543,24 @@ class VoiceSession:
                     await asyncio.to_thread(self.plan_service.bind_source, self.selection_owner, result['planId'],
                         {'sessionId': self.session_id, 'threadId': self.thread_id, 'turnId': turn_id,
                          'requestId': state['requestId']})
+            elif tool_name == 'stocks_report':
+                report = result.get('report') or {}
+                changed.update(reportId=result.get('reportId'), planId=report.get('planId'), code=report.get('code'))
+                if self.report_service is not None and result.get('reportId'):
+                    await asyncio.to_thread(self.report_service.bind_source, self.selection_owner, result['reportId'],
+                        {'sessionId': self.session_id, 'threadId': self.thread_id, 'turnId': turn_id,
+                         'requestId': state['requestId']})
+            elif tool_name == 'stocks_plan_activation':
+                adoption = result.get('adoption') or {}
+                changed.update(planId=adoption.get('planId'), code=adoption.get('code'))
+                # A report-library revision is not a monitoring-library revision.
+                changed.pop('revision', None)
             self.record(changed)
             await self.event(changed)
+            if tool_name == 'stocks_plan_activation':
+                report_changed = {**changed, 'type': 'report.changed', 'reportId': adoption.get('reportId'), 'revision': result.get('revision')}
+                self.record(report_changed)
+                await self.event(report_changed)
 
     @staticmethod
     def tool_duration(state, call_id, provided=None):
@@ -598,12 +622,13 @@ class VoiceSession:
                 tool.get('success') and not tool.get('nonMarketAction') and (tool.get('dataReturned') or tool.get('actionApplied'))
                 for tool in state['tools'])
             action_verified = any(tool.get('success') and tool.get('actionApplied') for tool in state['tools'])
+            research_verified = any(tool.get('success') and tool.get('researchReturned') for tool in state['tools'])
             has_number = bool(re.search(r'\d|[零〇一二两三四五六七八九十百千万亿]+\s*(?:元|块|股|手|％|%)', answer))
             stock_claim = bool(re.search(r'股票|股价|价格|报价|行情|收盘|开盘|涨|跌|成交|市值|换手|量比|元|资金|代码|K线|\b\d{6}\b',
                                         state['inputText'] + '\n' + answer))
             self.record({'type': 'backend.final', 'requestId': state['requestId'], 'turnId': turn_id,
-                         'text': answer, 'dataVerified': verified, 'source': state['source']})
-            if state['source'] == 'text' and has_number and stock_claim and not verified and not action_verified:
+                         'text': answer, 'dataVerified': verified, 'researchVerified': research_verified, 'source': state['source']})
+            if state['source'] == 'text' and has_number and stock_claim and not verified and not action_verified and not research_verified:
                 await self.fail_turn(state, '本轮没有取得成功的行情数据回执，股票数值尚未核实，请重试。')
                 return
             final_events = self.transcript_streams.finish_backend(turn_id)
@@ -628,6 +653,7 @@ class VoiceSession:
             state['finished'] = True
             receipt = {'type': 'task', 'state': 'completed', 'requestId': state['requestId'],
                         'turnId': turn_id, 'source': state['source'], 'dataVerified': verified, 'actionVerified': action_verified,
+                        'researchVerified': research_verified,
                         'durationMs': round((time.monotonic() - state.get('startedAt', time.monotonic())) * 1000),
                         'toolCount': len(state['tools']), 'speech': 'submitted', 'text': answer}
             self.record(receipt)
@@ -691,6 +717,8 @@ class VoiceSession:
                     if item.get('type') == 'mcpToolCall' and (item.get('server'), item.get('tool')) in (
                             ('stocks_selection', 'stocks_selection'), ('stocks_monitor', 'stocks_monitor'),
                             ('stocks_monitor', 'stocks_call'), ('stocks_monitor', 'stocks_plan'),
+                            ('stocks_monitor', 'stocks_report'), ('stocks_monitor', 'stocks_plan_activation'),
+                            ('stocks_monitor', 'stocks_news'),
                             ('stocks_monitor', 'stocks_schedule')):
                         await self.tool_started(p.get('turnId'), item.get('id'), item.get('tool'))
                     if item.get('type') == 'agentMessage':
@@ -1242,15 +1270,19 @@ class VoiceSession:
                 'args': [str(Path(__file__).with_name('monitor_mcp.py').resolve())],
                 'env': {'STOCKS_MONITOR_OWNER': self.selection_owner,
                         'STOCKS_MONITOR_STATE_DIR': str(self.state_dir.resolve()),
+                        'STOCKS_DATA_ROOT': str(Path(getattr(self.data_store, 'root', os.environ.get('STOCKS_DATA_ROOT', '/var/lib/stocks-native/market'))).resolve()),
                         'STOCKS_VOICE_SESSION_ID': self.session_id,
                         'STOCKS_CLIENT_TIME_ZONE': self.client_time_zone or '',
                         'STOCKS_MONITOR_CALLS_CONFIGURED': '1' if NotificationDelivery.configured() else '0'},
                 # These account-bound App operations execute the user's voice intent.
                 # Scope approval to these tools; keep shell and other MCP policies intact.
-                'enabled_tools': ['stocks_monitor', 'stocks_call', 'stocks_plan', 'stocks_schedule'],
+                'enabled_tools': ['stocks_monitor', 'stocks_call', 'stocks_plan', 'stocks_schedule', 'stocks_report', 'stocks_plan_activation', 'stocks_news'],
                 'tools': {'stocks_monitor': {'approval_mode': 'approve'},
                           'stocks_plan': {'approval_mode': 'approve'},
                           'stocks_schedule': {'approval_mode': 'approve'},
+                          'stocks_report': {'approval_mode': 'approve'},
+                          'stocks_plan_activation': {'approval_mode': 'approve'},
+                          'stocks_news': {'approval_mode': 'approve'},
                           'stocks_call': {'approval_mode': 'approve'}},
                 'enabled': True, 'required': True, 'startup_timeout_sec': 15, 'tool_timeout_sec': 30}
         instructions, capability_digest = contract(PROMPT + (ANNOTATION_PROMPT if self.supports_annotations else ''))

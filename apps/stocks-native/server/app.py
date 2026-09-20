@@ -21,6 +21,8 @@ from monitoring import MonitorService, MonitorError
 from notification_delivery import NotificationDelivery
 from monitor_runtime import MonitorRuntime
 from plans import PlanService, PlanError
+from reports import ReportService, ReportError
+from news import NewsService
 from schedules import ScheduleService, ScheduleError
 from schedule_runtime import ScheduleRuntime
 
@@ -35,7 +37,7 @@ async def errors(request, handler):
         response = web.json_response({'error': '未找到该股票'}, status=404)
     except DataUnavailable:
         response = web.json_response({'error': '行情数据暂不可用，请稍后重试'}, status=503)
-    except (SelectionError, MonitorError, PlanError, ScheduleError) as exc:
+    except (SelectionError, MonitorError, PlanError, ScheduleError, ReportError) as exc:
         result = {'error': str(exc), 'message': str(exc), 'code': exc.code, **exc.detail}
         if isinstance(exc, SelectionConflict):
             result['revision'] = exc.revision
@@ -162,6 +164,8 @@ async def plan_item(request):
 
 async def plan_archive(request):
     caller = await identity(request)
+    if not caller['aiEnabled']:
+        return web.json_response({'error': '审核账号未开放策略修改'}, status=403)
     result = await asyncio.to_thread(request.app['plans'].archive, caller['ownerId'], await request.json())
     if not result.get('replayed'):
         event = {'type': 'plan.changed', 'revision': result['revision'], 'planId': result['planId'],
@@ -171,6 +175,62 @@ async def plan_archive(request):
                 with contextlib.suppress(ConnectionError, RuntimeError):
                     await entry[1].emit_json(event)
     return web.json_response(result)
+
+
+async def reports_list(request):
+    caller = await identity(request)
+    return web.json_response(await asyncio.to_thread(request.app['reports'].list, caller['ownerId'],
+        request.query.get('code'), int(request.query.get('limit', '30')), request.query.get('before')))
+
+
+async def report_item(request):
+    caller = await identity(request)
+    return web.json_response(await asyncio.to_thread(request.app['reports'].get, caller['ownerId'], request.match_info['id']))
+
+
+async def research_signals(request):
+    caller = await identity(request)
+    codes = request.query.get('codes')
+    return web.json_response(await asyncio.to_thread(request.app['reports'].signals, caller['ownerId'],
+        codes.split(',') if codes is not None else None))
+
+
+async def plan_preview(request):
+    caller = await identity(request)
+    return web.json_response(await asyncio.to_thread(request.app['reports'].preview, caller['ownerId'], await request.json()))
+
+
+async def plan_activate(request):
+    caller = await identity(request)
+    if not caller['aiEnabled']:
+        return web.json_response({'error': '审核账号未开放自动盯盘'}, status=403)
+    result = await asyncio.to_thread(request.app['reports'].apply, caller['ownerId'], await request.json())
+    adoption = result['adoption']
+    for entry in list(request.app['voices'].values()):
+        if entry and getattr(entry[1], 'selection_owner', None) == caller['ownerId']:
+            with contextlib.suppress(ConnectionError, RuntimeError):
+                await entry[1].emit_json({'type': 'monitor.changed',
+                    'requestId': result['requestId'], 'operation': 'plan.activate', 'code': adoption['code'], 'planId': adoption['planId']})
+                await entry[1].emit_json({'type': 'report.changed', 'revision': result['revision'],
+                    'requestId': result['requestId'], 'operation': 'plan.activate', 'code': adoption['code'],
+                    'planId': adoption['planId'], 'reportId': adoption.get('reportId')})
+    return web.json_response(result)
+
+
+async def news_feed(request):
+    await identity(request)
+    refresh = request.query.get('refresh', '0')
+    if refresh not in ('0', '1', 'false', 'true'):
+        raise ValueError('refresh must be a boolean')
+    return web.json_response(await request.app['news'].feed(category=request.query.get('category', 'macro'),
+        code=request.query.get('code'), sector=request.query.get('sector'), limit=int(request.query.get('limit', '30')),
+        refresh=refresh in ('1', 'true')))
+
+
+async def legacy_research(request):
+    await identity(request)
+    return web.json_response(await asyncio.to_thread(request.app['news'].legacy_signals,
+        request.query.get('code'), int(request.query.get('limit', '50'))))
 
 
 async def monitor_library(request):
@@ -452,6 +512,7 @@ async def voice(request):
                                selection_service=request.app['selection'], selection_owner=caller['ownerId'])
         session.monitor_service = request.app['monitor']
         session.plan_service = request.app['plans']
+        session.report_service = request.app['reports']
         session.notification_delivery = request.app['notifications']
         active[device_id] = (ws, session)
         await asyncio.to_thread(request.app['notifications'].voice_presence, caller['ownerId'], device_id)
@@ -537,6 +598,7 @@ async def shutdown(app):
         if entry:
             await entry[0].close(code=1001, message=b'Server shutdown')
     await app['live'].close()
+    await app['news'].close()
 
 
 async def startup(app):
@@ -557,6 +619,8 @@ def create_app():
     app['selection'] = SelectionService(app['data'], state)
     app['monitor'] = MonitorService(state)
     app['plans'] = PlanService(state)
+    app['reports'] = ReportService(state, app['plans'], app['monitor'])
+    app['news'] = NewsService(app['data'], state)
     app['schedules'] = ScheduleService(state)
     app['notifications'] = NotificationDelivery(state)
     app['live'] = LiveMarketSource()
@@ -571,7 +635,14 @@ def create_app():
                     web.post('/api/monitor/mutate', monitor_mutate),
                     web.get('/api/plans', plans_list),
                     web.post('/api/plans/archive', plan_archive),
+                    web.post('/api/plans/preview', plan_preview),
+                    web.post('/api/plans/activate', plan_activate),
                     web.get('/api/plans/{id}', plan_item),
+                    web.get('/api/reports', reports_list),
+                    web.get('/api/reports/{id}', report_item),
+                    web.get('/api/research/signals', research_signals),
+                    web.get('/api/research/legacy', legacy_research),
+                    web.get('/api/news', news_feed),
                     web.post('/api/notifications/device', notification_device),
                     web.post('/api/notifications/presence', notification_presence),
                     web.post('/api/notifications/receipt', notification_receipt),
