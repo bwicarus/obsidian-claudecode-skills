@@ -428,7 +428,9 @@ final class StocksAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificati
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
         // PushKit background launches may never construct a SwiftUI view.
-        Task { @MainActor in StockNotificationCoordinator.shared.configure(model: StocksAppRuntime.model) }
+        MainActor.assumeIsolated {
+            StockNotificationCoordinator.shared.configure(model: StocksAppRuntime.model)
+        }
         return true
     }
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {

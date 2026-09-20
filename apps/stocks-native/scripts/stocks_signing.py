@@ -268,7 +268,7 @@ def main():
             },
         }})["data"]
         print("Registered only the StocksNative bundle identifier")
-    existing = api.listing(f"/v1/bundleIds/{bundle['id']}/bundleIdCapabilities", limit=200)
+    existing = api.listing(f"/v1/bundleIds/{bundle['id']}/bundleIdCapabilities")
     enabled = {item['attributes']['capabilityType'] for item in existing}
     for capability in ('APPLE_ID_AUTH', 'PUSH_NOTIFICATIONS'):
         if capability not in enabled:
