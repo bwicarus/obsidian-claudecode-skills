@@ -256,15 +256,12 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             return
         }
         let markedBounds = inkCards.compactMap { host(for: $0.id)?.frame }.reduce(CGRect.null) { $0.union($1) }
-        let neighbors = visible.filter { !changed.contains($0.id) }.sorted {
-            func distance(_ card: WorkspaceCard) -> CGFloat {
-                guard let rect = host(for: card.id)?.frame else { return .greatestFiniteMagnitude }
-                let dx = max(0, max(markedBounds.minX - rect.maxX, rect.minX - markedBounds.maxX))
-                let dy = max(0, max(markedBounds.minY - rect.maxY, rect.minY - markedBounds.maxY))
-                return dx * dx + dy * dy
-            }
-            return distance($0) < distance($1)
-        }
+        let neighbors = visible.filter { !changed.contains($0.id) }.map { card -> (WorkspaceCard, CGFloat) in
+            guard let rect = host(for: card.id)?.frame else { return (card, .greatestFiniteMagnitude) }
+            let dx = max(0, max(markedBounds.minX - rect.maxX, rect.minX - markedBounds.maxX))
+            let dy = max(0, max(markedBounds.minY - rect.maxY, rect.minY - markedBounds.maxY))
+            return (card, dx * dx + dy * dy)
+        }.sorted { $0.1 < $1.1 }.map { $0.0 }
         let selected = Array((inkCards + neighbors).prefix(3))
         let captureBounds = selected.compactMap { host(for: $0.id)?.frame.intersection(visibleRect) }
             .reduce(CGRect.null) { $0.union($1) }
