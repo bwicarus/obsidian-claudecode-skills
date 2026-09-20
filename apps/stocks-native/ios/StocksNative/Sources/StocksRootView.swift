@@ -38,32 +38,13 @@ struct StocksRootView: View {
     @State private var addingMarketCodes: [String]?
 
     var body: some View {
-        NavigationSplitView {
-            stockList
-                .navigationTitle(selectionSection.title)
-                .navigationSplitViewColumnWidth(min: 240, ideal: 290, max: 340)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button { showingSettings = true } label: { Image(systemName: "slider.horizontal.3") }
-                            .accessibilityLabel("设置与设备配对")
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            Task {
-                                if selectionSection == .market { await model.loadStocks() }
-                                else { await selectionModel.refreshFromExternalChange() }
-                            }
-                        } label: { Image(systemName: "arrow.clockwise") }
-                            .disabled(!model.isPaired || model.isLoadingList)
-                            .accessibilityLabel("刷新股票列表")
-                    }
-                }
-        } detail: {
+        NavigationStack {
             GeometryReader { geometry in
                 let showsInspector = sizeClass == .regular && geometry.size.width >= 900 && showingWideInspector
                 HStack(spacing: 0) {
                     VStack(spacing: 0) {
                         if model.isPaired {
+                            selectionNavigation
                             StockSelectionControls(model: selectionModel,
                                                    isScreenerActive: selectionSection == .screener,
                                                    editorPresented: selectionEditorPresented,
@@ -74,8 +55,7 @@ struct StocksRootView: View {
                                                    })
                             Divider()
                         }
-                        StockDetailView(model: model)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        selectionResultsWorkspace
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if showsInspector {
@@ -92,9 +72,13 @@ struct StocksRootView: View {
                 .onChange(of: geometry.size.width) { _, width in detailWidth = width }
             }
             .background(AppStyle.canvas)
-            .navigationTitle("行情工作台")
+            .navigationTitle("选股工作台")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { showingSettings = true } label: { Image(systemName: "slider.horizontal.3") }
+                        .accessibilityLabel("设置与设备配对")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     assistantToggle
                 }
@@ -149,19 +133,25 @@ struct StocksRootView: View {
             do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
             await model.loadStocks()
         }
-        .task(id: model.selectedCode) {
+        .task(id: "\(model.detailPresented):\(model.selectedCode ?? "")") {
+            guard model.detailPresented else { return }
             if let code = model.selectedCode {
                 await model.voice.selectStock(code)
-                await model.publishVoiceContext(action: "打开股票：\(code)")
             }
             await model.loadDetail()
         }
-        .task(id: "\(model.selectedCode ?? ""):\(model.chartPeriod.rawValue):\(model.klinePeriod.rawValue)") {
-            await model.publishVoiceContext(action: "切换图表：\(model.chartPeriod.title)，独立 K 线：\(model.klinePeriod.title)")
+        .task(id: "\(model.detailPresented):\(model.selectedCode ?? ""):\(model.chartPeriod.rawValue):\(model.klinePeriod.rawValue)") {
+            guard model.detailPresented else { return }
             await model.loadChart()
         }
-        .task(id: scenePhase) {
-            guard scenePhase == .active, model.isPaired else { return }
+        .onChange(of: "\(model.chartPeriod.rawValue):\(model.klinePeriod.rawValue)") { _, _ in
+            guard model.detailPresented else { return }
+            Task {
+                await model.publishVoiceContext(action: "切换图表：\(model.chartPeriod.title)，独立 K 线：\(model.klinePeriod.title)")
+            }
+        }
+        .task(id: "\(scenePhase):\(model.detailPresented):\(model.selectedCode ?? "")") {
+            guard scenePhase == .active, model.isPaired, model.detailPresented else { return }
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(10)) } catch { return }
                 await model.refreshLiveData()
@@ -223,21 +213,65 @@ struct StocksRootView: View {
         }
     }
 
+    private var selectionNavigation: some View {
+        HStack(spacing: 12) {
+            Picker("股票范围", selection: $selectionSection) {
+                ForEach(StockSelectionSection.allCases) { section in Text(section.title).tag(section) }
+            }
+            .pickerStyle(.segmented).frame(maxWidth: 360)
+            Button {
+                Task {
+                    if selectionSection == .market { await model.loadStocks() }
+                    else { await selectionModel.refreshFromExternalChange() }
+                }
+            } label: { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44) }
+            .disabled(!model.isPaired || model.isLoadingList)
+            .accessibilityLabel("刷新股票列表")
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 2)
+    }
+
+    private var selectionResultsWorkspace: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                stockList
+                    .frame(width: model.detailPresented && geometry.size.width >= 820 ? 320 : geometry.size.width)
+                    .frame(maxHeight: .infinity)
+                // Keep the mounted chart canvas and its local viewport when closing.
+                // This overlay is confined below the bubbles and never dims or locks the list.
+                if model.selectedCode != nil {
+                    StockDetailPanel(model: model, availableSize: geometry.size,
+                                     onClose: { model.closeStockDetail() })
+                        .opacity(model.detailPresented ? 1 : 0)
+                        .allowsHitTesting(model.detailPresented)
+                        .accessibilityHidden(!model.detailPresented)
+                        .zIndex(1)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .clipped()
+        }
+    }
+
     private var stockList: some View {
         VStack(spacing: 0) {
-            if model.isPaired {
-                Picker("股票范围", selection: $selectionSection) {
-                    ForEach(StockSelectionSection.allCases) { section in Text(section.title).tag(section) }
-                }
-                .pickerStyle(.segmented).padding(10)
-            }
             if model.isPaired && selectionSection != .market {
                 StockSelectionSidebar(model: selectionModel, section: selectionSection,
                                       selectedStockCode: $model.selectedCode,
                                       editorPresented: $selectionEditorPresented,
-                                      onOpenStock: { model.selectedCode = $0 },
+                                      onOpenStock: { model.openStock($0) },
+                                      onSelectStock: openStock,
                                       onOverlayChange: { selectionOverlayPresented = $0 })
             } else { marketStockList }
+        }
+    }
+
+    private func openStock(_ code: String) {
+        if model.detailPresented && model.selectedCode == code {
+            model.closeStockDetail()
+        } else {
+            model.openStock(code)
         }
     }
 
@@ -256,14 +290,19 @@ struct StocksRootView: View {
                 if let error = model.listError {
                     Text(error).font(.caption).foregroundStyle(.red).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                List(model.stocks, selection: $model.selectedCode) { stock in
-                    StockRow(stock: stock).tag(stock.code)
-                        .contextMenu {
-                            Button("加入观察组", systemImage: "folder.badge.plus") { addingMarketCodes = [stock.code] }
-                                .disabled(!selectionModel.canWrite)
-                        }
+                List(model.stocks) { stock in
+                    Button { openStock(stock.code) } label: {
+                        StockRow(stock: stock).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(model.detailPresented && model.selectedCode == stock.code ? AppStyle.accent.opacity(0.08) : Color.clear)
+                    .contextMenu {
+                        Button("打开股票") { model.openStock(stock.code) }
+                        Button("加入观察组", systemImage: "folder.badge.plus") { addingMarketCodes = [stock.code] }
+                            .disabled(!selectionModel.canWrite)
+                    }
                 }
-                .listStyle(.sidebar)
+                .listStyle(.plain)
                 .overlay {
                     if model.isLoadingList && model.stocks.isEmpty { ProgressView("读取行情…") }
                     else if model.stocks.isEmpty && model.listError == nil {

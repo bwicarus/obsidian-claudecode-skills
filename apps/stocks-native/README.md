@@ -18,8 +18,15 @@ includes market breadth, quotes and five-level order books, intraday data,
 5/15/30/60-minute and daily/weekly/monthly K-lines, technical indicators, capital
 flow, chips, concepts, peers and announcements. No trading operations are exposed.
 
-The native left sidebar separates market search, observation groups and the
-screener. Screening restores the original 25 conditions with OR between groups,
+The main workspace separates market search, observation groups and the screener.
+Persistent condition bubbles sit directly above the result list. Selecting a stock
+opens a nonmodal native detail panel below the bubbles; its title moves the panel,
+the corner resizes it, and an expand/restore control changes its viewing area.
+The exposed list and bubbles remain interactive. Selecting the same stock again
+closes its panel without resetting the list, filters, chart viewport or annotations.
+Closing suspends detail-only refresh and removes hidden chart data from voice
+screen context. The AI sidebar remains separate from the detail panel.
+Screening restores the original 25 conditions with OR between groups,
 AND/NOT within each group, numeric thresholds, per-condition switches and removal
 impact counts. Missing data remains unknown and cannot satisfy a NOT rule. Saved
 schemes, manual groups and smart groups share one account-scoped service with AI.

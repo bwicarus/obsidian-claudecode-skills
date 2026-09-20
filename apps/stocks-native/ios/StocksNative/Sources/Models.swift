@@ -361,6 +361,8 @@ struct VoiceUIContext: Codable {
 }
 
 struct VoiceViewState: Codable, Hashable {
+    // selectedCode can remain the last selection while its detail panel is closed.
+    var detailPresented = false
     var detailTab = "chart"
     var inspectorVisible = false
     var inspectorMode: String?

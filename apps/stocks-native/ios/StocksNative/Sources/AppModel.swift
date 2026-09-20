@@ -11,6 +11,8 @@ final class AppModel: ObservableObject {
     @Published var selectedCode: String? {
         didSet {
             if selectedCode != oldValue {
+                invalidateDetailRequests()
+                detailPresented = selectedCode != nil
                 voiceViewState.detailTab = "chart"
                 latestChartSnapshot = nil
                 chartSnapshotForKline = nil
@@ -18,9 +20,11 @@ final class AppModel: ObservableObject {
                 chipRequestKey = nil
                 chipGeneration = UUID()
                 chipRefreshTask?.cancel()
+                publishDetailPresentationChange()
             }
         }
     }
+    @Published private(set) var detailPresented = false
     @Published private(set) var stocks: [Stock] = []
     @Published private(set) var detail: StockResponse?
     @Published private(set) var liveStock: Stock?
@@ -63,6 +67,7 @@ final class AppModel: ObservableObject {
     let workspace = WorkspaceLayoutStore()
     private var listGeneration = UUID()
     private var detailGeneration = UUID()
+    private var detailSessionGeneration = UUID()
     private var chartGeneration = UUID()
     private let cache = MarketCache.shared
     private var recentVoiceActions: [VoiceUIAction] = []
@@ -83,15 +88,15 @@ final class AppModel: ObservableObject {
         let savedID = UserDefaults.standard.string(forKey: "stocksNative.deviceID") ?? UUID().uuidString
         deviceID = savedID
         UserDefaults.standard.set(savedID, forKey: "stocksNative.deviceID")
-        voice.onStockSelected = { [weak self] code in self?.selectedCode = code }
+        voice.onStockSelected = { [weak self] code in self?.openStock(code) }
         voice.onCapabilityAction = { [weak self] action in
             guard let self else { return CapabilityResult(success: false, message: "App 状态不可用。") }
             return self.annotations.perform(action, selectedStockCode: self.selectedCode)
         }
         annotations.onChange = { [weak self] code, operation in
-            guard let self, code == self.selectedCode else { return }
+            guard let self, self.detailPresented, code == self.selectedCode else { return }
             Task {
-                guard code == self.selectedCode else { return }
+                guard self.detailPresented, code == self.selectedCode else { return }
                 await self.publishVoiceContext(action: "图表标注：\(operation)", kind: "annotation")
             }
         }
@@ -133,7 +138,67 @@ final class AppModel: ObservableObject {
     }
 
     var visibleWorkspaceKinds: Set<WorkspaceCardKind> {
-        Set(workspace.layout.selectedPage?.visibleCards.map(\.kind) ?? [])
+        guard detailPresented else { return [] }
+        return Set(workspace.layout.selectedPage?.visibleCards.map(\.kind) ?? [])
+    }
+
+    func openStock(_ code: String) {
+        if selectedCode != code {
+            selectedCode = code
+        } else if !detailPresented {
+            invalidateDetailRequests()
+            detailPresented = true
+            publishDetailPresentationChange()
+        }
+    }
+
+    func closeStockDetail() {
+        guard detailPresented else { return }
+        invalidateDetailRequests()
+        detailPresented = false
+        publishDetailPresentationChange()
+    }
+
+    private func invalidateDetailRequests() {
+        detailSessionGeneration = UUID()
+        detailGeneration = UUID()
+        chartGeneration = UUID()
+        chipGeneration = UUID()
+        chipRequestKey = nil
+        chipRefreshTask?.cancel()
+        chipRefreshTask = nil
+        isLoadingDetail = false
+        isLoadingChart = false
+        detailError = nil
+        chartError = nil
+    }
+
+    private func publishDetailPresentationChange() {
+        let generation = detailSessionGeneration
+        let presented = detailPresented
+        let code = selectedCode
+        Task { @MainActor [weak self] in
+            guard let self, self.detailSessionGeneration == generation,
+                  self.detailPresented == presented, self.selectedCode == code else { return }
+            await self.publishVoiceContext(action: presented ? "打开股票详情：\(code ?? "")" : "关闭股票详情", kind: "panel")
+        }
+    }
+
+    private func resetAccountDetailState() {
+        invalidateDetailRequests()
+        detailPresented = false
+        selectedCode = nil
+        detail = nil
+        liveStock = nil
+        intraday = nil
+        kline = nil
+        chipDistribution = nil
+        latestChartSnapshot = nil
+        latestChartSourceID = nil
+        chartSnapshotForKline = nil
+        recentVoiceActions = []
+        voiceActionExpiryTask?.cancel()
+        voiceActionExpiryTask = nil
     }
 
     private func chartIsVisible(period: String) -> Bool {
@@ -163,12 +228,8 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(baseURL, forKey: "stocksNative.baseURL")
         isPaired = true
         stocks = []
-        selectedCode = nil
-        detail = nil
-        liveStock = nil
+        resetAccountDetailState()
         overview = nil
-        intraday = nil
-        kline = nil
         listAsOf = nil
         await loadStocks()
     }
@@ -192,9 +253,9 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(baseURL, forKey: "stocksNative.baseURL")
         isPaired = true
         stocks = []
-        selectedCode = nil
-        detail = nil
-        liveStock = nil
+        resetAccountDetailState()
+        overview = nil
+        listAsOf = nil
         await loadOverview()
         await loadStocks()
         if let warning = result.libraryMigrationWarning { listError = warning }
@@ -210,12 +271,8 @@ final class AppModel: ObservableObject {
         detailGeneration = UUID()
         chartGeneration = UUID()
         stocks = []
-        selectedCode = nil
-        detail = nil
-        liveStock = nil
+        resetAccountDetailState()
         overview = nil
-        intraday = nil
-        kline = nil
         listAsOf = nil
         listError = nil
         detailError = nil
@@ -236,14 +293,12 @@ final class AppModel: ObservableObject {
            let cached = await cache.value(StocksResponse.self, for: "stocks", maxAge: 24 * 3600) {
             stocks = cached.items
             listAsOf = cached.asOf
-            if selectedCode == nil { selectedCode = cached.items.first?.code }
         }
         do {
             let result = try await client.stocks(query: query)
             guard current == listGeneration, !Task.isCancelled else { return }
             stocks = result.items
             listAsOf = result.asOf
-            if selectedCode == nil { selectedCode = result.items.first?.code }
             if cacheable { await cache.save(result, for: "stocks") }
             if !query.isEmpty { await publishVoiceContext(action: "搜索股票：\(query)") }
         } catch {
@@ -271,6 +326,11 @@ final class AppModel: ObservableObject {
     func loadDetail() async {
         let current = UUID()
         detailGeneration = current
+        defer { if current == detailGeneration { isLoadingDetail = false } }
+        guard detailPresented else {
+            isLoadingDetail = false
+            return
+        }
         guard isPaired, let code = selectedCode else {
             detail = nil
             liveStock = nil
@@ -283,31 +343,35 @@ final class AppModel: ObservableObject {
             if intraday?.code != code { intraday = nil }
             if kline?.code != code { kline = nil }
             if let cached = await cache.value(StockResponse.self, for: "detail-\(code)", maxAge: 7 * 24 * 3600) {
-                guard current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
+                guard detailPresented, current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
                 detail = cached
                 liveStock = cached.stock
             }
         }
-        guard current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
+        guard detailPresented, current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
         isLoadingDetail = true
         detailError = nil
         do {
             let result = try await client.stock(code: code)
-            guard current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
+            guard detailPresented, current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
             detail = result
             liveStock = result.stock
             await cache.save(result, for: "detail-\(code)")
             await publishVoiceContext()
         } catch {
-            guard current == detailGeneration, !Task.isCancelled else { return }
+            guard detailPresented, current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
             detailError = error.localizedDescription
         }
-        if current == detailGeneration { isLoadingDetail = false }
     }
 
     func loadChart() async {
         let current = UUID()
         chartGeneration = current
+        defer { if current == chartGeneration { isLoadingChart = false } }
+        guard detailPresented else {
+            isLoadingChart = false
+            return
+        }
         guard isPaired, let code = selectedCode else {
             intraday = nil
             kline = nil
@@ -321,42 +385,44 @@ final class AppModel: ObservableObject {
         let candleKey = "chart-\(code)-\(period.rawValue)"
         if intraday?.code != code {
             let cached = await cache.value(IntradayResponse.self, for: minuteKey, maxAge: 12 * 3600)
-            guard current == chartGeneration, selectedCode == code, !Task.isCancelled else { return }
+            guard detailPresented, current == chartGeneration, selectedCode == code, !Task.isCancelled else { return }
             intraday = cached
         }
         if kline?.code != code || kline?.period != period.rawValue {
             let cached = await cache.value(KLineResponse.self, for: candleKey, maxAge: 7 * 24 * 3600)
-            guard current == chartGeneration, selectedCode == code, !Task.isCancelled else { return }
+            guard detailPresented, current == chartGeneration, selectedCode == code, !Task.isCancelled else { return }
             kline = cached
         }
+        guard detailPresented, current == chartGeneration, selectedCode == code,
+              klinePeriod == period, !Task.isCancelled else { return }
         // Fetch both series so independent intraday and K-line cards can coexist.
         async let minuteResult = client.intraday(code: code)
         async let candleResult = client.kline(code: code, period: period)
         do {
             let result = try await minuteResult
-            guard current == chartGeneration, selectedCode == code, !Task.isCancelled else { return }
+            guard detailPresented, current == chartGeneration, selectedCode == code, !Task.isCancelled else { return }
             intraday = result
             await cache.save(result, for: minuteKey)
         } catch {
-            if current == chartGeneration { chartError = error.localizedDescription }
+            if detailPresented, current == chartGeneration, !Task.isCancelled { chartError = error.localizedDescription }
         }
         do {
             let result = try await candleResult
-            guard current == chartGeneration, selectedCode == code,
+            guard detailPresented, current == chartGeneration, selectedCode == code,
                   klinePeriod == period, !Task.isCancelled else { return }
             kline = result
             await cache.save(result, for: candleKey)
         } catch {
-            if current == chartGeneration { chartError = error.localizedDescription }
+            if detailPresented, current == chartGeneration, !Task.isCancelled { chartError = error.localizedDescription }
         }
-        guard current == chartGeneration, !Task.isCancelled else { return }
+        guard detailPresented, current == chartGeneration, selectedCode == code, !Task.isCancelled else { return }
         isLoadingChart = false
         scheduleChipRefresh()
         await publishVoiceContext()
     }
 
     func loadChips(start: String? = nil, end: String? = nil) async {
-        guard isPaired, let code = selectedCode,
+        guard detailPresented, isPaired, let code = selectedCode,
               !visibleWorkspaceKinds.isDisjoint(with: [.chipDistribution, .klineChips]) else { return }
         let key = "chips-\(code)-\(start ?? "recent")-\(end ?? "latest")"
         if chipRequestKey == key, chipDistribution?.code == code { return }
@@ -366,16 +432,17 @@ final class AppModel: ObservableObject {
         let sameRange = chipDistribution?.code == code && chipDistribution?.start == start && chipDistribution?.end == end
         if !sameRange { chipDistribution = nil }
         if chipDistribution == nil, let cached = await cache.value(ChipDistributionResponse.self, for: key, maxAge: 24 * 3600) {
-            guard current == chipGeneration, selectedCode == code, !Task.isCancelled else { return }
+            guard detailPresented, current == chipGeneration, selectedCode == code, !Task.isCancelled else { return }
             chipDistribution = cached
         }
+        guard detailPresented, current == chipGeneration, selectedCode == code, !Task.isCancelled else { return }
         do {
             let result = try await client.chips(code: code, start: start, end: end)
-            guard current == chipGeneration, selectedCode == code, !Task.isCancelled else { return }
+            guard detailPresented, current == chipGeneration, selectedCode == code, !Task.isCancelled else { return }
             chipDistribution = result
             await cache.save(result, for: key)
         } catch {
-            guard current == chipGeneration, selectedCode == code, !Task.isCancelled else { return }
+            guard detailPresented, current == chipGeneration, selectedCode == code, !Task.isCancelled else { return }
             chipRequestKey = nil
             if chipDistribution == nil {
                 chipDistribution = ChipDistributionResponse(code: code, start: start, end: end, rows: [],
@@ -392,7 +459,7 @@ final class AppModel: ObservableObject {
         let code = selectedCode
         chipRefreshTask = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
-            guard let self, self.selectedCode == code else { return }
+            guard let self, self.detailPresented, self.selectedCode == code else { return }
             var start = snapshot?.firstVisibleTime.map { String($0.prefix(10)) }
             var end = snapshot?.lastVisibleTime.map { String($0.prefix(10)) }
             if self.klinePeriod.rawValue.hasPrefix("m"), self.klinePeriod != .month {
@@ -413,10 +480,12 @@ final class AppModel: ObservableObject {
     }
 
     func loadRealtime() async {
-        guard isPaired, let code = selectedCode else { return }
+        guard detailPresented, isPaired, let code = selectedCode else { return }
+        let session = detailSessionGeneration
         do {
             let result = try await client.realtime(codes: [code])
-            guard selectedCode == code, !Task.isCancelled else { return }
+            guard detailPresented, session == detailSessionGeneration,
+                  selectedCode == code, !Task.isCancelled else { return }
             if let stock = result.items.first {
                 liveStock = stock
                 await publishVoiceContext()
@@ -427,18 +496,30 @@ final class AppModel: ObservableObject {
     }
 
     func refreshLiveData() async {
+        guard detailPresented, isPaired, let code = selectedCode else { return }
+        let session = detailSessionGeneration
         await loadRealtime()
+        guard detailPresented, session == detailSessionGeneration,
+              selectedCode == code, !Task.isCancelled else { return }
         let kinds = visibleWorkspaceKinds
-        guard isPaired, let code = selectedCode else { return }
         if kinds.contains(.intraday) || (kinds.contains(.chart) && chartPeriod == .intraday) {
             do {
                 let result = try await client.intraday(code: code)
-                guard selectedCode == code, !Task.isCancelled else { return }
+                guard detailPresented, session == detailSessionGeneration,
+                      selectedCode == code, !Task.isCancelled else { return }
                 intraday = result
                 await cache.save(result, for: "chart-\(code)-intraday")
+                guard detailPresented, session == detailSessionGeneration,
+                      selectedCode == code, !Task.isCancelled else { return }
                 await publishVoiceContext()
-            } catch { chartError = error.localizedDescription }
+            } catch {
+                guard detailPresented, session == detailSessionGeneration,
+                      selectedCode == code, !Task.isCancelled else { return }
+                chartError = error.localizedDescription
+            }
         }
+        guard detailPresented, session == detailSessionGeneration,
+              selectedCode == code, !Task.isCancelled else { return }
         if !kinds.isDisjoint(with: [.chipDistribution, .klineChips]) {
             chipRequestKey = nil
             scheduleChipRefresh()
@@ -459,6 +540,7 @@ final class AppModel: ObservableObject {
     }
 
     func workspaceDidChange() {
+        guard detailPresented else { return }
         if let snapshot = latestChartSnapshot, !chartIsVisible(period: snapshot.chart.period) {
             latestChartSnapshot = nil
         }
@@ -468,7 +550,11 @@ final class AppModel: ObservableObject {
             chipGeneration = UUID()
             chipRequestKey = nil
         } else { scheduleChipRefresh() }
-        Task { await publishVoiceContext(action: "工作台：\(workspace.layout.selectedPage?.title ?? "")", kind: "panel") }
+        let session = detailSessionGeneration
+        Task { @MainActor [weak self] in
+            guard let self, self.detailPresented, self.detailSessionGeneration == session else { return }
+            await self.publishVoiceContext(action: "工作台：\(self.workspace.layout.selectedPage?.title ?? "")", kind: "panel")
+        }
     }
 
     func updateInspectorContext(visible: Bool, mode: String, presentation: String, settingsPresented: Bool) async {
@@ -528,7 +614,7 @@ final class AppModel: ObservableObject {
 
     func publishVoiceContext(action: String? = nil, kind: String? = nil) async {
         let kinds = visibleWorkspaceKinds
-        let detailObscured = voiceViewState.settingsPresented || voiceViewState.selectionEditorPresented
+        let detailObscured = !detailPresented || voiceViewState.settingsPresented || voiceViewState.selectionEditorPresented
         let snapshot = !detailObscured
             && latestChartSnapshot?.chart.stockCode == selectedCode
             && latestChartSnapshot.map({ chartIsVisible(period: $0.chart.period) }) == true ? latestChartSnapshot : nil
@@ -538,15 +624,17 @@ final class AppModel: ObservableObject {
         recentVoiceActions.removeAll {
             guard let occurred = formatter.date(from: $0.occurredAtUtc) else { return true }
             return now.timeIntervalSince(occurred) >= 30 || $0.stockCode != selectedCode
-                || (isChartAction($0.kind) && $0.chartPeriod != contextPeriod.rawValue)
+                || (isChartAction($0.kind) && (detailObscured || $0.chartPeriod != contextPeriod.rawValue))
         }
-        if let action, !action.isEmpty {
+        let actionKind = kind ?? action.map(voiceActionKind)
+        if let action, !action.isEmpty, let actionKind,
+           !detailObscured || !isChartAction(actionKind) {
             let next = VoiceUIAction(id: UUID().uuidString,
-                                     kind: kind ?? voiceActionKind(action),
+                                     kind: actionKind,
                                      label: String(action.prefix(120)),
                                      occurredAtUtc: Date().ISO8601Format(),
                                      stockCode: selectedCode,
-                                     chartPeriod: contextPeriod.rawValue)
+                                     chartPeriod: detailObscured ? nil : contextPeriod.rawValue)
             if let last = recentVoiceActions.last,
                last.kind == next.kind, last.label == next.label,
                last.stockCode == next.stockCode, last.chartPeriod == next.chartPeriod {
@@ -557,9 +645,9 @@ final class AppModel: ObservableObject {
             recentVoiceActions = Array(recentVoiceActions.suffix(3))
         }
         scheduleVoiceActionExpiry(now: now, formatter: formatter)
-        let stock = displayedStock
-        let activeDetail = displayedDetail
-        let activeIntraday = displayedIntraday
+        let stock = detailObscured ? nil : displayedStock
+        let activeDetail = detailObscured ? nil : displayedDetail
+        let activeIntraday = detailObscured ? nil : displayedIntraday
         var metrics: [String: String] = [:]
         if let value = stock?.price { metrics["price"] = String(format: "%.3f", value) }
         if let value = stock?.changePct { metrics["changePct"] = String(format: "%+.3f%%", value) }
@@ -568,7 +656,7 @@ final class AppModel: ObservableObject {
         if let value = stock?.low { metrics["low"] = String(format: "%.3f", value) }
         if let value = stock?.turnover { metrics["turnover"] = String(format: "%.0f", value) }
         if let value = stock?.turnoverRate { metrics["turnoverRate"] = String(format: "%.3f%%", value) }
-        if kinds.contains(.macd) {
+        if !detailObscured, kinds.contains(.macd) {
             let points = NativeChartIndicators.series(candles: displayedKlineCandles,
                 panel: klinePeriod == .day ? activeDetail?.technical : nil)
             let visible = NativeChartIndicators.visible(points, context: chartSnapshotForKline)
@@ -586,7 +674,8 @@ final class AppModel: ObservableObject {
             if activeDetail != nil {
                 panels = ["价格摘要"] + (workspace.layout.selectedPage?.visibleCards.map { $0.kind.title } ?? [])
             }
-            if voiceViewState.inspectorVisible, let mode = voiceViewState.inspectorMode {
+            if voiceViewState.inspectorVisible, let mode = voiceViewState.inspectorMode,
+               mode == "assistant" || !detailObscured {
                 panels.append(["orderBook": "盘口", "analysis": "分析摘要", "assistant": "AI 对话"][mode] ?? mode)
             }
             if let section = voiceViewState.navigationSection {
@@ -594,14 +683,16 @@ final class AppModel: ObservableObject {
                                "selection_library": "筛选方案库"][section] ?? section)
             }
         }
-        let latestTime = contextPeriod == .intraday
+        let latestTime = detailObscured ? nil : (contextPeriod == .intraday
             ? (snapshot?.chart.selectionSource == "latest" ? snapshot?.chart.lastVisibleTime : nil)
-            : displayedKlineCandles.last?.time
+            : displayedKlineCandles.last?.time)
         let annotationContext = snapshot?.annotations
         var contextViewState = voiceViewState
-        contextViewState.detailTab = "chart"
-        contextViewState.workspacePageID = workspace.layout.selectedPage?.id
-        contextViewState.workspacePageTitle = workspace.layout.selectedPage?.title
+        contextViewState.detailPresented = detailPresented
+        contextViewState.detailTab = detailObscured ? "none" : "chart"
+        contextViewState.visibilityScope = detailPresented ? "active_detail_panel" : "selection_workspace"
+        contextViewState.workspacePageID = detailObscured ? nil : workspace.layout.selectedPage?.id
+        contextViewState.workspacePageTitle = detailObscured ? nil : workspace.layout.selectedPage?.title
         contextViewState.visibleCardIDs = detailObscured ? [] : (workspace.layout.selectedPage?.visibleCards.map { $0.kind.rawValue } ?? [])
         contextViewState.chartViewport = snapshot.map {
             VoiceChartViewport(firstVisibleTime: $0.chart.firstVisibleTime,
@@ -614,16 +705,18 @@ final class AppModel: ObservableObject {
             ? VoiceOrderBookContext(bids: Array((stock?.bids ?? []).prefix(5)), asks: Array((stock?.asks ?? []).prefix(5))) : nil
         let quoteDate = stock?.quoteTime.map { String($0.prefix(10)) }
             ?? (activeIntraday?.tradeDate.isEmpty == false ? activeIntraday?.tradeDate : activeDetail?.asOf)
+        let workspaceScreen = ["market": "market_overview", "watchlist": "watchlist",
+                               "screener": "screener", "selection_library": "selection_library"][voiceViewState.navigationSection ?? "market"] ?? "market_overview"
         let context = VoiceUIContext(screen: voiceViewState.settingsPresented ? "settings" :
                                      (voiceViewState.selectionEditorPresented ? "selection_editor" :
-                                      (selectedCode == nil ? "market_overview" : "stock_detail")),
-                                     selectedCode: selectedCode, selectedName: stock?.name,
+                                      (detailPresented ? "stock_detail" : workspaceScreen)),
+                                     selectedCode: selectedCode, selectedName: displayedStock?.name,
                                      quoteAsOf: quoteDate, quoteTime: stock?.quoteTime, quoteSource: stock?.quoteSource,
                                      observedAtUtc: Date().ISO8601Format(),
-                                     chartPeriod: contextPeriod.title, latestPointTime: latestTime,
+                                     chartPeriod: detailObscured ? "" : contextPeriod.title, latestPointTime: latestTime,
                                      metrics: metrics, visiblePanels: panels,
                                      recentActions: recentVoiceActions,
-                                     chartPeriodID: contextPeriod.rawValue,
+                                     chartPeriodID: detailObscured ? nil : contextPeriod.rawValue,
                                      viewState: contextViewState, chart: snapshot?.chart,
                                      annotations: annotationContext, orderBook: orderBook)
         await voice.updateContext(context)

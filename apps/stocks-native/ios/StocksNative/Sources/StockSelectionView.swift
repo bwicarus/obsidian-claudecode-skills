@@ -260,6 +260,7 @@ struct StockSelectionSidebar: View {
     @Binding var selectedStockCode: String?
     @Binding var editorPresented: Bool
     let onOpenStock: (String) -> Void
+    let onSelectStock: (String) -> Void
     let onOverlayChange: (Bool) -> Void
     @State private var groupEditor: SelectionGroupDraft?
     @State private var deletingGroup: SelectionWatchGroup?
@@ -363,7 +364,7 @@ struct StockSelectionSidebar: View {
                 }
             }
             HStack {
-                Text("在工作区顶部直接切换条件").font(.caption2).foregroundStyle(.secondary)
+                Text("上方切换条件，点股票展开详情").font(.caption2).foregroundStyle(.secondary)
                 Spacer(minLength: 4)
                 Button { Task { await model.run() } } label: {
                     if model.isEvaluating { ProgressView() } else { Label("选股", systemImage: "play.fill") }
@@ -422,7 +423,7 @@ struct StockSelectionSidebar: View {
                             if choosingStocks {
                                 if model.selectedCodes.contains(stock.code) { model.selectedCodes.remove(stock.code) }
                                 else { model.selectedCodes.insert(stock.code) }
-                            } else { onOpenStock(stock.code) }
+                            } else { onSelectStock(stock.code) }
                         } label: {
                             HStack(spacing: 8) {
                                 if choosingStocks {
