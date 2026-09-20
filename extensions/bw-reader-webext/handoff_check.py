@@ -50,6 +50,7 @@ TESTS = (
 )
 RUNTIME_TEST_GLOB = "tests/reader_contract/*.test.mjs"
 READER_NETWORK_AUDIT = ROOT / "scripts" / "audit_reader_network.py"
+STYLE_CONFLICTS = ROOT / "scripts" / "check_style_conflicts.py"
 REQUIRED_RUNTIME_TESTS = {
     "account-context.contract.test.mjs",
     "turn-container-dedupe.contract.test.mjs",
@@ -825,6 +826,27 @@ def run_runtime_contract_tests(audit: Audit) -> None:
         audit.ok(f"统一 runtime 契约测试通过 ({len(tests)} files)")
 
 
+def run_style_conflicts(audit: Audit) -> None:
+    """pdf-styles.css 与 rc-*.js 同名选择器取值是否一致。
+
+    两边**故意**共用类名（pdf-adapter 的 fallback 路径靠静态 CSS 上样式，而
+    rc-settings 复用同一套 id/类名好让旧函数零改动复用），于是同一个元素被两份
+    规则命中，谁最后生效谁说了算。2026-09-20 一天内因此漏了两个属性：
+    flex-wrap:wrap 让分段控件折成两行、margin-bottom:-1px 把按钮往下拽 1px。
+    """
+    if not STYLE_CONFLICTS.is_file():
+        audit.error("缺少样式冲突检查脚本")
+        return
+    result = run([sys.executable, str(STYLE_CONFLICTS)], capture=True)
+    if result.returncode:
+        if result.stdout:
+            print(result.stdout.rstrip())
+        audit.error("pdf-styles.css 与 rc-*.js 样式冲突")
+        return
+    audit.ok((result.stdout or "").strip().splitlines()[-1]
+             if (result.stdout or "").strip() else "样式冲突检查通过")
+
+
 def run_reader_network_audit(audit: Audit) -> None:
     if not READER_NETWORK_AUDIT.is_file():
         audit.error("缺少读者交互网络依赖审计脚本")
@@ -1132,6 +1154,7 @@ def main() -> int:
     audit_reader_concat(audit)
     audit_syntax(audit)
     run_runtime_contract_tests(audit)
+    run_style_conflicts(audit)
     run_reader_network_audit(audit)
     run_indexeddb_browser_contract(audit)
     run_text_hit_browser_contract(audit)

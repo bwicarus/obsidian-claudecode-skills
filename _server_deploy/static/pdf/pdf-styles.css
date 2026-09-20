@@ -362,8 +362,8 @@ body.grammar-open.grammar-floating #main,body.grammar-open.grammar-floating #hea
 .draft-item .sel-circle{flex-shrink:0;width:20px;height:20px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;margin-top:2px;transition:all .15s;touch-action:pan-y;align-self:center}
 .draft-item .sel-circle:hover{border-color:var(--rc-accent,#0a84ff)}
 .draft-item.selected .sel-circle{background:var(--rc-success,#30d158);border-color:var(--rc-success,#30d158);box-shadow:inset 0 0 0 3px var(--rc-bg-surface,#1c1c1e)}
-.draft-item-wrap.swiped .draft-item .sel-circle{border-color:#7a2828}
-.draft-item-del-row{position:absolute;right:0;top:0;bottom:0;width:64px;background:#7a2828;color:#fff;border:none;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1;visibility:hidden}
+.draft-item-wrap.swiped .draft-item .sel-circle{border-color:var(--rc-danger,rgba(255,69,58,.20))}
+.draft-item-del-row{position:absolute;right:0;top:0;bottom:0;width:64px;background:var(--rc-danger,rgba(255,69,58,.20));color:#fff;border:none;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1;visibility:hidden}
 .draft-item-del-row:hover{background:#9a3232}
 .draft-item-wrap.swiped .draft-item-del-row{visibility:visible}
 .draft-item-wrap.swiped .draft-item{transform:translateX(-64px)}
@@ -598,7 +598,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #hl-popover .hl-snip-content{flex:1;min-width:0}
 #hl-popover .hl-snip-circle{flex-shrink:0;width:20px;height:20px;border-radius:50%;border:2px solid #5b6a85;align-self:center;cursor:grab;transition:border-color .12s;touch-action:pan-y}
 #hl-popover .hl-snip-circle:hover{border-color:var(--rc-accent,#0a84ff)}
-#hl-popover .hl-snip-wrap.swiped .hl-snip-circle{border-color:#7a2828}
+#hl-popover .hl-snip-wrap.swiped .hl-snip-circle{border-color:var(--rc-danger,rgba(255,69,58,.20))}
 #hl-popover .hl-snip-row{font-size:11px;line-height:1.5;color:var(--rc-text-strong,#fff);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
 #hl-popover .hl-snip-row:last-child{margin-bottom:0}
 #hl-popover .hl-snip-row.text{color:var(--rc-text-strong,#fff)}
@@ -607,14 +607,14 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #hl-popover .hl-snip-row .row-lbl{color:var(--rc-text-dim,rgba(235,235,245,.38));font-size:10px;margin-right:6px;font-weight:600;letter-spacing:.04em}
 #hl-popover .hl-snip-content.expanded .hl-snip-row{white-space:pre-wrap;overflow:visible;text-overflow:initial;word-break:break-word}
 /* 右侧后方的删除按钮：visibility 控制，未 swiped 时彻底不可见（不仅靠 z-index） */
-#hl-popover .hl-snip-del-row{position:absolute;right:0;top:0;bottom:0;width:64px;background:#7a2828;color:#fff;border:none;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1;border-radius:0 4px 4px 0;visibility:hidden}
+#hl-popover .hl-snip-del-row{position:absolute;right:0;top:0;bottom:0;width:64px;background:var(--rc-danger,rgba(255,69,58,.20));color:#fff;border:none;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1;border-radius:0 4px 4px 0;visibility:hidden}
 #hl-popover .hl-snip-del-row:hover{background:#9a3232}
 #hl-popover .hl-snip-wrap.swiped .hl-snip-del-row{visibility:visible}
 #hl-popover .hl-snip-wrap.swiped .hl-snip{transform:translateX(-64px)}
 #hl-popover .actions{display:flex;gap:6px;justify-content:flex-end}
 #hl-popover button{background:transparent;border:1px solid var(--rc-border-accent,rgba(10,132,255,.58));color:var(--rc-text-strong,#fff);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer}
 #hl-popover button:hover{background:var(--rc-bg-hover,rgba(120,120,128,.24))}
-#hl-popover button.del{border-color:#7a2828;color:#ffb4b4}
+#hl-popover button.del{border-color:var(--rc-danger,rgba(255,69,58,.20));color:#ffb4b4}
 #hl-popover button.del:hover{background:#4a1a1a}
 #hl-popover button.primary{background:var(--rc-bg-active,rgba(10,132,255,.26));border-color:var(--rc-border-accent,rgba(10,132,255,.58));color:#fff}
 #hl-popover button.primary:hover{background:#2c5188}
@@ -623,7 +623,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 .set-hl-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
 .set-hl-row .swatch-w{position:relative;display:inline-block}
 .set-hl-row .swatch{width:28px;height:28px;border-radius:50%;border:2px solid var(--rc-border,rgba(84,84,88,.62));cursor:default;display:block}
-.set-hl-row .del{position:absolute;right:-5px;top:-5px;width:16px;height:16px;border-radius:50%;background:#7a2828;border:1px solid #4a1a1a;color:#ffb4b4;font-size:10px;line-height:13px;cursor:pointer;padding:0;text-align:center}
+.set-hl-row .del{position:absolute;right:-5px;top:-5px;width:16px;height:16px;border-radius:50%;background:var(--rc-danger,rgba(255,69,58,.20));border:1px solid #4a1a1a;color:#ffb4b4;font-size:10px;line-height:13px;cursor:pointer;padding:0;text-align:center}
 .set-hl-row .del:hover{background:#9a3232}
 
 
