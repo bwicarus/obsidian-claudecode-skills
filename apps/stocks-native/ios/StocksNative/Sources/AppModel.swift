@@ -190,9 +190,9 @@ final class AppModel: ObservableObject {
             }
             byID[plan.id] = plan
         }
-        savedPlans = Array(byID.values.sorted {
+        savedPlans = byID.values.sorted {
             $0.createdAt == $1.createdAt ? $0.id > $1.id : $0.createdAt > $1.createdAt
-        }.prefix(500))
+        }
         research.mergePlans(incoming)
     }
 

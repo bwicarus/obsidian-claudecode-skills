@@ -81,7 +81,10 @@ struct ReportListResponse: Codable {
 }
 
 struct ReportItemResponse: Codable { let report: StockReport }
-struct ReportSignalsResponse: Codable { let items: [String: ResearchSignal] }
+struct ReportSignalsResponse: Codable {
+    let items: [String: ResearchSignal]
+    let adoptions: [String: PlanAdoption]?
+}
 struct ResearchSignal: Codable {
     let code: String
     let reportId: String?
@@ -158,7 +161,7 @@ final class StockResearchStore: ObservableObject {
             map[report.id] = report
             if let adoption = report.adoption { adoptions[adoption.planId] = adoption }
         }
-        reports = Array(map.values.sorted { $0.createdAt > $1.createdAt }.prefix(500))
+        reports = map.values.sorted { $0.createdAt > $1.createdAt }
         mergePlans(values.compactMap(\.plan))
     }
 
@@ -171,7 +174,7 @@ final class StockResearchStore: ObservableObject {
             }
             map[plan.id] = plan
         }
-        plans = Array(map.values.sorted { $0.createdAt > $1.createdAt }.prefix(500))
+        plans = map.values.sorted { $0.createdAt > $1.createdAt }
     }
 
     func refresh(code: String? = nil, more: Bool = false) async {
@@ -191,6 +194,7 @@ final class StockResearchStore: ObservableObject {
             let updated = try await client.researchSignals()
             guard token == generation, loads[key] == ticket else { return }
             signals = updated.items
+            if let states = updated.adoptions { adoptions = states }
             for value in updated.items.values { if let adoption = value.adoption { adoptions[adoption.planId] = adoption } }
         } catch {
             guard token == generation else { return }
