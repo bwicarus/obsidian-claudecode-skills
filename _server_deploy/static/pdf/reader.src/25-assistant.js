@@ -63,7 +63,7 @@
     '.asst-a img,.asst-a svg{max-width:100%;height:auto;border-radius:8px;display:block;margin:.4em auto;background:#fff;padding:10px;box-sizing:border-box}' +
     '.asst-a img{cursor:zoom-in}' +
     '.asst-tool{align-self:flex-start;color:var(--rc-text-muted);font-size:12px;padding:2px 6px;font-style:italic}' +
-    '.asst-note{align-self:center;background:#2a2410;border:1px solid #5a4a18;color:#e7d28a;font-size:12px;padding:4px 10px;border-radius:9px;max-width:96%}' +
+    '.asst-note{align-self:center;background:#2a2410;border:1px solid #5a4a18;color:var(--rc-warn);font-size:12px;padding:4px 10px;border-radius:9px;max-width:96%}' +
     '.asst-undo{background:#3a1d2a;border:1px solid #6b3550;color:#ffd0e0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
     '.asst-undo:active{background:#52283a}.asst-undo:disabled{opacity:.5}' +
     '.asst-jump{background:var(--rc-bg-surface);border:1px solid var(--rc-border);color:var(--rc-text-muted);border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
@@ -75,7 +75,7 @@
     '.asst-hl-del:active{background:#522828}.asst-hl-del:disabled{opacity:.5}' +
     '.asst-hl-redo{flex:0 0 auto;background:#1d3a2a;border:1px solid #2f6347;color:#bfead0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer}.asst-hl-redo:active{background:#244a35}.asst-hl-redo:disabled{opacity:.5}' +   // M9:删完转「↪ 重做」
     '.asst-edit-card{align-self:flex-start;max-width:92%;background:#13203a;border:1px solid #294060;border-radius:11px;padding:8px 11px;display:flex;flex-direction:column;gap:7px}' +
-    '.asst-edit-h{font-size:12px;color:#bfe0c8}' +
+    '.asst-edit-h{font-size:12px;color:var(--rc-success)}' +
     '.asst-edit-chips{display:flex;flex-wrap:wrap;gap:6px}' +
     '.asst-edit-undo{align-self:flex-start;background:#26344f;border:1px solid #3a5273;color:var(--rc-text-strong);border-radius:8px;padding:3px 12px;font-size:12px;cursor:pointer}' +
     '.asst-edit-undo:active{background:#2f4061}.asst-edit-undo:disabled{opacity:.55}' +
@@ -115,7 +115,7 @@
     '.afp-s{background:var(--rc-bg-raised)}.afp-s:active{background:var(--rc-bg-raised)}' +
     '#asst-input{flex:0 0 auto;display:flex;gap:8px;padding:10px;border-top:1px solid var(--rc-bg-raised);align-items:flex-end}' +
     '#asst-ta{flex:1;background:#0b1220;border:1px solid var(--rc-border-control);color:#e6eeff;border-radius:12px;padding:9px 11px;font-size:15px;resize:none;max-height:120px;line-height:1.4;font-family:inherit}' +
-    '#asst-send{background:#2563eb;border:none;color:#fff;width:42px;height:42px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}' +
+    '#asst-send{background:var(--rc-accent);border:none;color:#fff;width:42px;height:42px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}' +
     '#asst-send:disabled{opacity:.5}' +
     // 苹果风格语音按钮:静默时素净,听写时 iOS 蓝 + 呼吸光环
     '#asst-mic{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
@@ -147,7 +147,7 @@
     '.ams-rst{background:var(--rc-bg-raised);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
     '.ams-rst:active{background:var(--rc-bg-raised)}' +
     '.ams-cur{font-size:11px;color:var(--rc-text-muted);margin-top:6px}' +
-    '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}';
+    '.ams-note{font-size:11px;color:var(--rc-warn);background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}';
   document.head.appendChild(css);
 
   // 🤖 fab:一键开抽屉到助手 tab

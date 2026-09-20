@@ -408,7 +408,7 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
 /* 侧栏外观设置弹层(照搬 PDF #side-settings):⚙ 开,悬浮显示 + 背景模糊度 */
 #ep-side-settings{position:absolute;top:42px;right:8px;z-index:10;background:var(--rc-bg-surface,#1c1c1e);border:1px solid var(--rc-border,rgba(84,84,88,.62));border-radius:var(--rc-radius-lg,10px);box-shadow:var(--rc-shadow-panel,0 8px 24px rgba(0,0,0,.6));padding:8px;min-width:210px;max-height:calc(100vh - 58px);overflow-y:auto;font-size:12px}
 #ep-side-settings .ss-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 5px;color:var(--rc-text-strong,#fff);cursor:pointer;border-radius:var(--rc-radius-sm,6px)}
-#ep-side-settings .ss-row:hover{background:#162045}
+#ep-side-settings .ss-row:hover{background:var(--rc-bg-raised)}
 #ep-side-settings .ss-row.ss-col{flex-direction:column;align-items:stretch;gap:7px;cursor:default}
 #ep-side-settings .ss-row.ss-col:hover{background:transparent}
 #ep-side-settings input[type=range]{width:100%;accent-color:var(--rc-border-accent,rgba(10,132,255,.58))}
@@ -443,19 +443,19 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
 #ep-side-vocab .vocab-item .vi-pages{font-size:10px;color:var(--rc-text-dim);flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 #ep-side-vocab .vocab-item .vi-anki{flex:0 0 auto;font-size:10px;background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:5px;padding:3px 9px;cursor:pointer}
 #ep-side-vocab .vocab-item .vi-anki:hover{background:var(--rc-bg-hover)}
-#ep-side-vocab .vocab-item .vi-anki.done{color:#22c55e;border-color:#22c55e;cursor:default}
+#ep-side-vocab .vocab-item .vi-anki.done{color:var(--rc-success);border-color:var(--rc-success);cursor:default}
 /* 知识点节点卡(照搬 PDF .kg-node / rc-knowledge;embedded 模式下 rc-knowledge 不再自注 CSS,卡片样式由本模块负责) */
 #ep-kg-nodes .kg-node{background:var(--rc-bg-canvas);border:1px solid var(--rc-border);border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:12px;display:flex;align-items:flex-start;gap:8px}
 #ep-kg-nodes .kg-node .kg-node-main{flex:1;min-width:0;cursor:pointer}
-#ep-kg-nodes .kg-node:hover{background:#162045;border-color:var(--rc-border-accent)}
-#ep-kg-nodes .kg-track-btn{flex:none;align-self:center;background:transparent;border:1px solid #3a4456;color:var(--rc-text-muted);border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer;white-space:nowrap}
+#ep-kg-nodes .kg-node:hover{background:var(--rc-bg-raised);border-color:var(--rc-border-accent)}
+#ep-kg-nodes .kg-track-btn{flex:none;align-self:center;background:transparent;border:1px solid var(--rc-border);color:var(--rc-text-muted);border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer;white-space:nowrap}
 #ep-kg-nodes .kg-track-btn:hover{border-color:var(--rc-success);color:var(--rc-text-strong)}
 #ep-kg-nodes .kg-track-btn.on{background:#13351f;border-color:var(--rc-success);color:var(--rc-success)}
 #ep-kg-nodes .kg-node .lbl{font-weight:600;color:var(--rc-text-strong)}
 #ep-kg-nodes .kg-node .sum{color:var(--rc-text-muted);font-size:11px;margin-top:3px;line-height:1.5}
 #ep-kg-nodes .kg-node.mastered{border-left:3px solid var(--rc-success)}
 #ep-kg-nodes .kg-node.unlockable{border-left:3px solid var(--rc-accent)}
-#ep-kg-nodes .kg-node.locked{border-left:3px solid #3a4456;opacity:.7}
+#ep-kg-nodes .kg-node.locked{border-left:3px solid var(--rc-border);opacity:.7}
 #ep-kg-nodes .kg-empty{color:var(--rc-text-dim);font-size:12px}`;
     document.head.appendChild(st);
   }

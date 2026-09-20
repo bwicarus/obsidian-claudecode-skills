@@ -674,9 +674,11 @@
       // 分类切换改成 iOS 分段控件：一条填充底的胶囊，选中项是一块浮起来的白片。
       // 原来是网页式的「下划线 tab」—— 那个形态 iOS 里不存在。
       // ⚠ 项目多时允许横滑（分段控件本身不换行），而不是折成两行。
-      '.rc-set-mask .set-tabs{display:flex;flex:0 0 auto;gap:2px;padding:2px;margin-bottom:16px;border:0;border-radius:var(--rc-radius-md,9px);background:var(--rc-bg-control);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}' +
+      '.rc-set-mask .set-tabs{display:flex;flex:0 0 auto;flex-wrap:nowrap;gap:2px;padding:2px;margin-bottom:16px;border:0;border-radius:var(--rc-radius-md,9px);background:var(--rc-bg-control);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}' +
       '.rc-set-mask .set-tabs::-webkit-scrollbar{display:none}' +
       '.rc-set-mask .set-tab{flex:1 0 auto;background:transparent;border:0;border-radius:calc(var(--rc-radius-md,9px) - 2px);color:var(--rc-text-muted);font-size:13px;font-weight:500;padding:7px 14px;cursor:pointer;white-space:nowrap;transition:background var(--rc-motion-fast) var(--rc-ease),color var(--rc-motion-fast) var(--rc-ease)}' +
+      '.rc-set-mask .set-tab:focus{outline:none}' +
+      '.rc-set-mask .set-tab:focus-visible{outline:2px solid var(--rc-accent);outline-offset:-2px}' +
       '.rc-set-mask .set-tab.active{color:var(--rc-text);font-weight:600;background:var(--rc-bg-raised);box-shadow:0 1px 3px rgba(0,0,0,.28)}' +
       '.rc-set-mask .ep-set-body{overflow-y:auto;flex:1;min-height:0;padding:12px 4px 2px}' +
       '.rc-set-mask .set-lbl{display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:4px}' +
@@ -688,7 +690,7 @@
       '.rc-set-mask .stepper .v{font-size:13px;color:var(--rc-text-strong);min-width:46px;text-align:center}' +
       '.rc-set-mask .seg{display:flex;border:1px solid var(--rc-border-control);border-radius:8px;overflow:hidden}' +
       '.rc-set-mask .seg button{background:var(--rc-bg-canvas);border:0;color:#9fb0d6;padding:6px 12px;font-size:12px;cursor:pointer}' +
-      '.rc-set-mask .seg button.on{background:#2563eb;color:#fff}' +
+      '.rc-set-mask .seg button.on{background:var(--rc-accent);color:#fff}' +
       '.rc-set-mask .ep-set-chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer}' +
       '.rc-set-mask .ep-set-chk input{width:16px;height:16px}' +
       '.rc-set-mask .ep-set-note{font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5}' +
@@ -698,7 +700,7 @@
       '.rc-set-mask .set-hl-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}' +
       '.rc-set-mask .set-hl-row .swatch-w{position:relative;display:inline-block}' +
       '.rc-set-mask .set-hl-row .swatch{width:28px;height:28px;border-radius:50%;border:2px solid var(--rc-border);cursor:default;display:block}' +
-      '.rc-set-mask .set-hl-row .del{position:absolute;right:-5px;top:-5px;width:16px;height:16px;border-radius:50%;background:#7a2828;border:1px solid #4a1a1a;color:#ffb4b4;font-size:10px;line-height:13px;cursor:pointer;padding:0;text-align:center}' +
+      '.rc-set-mask .set-hl-row .del{position:absolute;right:-5px;top:-5px;width:16px;height:16px;border-radius:50%;background:var(--rc-danger);border:1px solid #4a1a1a;color:#ffb4b4;font-size:10px;line-height:13px;cursor:pointer;padding:0;text-align:center}' +
       '.rc-set-mask .set-hl-row .del:hover{background:#9a3232}' +
       // 侧栏外观:模糊度 slider 行(照搬 PDF #side-settings .ss-row.ss-col + input[type=range])
       '.rc-set-mask .ep-set-slrow{display:flex;flex-direction:column;align-items:stretch;gap:7px;margin:9px 0}' +
@@ -1055,14 +1057,14 @@
           '<div id="set-bridge-voice-help" style="display:none;font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '关闭 = 仅桥接：语音留在电脑（用电脑音频设备），通话不接到 App；上下文/快照/出卷照常。切换在数秒内由 ReaderPC 重启服务生效。' +
           '</div>' +
-          '<div id="set-bridge-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
+          '<div id="set-bridge-voice-msg" style="font-size:11px;color:var(--rc-warn);margin-top:6px;display:none"></div>' +
           '<label id="set-readerpc-no-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer;margin-top:10px">' +
             '<input type="checkbox" id="set-readerpc-no-voice" class="rc-ui-switch"> 🔇 无语音功能（其它 Reader 功能保持在线）' +
           '</label>' +
           '<div id="set-readerpc-no-voice-help" style="display:none;font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '开启后不自动拉起 Codex Voice，不启用 F24 保活与音频路由；实时快照、视觉读取、浏览器控制、卡片、Anki、词典、OCR 与历史工具继续在线。' +
           '</div>' +
-          '<div id="set-readerpc-no-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
+          '<div id="set-readerpc-no-voice-msg" style="font-size:11px;color:var(--rc-warn);margin-top:6px;display:none"></div>' +
         '</div>' +
         '<div id="set-ctx-sync-card" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
           '<label id="set-ctx-sync-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer">' +
@@ -1074,7 +1076,7 @@
           '<div id="set-ctx-mode-help" style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '实时快照 MCP 跟随 ReaderPC 非语音服务，不受语音功能或旧版同步开关影响。只有测试旧版文字注入时才显示其同步开关。' +
           '</div>' +
-          '<div id="set-ctx-sync-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
+          '<div id="set-ctx-sync-msg" style="font-size:11px;color:var(--rc-warn);margin-top:6px;display:none"></div>' +
         '</div>' +
       '</div>';
 
@@ -1184,12 +1186,12 @@
             '<button onclick="_nudgeChars(0,1)" title="文字层下移" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">↓</button>' +
             '<button onclick="_nudgeChars(1,0)" title="文字层右移" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">→</button>' +
             '<label style="font-size:11px;color:var(--rc-text-muted)">步长<input type="number" id="charofs-step" value="2" min="0.5" step="0.5" style="width:50px;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:5px 6px;font-size:13px;margin-left:3px">pt</label>' +
-            '<button onclick="_resetCharOffset()" style="background:#2a1a1a;border:1px solid #5a3030;color:#e6b0b0;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">重置本页</button>' +
+            '<button onclick="_resetCharOffset()" style="background:#2a1a1a;border:1px solid #5a3030;color:var(--rc-danger-text);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">重置本页</button>' +
           '</div>' +
           '<div id="charofs-cur" style="font-size:11px;color:var(--rc-text-dim);margin-bottom:8px">第 — 页　dx 0.0 · dy 0.0</div>' +
           '<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center">' +
             '<button onclick="_reocrPage()" id="reocr-btn" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">🔁 单页重扫(Google Vision)</button>' +
-            '<button onclick="_clearReocr()" style="background:#2a1a1a;border:1px solid #5a3030;color:#e6b0b0;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">撤销重扫</button>' +
+            '<button onclick="_clearReocr()" style="background:#2a1a1a;border:1px solid #5a3030;color:var(--rc-danger-text);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">撤销重扫</button>' +
             '<span id="reocr-status" style="font-size:11px;color:var(--rc-text-dim)"></span>' +
           '</div>' +
           '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">没对齐：先「可视化文字框」看差多少 → 方向键微调推齐。识别错/漏/整页歪：「单页重扫」用 Google Vision 对当前页重新 OCR（~几秒，重扫后文字层即时更新）。</div>' +
@@ -1324,7 +1326,7 @@
               '<option value="showPalette">打开绘图面板</option><option value="toggleSelection">切换选区笔</option>' +
             '</select></div>' +
         '</div>' +
-        '<div style="font-size:11px;color:#7c8bab;line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
+        '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
         HR +
         '</div>' +
         '<div data-sec="nat-dict">' +
@@ -1336,7 +1338,7 @@
           '<button type="button" id="rcset-nat-dict-dl" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">下载离线日语词典</button>' +
           '<button type="button" id="rcset-nat-dict-rm" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">删除</button>' +
         '</div>' +
-        '<div style="font-size:11px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 上，由本 App 与它自己的 Safari 扩展共享（同一个 App 组，供扩展离线查词）；不进入书籍附件、服务器或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
+        '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:6px">词典只存在这台 iPad 上，由本 App 与它自己的 Safari 扩展共享（同一个 App 组，供扩展离线查词）；不进入书籍附件、服务器或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
         HR +
         '</div>' +
         '<div data-sec="nat-vault">' +
@@ -1349,7 +1351,7 @@
           '<button type="button" id="rcset-nat-vault-pick" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">选择 / 更换文件夹</button>' +
           '<button type="button" id="rcset-nat-vault-clr" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">移除授权</button>' +
         '</div>' +
-        '<div style="font-size:11px;color:#7c8bab;line-height:1.6;margin-top:6px">选文件夹必须走 App 的系统选择器 —— 只有它给出的授权能长期保存，网页拿不到也不该拿到你的文件路径。</div>' +
+        '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:6px">选文件夹必须走 App 的系统选择器 —— 只有它给出的授权能长期保存，网页拿不到也不该拿到你的文件路径。</div>' +
         HR +
         '</div>' +
         '<div data-sec="nat-location">' +
@@ -1362,7 +1364,7 @@
           '<input type="checkbox" id="rcset-nat-loc-bg" class="rc-ui-switch"> 不开 App 时也更新地点' +
         '</label>' +
         '<div id="rcset-nat-loc-bgst" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px 22px"></div>' +
-        '<div style="font-size:11px;color:#7c8bab;line-height:1.6;margin-top:6px">开着时，读页停留记录会带上当时的位置（坐标与地名，建筑物级），用于以后回答"我在哪学的"。首次打开会请求系统定位权限（使用期间）。位置只随学习记录存到你自己的服务器，不发给任何第三方。</div>' +
+        '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:6px">开着时，读页停留记录会带上当时的位置（坐标与地名，建筑物级），用于以后回答"我在哪学的"。首次打开会请求系统定位权限（使用期间）。位置只随学习记录存到你自己的服务器，不发给任何第三方。</div>' +
         HR +
         '</div>' +
         '<div data-sec="nat-credentials">' +
@@ -1373,7 +1375,7 @@
           '<button type="button" id="rcset-nat-key-clr" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">清除本机 Key</button>' +
           '<button type="button" id="rcset-nat-pi-login" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">登录或重新登录 Pi</button>' +
         '</div>' +
-        '<div style="font-size:11px;color:#7c8bab;line-height:1.6;margin-top:6px">Key 由 App 保存在 Apple Keychain，输入框是 App 的原生控件 —— 密钥不经过这个网页。App 保存、启动通话与转写都直连 OpenAI，都不连接服务器。</div>' +
+        '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:6px">Key 由 App 保存在 Apple Keychain，输入框是 App 的原生控件 —— 密钥不经过这个网页。App 保存、启动通话与转写都直连 OpenAI，都不连接服务器。</div>' +
         HR +
         '<button type="button" id="rcset-nat-open" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">打开 App 原生设置（其它诊断项）</button>' +
         '</div>' +

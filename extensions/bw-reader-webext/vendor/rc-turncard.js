@@ -228,7 +228,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-hl-b:disabled{opacity:.5}' +
       // 操作条(带 op 的条目):一行一条,不折叠
       '.rc-opcard{padding:4px 10px}.rc-opbar{display:flex;align-items:center;gap:7px;padding:4px 0}' +
-      '.rc-opbar .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#bfe0c8}' +
+      '.rc-opbar .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--rc-success)}' +
       '.rc-opbar.undone .tt{text-decoration:line-through;opacity:.55}' +
       '.rc-opbar .pg{flex:0 0 auto;font-size:11px;opacity:.75;white-space:nowrap}';
     document.head.appendChild(s);

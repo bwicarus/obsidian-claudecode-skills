@@ -105,7 +105,7 @@ if (window.__bwPwaProviderOnly) return;
       '#word-pop .wp-phon{color:var(--rc-text-strong);font-style:italic;font-size:12px}',
       '#word-pop .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:15px;color:var(--rc-text-strong);padding-top:4px;flex-wrap:wrap;max-width:100%;row-gap:6px}',
       '#word-pop .wp-pitch .pm{position:relative;padding:3px 1px 0;line-height:1.1;border-top:2px solid transparent;flex:0 0 auto;white-space:nowrap}',
-      '#word-pop .wp-pitch .pm.hi{border-top:2px solid #6fd3ff;color:#dff1ff}',
+      '#word-pop .wp-pitch .pm.hi{border-top:2px solid var(--rc-accent-cyan);color:var(--rc-text)}',
       '#word-pop .wp-pitch .pm.drop::after{content:"";position:absolute;right:-1px;top:0;height:9px;border-right:2px solid #ff8a8a}',
       '#word-pop .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:var(--rc-text-dim);font-style:normal;align-self:center;border:1px solid #2a3450;border-radius:4px;padding:0 4px}',
       '#word-pop .wp-ex{margin-top:8px;padding-top:7px;border-top:1px dashed #243049}',
@@ -113,18 +113,18 @@ if (window.__bwPwaProviderOnly) return;
       '#word-pop .wp-ex .wp-ex-zh{color:#8fb0d8;font-size:12px;line-height:1.45;margin-bottom:3px}',
       // 日语完整字典大页面(渲进 RC.result.openResult 的 #result-content)
       '#result-content .jp-head{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;padding-bottom:4px}',
-      '#result-content .jp-zh{margin-top:8px;color:#dff1ff;font-size:15px;line-height:1.6}',
+      '#result-content .jp-zh{margin-top:8px;color:var(--rc-text);font-size:15px;line-height:1.6}',
       '#result-content .jp-sec-label{margin-top:14px;color:var(--rc-text-dim);font-size:11px;border-top:1px solid var(--rc-border);padding-top:8px}',
       '#result-content .jp-kanji-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}',
-      '#result-content .jp-kanji-chip{font-size:26px;line-height:1;padding:8px 12px;background:#162045;border:1px solid #2e3f63;border-radius:10px;color:#dff1ff;cursor:pointer;transition:all .12s}',
-      '#result-content .jp-kanji-chip.active{background:var(--rc-bg-active);border-color:#6fd3ff;box-shadow:0 0 0 1px #6fd3ff}',
+      '#result-content .jp-kanji-chip{font-size:26px;line-height:1;padding:8px 12px;background:var(--rc-bg-raised);border:1px solid #2e3f63;border-radius:10px;color:var(--rc-text);cursor:pointer;transition:all .12s}',
+      '#result-content .jp-kanji-chip.active{background:var(--rc-bg-active);border-color:var(--rc-accent-cyan);box-shadow:0 0 0 1px var(--rc-accent-cyan)}',
       '#result-content .jp-kanji-detail{margin-top:8px;display:flex;gap:12px;align-items:flex-start;background:var(--rc-bg-surface);border:1px solid #243049;border-radius:8px;padding:10px}',
       '#result-content .jp-kanji-detail:empty{display:none}',
       '#result-content .jk-lit{font-size:40px;line-height:1;color:#fff;flex-shrink:0}',
       '#result-content .jk-body{font-size:13px;color:var(--rc-text-strong);line-height:1.8}',
       '#result-content .jk-tag{display:inline-block;width:18px;text-align:center;border-radius:3px;font-size:11px;margin-right:6px;color:#0b1020;font-style:normal}',
-      '#result-content .jk-tag.jk-on{background:#6fd3ff}',
-      '#result-content .jk-tag.jk-kun{background:#9fe0b8}',
+      '#result-content .jk-tag.jk-on{background:var(--rc-accent-cyan)}',
+      '#result-content .jk-tag.jk-kun{background:var(--rc-success)}',
       '#result-content .jk-mean{color:#8fb0d8;font-size:12px;margin-top:3px}',
       '#result-content .jp-ex-ja{color:#dfe9ff;font-size:14px;line-height:1.6;margin-top:7px}',
       '#result-content .jp-ex-zh{color:#8fb0d8;font-size:12px;line-height:1.45}',
@@ -137,11 +137,11 @@ if (window.__bwPwaProviderOnly) return;
       // 日语变形分析行(原形 + 语法标签);word-pop 小框 + 完整字典(result-content)共用
       '#word-pop .jp-inflect,#result-content .jp-inflect{font-size:12px;color:#9fb4cf;padding:6px 14px 0;line-height:1.5}',
       '#result-content .jp-inflect{padding:6px 0 0}',
-      '.jp-inflect b{color:#dff1ff;font-weight:600}',
-      '.jp-inflect .jp-inflect-mark{display:inline-block;background:#16352a;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:4px;padding:0 6px;font-size:11px;margin-left:2px}',
+      '.jp-inflect b{color:var(--rc-text);font-weight:600}',
+      '.jp-inflect .jp-inflect-mark{display:inline-block;background:#16352a;border:1px solid #2e7d4f;color:var(--rc-success);border-radius:4px;padding:0 6px;font-size:11px;margin-left:2px}',
       '.jp-inflect.jp-source b{color:#ffe0b2;letter-spacing:.2px}',
       '.jp-inflect .jp-inflect-mark.jp-wasei{background:#3a2a12;border-color:#8a5a1e;color:#ffcf8f}',
-      '#word-pop .wp-def:hover{background:#162045}',
+      '#word-pop .wp-def:hover{background:var(--rc-bg-raised)}',
       '#word-pop .wp-more{color:var(--rc-accent);font-size:11px;margin-top:7px}',
       // flex-wrap 为 EPUB 多一两个按钮(🎴Anki/🖌标记)留行,避免横向溢出;其余照搬
       '#word-pop .wp-actions{display:flex;gap:8px;padding:9px 14px;border-top:1px solid var(--rc-border);background:var(--rc-bg-canvas);flex-wrap:wrap}',
@@ -1593,7 +1593,7 @@ if (window.__bwPwaProviderOnly) return;
         va.className = 'show';
         va.innerHTML =
           '<button data-wp-act="vocabAnki" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px"><span class="rc-i rc-i-card"></span> 加入 Anki</button>' +
-          '<button data-wp-act="vocabKnown" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词"><span class="rc-i rc-i-check"></span> 已掌握</button>' +
+          '<button data-wp-act="vocabKnown" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:var(--rc-success);border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词"><span class="rc-i rc-i-check"></span> 已掌握</button>' +
           (s.sources_hit.length
             ? '<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">源：' + s.sources_hit.join(' + ') + (s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file=' + encodeURIComponent(s.vocab_note) + '" style="color:var(--rc-accent)">在 Obsidian 打开词条 →</a>' : '') + '</span>'
             : '<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">⏳ 加载更多源…</span>');
@@ -1874,7 +1874,7 @@ if (window.__bwPwaProviderOnly) return;
       va.innerHTML =
         '<button data-wp-act="tts" data-wp-arg="' + rq + '" data-wp-lang="ja-JP" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '"><span class="rc-i rc-i-speaker"></span> 朗读</button>' +
         '<button data-wp-act="vocabAnki" data-wp-arg="' + wq + '" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '"><span class="rc-i rc-i-card"></span> 加入 Anki</button>' +
-        '<button data-wp-act="vocabKnown" data-wp-arg="' + wq + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%"><span class="rc-i rc-i-check"></span> 已掌握</button>';
+        '<button data-wp-act="vocabKnown" data-wp-arg="' + wq + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:var(--rc-success);' + bs + '" title="掌握度设为100%"><span class="rc-i rc-i-check"></span> 已掌握</button>';
     }
     return true;
   }

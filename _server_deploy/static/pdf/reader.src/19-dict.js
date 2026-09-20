@@ -69,7 +69,7 @@ async function dictStream(word, ctx) {
       va.className = 'show';
       va.innerHTML =
         `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px"><span class="rc-i rc-i-card"></span> 加入 Anki</button>` +
-        `<button onclick="markVocabKnown('${esc(s.lemma||word)}', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词"><span class="rc-i rc-i-check"></span> 已掌握</button>` +
+        `<button onclick="markVocabKnown('${esc(s.lemma||word)}', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:var(--rc-success);border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词"><span class="rc-i rc-i-check"></span> 已掌握</button>` +
         (s.sources_hit.length
           ? `<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`
           : `<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>`);
@@ -597,7 +597,7 @@ async function dictStreamJP(word, ctx) {
     va.innerHTML =
       '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '"><span class="rc-i rc-i-speaker"></span> 朗读</button>' +
       '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '"><span class="rc-i rc-i-card"></span> 加入 Anki</button>' +
-      '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%"><span class="rc-i rc-i-check"></span> 已掌握</button>';
+      '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:var(--rc-success);' + bs + '" title="掌握度设为100%"><span class="rc-i rc-i-check"></span> 已掌握</button>';
   }
   return true;
 }

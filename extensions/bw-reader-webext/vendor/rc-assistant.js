@@ -89,7 +89,7 @@ if (window.__bwPwaProviderOnly) return;
       '.ams-h{font-size:15px;color:var(--rc-text-strong);font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
       '.ams-x{background:none;border:none;color:var(--rc-text-muted);font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
       '.ams-sub{font-size:11px;color:var(--rc-text-dim);margin-bottom:10px;line-height:1.5}' +
-      '.ams-task{background:#0a1322;border:1px solid var(--rc-bg-raised);border-radius:10px;padding:10px;margin-bottom:9px}' +
+      '.ams-task{background:var(--rc-bg-surface);border:.5px solid var(--rc-border);border-radius:10px;padding:10px;margin-bottom:9px}' +
       '.ams-tname{font-size:13px;color:var(--rc-text);font-weight:600;margin-bottom:2px}' +
       '.ams-tdef{font-size:11px;color:var(--rc-text-dim);margin-bottom:7px}' +
       '.ams-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}' +
@@ -100,7 +100,7 @@ if (window.__bwPwaProviderOnly) return;
       '.ams-rst{background:var(--rc-bg-raised);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
       '.ams-rst:active{background:var(--rc-bg-raised)}' +
       '.ams-cur{font-size:11px;color:var(--rc-text-muted);margin-top:6px}' +
-      '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}' +
+      '.ams-note{font-size:11px;color:var(--rc-warn);background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}' +
       // 预设条:一排 chips,点=整包应用,长按/右键=删,＋=存当前
       '.ams-profiles{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}' +
       '.ams-prof{background:var(--rc-bg-control);border:0;color:var(--rc-text);border-radius:14px;padding:5px 13px;font-size:12px;cursor:pointer;transition:background var(--rc-motion-fast) var(--rc-ease)}' +
@@ -677,7 +677,7 @@ if (window.__bwPwaProviderOnly) return;
       }
       _renderActs(['orchestrator', 'summarize', 'vision', 'deep']);
       var _ch = document.createElement('div'); _ch.className = 'ams-sub';
-      _ch.style.cssText = 'margin-top:12px;font-weight:600;color:#c2b5ff;';
+      _ch.style.cssText = 'margin-top:12px;font-weight:600;color:var(--rc-purple);';
       _ch.textContent = '— 复习与卡片改进 —';
       container.appendChild(_ch);
       _renderActs(['card_improve', 'agent', 'paper', 'dictation_grade']);
@@ -775,7 +775,7 @@ if (window.__bwPwaProviderOnly) return;
     if (rec) _recoverNoted = true; else _paidNoted = true;
     var box = document.createElement('div'); box.className = 'rc-paid-note';
     box.style.cssText = 'align-self:center;max-width:96%;'
-      + (rec ? 'background:#0f2a1a;border:1px solid #2a5a3a;color:#8ae7b0;' : 'background:#2a2410;border:1px solid #5a4a18;color:#e7d28a;')
+      + (rec ? 'background:#0f2a1a;border:1px solid #2a5a3a;color:#8ae7b0;' : 'background:#2a2410;border:1px solid #5a4a18;color:var(--rc-warn);')
       + 'font-size:12px;padding:6px 10px;border-radius:9px;line-height:1.55;display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0';
     var tx = document.createElement('span');
     tx.textContent = rec ? (data.text || '✅ Gemini 免费额度已恢复,已自动切回免费。')
@@ -971,7 +971,7 @@ if (window.__bwPwaProviderOnly) return;
     '.asst-a img,.asst-a svg{max-width:100%;height:auto;border-radius:8px;display:block;margin:.4em auto;background:#fff;padding:10px;box-sizing:border-box}' +
     '.asst-a img{cursor:zoom-in}' +
     '.asst-tool{align-self:flex-start;color:var(--rc-text-muted);font-size:12px;padding:2px 6px;font-style:italic}' +
-    '.asst-note{align-self:center;background:#2a2410;border:1px solid #5a4a18;color:#e7d28a;font-size:12px;padding:4px 10px;border-radius:9px;max-width:96%}' +
+    '.asst-note{align-self:center;background:#2a2410;border:1px solid #5a4a18;color:var(--rc-warn);font-size:12px;padding:4px 10px;border-radius:9px;max-width:96%}' +
     '.asst-undo{background:#3a1d2a;border:1px solid #6b3550;color:#ffd0e0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
     '.asst-undo:active{background:#52283a}.asst-undo:disabled{opacity:.5}' +
     '.asst-jump{background:var(--rc-bg-surface);border:1px solid var(--rc-border);color:var(--rc-text-muted);border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
@@ -983,12 +983,12 @@ if (window.__bwPwaProviderOnly) return;
     '.asst-hl-del:active{background:#522828}.asst-hl-del:disabled{opacity:.5}' +
     '.asst-hl-redo{flex:0 0 auto;background:#1d3a2a;border:1px solid #2f6347;color:#bfead0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer}.asst-hl-redo:active{background:#244a35}.asst-hl-redo:disabled{opacity:.5}' +   // M9:删完转「↪ 重做」
     '#side-pane-ops{padding:12px}#side-pane-ops.active{display:block}' +
-    '.asst-ops-row{display:flex;align-items:center;gap:7px;padding:7px 0;border-bottom:1px solid #1f2b44;font-size:12px;color:#bfe0c8}' +
+    '.asst-ops-row{display:flex;align-items:center;gap:7px;padding:7px 0;border-bottom:1px solid #1f2b44;font-size:12px;color:var(--rc-success)}' +
     '.asst-ops-row .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.asst-ops-row.undone .tt{text-decoration:line-through;opacity:.55}' +
     '.asst-ops-row .asst-edit-undo{flex:0 0 auto;align-self:center;padding:2px 9px;font-size:12px}' +
     '.asst-ops-empty{font-size:12px;color:var(--rc-text-muted);line-height:1.6}' +
     '.asst-edit-card{align-self:flex-start;max-width:92%;background:#13203a;border:1px solid #294060;border-radius:11px;padding:8px 11px;display:flex;flex-direction:column;gap:7px}' +
-    '.asst-edit-h{font-size:12px;color:#bfe0c8}' +
+    '.asst-edit-h{font-size:12px;color:var(--rc-success)}' +
     '.asst-edit-chips{display:flex;flex-wrap:wrap;gap:6px}' +
     '.asst-edit-undo{align-self:flex-start;background:#26344f;border:1px solid #3a5273;color:var(--rc-text-strong);border-radius:8px;padding:3px 12px;font-size:12px;cursor:pointer}' +
     '.asst-edit-undo:active{background:#2f4061}.asst-edit-undo:disabled{opacity:.55}' +
@@ -1063,7 +1063,7 @@ if (window.__bwPwaProviderOnly) return;
     '.afp-s{background:var(--rc-bg-raised)}.afp-s:active{background:var(--rc-bg-raised)}' +
     '#asst-input{flex:0 0 auto;display:flex;gap:8px;padding:10px;border-top:1px solid var(--rc-bg-raised);align-items:flex-end}' +
     '#asst-ta{flex:1;background:#0b1220;border:1px solid var(--rc-border-control);color:#e6eeff;border-radius:12px;padding:9px 11px;font-size:15px;resize:none;max-height:120px;line-height:1.4;font-family:inherit}' +
-    '#asst-send{background:#2563eb;border:none;color:#fff;width:42px;height:42px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}' +
+    '#asst-send{background:var(--rc-accent);border:none;color:#fff;width:42px;height:42px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}' +
     '#asst-send:disabled{opacity:.5}' +
     // 苹果风格语音按钮:静默时素净,听写时 iOS 蓝 + 呼吸光环
     '#asst-mic{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
@@ -1086,7 +1086,7 @@ if (window.__bwPwaProviderOnly) return;
     '.ams-h{font-size:15px;color:var(--rc-text-strong);font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
     '.ams-x{background:none;border:none;color:var(--rc-text-muted);font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
     '.ams-sub{font-size:11px;color:var(--rc-text-dim);margin-bottom:10px;line-height:1.5}' +
-    '.ams-task{background:#0a1322;border:1px solid var(--rc-bg-raised);border-radius:10px;padding:10px;margin-bottom:9px}' +
+    '.ams-task{background:var(--rc-bg-surface);border:.5px solid var(--rc-border);border-radius:10px;padding:10px;margin-bottom:9px}' +
     '.ams-tname{font-size:13px;color:var(--rc-text);font-weight:600;margin-bottom:2px}' +
     '.ams-tdef{font-size:11px;color:var(--rc-text-dim);margin-bottom:7px}' +
     '.ams-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}' +
@@ -1097,7 +1097,7 @@ if (window.__bwPwaProviderOnly) return;
     '.ams-rst{background:var(--rc-bg-raised);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
     '.ams-rst:active{background:var(--rc-bg-raised)}' +
     '.ams-cur{font-size:11px;color:var(--rc-text-muted);margin-top:6px}' +
-    '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}' +
+    '.ams-note{font-size:11px;color:var(--rc-warn);background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}' +
     '.asst-imgph{display:inline-block;font-size:12px;color:var(--rc-text-muted);background:#121a2e;border:1px dashed var(--rc-border-control);border-radius:8px;padding:3px 9px;margin:.3em 0}';
   // EPUB 页没有 mfx.css(只有 PDF 模板引它)→ 揭示游标/流光/闪烁光标全无样式 = 流式动效消失。
   // 检测不到 mfx.css 时补注入等价规则(颜色取 mfx tokens 实值,不依赖 var(--c-*);PDF 上有 mfx.css → 不注入,零重复)。
@@ -1638,7 +1638,7 @@ if (window.__bwPwaProviderOnly) return;
       }
       _renderActs(['orchestrator', 'summarize', 'vision', 'deep']);
       var _ch = document.createElement('div'); _ch.className = 'ams-sub';
-      _ch.style.cssText = 'margin-top:12px;font-weight:600;color:#c2b5ff;';
+      _ch.style.cssText = 'margin-top:12px;font-weight:600;color:var(--rc-purple);';
       _ch.textContent = '— 复习与卡片改进 —';
       box.appendChild(_ch);
       _renderActs(['card_improve', 'agent', 'paper', 'dictation_grade']);

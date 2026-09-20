@@ -35,14 +35,14 @@
       '.rc-hl-pop .rc-hl-note{width:100%;min-height:48px;background:var(--rc-bg-field,#1c1c1e);border:1px solid var(--rc-border-control,rgba(84,84,88,.46));color:#e6edf3;border-radius:var(--rc-radius-md,8px);padding:7px 9px;font-size:13px;resize:vertical;font-family:inherit;display:block;box-sizing:border-box}' +
       '.rc-hl-pop .rc-hl-row{display:flex;gap:8px;margin-top:8px;justify-content:flex-end}' +
       '.rc-hl-pop .rc-hl-row button{background:var(--rc-bg-control,rgba(120,120,128,.20));border:1px solid var(--rc-border-control,rgba(84,84,88,.46));color:var(--rc-text-strong);border-radius:7px;padding:5px 11px;font-size:13px;cursor:pointer}' +
-      '.rc-hl-pop .rc-hl-row button.rc-hl-del{background:var(--rc-danger,#7a2828);border-color:#9a3a3a;color:var(--rc-danger-text,#ffdede)}' +
+      '.rc-hl-pop .rc-hl-row button.rc-hl-del{background:var(--rc-danger,rgba(255,69,58,.20));border-color:#9a3a3a;color:var(--rc-danger-text,#ffdede)}' +
       // iOS Mail 式左滑删除(照搬 PDF reader.src/19-dict.js _attachSnipBehavior 的三个 CSS 点:
       //   ① 滑动内容 .rc-hl-slide(transform + transition);② 背后绝对定位删除条 .rc-hl-swipe-del(visibility:hidden);
       //   ③ .swiped 切换 → slide translateX(-64) + 删除条 visible)。
       '.rc-hl-item{position:relative;overflow:hidden;border-radius:10px;margin-bottom:8px}' +
       '.rc-hl-item .rc-hl-slide{display:flex;align-items:flex-start;gap:9px;background:#11192c;border:1px solid #243056;border-radius:10px;padding:9px 10px;position:relative;z-index:2;transition:transform .16s ease;will-change:transform}' +
       '.rc-hl-item.swiped .rc-hl-slide{transform:translateX(-64px)}' +
-      '.rc-hl-item .rc-hl-swipe-del{position:absolute;right:0;top:0;bottom:0;width:64px;background:#7a2828;color:#ffdede;border:none;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1;visibility:hidden}' +
+      '.rc-hl-item .rc-hl-swipe-del{position:absolute;right:0;top:0;bottom:0;width:64px;background:var(--rc-danger);color:#ffdede;border:none;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1;visibility:hidden}' +
       '.rc-hl-item.swiped .rc-hl-swipe-del{visibility:visible}' +
       '.rc-hl-item .rc-hl-dot{flex:0 0 auto;width:14px;height:14px;border-radius:4px;margin-top:2px;cursor:pointer}' +
       '.rc-hl-item .rc-hl-tx{flex:1;min-width:0;font-size:13px;color:var(--rc-text-strong);line-height:1.5;word-break:break-word}' +
@@ -50,7 +50,7 @@
       '.rc-hl-item .rc-hl-tx .rc-hl-nt.expanded{white-space:normal;overflow:visible;text-overflow:clip}' +
       '.rc-hl-item .rc-hl-ops{flex:0 0 auto;display:flex;flex-direction:column;gap:5px}' +
       '.rc-hl-item .rc-hl-ops button{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:6px;padding:3px 8px;font-size:12px;cursor:pointer}' +
-      '.rc-hl-item .rc-hl-ops button.rc-hl-del{background:#7a2828;border-color:#9a3a3a;color:#ffdede}' +
+      '.rc-hl-item .rc-hl-ops button.rc-hl-del{background:var(--rc-danger);border-color:#9a3a3a;color:#ffdede}' +
       '.rc-hl-empty{color:var(--rc-text-muted);font-size:13px;text-align:center;padding:20px;line-height:1.6}';
     document.head.appendChild(css);
   }

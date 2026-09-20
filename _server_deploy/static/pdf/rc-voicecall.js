@@ -673,7 +673,7 @@
       // Anki 完整卡片预览(正/反面翻页 + 挖空 + 公式/图由 MathJax/img 渲染)
       '.vc-fc{margin-top:7px;background:rgba(0,0,0,.26);border:0.5px solid rgba(255,255,255,.1);border-radius:9px;padding:7px 9px;color:#e6ecf8;font-size:13px}' +
       '.vc-fc img{max-width:100%;border-radius:6px;margin-top:5px;display:block}' +
-      '.vc-fc-t{font-size:9px;letter-spacing:.1em;color:#7c8bab;font-weight:700;margin-bottom:3px}' +
+      '.vc-fc-t{font-size:9px;letter-spacing:.1em;color:var(--rc-text-muted);font-weight:700;margin-bottom:3px}' +
       // 删掉「正面/背面」标题后，靠底色深一档区分背面（.vc-fc 本身已有边框和间距）。
       '.vc-fc-back{background:rgba(0,0,0,.36)}' +
       '.vc-cz{background:rgba(123,108,255,.22);border-bottom:1.5px solid var(--rc-indigo);border-radius:3px;padding:0 5px;color:#cdc6ff;font-weight:600}' +
