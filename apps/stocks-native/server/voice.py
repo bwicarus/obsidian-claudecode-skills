@@ -1001,6 +1001,11 @@ class VoiceSession:
                 'env': {'STOCKS_MONITOR_OWNER': self.selection_owner,
                         'STOCKS_MONITOR_STATE_DIR': str(self.state_dir.resolve()),
                         'STOCKS_MONITOR_CALLS_CONFIGURED': '1' if NotificationDelivery.configured() else '0'},
+                # These account-bound App operations execute the user's voice intent.
+                # Scope approval to these tools; keep shell and other MCP policies intact.
+                'enabled_tools': ['stocks_monitor', 'stocks_call'],
+                'tools': {'stocks_monitor': {'approval_mode': 'approve'},
+                          'stocks_call': {'approval_mode': 'approve'}},
                 'enabled': True, 'required': True, 'startup_timeout_sec': 15, 'tool_timeout_sec': 30}
         params = {'cwd': str(self.state_dir), 'model': 'gpt-5.6-sol', 'modelProvider': 'openai',
                   'approvalPolicy': 'never', 'sandbox': 'read-only', 'environments': [],
@@ -1010,7 +1015,7 @@ class VoiceSession:
         previous = self.thread_file.read_text().strip() if self.thread_file.exists() else None
         if previous:
             try:
-                r = await self.call('thread/resume', {**params, 'threadId': previous, 'dynamicTools': tools})
+                r = await self.call('thread/resume', {**params, 'threadId': previous})
                 self.thread_id = r['thread']['id']
             except Exception:
                 log.warning('Could not resume owned thread %s', previous)
