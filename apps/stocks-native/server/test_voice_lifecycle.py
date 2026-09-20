@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from voice import VoiceSession, closes_voice_connection
 
@@ -126,6 +127,27 @@ class VoiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, [
             ('thread/realtime/stop', {'threadId': 'thread-live'}, 8)])
+
+    async def test_failed_first_thread_write_does_not_publish_unresumable_pointer(self):
+        async def rpc(method, params, timeout=45):
+            if method == 'thread/start':
+                return {'thread': {'id': 'not-yet-persisted-thread'}}
+            if method == 'thread/inject_items':
+                raise PermissionError('thread-store: permission denied')
+            return {}
+
+        self.session.call = rpc
+        self.session.send = AsyncMock()
+        # No reader tasks, real Codex process or voice transport are needed to
+        # reproduce a store failure immediately after thread/start returns.
+        self.session.task = lambda coroutine: coroutine.close()
+        with patch('voice.asyncio.create_subprocess_exec', new=AsyncMock(return_value=object())):
+            with self.assertRaises(PermissionError):
+                await self.session.start()
+
+        self.assertFalse(self.session.thread_file.exists())
+        marker = self.session.thread_file.with_suffix(self.session.thread_file.suffix + '.capabilities.json')
+        self.assertFalse(marker.exists())
 
 
 if __name__ == '__main__':

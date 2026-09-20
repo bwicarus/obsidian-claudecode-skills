@@ -1024,14 +1024,18 @@ class VoiceSession:
             except Exception as exc:
                 # Connection failure must not silently replace the user's conversation.
                 raise RuntimeError('无法续接原对话，请重试；原对话历史已保留') from exc
-        if not self.thread_id:
+        created_thread = not self.thread_id
+        if created_thread:
             r = await self.call('thread/start', {**params, 'dynamicTools': tools, 'ephemeral': False})
             self.thread_id = r['thread']['id']
+        capability_marker = self.thread_file.with_suffix(self.thread_file.suffix + '.capabilities.json')
+        updated = await sync_contract(self.call, self.thread_id, capability_marker, instructions, capability_digest)
+        if created_thread:
+            # thread/start can return before its first durable write. Publish the
+            # pointer only once injection has flushed the new thread successfully.
             tmp = self.thread_file.with_suffix('.tmp')
             tmp.write_text(self.thread_id)
             tmp.replace(self.thread_file)
-        capability_marker = self.thread_file.with_suffix(self.thread_file.suffix + '.capabilities.json')
-        updated = await sync_contract(self.call, self.thread_id, capability_marker, instructions, capability_digest)
         self.record({'type': 'assistant.capabilities', 'revision': capability_digest,
                      'updated': updated, 'threadId': self.thread_id})
         self.pc.addTrack(self.input)
