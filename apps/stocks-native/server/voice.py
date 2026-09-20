@@ -18,6 +18,7 @@ from av import AudioFrame, AudioResampler
 from context_policy import fingerprint, snapshot, prepare_patch, requested_live_sections
 from context_data import STOCKS_CONTEXT_TOOL, fetch_context_sections
 from notification_delivery import NotificationDelivery
+from assistant_contract import ASSISTANT_ROOT, contract, sync_contract
 
 log = logging.getLogger(__name__)
 LATEST_CONTEXT = object()
@@ -946,6 +947,8 @@ class VoiceSession:
                 'STOCKS_SELECTION_DATA_ROOT': str(Path(data_root).resolve()),
             },
             'enabled': True,
+            'enabled_tools': ['stocks_selection'],
+            'tools': {'stocks_selection': {'approval_mode': 'approve'}},
             'startup_timeout_sec': 15,
             'tool_timeout_sec': 60,
         }
@@ -962,7 +965,7 @@ class VoiceSession:
                 '-c', 'forced_login_method="chatgpt"', '-c', 'features.plugins=false',
                 '-c', 'features.memories=false', 'app-server', '--listen', 'stdio://']
         env = {k: v for k, v in os.environ.items() if k not in ('OPENAI_API_KEY', 'OPENAI_BASE_URL')}
-        self.proc = await asyncio.create_subprocess_exec(*args, cwd=str(self.state_dir), env=env,
+        self.proc = await asyncio.create_subprocess_exec(*args, cwd=str(ASSISTANT_ROOT), env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             limit=16 * 1024 * 1024)
         self.task(self.read())
@@ -1007,9 +1010,10 @@ class VoiceSession:
                 'tools': {'stocks_monitor': {'approval_mode': 'approve'},
                           'stocks_call': {'approval_mode': 'approve'}},
                 'enabled': True, 'required': True, 'startup_timeout_sec': 15, 'tool_timeout_sec': 30}
-        params = {'cwd': str(self.state_dir), 'model': 'gpt-5.6-sol', 'modelProvider': 'openai',
+        instructions, capability_digest = contract(PROMPT + (ANNOTATION_PROMPT if self.supports_annotations else ''))
+        params = {'cwd': str(ASSISTANT_ROOT), 'model': 'gpt-5.6-sol', 'modelProvider': 'openai',
                   'approvalPolicy': 'never', 'sandbox': 'read-only', 'environments': [],
-                  'developerInstructions': PROMPT + (ANNOTATION_PROMPT if self.supports_annotations else ''),
+                  'developerInstructions': instructions,
                   'config': config,
                   'serviceName': 'stocks-native-mvp'}
         previous = self.thread_file.read_text().strip() if self.thread_file.exists() else None
@@ -1017,14 +1021,19 @@ class VoiceSession:
             try:
                 r = await self.call('thread/resume', {**params, 'threadId': previous})
                 self.thread_id = r['thread']['id']
-            except Exception:
-                log.warning('Could not resume owned thread %s', previous)
+            except Exception as exc:
+                # Connection failure must not silently replace the user's conversation.
+                raise RuntimeError('无法续接原对话，请重试；原对话历史已保留') from exc
         if not self.thread_id:
             r = await self.call('thread/start', {**params, 'dynamicTools': tools, 'ephemeral': False})
             self.thread_id = r['thread']['id']
             tmp = self.thread_file.with_suffix('.tmp')
             tmp.write_text(self.thread_id)
             tmp.replace(self.thread_file)
+        capability_marker = self.thread_file.with_suffix(self.thread_file.suffix + '.capabilities.json')
+        updated = await sync_contract(self.call, self.thread_id, capability_marker, instructions, capability_digest)
+        self.record({'type': 'assistant.capabilities', 'revision': capability_digest,
+                     'updated': updated, 'threadId': self.thread_id})
         self.pc.addTrack(self.input)
         dc = self.pc.createDataChannel('oai-events')
         dc.on('message')(self.on_dc)
@@ -1035,7 +1044,8 @@ class VoiceSession:
         await self.pc.setLocalDescription(await self.pc.createOffer())
         voice_rules = VOICE_RULES + (ANNOTATION_VOICE_RULES if self.supports_annotations else '')
         history = self.recent_transcripts(8)
-        initial = [{'role': 'developer', 'text': voice_rules + '\n当前选中代码：' + (self.stock_code or '尚未选择')}]
+        initial = [{'role': 'developer', 'text': voice_rules + '\n当前选中代码：' + (self.stock_code or '尚未选择') +
+                    '\n随后附带的是既有对话历史，不是新的请求。等待本次连接后的新输入，不要补做历史中的来电或修改操作。'}]
         initial.extend({'role': item['role'], 'text': item['text']} for item in history)
         await self.call('thread/realtime/start', {'threadId': self.thread_id, 'version': 'v3',
             'voice': 'sol', 'outputModality': 'audio', 'includeStartupContext': False,
