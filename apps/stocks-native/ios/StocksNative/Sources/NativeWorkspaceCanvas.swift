@@ -29,6 +29,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     private let previewLayer = CAShapeLayer()
     private let targetLayer = CAShapeLayer()
     private let guideLayer = CAShapeLayer()
+    private let dropLabel = UILabel()
     private var hosts: [String: WorkspaceCardHost] = [:]
     private var splitters: [UIView] = []
     private var page: WorkspacePage?
@@ -43,15 +44,16 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     private var displayLinkProxy: WorkspaceCanvasDisplayLinkProxy?
     private var lastTimestamp: CFTimeInterval = 0
     private var lastViewportPoint = CGPoint.zero
+    private var edgeHoverStartedAt: CFTimeInterval?
+    private var edgeHoverDirection: CGFloat = 0
     private var pendingUpdate = false
     private var laidOutWidth: CGFloat = 0
     private let margin: CGFloat = 18
-    private let minimumCanvasWidth: CGFloat = 720
 
     private var gap: CGFloat { WorkspaceGridEngine.gap }
     private var rowPitch: CGFloat { WorkspaceGridEngine.rowHeight + gap }
-    private var canvasWidth: CGFloat { max(minimumCanvasWidth, scrollView.bounds.width) }
-    private var columnPitch: CGFloat { (canvasWidth - margin * 2 + gap) / CGFloat(WorkspaceGridEngine.columnCount) }
+    private var canvasWidth: CGFloat { max(1, scrollView.bounds.width) }
+    private var columnPitch: CGFloat { max(1, (canvasWidth - margin * 2 + gap) / CGFloat(WorkspaceGridEngine.columnCount)) }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -59,16 +61,16 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         scrollView.backgroundColor = .clear
         scrollView.alwaysBounceVertical = true
         scrollView.alwaysBounceHorizontal = false
-        scrollView.isDirectionalLockEnabled = false
+        scrollView.isDirectionalLockEnabled = true
         scrollView.contentInsetAdjustmentBehavior = .never
         scrollView.keyboardDismissMode = .onDrag
         view.addSubview(scrollView)
         canvas.backgroundColor = .clear
         scrollView.addSubview(canvas)
-        previewLayer.fillColor = UIColor.clear.cgColor
-        previewLayer.strokeColor = UIColor(AppStyle.accent).withAlphaComponent(0.25).cgColor
+        previewLayer.fillColor = UIColor(AppStyle.accent).withAlphaComponent(0.06).cgColor
+        previewLayer.strokeColor = UIColor(AppStyle.accent).withAlphaComponent(0.35).cgColor
         previewLayer.lineWidth = 1
-        targetLayer.fillColor = UIColor(AppStyle.accent).withAlphaComponent(0.09).cgColor
+        targetLayer.fillColor = UIColor(AppStyle.accent).withAlphaComponent(0.23).cgColor
         targetLayer.strokeColor = UIColor(AppStyle.accent).cgColor
         targetLayer.lineWidth = 2
         targetLayer.lineDashPattern = [5, 4]
@@ -78,17 +80,30 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         canvas.layer.addSublayer(previewLayer)
         canvas.layer.addSublayer(targetLayer)
         canvas.layer.addSublayer(guideLayer)
+        dropLabel.font = .preferredFont(forTextStyle: .caption1)
+        dropLabel.textColor = UIColor(AppStyle.accent)
+        dropLabel.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.94)
+        dropLabel.textAlignment = .center
+        dropLabel.layer.cornerRadius = 8
+        dropLabel.clipsToBounds = true
+        dropLabel.isUserInteractionEnabled = false
+        dropLabel.isHidden = true
+        view.addSubview(dropLabel)
         installHosts()
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         scrollView.frame = view.bounds
+        if scrollView.contentOffset.x != 0 {
+            scrollView.setContentOffset(CGPoint(x: 0, y: scrollView.contentOffset.y), animated: false)
+        }
         if abs(laidOutWidth - canvasWidth) > 0.5 {
             if interaction != nil { finishInteraction(commit: false) }
             laidOutWidth = canvasWidth
-            constraints = makeConstraints(for: cards)
-            cards = WorkspaceGridEngine.normalized(cards, constraints: constraints)
+            let source = page?.cards ?? cards
+            constraints = makeConstraints(for: source)
+            cards = WorkspaceGridEngine.normalized(source, constraints: constraints)
             layoutHosts()
         } else if interaction == nil {
             updateContentSize()
@@ -152,7 +167,8 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                 canvas.addSubview(host)
                 controller.didMove(toParent: self)
                 let move = makePan(.move(card.id))
-                host.grip.addGestureRecognizer(move)
+                host.moveSurface.addGestureRecognizer(move)
+                host.grip.addGestureRecognizer(makePan(.move(card.id)))
                 let resize = makePan(.resize(card.id))
                 host.resizeGrip.addGestureRecognizer(resize)
                 host.setEditing(layoutEditing)
@@ -270,10 +286,10 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        // The dedicated handle wins as soon as it begins, when scrolling is disabled.
-        // No retained failure dependencies are added for transient shared-edge handles.
-        otherGestureRecognizer === scrollView.panGestureRecognizer
+                           shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // An edit touch belongs to one card/edge from the start. Blank-canvas
+        // touches still scroll, without a permanent dependency on transient handles.
+        gestureRecognizer is WorkspaceCanvasPan && otherGestureRecognizer === scrollView.panGestureRecognizer
     }
 
     @objc private func didPan(_ pan: WorkspaceCanvasPan) {
@@ -304,6 +320,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             ghost.frame = host.frame
             ghost.backgroundColor = .white
             ghost.isUserInteractionEnabled = false
+            ghost.alpha = 0.62
             ghost.layer.cornerRadius = 20
             ghost.layer.shadowColor = UIColor.black.cgColor
             ghost.layer.shadowOpacity = 0.15
@@ -330,6 +347,8 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         link.add(to: .main, forMode: .common)
         displayLink = link
         lastTimestamp = 0
+        edgeHoverStartedAt = nil
+        edgeHoverDirection = 0
     }
 
     private func updateInteraction(point: CGPoint) {
@@ -337,6 +356,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         let delta = CGPoint(x: point.x - interaction.startPoint.x, y: point.y - interaction.startPoint.y)
         var preview = interaction.initialCards
         var snap: WorkspaceGridSnapTarget?
+        interaction.dropMessage = nil
         switch interaction.operation {
         case .move(let id):
             guard let original = interaction.initialCards.first(where: { $0.id == id })?.grid else { return }
@@ -344,10 +364,28 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             let proposed = start.offsetBy(dx: delta.x, dy: delta.y)
             interaction.ghosts[id]?.frame = proposed
             let grid = continuousGrid(proposed)
-            snap = WorkspaceGridEngine.snapTarget(for: grid, in: interaction.initialCards, excluding: id,
-                                                 columnTolerance: Double(28 / columnPitch), rowTolerance: Double(28 / rowPitch),
-                                                 constraints: constraints)
-            if let snap, snap.primaryID != nil {
+            let insertion = insertionTarget(at: point, in: interaction.initialCards, excluding: id,
+                                            previous: interaction.lastSnap)
+            snap = insertion ?? WorkspaceGridEngine.snapTarget(for: grid, in: interaction.initialCards, excluding: id,
+                                                               columnTolerance: Double(28 / columnPitch), rowTolerance: Double(28 / rowPitch),
+                                                               constraints: constraints)
+            if let insertion, let targetID = insertion.primaryID {
+                preview = WorkspaceGridEngine.insert(interaction.initialCards, id: id, targetID: targetID,
+                                                      edge: insertion.edge, constraints: constraints)
+                let horizontal = insertion.edge == .left || insertion.edge == .right
+                if horizontal && constraints.columns(for: id) + constraints.columns(for: targetID) > WorkspaceGridEngine.columnCount {
+                    interaction.dropMessage = "宽度不足，松手保持原位"
+                } else {
+                    let side: String
+                    switch insertion.edge {
+                    case .top: side = "上方"
+                    case .bottom: side = "下方"
+                    case .left: side = "左侧"
+                    case .right: side = "右侧"
+                    }
+                    interaction.dropMessage = "松手放在" + side
+                }
+            } else if let snap, snap.primaryID != nil {
                 // Dock against the original peer coordinates. Moving first would push
                 // an overlapping peer away before its edge can be used as the anchor.
                 preview = WorkspaceGridEngine.dock(interaction.initialCards, id: id, target: snap, constraints: constraints)
@@ -408,6 +446,42 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         }
     }
 
+    private func insertionTarget(at point: CGPoint, in cards: [WorkspaceCard], excluding id: String,
+                                 previous: WorkspaceGridSnapTarget?) -> WorkspaceGridSnapTarget? {
+        guard point.x >= 0, point.x <= canvasWidth, point.y >= 0 else { return nil }
+        let candidates = cards.filter { $0.isVisible && $0.id != id }.compactMap { card -> (WorkspaceCard, CGRect)? in
+            guard let grid = card.grid else { return nil }
+            let rect = frame(for: grid)
+            return rect.insetBy(dx: -18, dy: -18).contains(point) ? (card, rect) : nil
+        }
+        // Prefer the card under the finger over an adjacent card's expanded edge.
+        guard let (peer, rect) = candidates.min(by: { lhs, rhs in
+            func distance(_ rect: CGRect) -> CGFloat {
+                let dx = max(max(rect.minX - point.x, 0), point.x - rect.maxX)
+                let dy = max(max(rect.minY - point.y, 0), point.y - rect.maxY)
+                return dx * dx + dy * dy
+            }
+            return distance(lhs.1) < distance(rhs.1)
+        }), let grid = peer.grid else { return nil }
+        let distances: [(WorkspaceGridEdge, CGFloat)] = [
+            (.top, abs(point.y - rect.minY)), (.bottom, abs(point.y - rect.maxY)),
+            (.left, abs(point.x - rect.minX)), (.right, abs(point.x - rect.maxX))
+        ]
+        guard let closest = distances.min(by: { $0.1 < $1.1 }) else { return nil }
+        var edge = closest.0
+        if let previous, previous.primaryID == peer.id,
+           let oldDistance = distances.first(where: { $0.0 == previous.edge })?.1,
+           oldDistance <= closest.1 + 14 { edge = previous.edge }
+        let coordinate: Int
+        switch edge {
+        case .top: coordinate = grid.row
+        case .bottom: coordinate = grid.maxRow
+        case .left: coordinate = grid.column
+        case .right: coordinate = grid.maxColumn
+        }
+        return WorkspaceGridSnapTarget(edge: edge, coordinate: coordinate, peerIDs: [peer.id], primaryID: peer.id)
+    }
+
     private func resizeSnapTarget(for rect: CGRect, in cards: [WorkspaceCard], excluding id: String) -> WorkspaceGridSnapTarget? {
         var best: WorkspaceGridSnapTarget?
         var bestDistance: CGFloat = 28
@@ -448,7 +522,19 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         targetLayer.path = targetPath.cgPath
         let guide = UIBezierPath()
         if let snap {
-            if snap.edge == .left || snap.edge == .right {
+            if let peerID = snap.primaryID, let rect = preview.first(where: { $0.id == peerID })?.grid {
+                let peer = frame(for: rect)
+                switch snap.edge {
+                case .left, .right:
+                    let x = snap.edge == .left ? peer.minX - gap / 2 : peer.maxX + gap / 2
+                    guide.move(to: CGPoint(x: x, y: peer.minY))
+                    guide.addLine(to: CGPoint(x: x, y: peer.maxY))
+                case .top, .bottom:
+                    let y = snap.edge == .top ? peer.minY - gap / 2 : peer.maxY + gap / 2
+                    guide.move(to: CGPoint(x: peer.minX, y: y))
+                    guide.addLine(to: CGPoint(x: peer.maxX, y: y))
+                }
+            } else if snap.edge == .left || snap.edge == .right {
                 let x = margin + CGFloat(snap.coordinate) * columnPitch - gap / 2
                 guide.move(to: CGPoint(x: x, y: scrollView.contentOffset.y + 8))
                 guide.addLine(to: CGPoint(x: x, y: scrollView.contentOffset.y + scrollView.bounds.height - 8))
@@ -460,6 +546,17 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         }
         guideLayer.path = guide.cgPath
         CATransaction.commit()
+        if let interaction, case .move(let id) = interaction.operation,
+           let rect = preview.first(where: { $0.id == id })?.grid {
+            dropLabel.text = interaction.dropMessage ?? "松手放到这里"
+            dropLabel.sizeToFit()
+            let width = min(view.bounds.width - 16, dropLabel.bounds.width + 20)
+            let target = canvas.convert(frame(for: rect), to: view)
+            dropLabel.frame = CGRect(x: min(max(8, target.midX - width / 2), max(8, view.bounds.width - width - 8)),
+                                     y: min(max(8, target.minY + 10), max(8, view.bounds.height - 36)),
+                                     width: max(1, width), height: 28)
+            dropLabel.isHidden = false
+        } else { dropLabel.isHidden = true }
     }
 
     private func finishInteraction(commit: Bool) {
@@ -468,6 +565,8 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         displayLink?.invalidate()
         displayLink = nil
         displayLinkProxy = nil
+        edgeHoverStartedAt = nil
+        edgeHoverDirection = 0
         for (id, ghost) in interaction.ghosts {
             host(for: id)?.frame = ghost.frame
             ghost.removeFromSuperview()
@@ -477,6 +576,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         previewLayer.path = nil
         targetLayer.path = nil
         guideLayer.path = nil
+        dropLabel.isHidden = true
         if commit, let preview = interaction.preview {
             cards = preview
             settleHosts()
@@ -502,22 +602,24 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     }
 
     fileprivate func autoScroll(_ link: CADisplayLink) {
-        guard interaction != nil else { return }
+        guard let interaction, case .move = interaction.operation else { return }
         let elapsed = lastTimestamp == 0 ? 1.0 / 60.0 : min(link.timestamp - lastTimestamp, 0.05)
         lastTimestamp = link.timestamp
-        let band: CGFloat = 64
+        let band: CGFloat = 28
         func speed(at coordinate: CGFloat, extent: CGFloat) -> CGFloat {
-            if coordinate < band { return -420 * min(1, max(0, (band - coordinate) / band)) }
-            if coordinate > extent - band { return 420 * min(1, max(0, (coordinate - extent + band) / band)) }
+            if coordinate < band { return -260 * min(1, max(0, (band - coordinate) / band)) }
+            if coordinate > extent - band { return 260 * min(1, max(0, (coordinate - extent + band) / band)) }
             return 0
         }
-        let velocity = CGPoint(x: speed(at: lastViewportPoint.x, extent: view.bounds.width),
-                               y: speed(at: lastViewportPoint.y, extent: view.bounds.height))
-        guard velocity != .zero else { return }
-        let maximumX = max(0, scrollView.contentSize.width - scrollView.bounds.width)
+        let velocity = view.bounds.contains(lastViewportPoint) ? speed(at: lastViewportPoint.y, extent: view.bounds.height) : 0
+        let direction: CGFloat = velocity == 0 ? 0 : (velocity < 0 ? -1 : 1)
+        guard direction != 0 else { edgeHoverStartedAt = nil; edgeHoverDirection = 0; return }
+        if edgeHoverDirection != direction || edgeHoverStartedAt == nil {
+            edgeHoverDirection = direction; edgeHoverStartedAt = link.timestamp; return
+        }
+        guard link.timestamp - (edgeHoverStartedAt ?? link.timestamp) >= 0.35 else { return }
         let maximumY = max(0, scrollView.contentSize.height - scrollView.bounds.height)
-        let next = CGPoint(x: min(maximumX, max(0, scrollView.contentOffset.x + velocity.x * CGFloat(elapsed))),
-                           y: min(maximumY, max(0, scrollView.contentOffset.y + velocity.y * CGFloat(elapsed))))
+        let next = CGPoint(x: 0, y: min(maximumY, max(0, scrollView.contentOffset.y + velocity * CGFloat(elapsed))))
         guard next != scrollView.contentOffset else { return }
         scrollView.setContentOffset(next, animated: false)
         updateInteraction(point: canvas.convert(lastViewportPoint, from: view))
@@ -550,6 +652,7 @@ private final class WorkspaceCanvasInteraction {
     let ghosts: [String: UIView]
     var preview: [WorkspaceCard]?
     var lastSnap: WorkspaceGridSnapTarget?
+    var dropMessage: String?
     init(operation: WorkspaceCanvasOperation, initialCards: [WorkspaceCard], startPoint: CGPoint, ghosts: [String: UIView]) {
         self.operation = operation
         self.initialCards = initialCards
@@ -568,6 +671,7 @@ private final class WorkspaceCanvasDisplayLinkProxy: NSObject {
 private final class WorkspaceCardHost: UIView {
     let controller: UIHostingController<AnyView>
     let grip = UIView()
+    let moveSurface = WorkspaceCardMoveSurface()
     let resizeGrip = UIView()
     private let gripMark = UIView()
     private let resizeMark = UIImageView(image: UIImage(systemName: "arrow.up.left.and.arrow.down.right"))
@@ -590,6 +694,9 @@ private final class WorkspaceCardHost: UIView {
         clipsToBounds = true
         controller.view.backgroundColor = .clear
         addSubview(controller.view)
+        addSubview(moveSurface)
+        moveSurface.backgroundColor = .clear
+        moveSurface.accessibilityLabel = "拖动卡片主体调整位置"
         addSubview(grip)
         grip.accessibilityLabel = "拖动移动卡片"
         grip.isAccessibilityElement = true
@@ -610,6 +717,7 @@ private final class WorkspaceCardHost: UIView {
         guard editing != self.editing else { return }
         self.editing = editing
         grip.isHidden = !editing
+        moveSurface.isHidden = !editing
         resizeGrip.isHidden = !editing
         setNeedsLayout()
     }
@@ -621,11 +729,20 @@ private final class WorkspaceCardHost: UIView {
         let headerHeight: CGFloat = editing ? contentInset : 0
         controller.view.frame = CGRect(x: 0, y: headerHeight, width: bounds.width,
                                        height: max(1, bounds.height - headerHeight))
+        moveSurface.frame = bounds
         // Data cards already have top padding: the extra touch area only covers that padding.
         grip.frame = CGRect(x: max(0, (bounds.width - 120) / 2), y: 0, width: min(120, bounds.width), height: editing ? 24 : 0)
         gripMark.frame = CGRect(x: (grip.bounds.width - 30) / 2, y: contentInset == 16 ? 5 : 8, width: 30, height: 4)
         resizeGrip.frame = CGRect(x: max(0, bounds.width - 44), y: max(0, bounds.height - 44), width: 44, height: 44)
         resizeMark.frame = CGRect(x: 20, y: 20, width: 14, height: 14)
+    }
+}
+
+/// In layout mode fingers move the card; Pencil input still reaches annotations.
+private final class WorkspaceCardMoveSurface: UIView {
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if event?.allTouches?.contains(where: { $0.type == .pencil }) == true { return false }
+        return super.point(inside: point, with: event)
     }
 }
 

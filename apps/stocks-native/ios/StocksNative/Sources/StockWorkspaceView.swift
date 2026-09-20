@@ -5,7 +5,7 @@ struct StockWorkspaceView: View {
     let detail: StockResponse
     @ObservedObject private var workspace: WorkspaceLayoutStore
     @State private var showingEditor = false
-    @AppStorage("stocksNative.workspaceLocked") private var layoutLocked = false
+    @AppStorage("stocksNative.workspaceLocked") private var layoutLocked = true
     @ScaledMetric(relativeTo: .caption) private var compactCardTextScale: CGFloat = 1
     @State private var layoutError: String?
 
@@ -67,13 +67,16 @@ struct StockWorkspaceView: View {
                 }
             }
             Button { layoutLocked.toggle() } label: {
-                Image(systemName: layoutLocked ? "lock.fill" : "lock.open")
-                    .frame(width: 44, height: 44)
-                    .background(AppStyle.canvas, in: RoundedRectangle(cornerRadius: 10))
+                Group {
+                    if layoutLocked { Image(systemName: "lock.fill") }
+                    else { Text("完成布局").font(.caption.weight(.semibold)) }
+                }
+                .frame(width: layoutLocked ? 44 : 88, height: 44)
+                .background(layoutLocked ? AppStyle.canvas : AppStyle.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(.plain).foregroundStyle(AppStyle.accent)
-            .accessibilityLabel(layoutLocked ? "解锁卡片布局" : "锁定卡片布局")
-            .help(layoutLocked ? "解锁后可拖动卡片、角标和共享边" : "锁定后只操作图表")
+            .accessibilityLabel(layoutLocked ? "解锁卡片布局" : "完成布局，恢复图表操作")
+            .help(layoutLocked ? "解锁后直接拖动卡片主体，预览落点后松手" : "卡片主体用于移动；空白处或双指滚动，完成后恢复图表操作")
             Button { showingEditor = true } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.subheadline.weight(.medium))

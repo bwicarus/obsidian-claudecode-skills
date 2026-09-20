@@ -358,6 +358,91 @@ struct WorkspaceGridChecks {
         try requireValid(docked)
     }
 
+    static func verticalInsertionMakesRoomAtTheTopAndBottom() throws {
+        let original = [card(.quote, 0, 0, 12, 4), card(.orderBook, 0, 4, 12, 2),
+                        card(.fund, 0, 10, 6, 3), card(.kdj, 4, 20, 3, 5, visible: false)]
+        for edge in [WorkspaceGridEdge.top, .bottom] {
+            let inserted = WorkspaceGridEngine.insert(original, id: "fund", targetID: "quote", edge: edge)
+            let moving = try rect(.fund, in: inserted), target = try rect(.quote, in: inserted)
+            try require(moving.column == 0 && moving.width == 12 && moving.height == 3,
+                        "Vertical insertion did not adopt the target width while keeping content height")
+            try require(edge == .top ? moving.row == 0 && target.row == 3 : target.row == 0 && moving.row == 4,
+                        "Insertion at a top-row card failed to put the cards in the requested order")
+            try require(try rect(.orderBook, in: inserted).row == 7, "Vertical insertion failed to push the next card down")
+            try require(inserted[3] == original[3], "Insertion changed a hidden card")
+            try require(WorkspaceGridEngine.insert(inserted, id: "fund", targetID: "quote", edge: edge) == inserted,
+                        "Repeating vertical insertion drifted the preview")
+            try require(WorkspaceGridEngine.normalized(inserted) == inserted, "Saving changed the vertical insertion preview")
+            try requireValid(inserted)
+        }
+    }
+
+    static func horizontalInsertionDividesTheTargetAndKeepsReadableHeights() throws {
+        let original = [card(.quote, 0, 0, 12, 4), card(.orderBook, 0, 4, 12, 2), card(.fund, 0, 10, 6, 3)]
+        let constraints = WorkspaceGridConstraints(minimumColumns: ["quote": 3, "fund": 4],
+            minimumRows: ["quote": [6: 5], "fund": [6: 7]])
+        for edge in [WorkspaceGridEdge.left, .right] {
+            let inserted = WorkspaceGridEngine.insert(original, id: "fund", targetID: "quote", edge: edge,
+                                                       constraints: constraints)
+            let moving = try rect(.fund, in: inserted), target = try rect(.quote, in: inserted)
+            try require(moving.width == 6 && target.width == 6 && moving.row == 0 && target.row == 0,
+                        "Side insertion did not divide the target rectangle")
+            try require(edge == .left ? moving.maxColumn == target.column : target.maxColumn == moving.column,
+                        "Side insertion used the wrong edge")
+            try require(moving.height == 7 && target.height == 7,
+                        "Side insertion did not align both cards at the width-dependent content minimum")
+            try require(try rect(.orderBook, in: inserted).row == 7, "The taller pair did not make space below it")
+            for item in inserted where item.isVisible {
+                try require(constraints.accepts(try rect(item.kind, in: inserted), id: item.id), "Insertion violated a content minimum")
+            }
+            try require(WorkspaceGridEngine.insert(inserted, id: "fund", targetID: "quote", edge: edge,
+                                                   constraints: constraints) == inserted, "Repeated side insertion split the pair again")
+            try requireValid(inserted)
+        }
+    }
+
+    static func horizontalInsertionExpandsWithoutBreakingTheSharedRow() throws {
+        let original = [card(.orderBook, 0, 0, 6, 4), card(.macd, 6, 0, 6, 2),
+                        card(.quote, 6, 4, 6, 3), card(.fund, 0, 12, 6, 3),
+                        card(.kdj, 0, 4, 6, 3), card(.valuation, 7, 30, 4, 2, visible: false)]
+        let constraints = WorkspaceGridConstraints(minimumColumns: ["quote": 4, "fund": 5],
+            minimumRows: ["quote": [6: 4], "fund": [6: 5]])
+        for edge in [WorkspaceGridEdge.left, .right] {
+            let inserted = WorkspaceGridEngine.insert(original, id: "fund", targetID: "quote", edge: edge,
+                                                       constraints: constraints)
+            let moving = try rect(.fund, in: inserted), target = try rect(.quote, in: inserted)
+            try require(moving.width + target.width == 12 && min(moving.column, target.column) == 0,
+                        "Insufficient target width did not expand the pair into the row")
+            try require(moving.row == 4 && target.row == 4 && moving.height == 5 && target.height == 5,
+                        "Unequal blockers above the pair broke its shared row")
+            try require(try rect(.kdj, in: inserted).row == 9, "Expanded pair did not push its colliding neighbor down")
+            try require(inserted[0] == original[0] && inserted[1] == original[1], "Insertion moved noncolliding upper cards")
+            try require(inserted[5] == original[5] && inserted.map(\.id) == original.map(\.id),
+                        "Insertion changed hidden cards or storage order")
+            try require(WorkspaceGridEngine.normalized(inserted, constraints: constraints) == inserted,
+                        "Saving shifted the grouped preview")
+            try require(WorkspaceGridEngine.insert(inserted, id: "fund", targetID: "quote", edge: edge,
+                                                   constraints: constraints) == inserted, "Expanded insertion was not stable")
+            try requireValid(inserted)
+        }
+    }
+
+    static func impossibleAndInvalidInsertionsLeaveTheLayoutUntouched() throws {
+        let original = [card(.quote, 0, 0, 6, 4), card(.fund, 6, 0, 6, 4),
+                        card(.kdj, 2, 12, 5, 2, visible: false)]
+        let narrowViewport = WorkspaceGridConstraints(minimumColumns: ["quote": 7, "fund": 6],
+                                                      columnPitch: 36, rowPitch: 36)
+        for edge in [WorkspaceGridEdge.left, .right] {
+            try require(WorkspaceGridEngine.insert(original, id: "fund", targetID: "quote", edge: edge,
+                                                    constraints: narrowViewport) == original,
+                        "An impossible narrow-viewport insert changed the layout or fell back to another edge")
+        }
+        for targetID in ["fund", "kdj", "missing"] {
+            try require(WorkspaceGridEngine.insert(original, id: "fund", targetID: targetID, edge: .top) == original,
+                        "An invalid or hidden insertion target changed the layout")
+        }
+    }
+
     static func main() throws {
         let checks: [(String, () throws -> Void)] = [
             ("schema 1 migration", migrationPreservesUserChoices),
@@ -378,7 +463,11 @@ struct WorkspaceGridChecks {
             ("saved and resized content minimums", minimumContentSizesApplyToSavedCardsAndResize),
             ("divider content minimums", sharedDividerRespectsWidthDependentHeight),
             ("junction coupled content minimums", junctionCouplesWidthAndHeightMinimums),
-            ("readable dock minimum", dockingRejectsUnreadableGaps)
+            ("readable dock minimum", dockingRejectsUnreadableGaps),
+            ("top and bottom insertion", verticalInsertionMakesRoomAtTheTopAndBottom),
+            ("side insertion content minimums", horizontalInsertionDividesTheTargetAndKeepsReadableHeights),
+            ("side insertion expansion and stable pair", horizontalInsertionExpandsWithoutBreakingTheSharedRow),
+            ("unavailable insertion leaves layout untouched", impossibleAndInvalidInsertionsLeaveTheLayoutUntouched)
         ]
         for (name, check) in checks {
             try check()

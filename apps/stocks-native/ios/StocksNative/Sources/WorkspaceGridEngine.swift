@@ -250,6 +250,101 @@ enum WorkspaceGridEngine {
         return compactVertically(resolveCollisions(result, anchors: groupIDs.union([id])))
     }
 
+    /// Insert beside a card, making space for both readable contents. Unlike dock,
+    /// this may divide the target's rectangle or push the occupied row downward.
+    static func insert(_ cards: [WorkspaceCard], id: String, targetID: String, edge: WorkspaceGridEdge,
+                       constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceCard] {
+        guard id != targetID,
+              cards.contains(where: { $0.id == id && $0.isVisible }),
+              cards.contains(where: { $0.id == targetID && $0.isVisible }) else { return cards }
+        let minimumMoving = constraints.columns(for: id)
+        let minimumTarget = constraints.columns(for: targetID)
+        if edge == .left || edge == .right {
+            guard minimumMoving + minimumTarget <= columnCount else { return cards }
+        }
+        var result = normalized(cards, constraints: constraints)
+        guard let movingIndex = result.firstIndex(where: { $0.id == id }),
+              let targetIndex = result.firstIndex(where: { $0.id == targetID }),
+              var moving = result[movingIndex].grid,
+              var target = result[targetIndex].grid else { return cards }
+
+        // A repeated preview or drop on the same shared edge must not divide again.
+        let adjacent: Bool
+        switch edge {
+        case .top:
+            adjacent = moving.column == target.column && moving.width == target.width && moving.maxRow == target.row
+        case .bottom:
+            adjacent = moving.column == target.column && moving.width == target.width && target.maxRow == moving.row
+        case .left:
+            adjacent = moving.row == target.row && moving.height == target.height && moving.maxColumn == target.column
+        case .right:
+            adjacent = moving.row == target.row && moving.height == target.height && target.maxColumn == moving.column
+        }
+        if adjacent && result == cards { return cards }
+
+        switch edge {
+        case .top, .bottom:
+            let width = max(target.width, max(minimumMoving, minimumTarget))
+            let column = min(target.column, columnCount - width)
+            moving.column = column; moving.width = width
+            target.column = column; target.width = width
+            moving.height = max(moving.height, constraints.rows(for: id, width: width))
+            target.height = max(target.height, constraints.rows(for: targetID, width: width))
+            if edge == .top {
+                moving.row = target.row
+                target.row = moving.maxRow
+            } else {
+                moving.row = target.maxRow
+            }
+        case .left, .right:
+            let minimumWidth = minimumMoving + minimumTarget
+            let width = target.width >= minimumWidth ? target.width
+                : min(columnCount, max(minimumWidth, target.width + moving.width))
+            let movingWidth = min(max(width / 2, minimumMoving), width - minimumTarget)
+            let targetWidth = width - movingWidth
+            let column = edge == .left ? max(0, target.maxColumn - width)
+                : min(target.column, columnCount - width)
+            let height = max(max(moving.height, target.height),
+                             max(constraints.rows(for: id, width: movingWidth),
+                                 constraints.rows(for: targetID, width: targetWidth)))
+            moving.width = movingWidth; target.width = targetWidth
+            moving.height = height; target.height = height
+            moving.row = target.row
+            if edge == .left {
+                moving.column = column; target.column = column + movingWidth
+            } else {
+                target.column = column; moving.column = column + targetWidth
+            }
+        }
+        guard constraints.accepts(moving, id: id), constraints.accepts(target, id: targetID) else { return cards }
+        result[movingIndex].grid = moving
+        result[targetIndex].grid = target
+        result = resolveCollisions(result, anchors: [id, targetID])
+
+        // Both rectangles exactly tile this box. Settle them as one object so
+        // asymmetric blockers above a left/right pair cannot break their seam.
+        let group = WorkspaceGridRect(column: min(moving.column, target.column), row: min(moving.row, target.row),
+                                      width: max(moving.maxColumn, target.maxColumn) - min(moving.column, target.column),
+                                      height: max(moving.maxRow, target.maxRow) - min(moving.row, target.row))
+        var grouped = result.filter { $0.id != targetID }
+        guard let groupIndex = grouped.firstIndex(where: { $0.id == id }) else { return cards }
+        grouped[groupIndex].grid = group
+        let settled = compactVertically(grouped)
+        guard let settledGroup = settled.first(where: { $0.id == id })?.grid else { return cards }
+        let shift = settledGroup.row - group.row
+        moving.row += shift; target.row += shift
+        let positions = Dictionary(uniqueKeysWithValues: settled.compactMap { card in
+            card.grid.map { (card.id, $0) }
+        })
+        for index in result.indices {
+            if !cards[index].isVisible { result[index] = cards[index] }
+            else if result[index].id == id { result[index].grid = moving }
+            else if result[index].id == targetID { result[index].grid = target }
+            else { result[index].grid = positions[result[index].id] }
+        }
+        return result
+    }
+
     static func sharedEdges(_ cards: [WorkspaceCard], constraints: WorkspaceGridConstraints = .unrestricted) -> [WorkspaceGridSharedEdge] {
         let visible = normalized(cards, constraints: constraints).filter(\.isVisible)
         var result: [WorkspaceGridSharedEdge] = []
