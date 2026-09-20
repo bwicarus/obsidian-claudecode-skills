@@ -18,9 +18,13 @@ includes market breadth, quotes and five-level order books, intraday data,
 5/15/30/60-minute and daily/weekly/monthly K-lines, technical indicators, capital
 flow, chips, concepts, peers and announcements. No trading operations are exposed.
 
-The main workspace separates market search, observation groups and the screener.
-Persistent condition bubbles sit directly above the result list. Selecting a stock
-opens a nonmodal native detail panel below the bubbles; its title moves the panel,
+The top toolbar switches between market search, observation groups and the
+screener, alongside settings, refresh and AI; it has no separate workspace title.
+Condition bubbles appear only in the screener and wrap to their full content
+height above the result list, without a separate capped scrolling area. Long
+schemes can scroll the whole page so no conditions are clipped. Selecting a stock
+opens a nonmodal native detail panel over the full workspace, independent of bubble
+height; its title moves the panel,
 the corner resizes it, and an expand/restore control changes its viewing area.
 The exposed list and bubbles remain interactive. Selecting the same stock again
 closes its panel without resetting the list, filters, chart viewport or annotations.

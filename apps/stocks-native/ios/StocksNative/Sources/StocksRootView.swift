@@ -36,28 +36,15 @@ struct StocksRootView: View {
     @State private var selectionEditorPresented = false
     @State private var selectionOverlayPresented = false
     @State private var addingMarketCodes: [String]?
+    @State private var selectionControlsHeight: CGFloat = 0
 
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
                 let showsInspector = sizeClass == .regular && geometry.size.width >= 900 && showingWideInspector
                 HStack(spacing: 0) {
-                    VStack(spacing: 0) {
-                        if model.isPaired {
-                            selectionNavigation
-                            StockSelectionControls(model: selectionModel,
-                                                   isScreenerActive: selectionSection == .screener,
-                                                   editorPresented: selectionEditorPresented,
-                                                   onActivate: { selectionSection = .screener },
-                                                   onEdit: {
-                                                       selectionSection = .screener
-                                                       selectionEditorPresented = true
-                                                   })
-                            Divider()
-                        }
-                        selectionResultsWorkspace
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    selectionResultsWorkspace
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if showsInspector {
                         Divider()
                         StockAssistantInspector(
@@ -72,12 +59,16 @@ struct StocksRootView: View {
                 .onChange(of: geometry.size.width) { _, width in detailWidth = width }
             }
             .background(AppStyle.canvas)
-            .navigationTitle("选股工作台")
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItemGroup(placement: .topBarLeading) {
                     Button { showingSettings = true } label: { Image(systemName: "slider.horizontal.3") }
                         .accessibilityLabel("设置与设备配对")
+                    refreshStockListButton
+                }
+                ToolbarItem(placement: .principal) {
+                    if model.isPaired { selectionNavigation }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     assistantToggle
@@ -214,32 +205,55 @@ struct StocksRootView: View {
     }
 
     private var selectionNavigation: some View {
-        HStack(spacing: 12) {
-            Picker("股票范围", selection: $selectionSection) {
-                ForEach(StockSelectionSection.allCases) { section in Text(section.title).tag(section) }
-            }
-            .pickerStyle(.segmented).frame(maxWidth: 360)
-            Button {
-                Task {
-                    if selectionSection == .market { await model.loadStocks() }
-                    else { await selectionModel.refreshFromExternalChange() }
-                }
-            } label: { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44) }
-            .disabled(!model.isPaired || model.isLoadingList)
-            .accessibilityLabel("刷新股票列表")
-            Spacer(minLength: 0)
+        Picker("股票范围", selection: $selectionSection) {
+            ForEach(StockSelectionSection.allCases) { section in Text(section.title).tag(section) }
         }
-        .padding(.horizontal, 14).padding(.vertical, 2)
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: sizeClass == .regular ? 300 : 200)
+    }
+
+    private var refreshStockListButton: some View {
+        Button {
+            Task {
+                if selectionSection == .market { await model.loadStocks() }
+                else { await selectionModel.refreshFromExternalChange() }
+            }
+        } label: { Image(systemName: "arrow.clockwise") }
+        .disabled(!model.isPaired || model.isLoadingList)
+        .accessibilityLabel("刷新股票列表")
     }
 
     private var selectionResultsWorkspace: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                stockList
-                    .frame(width: model.detailPresented && geometry.size.width >= 820 ? 320 : geometry.size.width)
-                    .frame(maxHeight: .infinity)
+                // Usually this page fits, keeping all bubbles above the scrolling list.
+                // Very long schemes can scroll the whole page instead of clipping conditions.
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if model.isPaired && selectionSection == .screener {
+                            StockSelectionControls(model: selectionModel,
+                                                   isScreenerActive: true,
+                                                   editorPresented: selectionEditorPresented,
+                                                   onActivate: {},
+                                                   onEdit: { selectionEditorPresented = true })
+                                .background {
+                                    GeometryReader { controls in
+                                        Color.clear.preference(key: ScreenerControlsHeight.self, value: controls.size.height)
+                                    }
+                                }
+                            Divider()
+                        }
+                        stockList
+                            .frame(width: model.detailPresented && geometry.size.width >= 820 ? 320 : geometry.size.width)
+                            .frame(height: max(280, geometry.size.height - (model.isPaired && selectionSection == .screener ? selectionControlsHeight + 1 : 0)))
+                    }
+                    .frame(width: geometry.size.width, alignment: .leading)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .onPreferenceChange(ScreenerControlsHeight.self) { selectionControlsHeight = $0 }
                 // Keep the mounted chart canvas and its local viewport when closing.
-                // This overlay is confined below the bubbles and never dims or locks the list.
+                // The panel uses the entire workspace, independently of bubble height.
                 if model.selectedCode != nil {
                     StockDetailPanel(model: model, availableSize: geometry.size,
                                      onClose: { model.closeStockDetail() })
@@ -319,6 +333,11 @@ struct StocksRootView: View {
             }
         }
     }
+}
+
+private struct ScreenerControlsHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 private struct StockRow: View {

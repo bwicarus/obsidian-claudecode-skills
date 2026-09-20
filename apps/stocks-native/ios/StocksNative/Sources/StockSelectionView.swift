@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Persistent controls belong to the workspace, outside the movable chart cards.
+/// Screener controls expand with their bubbles, outside the movable chart cards.
 @MainActor
 struct StockSelectionControls: View {
     @ObservedObject var model: StockSelectionModel
@@ -9,7 +9,6 @@ struct StockSelectionControls: View {
     let onActivate: () -> Void
     let onEdit: () -> Void
     @Environment(\.scenePhase) private var scenePhase
-    @State private var conditionsHeight: CGFloat = 44
     @AppStorage("stocksNative.selectionExpandedCommonGroups") private var expandedCommonGroups = "[]"
 
     var body: some View {
@@ -46,19 +45,10 @@ struct StockSelectionControls: View {
                 Button("添加筛选条件", systemImage: "plus", action: onEdit)
                     .font(.subheadline).frame(minHeight: 44)
             } else {
-                ScrollView(.vertical) {
-                    VStack(spacing: 6) {
-                        ForEach(model.draft.groups) { group in conditionGroup(group) }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background {
-                        GeometryReader { geometry in
-                            Color.clear.preference(key: SelectionControlsHeight.self, value: geometry.size.height)
-                        }
-                    }
+                VStack(spacing: 6) {
+                    ForEach(model.draft.groups) { group in conditionGroup(group) }
                 }
-                .frame(height: min(max(44, conditionsHeight), 220))
-                .onPreferenceChange(SelectionControlsHeight.self) { conditionsHeight = $0 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             if model.requiresPresetConfirmation {
                 Text("旧方案需在编辑中核对并保存确认。").font(.caption).foregroundStyle(.orange)
@@ -72,6 +62,7 @@ struct StockSelectionControls: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
+        .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(AppStyle.canvas)
         .task(id: "\(scenePhase):\(isScreenerActive):\(editorPresented):\(model.liveEvaluationKey)") {
@@ -211,12 +202,7 @@ struct StockSelectionControls: View {
     }
 }
 
-private struct SelectionControlsHeight: PreferenceKey {
-    static let defaultValue: CGFloat = 44
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-/// Intrinsic-width native bubbles wrap within the fixed workspace control area.
+/// Intrinsic-width native bubbles wrap to the available width and grow vertically.
 private struct SelectionBubbleFlow: Layout {
     var spacing: CGFloat
 
