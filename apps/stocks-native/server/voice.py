@@ -128,6 +128,7 @@ class VoiceSession:
         self.assistant_speaking = False
         self.reply_lock = asyncio.Lock()
         self.speech_receipts = []
+        self.last_speech_submission = 0
         self.pending_capabilities = {}
         self.journal = self.state_dir / ('voice-' + hashlib.sha256(device_id.encode()).hexdigest()[:24] + '.jsonl')
         self.thread_file = self.journal.with_suffix('.thread')
@@ -157,7 +158,7 @@ class VoiceSession:
     def can_announce_notification(self):
         return (not self.closed and self.ready.is_set() and not self.user_speaking
                 and not self.assistant_speaking and not self.active_turn_id and not self.text_pending
-                and not self.delegation_pending and not self.speech_receipts)
+                and not self.delegation_pending and time.monotonic() - self.last_speech_submission > 3)
 
     async def announce_notification(self, notice):
         if self.closed or not self.ready.is_set():
@@ -169,6 +170,7 @@ class VoiceSession:
             if self.closed:
                 return
             self.speech_receipts.append(receipt)
+            self.last_speech_submission = time.monotonic()
             try:
                 await self.call('thread/realtime/appendSpeech', {'threadId': self.thread_id, 'text': receipt['text']})
             except Exception:
@@ -424,6 +426,7 @@ class VoiceSession:
                     return
                 spoken = {'requestId': state['requestId'], 'turnId': turn_id, 'text': answer}
                 self.speech_receipts.append(spoken)
+                self.last_speech_submission = time.monotonic()
                 self.speech_receipts = self.speech_receipts[-32:]
                 try:
                     await self.call('thread/realtime/appendSpeech', {'threadId': self.thread_id, 'text': answer})

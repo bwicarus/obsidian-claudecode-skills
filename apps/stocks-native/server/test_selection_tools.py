@@ -116,6 +116,14 @@ class VoiceSelectionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("apple-owner", " ".join(config["args"]))
         self.assertTrue(config["args"][0].endswith("selection_mcp.py"))
 
+    def test_unmatched_old_transcript_does_not_block_future_notifications(self):
+        import time
+        self.session.ready.set()
+        self.session.speech_receipts = [{'text': '旧播报的转录可能使用不同的数字写法'}]
+        self.assertTrue(self.session.can_announce_notification())
+        self.session.last_speech_submission = time.monotonic()
+        self.assertFalse(self.session.can_announce_notification())
+
     def test_mcp_config_can_use_isolated_python(self):
         import os
         from unittest.mock import patch
