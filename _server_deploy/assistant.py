@@ -12519,7 +12519,9 @@ def assistant_log_external():
     #    upsert 成功就直接 return 了（实录：n=0 upserted=true）—— 于是收拢代码**永远执行不到**，
     #    三条零散记录原封不动留在库里，侧栏照旧是一堆框。而"正常情况"恰恰就是记录已存在。
     _absorbed = 0
+    _absorbed_ids: list[str] = []
     if isinstance(b.get("absorb"), list) and b["absorb"]:
+        _absorbed_ids = [str(x)[:64] for x in b["absorb"][:24] if x]
         _absorbed = _convo_absorb_turns(uid, b["absorb"][:24], mode=assistant_mode)
     if _tid and _convo_upsert_turn(
         uid,
@@ -12568,7 +12570,9 @@ def assistant_log_external():
                 import reader_events
                 reader_events.publish(
                     "assistant-history", b.get("file") or "", uid,
-                    {"turn_id": _tid, "n": 0})
+                    # 这条 upsert 路径同样可能带 absorb —— 漏了它，那条路下的
+                    # 残留气泡照样没人清（2026-09-21：第一版只改了下面那处发布）。
+                    {"turn_id": _tid, "n": 0, "absorbed_ids": _absorbed_ids})
                 _sent = True
             except Exception:
                 pass
@@ -12638,7 +12642,12 @@ def assistant_log_external():
             # 带 turn_id:侧栏收到后能只追加这一轮,不必整段重拉;顺带拿到真实投递数。
             _delivered = reader_events.publish(
                 "assistant-history", b.get("file") or "", uid,
-                {"turn_id": meta.get("turn_id") or "", "n": n}) or 0
+                # ⚠ absorbed_ids 必须推给客户端（2026-09-21）。收拢只删了**库里**那几条
+                #   零散语音记录，而屏幕上早就渲出来的那个独立气泡没人去清 —— 表现是
+                #   同一句话在卡外面和卡里面各出现一次，而库里其实只有一条。
+                #   回执里的 absorbed 只到运行器，客户端看不见，所以必须走事件这条路。
+                {"turn_id": meta.get("turn_id") or "", "n": n,
+                 "absorbed_ids": _absorbed_ids}) or 0
         except Exception:
             pass
     # 分层回执:appended=已写库;delivered=SSE 推到了几个在线侧栏(0=没人开着,不是失败);

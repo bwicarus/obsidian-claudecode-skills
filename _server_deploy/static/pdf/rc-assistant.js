@@ -3743,6 +3743,23 @@
       //   「草稿卡随原子换入消失」说的就是它）。所以在请求重载之前，先把还压在
       //   防抖里的 App 部件（卡片草稿、撤销条、高亮条）落下去 —— 否则就是
       //   用户反复看到的「中途渲出来了，完成后消失」。
+      // ⚠ 先清掉被**收拢**的那几条：它们的正文已经并进本轮 parts、库里那条已被删除，
+      //   但屏幕上早就渲出来的独立气泡没人管 —— 表现是同一句在卡外面和卡里面各一次
+      //   （2026-09-21 用户截图：「还在做,马上好。」重复，而库里只有一条）。
+      //   这一步必须在权威重载**之前**：重载会整页原子换入，残留元素若还在，
+      //   换入的瞬间会连它一起留下。
+      try {
+        var _absorbed = ev && ev.absorbed_ids;
+        if (_absorbed && _absorbed.length && window.RC && RC.turnCard && RC.turnCard.drop) {
+          for (var _ai = 0; _ai < _absorbed.length; _ai++) {
+            var _aid = String(_absorbed[_ai] || '');
+            if (!_aid || _aid === tid) continue;   // 别把本轮自己摘了
+            try { RC.turnCard.drop(_aid); } catch (_e) {}
+            try { delete _liveSeen[_aid]; } catch (_e2) {}
+            try { delete _liveUserDrafts[_aid]; } catch (_e3) {}
+          }
+        }
+      } catch (_eAbs) {}
       try { _flushPendingParts(); } catch (eFlush) {}
       if (window.__bwLiveTurnId === tid) window.__bwLiveTurnId = null;   // 这一轮已落库：之后的部件归下一轮
       if (_liveSeen[tid] || _historyPendingTurns[tid]) return;

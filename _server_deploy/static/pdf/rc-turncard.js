@@ -922,7 +922,25 @@
     } catch (e) {}
   }
 
+  /** 把某个轮次容器从页面上摘掉（2026-09-21）。
+   *
+   * ⚠ 为什么需要它：语音先以**独立气泡**实时渲出来，随后那句话被「收拢」进后台
+   *   轮次卡（服务端把库里那条零散记录删了）。但屏幕上那个独立元素没人去清 ——
+   *   表现是同一句在卡外面和卡里面各出现一次，而库里其实只有一条。
+   *   服务端现在会把被收拢的 id 随事件推来，这里负责真的把它摘掉。
+   * ⚠ 只摘我们自己建的容器；摘不到就当没有，绝不抛异常打断事件处理。
+   */
+  function drop(tid) {
+    tid = String(tid || '');
+    var t = tid && _turns[tid];
+    if (!t) return false;
+    try { if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (_) {}
+    delete _turns[tid];
+    return true;
+  }
+
   RC.turnCard = {
+    drop: drop,
     open: open, addPart: addPart, progress: progress, progressHtml: progressHtml, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
     renderTurn: renderTurn, partsOf: partsOf, reset: reset, prune: prune, setTaskId: setTaskId, setOrchTaskId: setOrchTaskId, title: title, status: status, cliPart: cliPart,
     current: function () { return _cur; },
