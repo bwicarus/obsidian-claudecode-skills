@@ -32,6 +32,11 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"afterSpeech": {"type": "boolean", "description": "等当前那句念完再挂，默认 true"},
                                                      "graceSeconds": {"type": "number", "description": "最多等多少秒，默认 10"},
                                                      "reason": {"type": "string", "description": "为什么结束（写进日志）"}}, "additionalProperties": False}},
+    {"name": "notify_ack", "description": '把一条通知登记为「已送到」。**送到之后必须调它**，否则那条会一直挂在 pending，路由层每隔一阵就再推一次（2026-09-20 实录：同一条刷了满屏）。\n⚠ 不要去跑 replication_notifications.py —— 你的沙盒是只读的，写不了那个文件；而且线程的工作目录在脚本的下一级，只给文件名你也找不到。用这个工具。\n「决定先不打扰」也算处理完了，同样要 ack —— 否则它还会回来吵。',
+     "inputSchema": {"type": "object",
+                     "properties": {"id": {"type": "string",
+                                           "description": "通知 id，形如 ntf-xxxxxxxxxxxx"}},
+                     "required": ["id"], "additionalProperties": False}},
     {"name": "kj_node_ensure", "description": ("查找或创建知识节点，一步到位（用户 2026-09-15）。按名称在本地节点库找：名称或别名完全一致 → 直接返回该节点；"
         "没有 → 按给的 kind/aliases/summary 新建并返回新编号。返回 {ok, nodeId, created, matched, candidates}。制卡（reader_anki_draft 的 nodeIds）前用它拿编号，"
         "不要再自己跑脚本分两步。有近似但不完全一致的候选时也会新建，并把候选列在 candidates 里 —— 你若认为其中某个就是同一概念，用返回的 nodeId 之外那个即可。"),
@@ -171,6 +176,8 @@ def call_tool(name: str, args: dict) -> dict:
             int(args.get("limit") or 12), float(args.get("sinceSeconds") or 0)), timeout=10)
     if name == "voice_session_start":
         return http("POST", "/session/start", {"reason": args.get("reason") or "backend"})
+    if name == "notify_ack":
+        return http("POST", "/notify/ack", {"id": str(args.get("id") or "").strip()})
     if name == "kj_node_ensure":
         return kj_node_ensure(args)
     if name == "voice_call":

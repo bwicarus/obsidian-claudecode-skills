@@ -650,24 +650,28 @@
       '.rc-set-mask .ep-set-modal{background:var(--rc-bg-surface);border:1px solid var(--rc-border);border-radius:10px;padding:16px 20px;width:420px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column}' +
       '.rc-set-mask .ep-set-h3{margin:0 0 10px;font-size:15px;color:var(--rc-text-strong)}' +
       // ══ iOS 分组列表（用户 2026-09-20：「应该全用一种显示方式」）══
+      // ⚠ 选择器必须限定在 .ep-set-body 之内：data-sec 在本文件里是**门控标记**，
+      //   同时打在 tab 按钮和 pane 上（gateSections 用它显隐「语言」「网页翻译」）。
+      //   挂在裸 [data-sec] 上会把 tab 按钮也当成卡片 —— 实录里就是只有「语言」
+      //   那个按钮错位，因为只有它带 data-sec。
       //
       // 系统设置的形态是：一组带圆角的卡片，行在卡片里，标签在左、控件在右，
       // 行与行之间是**从文字起始处内缩**的细分隔线（不是整条通栏），小标题在卡片
       // 外面、小号灰字。这里把已有的结构类映射过去，不重写 HTML：
       //   [data-sec] → 分组卡片   .ep-set-row/.ep-set-chk/.ep-set-slrow → 行
       //   .set-lbl → 卡片外的小标题   .ep-set-hr → 隐藏（卡片本身就是分隔）
-      '.rc-set-mask [data-sec]{background:var(--rc-bg-surface);border:.5px solid var(--rc-border-popover);border-radius:var(--rc-radius-lg);padding:0 14px;margin:0 0 18px;overflow:hidden}' +
-      '.rc-set-mask [data-sec] .ep-set-hr{display:none}' +
+      '.rc-set-mask .ep-set-body [data-sec]{background:var(--rc-bg-surface);border:.5px solid var(--rc-border-popover);border-radius:var(--rc-radius-lg);padding:0 14px;margin:0 0 18px;overflow:hidden}' +
+      '.rc-set-mask .ep-set-body [data-sec] .ep-set-hr{display:none}' +
       // 行：最小 44pt，标签左控件右；分隔线内缩到文字起始处，最后一行不画。
-      '.rc-set-mask [data-sec] .ep-set-row,.rc-set-mask [data-sec] .ep-set-chk{min-height:var(--rc-hit,44px);margin:0;padding:8px 0;border-bottom:.5px solid var(--rc-border)}' +
-      '.rc-set-mask [data-sec] .ep-set-row:last-child,.rc-set-mask [data-sec] .ep-set-chk:last-child{border-bottom:0}' +
-      '.rc-set-mask [data-sec] .ep-set-slrow{margin:0;padding:10px 0;border-bottom:.5px solid var(--rc-border)}' +
-      '.rc-set-mask [data-sec] .ep-set-slrow:last-child{border-bottom:0}' +
+      '.rc-set-mask .ep-set-body [data-sec] .ep-set-row,.rc-set-mask .ep-set-body [data-sec] .ep-set-chk{min-height:var(--rc-hit,44px);margin:0;padding:8px 0;border-bottom:.5px solid var(--rc-border)}' +
+      '.rc-set-mask .ep-set-body [data-sec] .ep-set-row:last-child,.rc-set-mask .ep-set-body [data-sec] .ep-set-chk:last-child{border-bottom:0}' +
+      '.rc-set-mask .ep-set-body [data-sec] .ep-set-slrow{margin:0;padding:10px 0;border-bottom:.5px solid var(--rc-border)}' +
+      '.rc-set-mask .ep-set-body [data-sec] .ep-set-slrow:last-child{border-bottom:0}' +
       // 小标题移到卡片外：iOS 的分组标题不在卡片里。
       '.rc-set-mask .set-lbl{font-size:12px;letter-spacing:.02em;color:var(--rc-text-muted);margin:2px 2px 7px;text-transform:none}' +
-      '.rc-set-mask [data-sec] .set-lbl{margin:10px 0 2px}' +
+      '.rc-set-mask .ep-set-body [data-sec] .set-lbl{margin:10px 0 2px}' +
       // 说明文字：iOS 放在卡片**下面**，不是行里。
-      '.rc-set-mask [data-sec] .ep-set-note{margin:0;padding:8px 0 10px;color:var(--rc-text-dim)}' +
+      '.rc-set-mask .ep-set-body [data-sec] .ep-set-note{margin:0;padding:8px 0 10px;color:var(--rc-text-dim)}' +
       // ⚠ flex:0 0 auto 不能省：.ep-set-modal 是 flex 列 + max-height:88vh，
       //   不写就会被当成可压缩子项**压扁**，整排分类只露出一半（2026-09-20 实录）。
       //   以前是下划线 tab、没有底色，压扁看不太出来；有了填充胶囊一压就露馅。

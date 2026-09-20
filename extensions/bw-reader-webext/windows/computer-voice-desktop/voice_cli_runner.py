@@ -934,6 +934,7 @@ class Runner:
         self._last_user_ask: tuple | None = None
         self._promise_pending: tuple | None = None
         self._notify_sent: dict[str, float] = {}   # 通知主动投递的冷却台账
+        self._notify_tries: dict[str, int] = {}   # 每条通知投了几次（见上限）
         self._delegation_seq = 0              # 累计委派次数（只增）
         self._last_backend_turn_id = None     # 上一条后台轮 id：轮外那句收尾语音认领用
         self._user_asks: list = []            # 最近几次用户发言 (时刻, 原话, 当时的委派序号)
@@ -2913,6 +2914,16 @@ class Runner:
                 said = str(item.get("title") or "").strip()
                 if item.get("body"):
                     said += "。" + str(item["body"]).strip()
+                # ⚠ 重投必须有上限。原来只有冷却、没有次数：ack 一旦失败（比如后台
+                #   沙盒写不了），同一条就每 30 分钟重投一次直到过期 —— 2026-09-20
+                #   实录里刷了满屏同样的话。投够几次还没 ack，就停下并记一笔，
+                #   让它安静地挂着，而不是一直吵。
+                _tries = self._notify_tries.get(ntf, 0) + 1
+                self._notify_tries[ntf] = _tries
+                _cap = int(self.settings.get("notifyPushMaxAttempts") or 3)
+                if _tries > _cap:
+                    self.log("notify_push_capped", ntf=ntf, tries=_tries, cap=_cap)
+                    continue
                 self._notify_sent[ntf] = now   # 先记再投：投递中途出错也不该立刻重来
                 if str(item.get("_action") or "speak") == "call":
                     # 打电话这一档**永远交后台**，不自己拨：拨号是阻塞的、还要处理拒接降级，
@@ -2922,7 +2933,7 @@ class Runner:
                         + "路由层判定这条是 deliver=call（建的时候就定了必须马上知道）。"
                           "用 voice_call 打给他，接通后把上面这句说清楚；拒接或没接通时按"
                           "通知系统的降级规则处理，不要反复重拨。"
-                          "送到之后跑 replication_notifications.py ack " + ntf + " 登记掉。",
+                          "送到之后调 notify_ack(id=\"" + ntf + "\") 登记掉。",
                         record_user=False)
                     self.log("notify_push", ntf=ntf, via="call-turn", text=said[:120])
                     continue
@@ -2939,8 +2950,8 @@ class Runner:
                         + "路由层已经判定现在可以说（按他的位置、设备活跃、语音状态）。"
                           "你来决定怎么送到：开语音说（voice_session_start + voice_say）、"
                           "打电话（voice_call，只用于必须马上知道的事），还是先不打扰。"
-                          "送到之后跑 replication_notifications.py ack " + ntf
-                        + " 把它登记掉，否则它会一直挂着。",
+                          "处理完之后调 notify_ack(id=\"" + ntf + "\") 登记掉 ——"
+                          "「先不打扰」也算处理完了，同样要调，否则它还会回来吵。",
                         record_user=False)
                     self.log("notify_push", ntf=ntf, via="turn", text=said[:120])
             except Exception as e:   # noqa: BLE001
@@ -3833,6 +3844,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/settings":
                 return self._send(200, self._run(r.update_settings(body)))
+            if u.path == "/notify/ack":
+                # 后台自己 ack 不了：它的沙盒是 read-only（写不了 notifications.json），
+                # 而且线程的 cwd 是 BASE=…/BWReader/voice-cli，脚本在它的**上一级** ——
+                # 指令里只写文件名，它只能满机器搜（2026-09-20 实录：三次 rg 全落空，
+                # 于是那条通知每 30 分钟重投一次、刷了满屏）。副作用走工具，沙盒不动。
+                _ntf = str((body or {}).get("id") or "").strip()
+                if not _ntf:
+                    return self._send(400, {"ok": False, "msg": "missing id"})
+                return self._send(200, {"ok": r._notify_ack(_ntf), "id": _ntf})
             if u.path == "/thread/new":
                 async def _renew():
                     if r.session_state != "idle":
