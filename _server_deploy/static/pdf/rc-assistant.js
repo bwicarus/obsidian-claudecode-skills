@@ -3674,6 +3674,17 @@
   var _liveSeen = {};        // turn_id → 1:本页已用权威历史原子回放/本地已呈现
   var _liveSeenOrder = [];   // 有界去重；长期开页也不随历史总量无限增长
   var _historyPendingTurns = Object.create(null);   // turn_id → 1:已排队，重复 SSE 不再追加请求
+  var _liveUserDrafts = Object.create(null);  // 权威重载不能删除尚未落库的用户字幕
+  function _restoreUserDrafts(seen) {
+    Object.keys(_liveUserDrafts).forEach(function (tid) {
+      var draft = _liveUserDrafts[tid];
+      if (seen.indexOf(tid) >= 0 || draft.mode !== _assistantMode || draft.epoch !== _modeEpoch) {
+        delete _liveUserDrafts[tid];
+        return;
+      }
+      try { RC.turnCard.draftText(tid, draft.text, 'user'); } catch (_) {}
+    });
+  }
   function _historyMarkSeen(tid) {
     tid = String(tid || '');
     if (!tid || _liveSeen[tid]) return;
@@ -3714,6 +3725,12 @@
       }
       if (ev.stream === 'delta') {
         if (_liveSeen[tid] || !(window.RC && RC.turnCard)) return;
+        if (ev.role === 'user' && (_historyPendingTurns[tid] || (_liveUserDrafts[tid] && _liveUserDrafts[tid].finalized))) return;
+        if (ev.role === 'user') {
+          _liveUserDrafts[tid] = { text: String(ev.content || ''), mode: _assistantMode, epoch: _modeEpoch };
+          var draftIds = Object.keys(_liveUserDrafts);
+          while (draftIds.length > 32) delete _liveUserDrafts[draftIds.shift()];
+        }
         // ⭐ 2026-09-18：渲进**同一个容器**，不再用 'live_' 前缀另开一个影子容器。
         //   影子容器是"一次任务散成好几个框"的一环：草稿在 live_<tid>、工具与卡片在 <tid>、
         //   语音正文又在 v-<ts> —— 三个框。同一个 tid 之后，工具链、绿点红点、逐字出现的
@@ -3729,6 +3746,7 @@
       try { _flushPendingParts(); } catch (eFlush) {}
       if (window.__bwLiveTurnId === tid) window.__bwLiveTurnId = null;   // 这一轮已落库：之后的部件归下一轮
       if (_liveSeen[tid] || _historyPendingTurns[tid]) return;
+      if (_liveUserDrafts[tid]) _liveUserDrafts[tid].finalized = true;
       try { if (window.RC && RC.turnCard && RC.turnCard.has(tid)) RC.turnCard.freezeDraft(tid); } catch (e1) {}
       if (Object.keys(_historyPendingTurns).length >= 64) return;
       _historyPendingTurns[tid] = 1;
@@ -3941,6 +3959,9 @@
           return { ok: false, stale: true };
         }
         _historyCommit(stage, deferredActions);
+        // 别的轮次落库时，下一句用户话可能仍在识别。整页原子替换后恢复
+        // 未出现在本次权威快照里的字幕；已落库的同 ID 则只留正式记录。
+        if (typeof _restoreUserDrafts === 'function') _restoreUserDrafts(seenTurnIds);
         stage.remove();
         if (_historyKeepScrollTop < 0) {
           requestAnimationFrame(scrollDown);

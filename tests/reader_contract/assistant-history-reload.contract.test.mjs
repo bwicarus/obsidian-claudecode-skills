@@ -394,6 +394,68 @@ test("assistant-history arriving during a full reload is serialized and never du
   assert.deepEqual(acknowledgements, ["remote-race"]);
 });
 
+function liveUserRenderer(harness) {
+  const nodes = new Map();
+  harness.sandbox.RC.turnCard.draftText = (id, text, role) => {
+    let node = nodes.get(id);
+    if (!node || node.parentNode !== harness.thread) {
+      node = new FakeNode(); node.className = role === "user" ? "asst-u" : "asst-a";
+      nodes.set(id, node); harness.thread.appendChild(node);
+    }
+    node.innerHTML = text;
+  };
+}
+
+test("a different completed turn cannot erase the user's live draft", async () => {
+  const harness = coordinatorHarness(async () => ({ ok: true, async json() {
+    return { ok: true, messages: [{ role: "assistant", content: "previous reply", turn_id: "a1" }] };
+  } }));
+  liveUserRenderer(harness);
+  harness.sandbox.RC.assistant.onHistoryEvent({ turn_id: "vu-1.u", role: "user", stream: "delta", content: "still speaking" });
+  harness.sandbox.RC.assistant.onHistoryEvent({ turn_id: "a1" });
+  harness.clock.tick(80); await flushPromises();
+  assert.deepEqual(harness.thread.children.map(n => n.innerHTML), ["previous reply", "still speaking"]);
+});
+
+test("user final replaces its draft once and rejects trailing partial snapshots", async () => {
+  const harness = coordinatorHarness(async () => ({ ok: true, async json() {
+    return { ok: true, messages: [{ role: "user", content: "complete user text", turn_id: "vu-2.u" }] };
+  } }));
+  liveUserRenderer(harness);
+  const event = harness.sandbox.RC.assistant.onHistoryEvent;
+  event({ turn_id: "vu-2.u", role: "user", stream: "delta", content: "complete user text" });
+  event({ turn_id: "vu-2.u" });
+  event({ turn_id: "vu-2.u", role: "user", stream: "delta", content: "late partial" });
+  assert.deepEqual(harness.thread.children.map(n => n.innerHTML), ["complete user text"]);
+  harness.clock.tick(80); await flushPromises();
+  event({ turn_id: "vu-2.u", role: "user", stream: "delta", content: "late partial" });
+  assert.deepEqual(harness.thread.children.map(n => n.innerHTML), ["complete user text"]);
+});
+
+test("user draft arriving during history fetch survives its older response", async () => {
+  let resolveHistory;
+  const harness = coordinatorHarness(() => new Promise(resolve => { resolveHistory = resolve; }));
+  liveUserRenderer(harness);
+  harness.sandbox.RC.assistant.onDrawerTabChanged("asst", true);
+  harness.clock.tick(80); await flushPromises();
+  harness.sandbox.RC.assistant.onHistoryEvent({ turn_id: "vu-3.u", role: "user", stream: "delta", content: "new speech" });
+  resolveHistory({ ok: true, async json() { return { ok: true, messages: [{ role: "user", content: "old question" }] }; } });
+  await flushPromises();
+  assert.deepEqual(harness.thread.children.map(n => n.innerHTML), ["old question", "new speech"]);
+});
+
+test("clearing or changing conversation scope never restores old live user text", async () => {
+  const harness = coordinatorHarness(async () => ({ ok: true, async json() {
+    return { ok: true, messages: [{ role: "user", content: "new scope" }] };
+  } }));
+  liveUserRenderer(harness);
+  harness.sandbox.RC.assistant.onHistoryEvent({ turn_id: "vu-old.u", role: "user", stream: "delta", content: "old draft" });
+  harness.sandbox._modeEpoch += 1;
+  harness.sandbox.RC.assistant.onDrawerTabChanged("asst", true);
+  harness.clock.tick(80); await flushPromises();
+  assert.deepEqual(harness.thread.children.map(n => n.innerHTML), ["new scope"]);
+});
+
 test("normal, review and EPUB reloads retain their existing authoritative scopes", () => {
   assert.match(ASSISTANT, /return _modeNorm\(mode \|\| _assistantMode\) === 'review'[\s\S]*'\/api\/assistant\/history\?assistant_mode=review'[\s\S]*_NORMAL_HISTURL/);
   assert.match(PDF_ADAPTER, /historyUrl: \(\) => '\/api\/assistant\/history'/);

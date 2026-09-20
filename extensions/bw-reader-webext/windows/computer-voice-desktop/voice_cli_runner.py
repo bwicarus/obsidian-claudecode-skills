@@ -946,6 +946,7 @@ class Runner:
         self._last_backend_turn_id = None     # 上一条后台轮 id：轮外那句收尾语音认领用
         self._user_asks: list = []            # 最近几次用户发言 (时刻, 原话, 当时的委派序号)
         self._voice_user_stream = ""   # 用户说话的实时转写（见 transcript/delta）
+        self._voice_user_turn_id: str | None = None  # 用户字幕身份不受助手完成/插话影响
         self._stream_role: dict[str, str] = {}   # 每轮草稿的角色（user / assistant）
         self._voice_stream = ""
         # 这段话的流正在往哪个容器投。⚠ 必须记住 —— 委派常发生在语音**还在说**的中途，
@@ -1082,11 +1083,11 @@ class Runner:
                 # ⚠ 推到 <tid>.u（用户句的轮次 id，与落库同一个），带 role=user，
                 #   否则会被当成助手正文渲进卡里。
                 if p.get("role") == "user" and p.get("delta"):
-                    if self._voice_turn_id is None:
-                        self._voice_turn_id = "v-" + str(int(time.time() * 1000))[-12:]
+                    if self._voice_user_turn_id is None:
+                        self._voice_user_turn_id = "vu-" + str(time.time_ns()) + ".u"
                     self._voice_user_stream += str(p.get("delta"))
                     try:
-                        self._stream_post(self._voice_turn_id + ".u",
+                        self._stream_post(self._voice_user_turn_id,
                                           self._voice_user_stream, role="user")
                     except Exception:
                         pass
@@ -3565,22 +3566,26 @@ class Runner:
         return self._subtitle_mode() and self.session_state == "connected"
 
     def _subtitle_done(self, role, text):
-        """字幕模式：一条 transcript/done 就是一条聊天记录。用户句 <id>.u，回复 <id>，同一轮共用 id
-        （id 在数据通道 turn.created 时分配；回复落库后归零，下一轮再分配）。"""
+        """字幕模式：一条 transcript/done 完成一条字幕记录。
+        用户句独立使用 vu-<id>.u，草稿和定稿共用身份，不复用助手轮次。
+        """
         text = str(text or "").strip()
         if not text:
             return
         if role == "user":
-            tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
-            self._voice_turn_id = tid
+            # transcript/done 完成的是一个字幕段，并不保证助手已经回答。
+            # 用户连续补充两句/打断助手时，复用助手轮次会覆盖前一句历史；
+            # 助手 done 又可能在用户说到一半时清空该轮次，导致草稿与定稿错位。
+            tid = self._voice_user_turn_id or ("vu-" + str(time.time_ns()) + ".u")
+            self._voice_user_turn_id = None
             # 先推草稿、再落库（与助手侧同一条顺序）：落库会触发侧栏权威重载，
             # 草稿必须赶在它前面，否则会在重载后又叠一份 —— 同一句出现两次。
             self._voice_user_stream = ""
             try:
-                self._stream_post(tid + ".u", text, role="user")
+                self._stream_post(tid, text, role="user")
             except Exception:
                 pass
-            self._history_post({"user": text, "via": "voice", "turn_id": tid + ".u"})
+            self._history_post({"user": text, "via": "voice", "turn_id": tid})
         elif role == "assistant":
             tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
             self._voice_turn_id = None
@@ -3721,6 +3726,8 @@ class Runner:
                     if wait > 0:
                         time.sleep(wait)
                     self._stream_queued.discard(payload)
+                    if payload not in self._stream_latest:
+                        continue  # 已经落库的迟到队列项不得再发送空草稿覆盖定稿
                     text = self._stream_latest.get(payload, "")
                     self._history_request("/api/assistant/stream", {"turn_id": payload, "content": text[:8000],
                                                                    "role": self._stream_role.get(payload, "assistant")})
@@ -3728,6 +3735,7 @@ class Runner:
                     self.history_stats["streamed"] += 1
                 else:
                     self._stream_latest.pop(str(payload.get("turn_id") or ""), None)
+                    self._stream_role.pop(str(payload.get("turn_id") or ""), None)
                     r = self._history_request("/api/assistant/log", payload)
                     self.history_stats["written"] += 1
                     via, tid, n, up = payload.get("via"), payload.get("turn_id"), r.get("n"), r.get("upserted")

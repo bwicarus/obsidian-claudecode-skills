@@ -24,6 +24,76 @@ BACKEND = "01a0b4e0-36cc-7410-9169-061a180c3c10"
 VOICE = "v-789740998692"
 
 
+class UserTranscriptIdentityTest(unittest.TestCase):
+    def _runner(self):
+        from collections import deque
+        r = object.__new__(vcr.Runner)
+        r.settings = {"historyMode": "subtitle"}
+        r.transcripts = deque()
+        r._voice_user_stream = ""
+        r._voice_user_turn_id = None
+        r._voice_turn_id = VOICE
+        r._turn = None
+        r._last_backend_turn_id = None
+        r._backend_done_at = 0
+        r.posted, r.streamed = [], []
+        r._history_post = lambda body: r.posted.append(body)
+        r._stream_post = lambda tid, text, role="assistant": r.streamed.append((tid, text, role))
+        r.log = lambda *args, **kwargs: None
+        r._promise_watch = lambda *args: None
+        return r
+
+    def _delta(self, r, text):
+        asyncio.run(r.on_notification("thread/realtime/transcript/delta", {"role": "user", "delta": text}))
+
+    def test_two_user_segments_before_reply_have_distinct_history_ids(self):
+        r = self._runner()
+        self._delta(r, "第一")
+        first = r.streamed[-1][0]
+        r._subtitle_done("user", "第一句完整内容")
+        self._delta(r, "第二")
+        second = r.streamed[-1][0]
+        r._subtitle_done("user", "第二句补充")
+        self.assertNotEqual(first, second)
+        self.assertEqual([p["turn_id"] for p in r.posted], [first, second])
+        self.assertEqual([p["user"] for p in r.posted], ["第一句完整内容", "第二句补充"])
+
+    def test_assistant_final_during_user_speech_cannot_change_user_identity(self):
+        r = self._runner()
+        self._delta(r, "我正在说")
+        original = r.streamed[-1][0]
+        r._subtitle_done("assistant", "助手此时才说完")
+        self._delta(r, "的话")
+        self.assertEqual(r.streamed[-1], (original, "我正在说的话", "user"))
+        r._subtitle_done("user", "我正在说的话。")
+        self.assertEqual(r.posted[-1]["turn_id"], original)
+
+    def test_final_without_delta_does_not_overwrite_previous_user_message(self):
+        r = self._runner()
+        r._subtitle_done("user", "没有逐字事件的第一句")
+        r._subtitle_done("user", "没有逐字事件的第二句")
+        self.assertNotEqual(r.posted[0]["turn_id"], r.posted[1]["turn_id"])
+        self.assertTrue(all(p["turn_id"].endswith(".u") for p in r.posted))
+
+    def test_queued_partial_after_final_cannot_publish_empty_draft(self):
+        from types import SimpleNamespace
+        r = self._runner()
+        identifier = "vu-queue.u"
+        queued = iter([("log", {"user": "完整", "turn_id": identifier}), ("stream", identifier)])
+        r._history_q = SimpleNamespace(get=lambda: next(queued))
+        r._stream_latest = {identifier: "完整"}
+        r._stream_role = {identifier: "user"}
+        r._stream_queued = {identifier}
+        r.history_stats = {"written": 0, "streamed": 0, "errors": 0}
+        r.loop = SimpleNamespace(call_soon_threadsafe=lambda fn: fn())
+        requests = []
+        r._history_request = lambda path, body: requests.append((path, body)) or {}
+        with self.assertRaises(StopIteration):
+            r._history_worker()
+        self.assertEqual([path for path, _ in requests], ["/api/assistant/log"])
+        self.assertEqual(r._stream_role, {})
+
+
 class StreamOwnerTest(unittest.TestCase):
     """改投是单向的：v- → 后台轮可以，后台轮 → v- 绝对不行。"""
 
