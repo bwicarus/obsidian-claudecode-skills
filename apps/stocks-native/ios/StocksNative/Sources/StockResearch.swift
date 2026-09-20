@@ -42,6 +42,11 @@ struct PlanAdoption: Codable, Identifiable {
         case "partial", "incomplete": return "部分启用"
         case "missing", "deleted", "removed": return "规则已移除"
         case "resting", "market_closed": return "休市待监控"
+        case "stale": return "行情待更新"
+        case "data_unavailable": return "等待行情"
+        case "confirming": return "确认信号中"
+        case "cooldown": return "冷却中"
+        case "waiting": return "等待信号"
         default: return enabledCount > 0 ? "盯盘中 · \(enabledCount)" : "未运行"
         }
     }
@@ -494,7 +499,9 @@ struct StockResearchHistoryView: View {
         do {
             let result = try await model.client.legacySignals(code: code)
             guard scope == model.planScopeID, code == model.selectedCode, !Task.isCancelled else { return }
-            legacy = result.items; legacyError = result.warnings.first
+            legacy = result.items
+            legacyError = result.warnings.contains { $0 != "legacy_history_not_active_monitoring" }
+                ? "部分旧版资料暂时不可用，已显示可读取的记录。" : nil
         } catch { if scope == model.planScopeID, code == model.selectedCode { legacyError = error.localizedDescription } }
     }
 }

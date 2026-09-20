@@ -92,7 +92,9 @@ struct StockNewsView: View {
             let value = try await model.client.news(category: kind, code: kind == "stock" ? code : nil,
                                                    sector: kind == "sector" ? query : nil, refresh: refresh)
             guard ticket == requestID, scope == identity, !Task.isCancelled else { return }
-            response = value; error = value.warnings.first
+            response = value
+            error = value.warnings.isEmpty ? nil : (value.status == "unavailable"
+                ? "新闻来源暂时不可用，请稍后刷新。" : "部分新闻来源暂未更新，已保留可用内容及其发布时间。")
         } catch { if ticket == requestID, scope == identity, !Task.isCancelled { self.error = error.localizedDescription } }
     }
 }
