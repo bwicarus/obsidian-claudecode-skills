@@ -82,7 +82,7 @@ if (window.__bwPwaProviderOnly) return;
   function _ensureHead(t, label) {
     if (t.hd) {
       var s0 = t.hd.querySelector(':scope > span');
-      if (s0 && label) s0.textContent = label;
+      if (s0 && label) { s0.textContent = label; s0.title = label; }
       return t.hd;
     }
     // ⚠ 样式必须先在:rc-toolchip 的 mountFlow 就是这么做的(它注释写着「样式必须在,否则裸 <button> = 白块」),
@@ -90,7 +90,8 @@ if (window.__bwPwaProviderOnly) return;
     try { if (RC.voiceCard && RC.voiceCard.css) RC.voiceCard.css(); } catch (e) {}
     t.el.classList.add('vc-if');   // 复用既有结果卡外观(见 _infoCardEl)
     var hd = document.createElement('div'); hd.className = 'vc-if-hd';
-    var sp = document.createElement('span'); sp.textContent = label || '工具调用';
+    _progressCss();
+    var sp = document.createElement('span'); sp.className = 'rc-flow-title'; sp.textContent = label || '工具调用'; sp.title = sp.textContent;
     hd.appendChild(sp);
     // 141:【流程】按钮**不再自己 new** —— 调 rc-toolchip 的唯一创建点(那条路一直渲染正常;
     //   我自己拼的那个一模一样的 <button> 却是白圆块)。跑同一段代码,差异就无处藏身。
@@ -891,6 +892,7 @@ if (window.__bwPwaProviderOnly) return;
       dst._streamVersion = Math.max(dst._streamVersion || 0, t._streamVersion || 0);
       if (dst.draft) dst._liveFinal = false;
       try { if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (e) {}
+      if (t._progressResize) t._progressResize.disconnect();
       delete _turns[oldTid];
       if (_cur === oldTid) _cur = newTid;
       return true;
@@ -918,7 +920,10 @@ if (window.__bwPwaProviderOnly) return;
   function prune() {
     Object.keys(_turns).forEach(function (tid) {
       var t = _turns[tid];
-      if (!t || !t.el || !t.el.isConnected) delete _turns[tid];
+      if (!t || !t.el || !t.el.isConnected) {
+        if (t && t._progressResize) t._progressResize.disconnect();
+        delete _turns[tid];
+      }
     });
     if (_cur && !_turns[_cur]) _cur = null;
   }
@@ -1011,14 +1016,21 @@ if (window.__bwPwaProviderOnly) return;
   function _progressCss() {
     if (document.getElementById('rc-flow-dots-css')) return;
     var s = document.createElement('style'); s.id = 'rc-flow-dots-css';
-    s.textContent = '.rc-flow-dots{display:inline-flex;align-items:center;gap:0;margin:2px 8px 0 0;vertical-align:middle}' +
+    s.textContent = '.rc-turn>.vc-if-hd{min-width:0;overflow:hidden}' +
+      '.rc-turn>.vc-if-hd>.rc-flow-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.rc-turn>.vc-if-hd>.rc-flow-dots-host{flex:0 1 50%;min-width:0;max-width:50%;overflow:hidden;line-height:18px}' +
+      '.rc-flow-progress{display:block;max-width:100%;overflow:hidden;white-space:nowrap}' +
+      '.rc-flow-dots{display:inline-flex;align-items:center;gap:0;vertical-align:middle}' +
       '.rc-flow-dots i{width:10px;height:10px;border-radius:50%;background:#3a4256;border:1.5px solid #4c5670;box-sizing:border-box;flex:none}' +
       '.rc-flow-dots i.run{background:#3b6fd4;border-color:#6fa1ff;animation:rcFlowPulse 1s ease-in-out infinite}' +
       '.rc-flow-dots i.done{background:#7ee787;border-color:#7ee787}' +
       '.rc-flow-dots i.err{background:#f85149;border-color:#f85149}' +
       '.rc-flow-dots b{width:14px;height:2px;background:#4c5670;flex:none}' +
       '.rc-flow-dots b.done{background:#7ee787}' +
-      '.rc-flow-dots em{font-style:normal;font-size:11px;color:#9aa4b8;margin-left:6px;white-space:nowrap}' +
+      '.rc-flow-counts{display:none;align-items:center;flex-wrap:wrap;gap:2px 8px;font-size:11px;line-height:18px;font-variant-numeric:tabular-nums}' +
+      '.rc-flow-counts small{font-size:inherit;font-weight:600;white-space:nowrap;color:#9aa4b8}' +
+      '.rc-flow-counts .done{color:#7ee787}.rc-flow-counts .err{color:#f85149}.rc-flow-counts .run{color:#6fa1ff}' +
+      '.rc-flow-progress.is-counted .rc-flow-dots{display:none}.rc-flow-progress.is-counted .rc-flow-counts{display:flex}' +
       '@keyframes rcFlowPulse{0%,100%{opacity:1}50%{opacity:.45}}';
     (document.head || document.documentElement).appendChild(s);
   }
@@ -1032,7 +1044,6 @@ if (window.__bwPwaProviderOnly) return;
       if (pr.total !== evt.total) { pr.total = evt.total; pr.states = new Array(evt.total); }
       var i = Math.max(0, Math.min(evt.total, evt.step || 1) - 1);
       pr.states[i] = evt.status === 'done' ? 'done' : (evt.status === 'error' ? 'err' : 'run');
-      for (var k = 0; k < i; k++) if (!pr.states[k]) pr.states[k] = 'done';   // 报到第 i 步 = 前面都过了
     } else if (evt.status === 'running') {
       pr.states.push('run');
     } else if (pr.states.length) {
@@ -1044,25 +1055,46 @@ if (window.__bwPwaProviderOnly) return;
     _paintProgress(t);
     return pr;
   }
-  function progressHtml(tid) {
+  function progressHtml(tid, availableWidth) {
     var t = _turns[tid]; if (!t || !t.prog || !t.prog.states.length) return '';
-    var pr = t.prog, n = pr.total || pr.states.length, out = '<span class="rc-flow-dots">';
+    var pr = t.prog, n = pr.total || pr.states.length;
+    var counts = { done: 0, err: 0, run: 0, pending: 0 };
+    for (var j = 0; j < n; j++) counts[pr.states[j] || 'pending']++;
+    var summary = '成功 ' + counts.done + '，失败 ' + counts.err + '，运行中 ' + counts.run + '，待处理 ' + counts.pending;
+    var width = 24 * n - 14;
+    // A bounded default also protects the floating subtitle, which reuses this HTML.
+    var counted = width > (availableWidth > 0 ? availableWidth : 130);
+    var out = '<span class="rc-flow-progress' + (counted ? ' is-counted' : '') + '" data-points-width="' + width + '" role="img" aria-label="' + summary + '" title="' + summary + '"><span class="rc-flow-dots" aria-hidden="true">';
     for (var i = 0; i < n; i++) {
       var st = pr.states[i] || '';
-      if (i) out += '<b class="' + (st ? 'done' : '') + '"></b>';
+      if (i) out += '<b class="' + (pr.states[i - 1] === 'done' ? 'done' : '') + '"></b>';
       out += '<i class="' + st + '"></i>';
     }
-    var done = 0; for (var j = 0; j < pr.states.length; j++) if (pr.states[j] === 'done') done++;
-    out += '<em>' + (pr.total ? (done + '/' + pr.total) : String(pr.states.length)) + (pr.label ? ' · ' + pr.label.replace(/[<>&]/g, '') : '') + '</em></span>';
+    out += '</span><span class="rc-flow-counts" aria-hidden="true"><small class="done">✓ ' + counts.done + '</small><small class="err">! ' + counts.err + '</small>';
+    if (counts.run) out += '<small class="run">◌ ' + counts.run + '</small>';
+    if (counts.pending) out += '<small>· ' + counts.pending + '</small>';
+    out += '</span></span>';
     return out;
+  }
+  function _fitProgress(el) {
+    var row = el && el.firstElementChild; if (!row) return;
+    var available = el.clientWidth;
+    row.classList.toggle('is-counted', Number(row.getAttribute('data-points-width')) > (available > 0 ? available : 130));
   }
   function _paintProgress(t) {
     try {
       _ensureHead(t, t.prog && t.prog.skill ? t.prog.skill : undefined);
       var host = t.hd; if (!host) return;
       var el = host.querySelector(':scope > .rc-flow-dots-host');
-      if (!el) { el = document.createElement('span'); el.className = 'rc-flow-dots-host'; host.insertBefore(el, host.querySelector('button')); }
-      el.innerHTML = progressHtml(t.tid);
+      if (!el) {
+        el = document.createElement('span'); el.className = 'rc-flow-dots-host'; host.insertBefore(el, host.querySelector('button'));
+        if (typeof ResizeObserver !== 'undefined') {
+          t._progressResize = new ResizeObserver(function (entries) { entries.forEach(function (entry) { _fitProgress(entry.target); }); });
+          t._progressResize.observe(el);
+        }
+      }
+      el.innerHTML = progressHtml(t.tid, el.clientWidth);
+      _fitProgress(el);
     } catch (e) {}
   }
 
@@ -1079,6 +1111,7 @@ if (window.__bwPwaProviderOnly) return;
     var t = tid && _turns[tid];
     if (!t) return false;
     try { if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (_) {}
+    if (t._progressResize) t._progressResize.disconnect();
     delete _turns[tid];
     return true;
   }

@@ -142,3 +142,30 @@ test("还在流的草稿不进 partsOf（半截话不得落库）", () => {
   tc.freezeDraft("t1");
   assert.deepEqual(Array.from(tc.partsOf("t1").map((p) => p.kind)), ["text"]);
 });
+
+test("步骤超出可用宽度后显示真实状态计数，仍保留完整工具详情", () => {
+  const { tc } = loadTurnCard();
+  tc.open("many");
+  for (let i = 0; i < 14; i++) {
+    tc.addPart("many", { kind: "tool", tool: "reader_card", args: { index: i }, result: "card" + i });
+    tc.progress("many", { status: "running" });
+    if (i < 13) tc.progress("many", { status: i === 4 ? "error" : "done" });
+  }
+  const narrow = tc.progressHtml("many", 120);
+  assert.match(narrow, /rc-flow-progress is-counted/);
+  assert.match(narrow, /aria-label="成功 12，失败 1，运行中 1，待处理 0"/);
+  assert.match(narrow, /class="done">✓ 12/);
+  assert.match(narrow, /class="err">! 1/);
+  assert.match(narrow, /class="run">◌ 1/);
+  assert.equal(tc.partsOf("many").length, 14);
+  assert.doesNotMatch(tc.progressHtml("many", 360), /rc-flow-progress is-counted/);
+});
+
+test("有总步骤数时，尚未收到完成事件的步骤不能计为成功", () => {
+  const { tc } = loadTurnCard();
+  tc.open("scheduled");
+  tc.progress("scheduled", { total: 14, step: 4, status: "running" });
+  assert.match(tc.progressHtml("scheduled"), /成功 0，失败 0，运行中 1，待处理 13/);
+  tc.progress("scheduled", { total: 14, step: 4, status: "error" });
+  assert.match(tc.progressHtml("scheduled"), /成功 0，失败 1，运行中 0，待处理 13/);
+});
