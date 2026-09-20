@@ -1,38 +1,22 @@
 import SwiftUI
 
-/// The chart shares the remaining card height; range controls stay at its bottom.
-struct ChartCardViewport<Content: View, Navigator: View>: View {
+/// The shared header owns time navigation; each card uses its full content area.
+struct ChartCardViewport<Content: View>: View {
     @Environment(\.workspaceCardHeight) private var availableHeight
     private let content: (CGFloat) -> Content
-    private let navigator: Navigator
 
-    init(@ViewBuilder content: @escaping (CGFloat) -> Content, @ViewBuilder navigator: () -> Navigator) {
-        self.content = content
-        self.navigator = navigator()
-    }
+    init(@ViewBuilder content: @escaping (CGFloat) -> Content) { self.content = content }
 
     var body: some View {
         Group {
             if availableHeight > 0 {
-                VStack(spacing: 0) {
-                    GeometryReader { geometry in
-                        content(max(0, geometry.size.height - 24))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                            .padding(.horizontal, 18).padding(.vertical, 12)
-                    }
-                    Divider()
-                    navigator
-                        .padding(.horizontal, 18).padding(.top, 6).padding(.bottom, 12)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .layoutPriority(1)
-                }
-                .frame(height: availableHeight, alignment: .top)
+                GeometryReader { geometry in
+                    content(max(0, geometry.size.height - 24))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.horizontal, 18).padding(.vertical, 12)
+                }.frame(height: availableHeight)
             } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    content(0)
-                    navigator
-                }
-                .padding(18)
+                content(0).padding(18)
             }
         }
         .background(.white, in: RoundedRectangle(cornerRadius: 22))
@@ -53,6 +37,7 @@ struct ChartRangeNavigator: View {
     let values: [Double?]
     @Binding var selection: Range<Int>
     let minimumCount: Int
+    let compact: Bool
     let onEditingChanged: (Bool) -> Void
 
     @State private var dragOrigin: Range<Int>?
@@ -61,13 +46,15 @@ struct ChartRangeNavigator: View {
     @Namespace private var navigatorCoordinateSpace
 
     private let touchSize: CGFloat = 44
-    private let trackHeight: CGFloat = 36
+    private var trackHeight: CGFloat { compact ? 24 : 36 }
+    private var controlHeight: CGFloat { compact ? 44 : 60 }
 
-    init(values: [Double?], selection: Binding<Range<Int>>, minimumCount: Int,
+    init(values: [Double?], selection: Binding<Range<Int>>, minimumCount: Int, compact: Bool = false,
          onEditingChanged: @escaping (Bool) -> Void = { _ in }) {
         self.values = values
         self._selection = selection
         self.minimumCount = minimumCount
+        self.compact = compact
         self.onEditingChanged = onEditingChanged
     }
 
@@ -91,7 +78,7 @@ struct ChartRangeNavigator: View {
                         Rectangle().fill(AppStyle.canvas.opacity(0.75)).frame(width: width - upperX)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .offset(x: touchSize / 2, y: (60 - trackHeight) / 2)
+                    .offset(x: touchSize / 2, y: (controlHeight - trackHeight) / 2)
                     .accessibilityHidden(true)
 
                 RoundedRectangle(cornerRadius: 6)
@@ -100,7 +87,7 @@ struct ChartRangeNavigator: View {
                         RoundedRectangle(cornerRadius: 6).stroke(AppStyle.accent.opacity(0.8), lineWidth: 1.5)
                     }
                     .frame(width: selectedWidth, height: trackHeight)
-                    .offset(x: touchSize / 2 + lowerX, y: (60 - trackHeight) / 2)
+                    .offset(x: touchSize / 2 + lowerX, y: (controlHeight - trackHeight) / 2)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
 
@@ -109,7 +96,7 @@ struct ChartRangeNavigator: View {
                 Rectangle().fill(Color.clear)
                     .frame(width: max(0, selectedWidth - touchSize), height: touchSize)
                     .contentShape(Rectangle())
-                    .position(x: touchSize / 2 + (lowerX + upperX) / 2, y: 30)
+                    .position(x: touchSize / 2 + (lowerX + upperX) / 2, y: controlHeight / 2)
                     .simultaneousGesture(dragGesture(for: .window, width: width, minimum: minimum))
                     .accessibilityElement()
                     .accessibilityLabel("平移时间范围")
@@ -121,9 +108,9 @@ struct ChartRangeNavigator: View {
                     .accessibilityHidden(values.isEmpty)
 
                 handle(.lower, range: range, width: width, minimum: minimum)
-                    .position(x: touchSize / 2 + lowerX, y: 30)
+                    .position(x: touchSize / 2 + lowerX, y: controlHeight / 2)
                 handle(.upper, range: range, width: width, minimum: minimum)
-                    .position(x: touchSize / 2 + upperX, y: 30)
+                    .position(x: touchSize / 2 + upperX, y: controlHeight / 2)
             }
             .coordinateSpace(name: navigatorCoordinateSpace)
             .onAppear { normalize(width: width) }
@@ -133,7 +120,7 @@ struct ChartRangeNavigator: View {
             .onChange(of: selection) { _, _ in normalize(width: width) }
         }
         .frame(minWidth: 132, maxWidth: .infinity)
-        .frame(height: 60)
+        .frame(height: controlHeight)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("图表时间范围")
         .onDisappear { finishDrag() }
@@ -189,7 +176,7 @@ struct ChartRangeNavigator: View {
             Rectangle().fill(Color.clear)
             RoundedRectangle(cornerRadius: 4)
                 .fill(AppStyle.accent)
-                .frame(width: 10, height: 28)
+                .frame(width: 10, height: compact ? 22 : 28)
                 .overlay {
                     Capsule().fill(.white.opacity(0.9)).frame(width: 2, height: 13)
                 }

@@ -377,6 +377,7 @@ struct VoiceViewState: Codable, Hashable {
     var navigationSection: String?
     var selectionSummary: String?
     var selectionEditorPresented = false
+    var inkScopeID: String?
 }
 
 struct VoiceChartViewport: Codable, Hashable {

@@ -324,6 +324,25 @@ async def chips(request):
     return web.json_response(result)
 
 
+async def voice_ink(request):
+    device_id = request.headers.get('X-Device-ID')
+    if not device_id:
+        raise AuthError('Missing device')
+    caller = await identity(request, device_id)
+    if not caller['aiEnabled']:
+        raise web.HTTPForbidden()
+    if request.content_length is None or request.content_length > 340_000:
+        raise web.HTTPRequestEntityTooLarge(max_size=340_000, actual_size=request.content_length or 0)
+    payload = await request.clone(client_max_size=340_000).json()
+    active = request.app['voices'].get(device_id)
+    session = active[1] if active else None
+    if (not session or session.closed or session.selection_owner != caller['ownerId']
+            or session.session_id != request.headers.get('X-Voice-Session')):
+        return web.json_response({'error': '通话已结束，笔迹保留在本机'}, status=409)
+    result = await session.update_ink(payload)
+    return web.json_response(result)
+
+
 async def voice(request):
     device_id = request.query.get('deviceId')
     if not device_id:
@@ -497,6 +516,7 @@ def create_app():
     app['voices'] = {}
     app['chip_cache'] = {}
     app.add_routes([web.get('/api/health', health), web.post('/api/pair', pair),
+                    web.post('/api/voice/ink', voice_ink),
                     web.post('/api/auth/apple', apple_login),
                     web.get('/api/monitor/catalog', monitor_catalog),
                     web.get('/api/monitor/library', monitor_library),

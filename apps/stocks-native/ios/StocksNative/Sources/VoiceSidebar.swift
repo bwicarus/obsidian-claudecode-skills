@@ -40,6 +40,9 @@ struct VoiceSidebar: View {
                 if let code = voice.stockCode, voice.isStarted {
                     Text("当前股票 · \(code)").font(.caption).foregroundStyle(.secondary)
                 }
+                if let status = voice.inkStatus, voice.isStarted {
+                    Text(status).font(.caption2).foregroundStyle(.secondary)
+                }
                 HStack(spacing: 10) {
                     Button {
                         Task {

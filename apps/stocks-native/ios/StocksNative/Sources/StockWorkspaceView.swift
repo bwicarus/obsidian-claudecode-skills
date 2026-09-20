@@ -22,6 +22,7 @@ struct StockWorkspaceView: View {
         VStack(spacing: 0) {
             if let page, !page.visibleCards.isEmpty {
                 NativeWorkspaceCanvas(page: page, isEditing: !layoutLocked,
+                                      inkContext: model.workspaceInkContext, onInkSnapshot: model.receiveWorkspaceInk,
                                       content: canvasCard, minimumContentSize: minimumContentSize, onCommit: saveCards)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -102,10 +103,10 @@ struct StockWorkspaceView: View {
             MarketChartSection(model: model, stockCode: stock.code, mode: .intraday)
         case .macd:
             TechnicalCard(panel: detail.technical, candles: model.displayedKlineCandles,
-                          visibleContext: model.chartSnapshotForKline, period: model.klinePeriod)
+                          visibleContext: model.linkedKlineContext, period: model.klinePeriod)
         case .kdj:
             KDJCard(panel: detail.technical, candles: model.displayedKlineCandles,
-                    visibleContext: model.chartSnapshotForKline, period: model.klinePeriod)
+                    visibleContext: model.linkedKlineContext, period: model.klinePeriod)
         case .fund:
             if let fund = detail.fund { FundCard(panel: fund) }
             else { unavailableCard(kind) }
@@ -164,13 +165,13 @@ struct StockWorkspaceView: View {
         switch card.kind {
         case .chart:
             minimumWidth = 320
-            minimumHeight = model.chartPeriod == .intraday ? 440 : (width < 420 ? 580 : 560)
+            minimumHeight = model.chartPeriod == .intraday ? 315 : (width < 420 ? 425 : 405)
         case .kline:
-            minimumWidth = 320; minimumHeight = width < 420 ? 580 : 560
+            minimumWidth = 320; minimumHeight = width < 420 ? 425 : 405
         case .intraday:
-            minimumWidth = 320; minimumHeight = 440
+            minimumWidth = 320; minimumHeight = 315
         case .klineChips:
-            minimumWidth = 500; minimumHeight = 660
+            minimumWidth = 500; minimumHeight = 505
         case .macd, .kdj:
             minimumWidth = 300; minimumHeight = 240
         case .fund:

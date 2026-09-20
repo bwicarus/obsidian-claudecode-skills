@@ -373,91 +373,55 @@ struct MonitoringBanner: View {
 }
 
 struct MonitoringStockRow: View {
-    @ScaledMetric(relativeTo: .caption2) private var monitorControlHeight: CGFloat = 20
-    let code: String
-    let name: String
-    let sector: String?
-    let price: Double?
-    let changePct: Double?
-    let volumeRatio: Double?
-    let turnoverRate: Double?
-    let turnover: Double?
-    let marketCap: Double?
-    var score: Double? = nil
+    let record: StockTableRecord
+    let columns: [StockTableColumn]
+    @ObservedObject var selection: StockSelectionModel
     let summary: MonitoringSummary?
     var isSelected: Bool? = nil
     let onOpen: () -> Void
     let onMonitoring: () -> Void
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                Button(action: onOpen) {
-                    HStack(spacing: 10) {
-                        selectionMark
-                        identity.frame(width: 148, alignment: .leading)
-                        compactMetric("现价", AppStyle.price(price))
-                        compactMetric("涨跌", AppStyle.change(changePct), color: AppStyle.movement(changePct))
-                        compactMetric("量比", volumeRatio.map { String(format: "%.2f", $0) } ?? "—")
-                        compactMetric("换手", AppStyle.percent(turnoverRate))
-                        compactMetric("成交额", AppStyle.compact(turnover))
-                        compactMetric("市值", AppStyle.compact(marketCap))
-                    }.contentShape(Rectangle())
-                }.buttonStyle(.plain)
-                Spacer(minLength: 0)
-                monitorBadge
-            }.fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: 2) {
-                Button(action: onOpen) {
-                    HStack(spacing: 8) {
-                        selectionMark
-                        Text(name).font(.subheadline.weight(.medium)).foregroundStyle(AppStyle.ink).lineLimit(1)
-                        Spacer(minLength: 4)
-                        HStack(alignment: .firstTextBaseline, spacing: 7) {
-                            Text(AppStyle.price(price)).font(.subheadline.weight(.semibold))
-                            Text(AppStyle.change(changePct)).font(.caption).foregroundStyle(AppStyle.movement(changePct))
-                        }.monospacedDigit().fixedSize()
-                    }.contentShape(Rectangle())
-                }.buttonStyle(.plain)
-                HStack(spacing: 6) {
-                    Button(action: onOpen) {
-                        stockMetadata
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }.buttonStyle(.plain)
-                    monitorBadge
+        HStack(spacing: 0) {
+            StockFavoriteButton(model: selection, code: record.code, name: record.name)
+                .frame(width: 32, height: 38)
+            ForEach(columns) { column in
+                Group {
+                    if column == .monitoring {
+                        monitorBadge
+                    } else {
+                        Button(action: onOpen) {
+                            cell(column)
+                                .frame(maxWidth: .infinity, minHeight: 40, alignment: column.alignment)
+                                .contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                    }
                 }
-                SelectionBubbleFlow(spacing: 6) {
-                    compactMetric("量比", volumeRatio.map { String(format: "%.2f", $0) } ?? "—")
-                    compactMetric("换手", AppStyle.percent(turnoverRate))
-                    compactMetric("成交额", AppStyle.compact(turnover))
-                    compactMetric("市值", AppStyle.compact(marketCap))
+                .padding(.horizontal, 6)
+                .frame(width: column.width, alignment: column.alignment)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+    }
+
+    @ViewBuilder private func cell(_ column: StockTableColumn) -> some View {
+        if column == .identity {
+            HStack(spacing: 5) {
+                if let isSelected {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(isSelected ? AppStyle.accent : .secondary)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(record.name).font(.subheadline.weight(.medium)).foregroundStyle(AppStyle.ink).lineLimit(1)
+                    Text(record.code).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                 }
             }
-        }.padding(.vertical, 1)
-    }
-
-    @ViewBuilder private var selectionMark: some View {
-        if let isSelected {
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(isSelected ? AppStyle.accent : .secondary)
+        } else {
+            Text(record.text(column)).font(.caption).monospacedDigit().lineLimit(1)
+                .foregroundStyle(column == .changePct ? AppStyle.movement(record.values[.changePct]) : AppStyle.ink)
+                .accessibilityLabel("\(column.title)，\(record.text(column))")
         }
-    }
-
-    private var identity: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(name).font(.subheadline.weight(.medium)).foregroundStyle(AppStyle.ink).lineLimit(1)
-            stockMetadata
-        }
-    }
-
-    private var stockMetadata: some View {
-        HStack(spacing: 5) {
-            Text(code).monospacedDigit().fixedSize()
-            if let score { Text("评 \(score.formatted(.number.precision(.fractionLength(0...1))))").fixedSize() }
-            if let sector, !sector.isEmpty { Text(sector).lineLimit(1) }
-        }
-        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
     }
 
     private var monitorBadge: some View {
@@ -466,21 +430,12 @@ struct MonitoringStockRow: View {
                 Image(systemName: (summary?.unreadCount ?? 0) > 0 ? "bell.badge.fill" : "waveform.path.ecg")
                 Text(summary?.title ?? "盯盘")
             }
-                .font(.caption2.weight(.medium))
-                .foregroundStyle((summary?.unreadCount ?? 0) > 0 ? AppStyle.up : AppStyle.accent)
-                .lineLimit(1)
-                .padding(.horizontal, 5)
-                .frame(height: monitorControlHeight)
-                .background(AppStyle.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 5))
-                .contentShape(Rectangle())
-                .fixedSize(horizontal: true, vertical: true)
-        }.buttonStyle(.plain).accessibilityLabel("\(name) \(summary?.title ?? "创建盯盘规则")")
-    }
-
-    private func compactMetric(_ title: String, _ value: String, color: Color = AppStyle.ink) -> some View {
-        HStack(spacing: 3) {
-            Text(title).foregroundStyle(.secondary)
-            Text(value).monospacedDigit().foregroundStyle(color)
-        }.font(.caption2)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle((summary?.unreadCount ?? 0) > 0 ? AppStyle.up : AppStyle.accent)
+            .lineLimit(1).padding(.horizontal, 5).padding(.vertical, 3)
+            .background(AppStyle.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 5))
+            .frame(maxWidth: .infinity, minHeight: 36)
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityLabel("\(record.name) \(summary?.title ?? "创建盯盘规则")")
     }
 }

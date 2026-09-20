@@ -68,8 +68,9 @@ enum NativeChartIndicators {
     }
 
     static func visible(_ points: [NativeIndicatorPoint], context: VoiceChartContext?) -> [NativeIndicatorPoint] {
-        guard let context, context.kind == "candles", let first = context.firstVisibleTime,
-              let last = context.lastVisibleTime else { return Array(points.suffix(60)) }
+        guard let context, context.kind == "candles" else { return Array(points.suffix(60)) }
+        guard context.visiblePointCount > 0, let first = context.firstVisibleTime,
+              let last = context.lastVisibleTime else { return [] }
         return points.filter { $0.time >= first && $0.time <= last }
     }
 

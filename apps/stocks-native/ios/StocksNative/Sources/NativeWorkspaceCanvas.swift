@@ -5,6 +5,8 @@ import UIKit
 struct NativeWorkspaceCanvas: UIViewControllerRepresentable {
     let page: WorkspacePage
     var isEditing = true
+    var inkContext: StockWorkspaceInkContext? = nil
+    var onInkSnapshot: ((StockWorkspaceInkSnapshot) -> Void)? = nil
     let content: (WorkspaceCard) -> AnyView
     let minimumContentSize: (WorkspaceCard, CGFloat) -> CGSize
     let onCommit: ([WorkspaceCard]) -> Void
@@ -12,13 +14,15 @@ struct NativeWorkspaceCanvas: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> NativeWorkspaceCanvasController {
         let controller = NativeWorkspaceCanvasController()
         controller.update(page: page, layoutEditing: isEditing, content: content,
-                          minimumContentSize: minimumContentSize, onCommit: onCommit)
+                          minimumContentSize: minimumContentSize, onCommit: onCommit,
+                          inkContext: inkContext, onInkSnapshot: onInkSnapshot)
         return controller
     }
 
     func updateUIViewController(_ controller: NativeWorkspaceCanvasController, context: Context) {
         controller.update(page: page, layoutEditing: isEditing, content: content,
-                          minimumContentSize: minimumContentSize, onCommit: onCommit)
+                          minimumContentSize: minimumContentSize, onCommit: onCommit,
+                          inkContext: inkContext, onInkSnapshot: onInkSnapshot)
     }
 }
 
@@ -39,6 +43,11 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     private var minimumContentSize: ((WorkspaceCard, CGFloat) -> CGSize)?
     private var constraints = WorkspaceGridConstraints.unrestricted
     private var onCommit: (([WorkspaceCard]) -> Void)?
+    private let inkSettings = StockWorkspaceInkSettings()
+    private var inkContext: StockWorkspaceInkContext?
+    private var onInkSnapshot: ((StockWorkspaceInkSnapshot) -> Void)?
+    private var changedInkCards = Set<String>()
+    private var inkSnapshotWork: DispatchWorkItem?
     private var interaction: WorkspaceCanvasInteraction?
     private var displayLink: CADisplayLink?
     private var displayLinkProxy: WorkspaceCanvasDisplayLinkProxy?
@@ -113,14 +122,29 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         finishInteraction(commit: false)
+        inkSnapshotWork?.cancel()
+        changedInkCards.removeAll()
+        hosts.values.forEach { $0.ink.save() }
     }
 
     deinit { displayLink?.invalidate() }
 
     func update(page: WorkspacePage, layoutEditing: Bool, content: @escaping (WorkspaceCard) -> AnyView,
                 minimumContentSize: @escaping (WorkspaceCard, CGFloat) -> CGSize,
-                onCommit: @escaping ([WorkspaceCard]) -> Void) {
+                onCommit: @escaping ([WorkspaceCard]) -> Void,
+                inkContext: StockWorkspaceInkContext?,
+                onInkSnapshot: ((StockWorkspaceInkSnapshot) -> Void)?) {
         let changedPage = self.page?.id != page.id
+        let changedInkIdentity = self.inkContext?.stockCode != inkContext?.stockCode
+            || self.inkContext?.scopeID != inkContext?.scopeID
+            || self.inkContext?.cardScopeIDs != inkContext?.cardScopeIDs
+        if changedPage || changedInkIdentity {
+            inkSnapshotWork?.cancel()
+            changedInkCards.removeAll()
+        }
+        if interaction != nil, changedInkIdentity { finishInteraction(commit: false) }
+        self.inkContext = inkContext
+        self.onInkSnapshot = onInkSnapshot
         if interaction != nil, changedPage || !layoutEditing { finishInteraction(commit: false) }
         self.page = page
         self.layoutEditing = layoutEditing
@@ -147,6 +171,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
         let wanted = Set(visible.map { "\(page.id):\($0.id)" })
         for key in Array(hosts.keys) where !wanted.contains(key) {
             guard let host = hosts.removeValue(forKey: key) else { continue }
+            host.ink.save()
             host.controller.willMove(toParent: nil)
             host.removeFromSuperview()
             host.controller.removeFromParent()
@@ -162,7 +187,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                 // its whole local rectangle, including cards near the screen edge.
                 controller.safeAreaRegions = []
                 addChild(controller)
-                let host = WorkspaceCardHost(controller: controller, kind: card.kind)
+                let host = WorkspaceCardHost(controller: controller, kind: card.kind, inkSettings: inkSettings)
                 host.accessibilityIdentifier = "workspace.card.\(page.id).\(card.id)"
                 canvas.addSubview(host)
                 controller.didMove(toParent: self)
@@ -174,7 +199,123 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                 host.setEditing(layoutEditing)
                 hosts[key] = host
             }
+            if let host = hosts[key] {
+                let scope = inkContext.map {
+                    "\($0.stockCode)|\(page.id)|\(card.id)|\($0.cardScopeIDs[card.id] ?? $0.scopeID)"
+                }
+                host.ink.configure(scope: scope)
+                host.ink.onChanged = { [weak self] in self?.inkChanged(card.id) }
+                host.ink.onShowSettings = { [weak self] source, point in
+                    self?.showInkSettings(source: source, point: point)
+                }
+            }
         }
+    }
+
+    private func showInkSettings(source: UIView, point: CGPoint) {
+        guard presentedViewController == nil else { return }
+        let palette = UIHostingController(rootView: StockWorkspaceInkPalette(settings: inkSettings))
+        palette.modalPresentationStyle = .popover
+        palette.preferredContentSize = CGSize(width: 310, height: 290)
+        palette.popoverPresentationController?.sourceView = source
+        palette.popoverPresentationController?.sourceRect = CGRect(x: point.x, y: point.y, width: 1, height: 1)
+        palette.popoverPresentationController?.permittedArrowDirections = [.up, .down]
+        present(palette, animated: true)
+    }
+
+    private func inkChanged(_ cardID: String) {
+        guard inkContext != nil else { return }
+        changedInkCards.insert(cardID)
+        inkSnapshotWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.captureInkSnapshot() }
+        inkSnapshotWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.62, execute: work)
+    }
+
+    private func captureInkSnapshot() {
+        guard let context = inkContext, !changedInkCards.isEmpty,
+              interaction == nil, view.window != nil else { return }
+        guard !hosts.values.contains(where: { $0.ink.isDrawing }) else {
+            let work = DispatchWorkItem { [weak self] in self?.captureInkSnapshot() }
+            inkSnapshotWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
+            return
+        }
+        let changed = changedInkCards
+        changedInkCards.removeAll()
+        let visibleRect = scrollView.convert(scrollView.bounds, to: canvas)
+        let visible = cards.filter { $0.isVisible && host(for: $0.id)?.frame.intersects(visibleRect) == true }
+        let affected = visible.filter { changed.contains($0.id) }
+        guard !affected.isEmpty else { return }
+        let inkCards = affected.filter { host(for: $0.id)?.ink.hasInk == true }
+        // An erase-to-empty event must replace the old server-side visual context.
+        if inkCards.isEmpty {
+            onInkSnapshot?(StockWorkspaceInkSnapshot(id: UUID().uuidString, stockCode: context.stockCode,
+                scopeID: context.scopeID, sourceTime: context.sourceTime, capturedAt: Date(),
+                cardIDs: affected.map(\.id), inkCardIDs: [], bounds: [:], jpegBase64: nil, cleared: true))
+            return
+        }
+        let markedBounds = inkCards.compactMap { host(for: $0.id)?.frame }.reduce(CGRect.null) { $0.union($1) }
+        let neighbors = visible.filter { !changed.contains($0.id) }.sorted {
+            func distance(_ card: WorkspaceCard) -> CGFloat {
+                guard let rect = host(for: card.id)?.frame else { return .greatestFiniteMagnitude }
+                let dx = max(0, max(markedBounds.minX - rect.maxX, rect.minX - markedBounds.maxX))
+                let dy = max(0, max(markedBounds.minY - rect.maxY, rect.minY - markedBounds.maxY))
+                return dx * dx + dy * dy
+            }
+            return distance($0) < distance($1)
+        }
+        let selected = Array((inkCards + neighbors).prefix(3))
+        let captureBounds = selected.compactMap { host(for: $0.id)?.frame.intersection(visibleRect) }
+            .reduce(CGRect.null) { $0.union($1) }
+        guard !captureBounds.isNull, captureBounds.width > 1, captureBounds.height > 1 else { return }
+        let scale = min(1, 1024 / max(captureBounds.width, captureBounds.height))
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+        let imageSize = CGSize(width: captureBounds.width * scale, height: captureBounds.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: imageSize, format: format)
+        let image = renderer.image { rendererContext in
+            UIColor.systemBackground.setFill()
+            rendererContext.fill(CGRect(origin: .zero, size: imageSize))
+            let cg = rendererContext.cgContext
+            cg.scaleBy(x: scale, y: scale)
+            cg.translateBy(x: -captureBounds.minX, y: -captureBounds.minY)
+            for card in selected {
+                guard let host = host(for: card.id) else { continue }
+                cg.saveGState()
+                cg.clip(to: host.frame.intersection(visibleRect))
+                cg.translateBy(x: host.frame.minX, y: host.frame.minY)
+                let wasHidden = host.ink.isHidden
+                host.ink.isHidden = true
+                if !host.drawHierarchy(in: host.bounds, afterScreenUpdates: false) { host.layer.render(in: cg) }
+                host.ink.isHidden = wasHidden
+                if !wasHidden { host.ink.renderInk(in: host.ink.frame) }
+                cg.restoreGState()
+            }
+        }
+        guard let jpeg = Self.boundedInkJPEG(image) else { return }
+        let bounds = Dictionary(uniqueKeysWithValues: selected.compactMap { card -> (String, StockWorkspaceInkRect)? in
+            guard let ink = host(for: card.id)?.ink, ink.hasInk else { return nil }
+            return (card.id, StockWorkspaceInkRect(ink.inkBounds))
+        })
+        onInkSnapshot?(StockWorkspaceInkSnapshot(id: UUID().uuidString, stockCode: context.stockCode,
+            scopeID: context.scopeID, sourceTime: context.sourceTime, capturedAt: Date(),
+            cardIDs: selected.map(\.id), inkCardIDs: selected.filter { host(for: $0.id)?.ink.hasInk == true }.map(\.id), bounds: bounds,
+            jpegBase64: jpeg.base64EncodedString(), cleared: false))
+    }
+
+    private static func boundedInkJPEG(_ source: UIImage) -> Data? {
+        var image = source
+        for _ in 0..<3 {
+            for quality in [0.72, 0.52, 0.34] {
+                if let data = image.jpegData(compressionQuality: quality), data.count <= 220_000 { return data }
+            }
+            let size = CGSize(width: image.size.width * 0.75, height: image.size.height * 0.75)
+            let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+            image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                image.draw(in: CGRect(origin: .zero, size: size))
+            }
+        }
+        return nil
     }
 
     private func host(for id: String) -> WorkspaceCardHost? {
@@ -592,6 +733,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             installHosts()
             layoutHosts()
         }
+        if let changedCard = changedInkCards.first { inkChanged(changedCard) }
     }
 
     private func settleHosts() {
@@ -673,10 +815,12 @@ private final class WorkspaceCardHost: UIView {
     let grip = UIView()
     let moveSurface = WorkspaceCardMoveSurface()
     let resizeGrip = UIView()
+    let ink: StockWorkspaceInkSurface
     private let gripMark = UIView()
     private let resizeMark = UIImageView(image: UIImage(systemName: "arrow.up.left.and.arrow.down.right"))
     private let contentInset: CGFloat
     private var editing = true
+    private var frozenContent: UIView?
 
     static func headerInset(for kind: WorkspaceCardKind) -> CGFloat {
         switch kind {
@@ -685,8 +829,9 @@ private final class WorkspaceCardHost: UIView {
         }
     }
 
-    init(controller: UIHostingController<AnyView>, kind: WorkspaceCardKind) {
+    init(controller: UIHostingController<AnyView>, kind: WorkspaceCardKind, inkSettings: StockWorkspaceInkSettings) {
         self.controller = controller
+        ink = StockWorkspaceInkSurface(settings: inkSettings)
         contentInset = WorkspaceCardHost.headerInset(for: kind)
         super.init(frame: .zero)
         backgroundColor = .white
@@ -709,9 +854,40 @@ private final class WorkspaceCardHost: UIView {
         resizeMark.tintColor = UIColor.secondaryLabel.withAlphaComponent(0.5)
         resizeMark.contentMode = .scaleAspectFit
         resizeGrip.addSubview(resizeMark)
+        addSubview(ink)
+        ink.onDrawingStateChanged = { [weak self] active in self?.freezeContent(active) }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func freezeContent(_ active: Bool) {
+        if active {
+            guard frozenContent == nil, controller.view.bounds.width > 1, controller.view.bounds.height > 1 else { return }
+            let frozen: UIView
+            if let snapshot = controller.view.snapshotView(afterScreenUpdates: false) {
+                frozen = snapshot
+            } else {
+                let sourceSize = controller.view.bounds.size
+                let scale = min(1, 1024 / max(sourceSize.width, sourceSize.height))
+                let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+                let size = CGSize(width: sourceSize.width * scale, height: sourceSize.height * scale)
+                let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+                    context.cgContext.scaleBy(x: scale, y: scale)
+                    controller.view.layer.render(in: context.cgContext)
+                }
+                frozen = UIImageView(image: image)
+            }
+            frozen.frame = controller.view.frame
+            frozen.isUserInteractionEnabled = false
+            insertSubview(frozen, belowSubview: ink)
+            frozenContent = frozen
+        } else {
+            frozenContent?.removeFromSuperview()
+            frozenContent = nil
+            setNeedsLayout()
+            layoutIfNeeded()
+        }
+    }
 
     func setEditing(_ editing: Bool) {
         guard editing != self.editing else { return }
@@ -729,6 +905,7 @@ private final class WorkspaceCardHost: UIView {
         let headerHeight: CGFloat = editing ? contentInset : 0
         controller.view.frame = CGRect(x: 0, y: headerHeight, width: bounds.width,
                                        height: max(1, bounds.height - headerHeight))
+        if frozenContent == nil { ink.frame = controller.view.frame }
         moveSurface.frame = bounds
         // Data cards already have top padding: the extra touch area only covers that padding.
         grip.frame = CGRect(x: max(0, (bounds.width - 120) / 2), y: 0, width: min(120, bounds.width), height: editing ? 24 : 0)

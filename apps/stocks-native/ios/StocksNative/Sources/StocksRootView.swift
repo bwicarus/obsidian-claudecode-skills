@@ -312,7 +312,7 @@ struct StocksRootView: View {
                 // Keep the mounted chart canvas and its local viewport when closing.
                 // The panel uses the entire workspace, independently of bubble height.
                 if model.selectedCode != nil {
-                    StockDetailPanel(model: model, availableSize: geometry.size,
+                    StockDetailPanel(model: model, selection: selectionModel, availableSize: geometry.size,
                                      onClose: { model.closeStockDetail() })
                         .opacity(model.detailPresented ? 1 : 0)
                         .allowsHitTesting(model.detailPresented)
@@ -362,14 +362,14 @@ struct StocksRootView: View {
                 if let error = model.listError {
                     Text(error).font(.caption).foregroundStyle(.red).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                List(model.stocks) { stock in
-                    MonitoringStockRow(code: stock.code, name: stock.name, sector: stock.sector,
-                                       price: stock.price, changePct: stock.changePct, volumeRatio: stock.volumeRatio,
-                                       turnoverRate: stock.turnoverRate, turnover: stock.turnover, marketCap: stock.marketCap,
+                StockTable(context: .market) { columns in
+                  List(model.stocks) { stock in
+                    MonitoringStockRow(record: StockTableRecord(stock), columns: columns, selection: selectionModel,
                                        summary: monitoringModel.library?.summary[stock.code],
                                        onOpen: { openStock(stock.code) }, onMonitoring: { openMonitoring(stock.code) })
                     .listRowBackground(model.detailPresented && model.selectedCode == stock.code ? AppStyle.accent.opacity(0.08) : Color.clear)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                    .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+                    .alignmentGuide(.listRowSeparatorLeading) { _ in 12 }
                     .contextMenu {
                         Button("打开股票") { model.openStock(stock.code) }
                         Button("盯盘规则", systemImage: "waveform.path.ecg") { openMonitoring(stock.code) }
@@ -377,8 +377,6 @@ struct StocksRootView: View {
                             .disabled(!selectionModel.canWrite)
                     }
                 }
-                .listStyle(.plain)
-                .environment(\.defaultMinListRowHeight, 44)
                 .overlay {
                     if model.isLoadingList && model.stocks.isEmpty { ProgressView("读取行情…") }
                     else if model.stocks.isEmpty && model.listError == nil {
@@ -386,6 +384,7 @@ struct StocksRootView: View {
                     }
                 }
                 .refreshable { await model.loadStocks() }
+                }
                 .searchable(text: $model.query, prompt: "代码或名称")
                 HStack(spacing: 6) {
                     Text("数据时间").font(.caption2).foregroundStyle(.secondary)

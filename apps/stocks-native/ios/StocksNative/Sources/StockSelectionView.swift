@@ -10,12 +10,20 @@ struct StockSelectionControls: View {
     let onEdit: () -> Void
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("stocksNative.selectionExpandedCommonGroups") private var expandedCommonGroups = "[]"
+    @AppStorage("stocksNative.selectionBubblesExpanded") private var bubblesExpanded = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                Label("选股条件", systemImage: "line.3.horizontal.decrease")
-                    .font(.subheadline.weight(.semibold))
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { bubblesExpanded.toggle() }
+                } label: {
+                    Label("选股条件", systemImage: bubblesExpanded ? "chevron.down" : "chevron.right")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(bubblesExpanded ? "已展开" : "已收起")
+                .accessibilityHint("只切换条件区域的显示，不改变筛选条件")
                 if model.draft.groups.count > 1 {
                     Text("组间任一满足").font(.caption2).foregroundStyle(.secondary)
                 }
@@ -41,25 +49,27 @@ struct StockSelectionControls: View {
                 Button("编辑", systemImage: "slider.horizontal.3", action: onEdit)
                     .font(.caption).buttonStyle(.bordered).disabled(model.catalog == nil)
             }
-            if model.draft.groups.isEmpty {
-                Button("添加筛选条件", systemImage: "plus", action: onEdit)
-                    .font(.subheadline).frame(minHeight: 44)
-            } else {
-                VStack(spacing: 6) {
-                    ForEach(model.draft.groups) { group in conditionGroup(group) }
+            if bubblesExpanded {
+                if model.draft.groups.isEmpty {
+                    Button("添加筛选条件", systemImage: "plus", action: onEdit)
+                        .font(.subheadline).frame(minHeight: 44)
+                } else {
+                    VStack(spacing: 6) {
+                        ForEach(model.draft.groups) { group in conditionGroup(group) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if model.requiresPresetConfirmation {
-                Text("旧方案需在编辑中核对并保存确认。").font(.caption).foregroundStyle(.orange)
-            } else if let message = model.validationMessage {
-                Text(message).font(.caption).foregroundStyle(.red)
-            } else if model.draft.groups.contains(where: { !conditionKeys($0).isEmpty })
-                        && !model.draft.groups.contains(where: { groupIsEnabled($0) }) {
-                Text("全部气泡已关闭；点任一气泡即可恢复该条件。").font(.caption).foregroundStyle(.secondary)
-            } else if model.resultsAreCurrent {
-                Text("＋N：单独关闭此条件后，本组新增通过的股票数。")
-                    .font(.caption2).foregroundStyle(.secondary)
+                if model.requiresPresetConfirmation {
+                    Text("旧方案需在编辑中核对并保存确认。").font(.caption).foregroundStyle(.orange)
+                } else if let message = model.validationMessage {
+                    Text(message).font(.caption).foregroundStyle(.red)
+                } else if model.draft.groups.contains(where: { !conditionKeys($0).isEmpty })
+                            && !model.draft.groups.contains(where: { groupIsEnabled($0) }) {
+                    Text("全部气泡已关闭；点任一气泡即可恢复该条件。").font(.caption).foregroundStyle(.secondary)
+                } else if model.resultsAreCurrent {
+                    Text("＋N：单独关闭此条件后，本组新增通过的股票数。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -409,12 +419,14 @@ struct StockSelectionSidebar: View {
                 }
                 if let warnings = result.warnings, !warnings.isEmpty { SelectionWarnings(warnings: warnings).padding(.horizontal, 12) }
                 if choosingStocks { batchControls(result: result) }
-                List {
+                StockTable(context: section, sortKey: model.sort, descending: model.descending, sortingDisabled: activeLoading,
+                           onSort: { key in
+                    setSort(key, descending: model.sort == key ? !model.descending : key != "code")
+                }) { columns in
+                  List {
                     ForEach(result.items) { stock in
-                        MonitoringStockRow(code: stock.code, name: stock.name, sector: stock.sector,
-                                           price: stock.price, changePct: stock.changePct, volumeRatio: stock.volumeRatio,
-                                           turnoverRate: stock.turnoverRate, turnover: stock.turnover, marketCap: stock.marketCap,
-                                           score: stock.score, summary: monitoring.library?.summary[stock.code],
+                        MonitoringStockRow(record: StockTableRecord(stock), columns: columns, selection: model,
+                                           summary: monitoring.library?.summary[stock.code],
                                            isSelected: choosingStocks ? model.selectedCodes.contains(stock.code) : nil,
                                            onOpen: {
                             if choosingStocks {
@@ -423,7 +435,8 @@ struct StockSelectionSidebar: View {
                             } else { onSelectStock(stock.code) }
                         }, onMonitoring: { onMonitoring(stock.code) })
                         .listRowBackground(selectedStockCode == stock.code && !choosingStocks ? AppStyle.accent.opacity(0.08) : Color.clear)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                        .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+                        .alignmentGuide(.listRowSeparatorLeading) { _ in 12 }
                         .contextMenu {
                             Button("打开股票") { onOpenStock(stock.code) }
                             Button("盯盘规则") { onMonitoring(stock.code) }
@@ -444,13 +457,13 @@ struct StockSelectionSidebar: View {
                         }.disabled(activeLoading || (section == .screener && !model.resultsAreCurrent))
                     }
                 }
-                .listStyle(.plain)
-                .environment(\.defaultMinListRowHeight, 44)
                 .overlay { if result.items.isEmpty { ContentUnavailableView("暂无符合条件的股票", systemImage: "line.3.horizontal.decrease.circle") } }
                 .refreshable {
                     if section == .watchlist { await model.refreshVisibleGroup(force: true) }
                     else { await model.run() }
                 }
+                }
+                .id(section.rawValue)
             }
         } else if activeLoading || model.isLoading {
             ProgressView("读取股票…").frame(maxWidth: .infinity, maxHeight: .infinity)

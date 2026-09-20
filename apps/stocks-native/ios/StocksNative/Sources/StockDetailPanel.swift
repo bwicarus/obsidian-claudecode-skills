@@ -3,6 +3,7 @@ import SwiftUI
 @MainActor
 struct StockDetailPanel: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var selection: StockSelectionModel
     let availableSize: CGSize
     let onClose: () -> Void
 
@@ -26,7 +27,7 @@ struct StockDetailPanel: View {
         VStack(spacing: 0) {
             titleBar
             Divider()
-            StockDetailView(model: model)
+            StockDetailView(model: model, selection: selection)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: frame.width, height: frame.height)

@@ -192,7 +192,6 @@ struct MarketChartSection: View {
     @ObservedObject var model: AppModel
     let stockCode: String
     var mode: WorkspaceChartMode = .adaptive
-    @State private var lastCandlePeriod: ChartPeriod = .day
 
     private var isIntraday: Bool { mode == .intraday || (mode == .adaptive && model.chartPeriod == .intraday) }
     private var candlePeriod: ChartPeriod { model.klinePeriod }
@@ -200,42 +199,6 @@ struct MarketChartSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                if mode == .adaptive {
-                Picker("图表类型", selection: Binding(get: { model.chartPeriod == .intraday }, set: {
-                    model.chartPeriod = $0 ? .intraday : lastCandlePeriod
-                })) {
-                    Text("分时走势").tag(true)
-                    Text("K 线").tag(false)
-                }
-                .pickerStyle(.segmented).frame(maxWidth: 260)
-                } else {
-                    Text(isIntraday ? "分时走势" : (mode == .withChips ? "K 线与筹码峰" : "K 线走势")).font(.headline)
-                }
-                Spacer(minLength: 0)
-                if !isIntraday {
-                    Menu {
-                        ForEach(ChartPeriod.allCases.filter { $0 != .intraday }) { period in
-                            Button {
-                                lastCandlePeriod = period
-                                if mode == .adaptive { model.chartPeriod = period }
-                                else { model.klinePeriod = period }
-                            } label: {
-                                if period == candlePeriod {
-                                    Label(candleIntervalTitle(period), systemImage: "checkmark")
-                                } else { Text(candleIntervalTitle(period)) }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Text(candleIntervalTitle(candlePeriod))
-                            Image(systemName: "chevron.down").font(.caption2)
-                        }
-                        .font(.caption.weight(.medium)).padding(.vertical, 12)
-                    }
-                    .accessibilityLabel("K 线精度，\(candleIntervalTitle(candlePeriod))")
-                }
-            }
             if let error = model.chartError {
                 Label(error, systemImage: "wifi.exclamationmark")
                     .font(.caption).foregroundStyle(.red)
@@ -248,9 +211,6 @@ struct MarketChartSection: View {
                 chartContent
             }
         }
-        .onChange(of: model.chartPeriod, initial: true) { _, period in
-            if period != .intraday { lastCandlePeriod = period }
-        }
     }
 
     @ViewBuilder private var chartContent: some View {
@@ -259,7 +219,7 @@ struct MarketChartSection: View {
                 IntradayChart(data: intraday, stockCode: stockCode, annotations: model.annotations,
                               onContextChange: { snapshot in
                                   await model.updateChartContext(snapshot, sourceID: "\(mode):intraday")
-                              })
+                              }, sharedRange: model.linkedIntradayRange, contextSuppressed: model.isTimelineEditing)
                     .id(stockCode)
             } else if model.isLoadingChart {
                 chartLoading
@@ -271,27 +231,14 @@ struct MarketChartSection: View {
                         annotations: model.annotations, onContextChange: { snapshot in
                             await model.updateChartContext(snapshot, sourceID: "\(mode):kline")
                         },
-                        onRangeChange: { count in
-                            await model.publishVoiceContext(action: "调整图表可见区间：\(count) 根", kind: "chart_range")
-                        }, chipDistribution: model.chipDistribution, showsChips: mode == .withChips,
-                        externalContext: model.chartSnapshotForKline, currentPrice: model.displayedStock?.price)
+                        chipDistribution: model.chipDistribution, showsChips: mode == .withChips,
+                        externalContext: model.linkedKlineContext, sharedRange: model.linkedKlineRange,
+                        contextSuppressed: model.isTimelineEditing, currentPrice: model.displayedStock?.price)
                 .id("\(stockCode):\(candlePeriod.rawValue):\(mode)")
         } else if model.isLoadingChart {
             chartLoading
         } else {
             emptyChart("暂无这个周期的 K 线")
-        }
-    }
-
-    private func candleIntervalTitle(_ period: ChartPeriod) -> String {
-        switch period {
-        case .m5: return "每根 5 分钟"
-        case .m15: return "每根 15 分钟"
-        case .m30: return "每根 30 分钟"
-        case .m60: return "每根 60 分钟"
-        case .week: return "每根 1 周"
-        case .month: return "每根 1 月"
-        default: return "每根 1 天"
         }
     }
 
@@ -335,7 +282,9 @@ struct IntradayChart: View {
     @ObservedObject var annotations: AnnotationStore
     let onContextChange: (VoiceChartSnapshot) async -> Void
     @State private var selectedTime: String?
-    @State private var window = 0..<242
+    var sharedRange: Range<Int>? = nil
+    var contextSuppressed = false
+    private var window: Range<Int> { sharedRange ?? 0..<242 }
 
     private var points: [SessionIntradayPoint] {
         data.rows.compactMap(SessionIntradayPoint.init).sorted { $0.minute < $1.minute }
@@ -345,11 +294,6 @@ struct IntradayChart: View {
     }
     private var xDomain: ClosedRange<Double> {
         Double(window.lowerBound)...Double(max(window.lowerBound + 1, window.upperBound - 1))
-    }
-    private var overviewValues: [Double?] {
-        var values = [Double?](repeating: nil, count: 242)
-        for item in points { values[Int(item.minute)] = item.point.price }
-        return values
     }
     private var tickPositions: [Double] {
         window == 0..<242 ? [0, 120.5, 241] : [Double(window.lowerBound), Double((window.lowerBound + window.upperBound - 1) / 2), Double(window.upperBound - 1)]
@@ -408,11 +352,11 @@ struct IntradayChart: View {
     var body: some View {
         ChartCardViewport { height in
             chartContent(contentHeight: height)
-        } navigator: {
-            rangeNavigator
         }
-        .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
-        .onChange(of: data.tradeDate) { _, _ in selectedTime = nil; window = 0..<242 }
+        .task(id: contextSuppressed ? nil : voiceContextSnapshot) {
+            if !contextSuppressed { await onContextChange(voiceContextSnapshot) }
+        }
+        .onChange(of: data.tradeDate) { _, _ in selectedTime = nil }
         .onChange(of: window) { _, _ in selectedTime = nil }
         .onChange(of: visiblePoints.map(\.id)) { _, times in
             if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
@@ -547,27 +491,7 @@ struct IntradayChart: View {
         }
     }
 
-    private var rangeNavigator: some View {
-        VStack(spacing: 6) {
-            HStack {
-                Text("\(sessionTime(window.lowerBound)) — \(sessionTime(window.upperBound - 1))")
-                Spacer()
-                Button("全天") {
-                    window = 0..<242
-                    selectedTime = nil
-                    Task { await onContextChange(voiceContextSnapshot) }
-                }
-                .disabled(window == 0..<242)
-            }
-            .font(.caption).foregroundStyle(.secondary)
-            ChartRangeNavigator(values: overviewValues, selection: $window, minimumCount: 12,
-                                onEditingChanged: { editing in
-                if !editing { Task { await onContextChange(voiceContextSnapshot) } }
-            })
-            Text("两端缩放 · 中间平移")
-                .font(.caption2).foregroundStyle(.secondary)
-        }
-    }
+
 }
 
 struct StockAnalyticsSections: View {

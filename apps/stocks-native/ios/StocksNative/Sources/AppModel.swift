@@ -16,6 +16,9 @@ final class AppModel: ObservableObject {
                 voiceViewState.detailTab = "chart"
                 latestChartSnapshot = nil
                 chartSnapshotForKline = nil
+                timelineWindow = nil
+                isTimelineEditing = false
+                if timelinePrecisionOverride == nil { chartPeriod = .intraday; klinePeriod = .m5 }
                 chipDistribution = nil
                 chipRequestKey = nil
                 chipGeneration = UUID()
@@ -33,7 +36,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var kline: KLineResponse?
     @Published private(set) var chipDistribution: ChipDistributionResponse?
     @Published private(set) var chartSnapshotForKline: VoiceChartContext?
-    @Published var klinePeriod: ChartPeriod = .day {
+    @Published private(set) var timelineWindow: StockTimelineWindow?
+    @Published private(set) var timelinePrecisionOverride: ChartPeriod?
+    @Published private(set) var isTimelineEditing = false
+    private var timelineCommitTask: Task<Void, Never>?
+    @Published var klinePeriod: ChartPeriod = .m5 {
         didSet {
             if klinePeriod != oldValue {
                 if chartPeriod != .intraday && chartPeriod != klinePeriod { chartPeriod = klinePeriod }
@@ -137,6 +144,158 @@ final class AppModel: ObservableObject {
         return klinePeriod == .day ? (displayedDetail?.candles ?? []) : []
     }
 
+    private var timelineLatestDay: String {
+        if let day = displayedIntraday?.tradeDate, !day.isEmpty { return day }
+        return displayedDetail?.candles.last?.time ?? StockTimelineTime.day(Date())
+    }
+
+    var requestedTimelineWindow: StockTimelineWindow? {
+        timelineWindow ?? StockTimelineWindow(first: "\(timelineLatestDay)T09:30", last: "\(timelineLatestDay)T15:00")
+    }
+
+    var timelineTimes: [String] {
+        if chartPeriod == .intraday {
+            guard let data = displayedIntraday, !data.rows.isEmpty else { return [] }
+            return (0..<242).map { "\(data.tradeDate)T\(StockTimelineTime.sessionTime($0))" }
+        }
+        return displayedKlineCandles.map(\.time)
+    }
+
+    var timelineValues: [Double?] {
+        if chartPeriod == .intraday {
+            guard let data = displayedIntraday, !data.rows.isEmpty else { return [] }
+            var values = [Double?](repeating: nil, count: 242)
+            for point in data.rows {
+                if let slot = StockTimelineTime.sessionSlot(point.time) { values[slot] = point.price }
+            }
+            return values
+        }
+        return displayedKlineCandles.map { Optional($0.close) }
+    }
+
+    var timelineIndexRange: Range<Int> {
+        requestedTimelineWindow?.indices(in: timelineTimes) ?? 0..<0
+    }
+
+    var linkedKlineRange: Range<Int> {
+        requestedTimelineWindow?.indices(in: displayedKlineCandles.map(\.time)) ?? 0..<0
+    }
+
+    var linkedIntradayRange: Range<Int> {
+        guard let day = displayedIntraday?.tradeDate else { return 0..<0 }
+        return requestedTimelineWindow?.indices(in: (0..<242).map { StockTimelineTime.sessionTime($0) }, tradeDate: day) ?? 0..<0
+    }
+
+    var linkedKlineContext: VoiceChartContext? {
+        guard let code = selectedCode else { return nil }
+        let candles = displayedKlineCandles
+        let range = linkedKlineRange
+        let cursor: VoiceChartPoint? = chartSnapshotForKline.flatMap { context in
+            context.selectionSource == "cursor" && range.contains(where: { candles[$0].time == context.selectedPoint?.time })
+                ? context.selectedPoint : nil
+        }
+        let last = range.last.map { candles[$0] }
+        let point = cursor ?? last.map { VoiceChartPoint(time: $0.time, open: $0.open, high: $0.high,
+                                                        low: $0.low, close: $0.close, volume: $0.volume) }
+        return VoiceChartContext(stockCode: code, period: klinePeriod.rawValue, kind: "candles",
+                                 firstVisibleTime: range.first.map { candles[$0].time }, lastVisibleTime: last?.time,
+                                 visiblePointCount: range.count, selectedPoint: point,
+                                 selectionSource: cursor != nil ? "cursor" : (range.upperBound == candles.count ? "latest" : "visible_end"))
+    }
+
+    var timelineRangeLabel: String {
+        guard let window = requestedTimelineWindow else { return "等待行情" }
+        let showTime = window.calendarDays <= 1.01
+        return StockTimelineTime.label(window.lower, includesTime: showTime) + " – "
+            + StockTimelineTime.label(window.upper, includesTime: showTime)
+    }
+
+    var timelineCoverageNote: String? {
+        guard let window = requestedTimelineWindow else { return nil }
+        if chartPeriod == .intraday {
+            guard let data = displayedIntraday, let last = data.rows.last else { return "分时仅提供当前交易日，正在读取可用数据。" }
+            if linkedIntradayRange.isEmpty { return "分时仅提供 \(data.tradeDate)，所选历史区间没有分时数据。" }
+            if window.calendarDays > 1.01 { return "分时仅提供 \(data.tradeDate)，其余所选日期没有分时数据。" }
+            return last.time < "15:00" ? "\(data.tradeDate) 分时截至 \(last.time)" : nil
+        }
+        guard let first = displayedKlineCandles.first?.time, let last = displayedKlineCandles.last?.time,
+              let firstKey = StockTimelineTime.key(first), let lastKey = StockTimelineTime.key(last, endOfDay: true) else {
+            return isLoadingChart ? "正在读取所选精度的行情…" : "所选精度暂无可用行情。"
+        }
+        let tolerance: TimeInterval = klinePeriod == .month ? 32 * 86400 : (klinePeriod == .week ? 8 * 86400 : 4 * 86400)
+        let missingStart = (StockTimelineTime.date(firstKey)?.timeIntervalSince(StockTimelineTime.date(window.lower) ?? .distantFuture) ?? 0) > tolerance
+        if linkedKlineRange.isEmpty || missingStart || window.upper < firstKey || window.lower > lastKey {
+            return "当前已载入 \(first) – \(last)；所选范围未完全覆盖。"
+        }
+        return nil
+    }
+
+    func previewTimelineRange(_ range: Range<Int>) {
+        // Navigator layout normalization must never overwrite requested dates.
+        guard isTimelineEditing, let first = range.first, let last = range.last,
+              timelineTimes.indices.contains(first), timelineTimes.indices.contains(last) else { return }
+        timelineWindow = StockTimelineWindow(first: timelineTimes[first], last: timelineTimes[last])
+    }
+
+    func timelineEditingChanged(_ editing: Bool) {
+        if editing { timelineCommitTask?.cancel(); isTimelineEditing = true }
+        else if isTimelineEditing { isTimelineEditing = false; commitTimelineChange() }
+    }
+
+    func selectTimelinePrecision(_ period: ChartPeriod?) {
+        timelinePrecisionOverride = period
+        commitTimelineChange()
+    }
+
+    func selectTimelineSpan(days: Int) {
+        guard let key = StockTimelineTime.key(timelineLatestDay), let end = StockTimelineTime.date(key) else { return }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let start: String
+        if days == 1 { start = timelineLatestDay }
+        else if days == 5, let first = displayedDetail?.candles.suffix(5).first?.time { start = first }
+        else {
+            let date = calendar.date(byAdding: .day, value: -(days == 5 ? 7 : days - 1), to: end) ?? end
+            start = StockTimelineTime.day(date)
+        }
+        timelineWindow = days == 1
+            ? StockTimelineWindow(first: "\(timelineLatestDay)T09:30", last: "\(timelineLatestDay)T15:00")
+            : StockTimelineWindow(first: start, last: timelineLatestDay)
+        commitTimelineChange()
+    }
+
+    func moveTimelineToLatest() {
+        guard let window = requestedTimelineWindow,
+              let oldEnd = StockTimelineTime.date(window.upper), let oldStart = StockTimelineTime.date(window.lower),
+              let key = StockTimelineTime.key(window.calendarDays <= 1.01 ? (displayedIntraday?.rows.last?.time ?? "15:00") : timelineLatestDay,
+                                               tradeDate: timelineLatestDay, endOfDay: true),
+              let end = StockTimelineTime.date(key) else { return }
+        let start = end.addingTimeInterval(-oldEnd.timeIntervalSince(oldStart))
+        timelineWindow = StockTimelineWindow(first: StockTimelineTime.timestamp(start), last: StockTimelineTime.timestamp(end))
+        commitTimelineChange()
+    }
+
+    private func commitTimelineChange() {
+        let automaticPeriod = requestedTimelineWindow.flatMap { ChartPeriod(rawValue: $0.automaticPeriodID) } ?? .intraday
+        var next = timelinePrecisionOverride ?? automaticPeriod
+        if timelinePrecisionOverride == nil, next == .intraday,
+           let window = requestedTimelineWindow, let currentDay = StockTimelineTime.key(timelineLatestDay),
+           window.lower.prefix(8) != currentDay.prefix(8) { next = .m5 }
+        if next == .intraday { chartPeriod = .intraday; klinePeriod = .m5 }
+        else { chartPeriod = next }
+        chartSnapshotForKline = nil
+        latestChartSnapshot = nil
+        timelineCommitTask?.cancel()
+        let code = selectedCode
+        timelineCommitTask = Task { @MainActor [weak self] in
+            // Let chart views report the final viewport and annotation scope first.
+            await Task.yield()
+            guard let self, self.detailPresented, self.selectedCode == code, !Task.isCancelled else { return }
+            self.scheduleChipRefresh()
+            await self.publishVoiceContext(action: "调整时间范围：\(self.timelineRangeLabel)，\(self.chartPeriod.title)", kind: "chart_range")
+        }
+    }
+
     var visibleWorkspaceKinds: Set<WorkspaceCardKind> {
         guard detailPresented else { return [] }
         return Set(workspace.layout.selectedPage?.visibleCards.map(\.kind) ?? [])
@@ -160,6 +319,8 @@ final class AppModel: ObservableObject {
     }
 
     private func invalidateDetailRequests() {
+        timelineCommitTask?.cancel()
+        isTimelineEditing = false
         detailSessionGeneration = UUID()
         detailGeneration = UUID()
         chartGeneration = UUID()
@@ -206,7 +367,7 @@ final class AppModel: ObservableObject {
         if period == ChartPeriod.intraday.rawValue {
             return kinds.contains(.intraday) || (kinds.contains(.chart) && chartPeriod == .intraday)
         }
-        return period == klinePeriod.rawValue && (kinds.contains(.kline) || kinds.contains(.klineChips)
+        return period == klinePeriod.rawValue && (kinds.contains(.kline) || kinds.contains(.klineChips) || kinds.contains(.macd) || kinds.contains(.kdj)
             || (kinds.contains(.chart) && chartPeriod != .intraday))
     }
 
@@ -379,6 +540,7 @@ final class AppModel: ObservableObject {
             return
         }
         let period = klinePeriod
+        let isPrecisionChange = kline?.code == code && kline?.period != period.rawValue
         isLoadingChart = true
         chartError = nil
         let minuteKey = "chart-\(code)-intraday"
@@ -396,8 +558,8 @@ final class AppModel: ObservableObject {
         guard detailPresented, current == chartGeneration, selectedCode == code,
               klinePeriod == period, !Task.isCancelled else { return }
         // Fetch both series so independent intraday and K-line cards can coexist.
-        async let minuteResult = client.intraday(code: code)
-        async let candleResult = client.kline(code: code, period: period)
+        async let minuteResult = loadChartIntraday(code: code, reusingCurrent: isPrecisionChange)
+        async let candleResult = client.kline(code: code, period: period, count: 320)
         do {
             let result = try await minuteResult
             guard detailPresented, current == chartGeneration, selectedCode == code, !Task.isCancelled else { return }
@@ -419,6 +581,11 @@ final class AppModel: ObservableObject {
         isLoadingChart = false
         scheduleChipRefresh()
         await publishVoiceContext()
+    }
+
+    private func loadChartIntraday(code: String, reusingCurrent: Bool) async throws -> IntradayResponse {
+        if reusingCurrent, let current = displayedIntraday { return current }
+        return try await client.intraday(code: code)
     }
 
     func loadChips(start: String? = nil, end: String? = nil) async {
@@ -454,18 +621,18 @@ final class AppModel: ObservableObject {
 
     private func scheduleChipRefresh() {
         chipRefreshTask?.cancel()
+        guard !isTimelineEditing else { return }
         guard !visibleWorkspaceKinds.isDisjoint(with: [.chipDistribution, .klineChips]) else { return }
-        let snapshot = chartSnapshotForKline
+        let snapshot = linkedKlineContext
         let code = selectedCode
         chipRefreshTask = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
             guard let self, self.detailPresented, self.selectedCode == code else { return }
             var start = snapshot?.firstVisibleTime.map { String($0.prefix(10)) }
             var end = snapshot?.lastVisibleTime.map { String($0.prefix(10)) }
-            if self.klinePeriod.rawValue.hasPrefix("m"), self.klinePeriod != .month {
-                let days = Array((self.displayedDetail?.candles ?? []).suffix(5))
-                start = days.first?.time
-                end = days.last?.time
+            if let window = self.requestedTimelineWindow {
+                start = StockTimelineTime.date(window.lower).map(StockTimelineTime.day)
+                end = StockTimelineTime.date(window.upper).map(StockTimelineTime.day)
             }
             let formatter = DateFormatter()
             formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -583,6 +750,7 @@ final class AppModel: ObservableObject {
     }
 
     func updateChartContext(_ snapshot: VoiceChartSnapshot, sourceID: String = "primary") async {
+        guard !isTimelineEditing else { return }
         guard snapshot.chart.stockCode == selectedCode, chartIsVisible(period: snapshot.chart.period) else { return }
         if snapshot.chart.period == klinePeriod.rawValue {
             let previous = chartSnapshotForKline
@@ -590,6 +758,9 @@ final class AppModel: ObservableObject {
             if previous?.firstVisibleTime != snapshot.chart.firstVisibleTime
                 || previous?.lastVisibleTime != snapshot.chart.lastVisibleTime { scheduleChipRefresh() }
         }
+        // A passive intraday companion must not replace the selected historical
+        // timeline while the main candles / technical cards are visible.
+        if snapshot.chart.period != chartPeriod.rawValue, chartIsVisible(period: chartPeriod.rawValue) { return }
         let previous = latestChartSnapshot
         // Synchronized companion charts report the same viewport. Their passive
         // annotation state must not replace the card the user is editing.
@@ -613,6 +784,7 @@ final class AppModel: ObservableObject {
     }
 
     func publishVoiceContext(action: String? = nil, kind: String? = nil) async {
+        guard !isTimelineEditing else { return }
         let kinds = visibleWorkspaceKinds
         let detailObscured = !detailPresented || voiceViewState.settingsPresented || voiceViewState.selectionEditorPresented
         let snapshot = !detailObscured
@@ -659,8 +831,8 @@ final class AppModel: ObservableObject {
         if !detailObscured, kinds.contains(.macd) {
             let points = NativeChartIndicators.series(candles: displayedKlineCandles,
                 panel: klinePeriod == .day ? activeDetail?.technical : nil)
-            let visible = NativeChartIndicators.visible(points, context: chartSnapshotForKline)
-            if let value = NativeChartIndicators.inspected(visible, context: chartSnapshotForKline)?.histogram {
+            let visible = NativeChartIndicators.visible(points, context: linkedKlineContext)
+            if let value = NativeChartIndicators.inspected(visible, context: linkedKlineContext)?.histogram {
                 metrics["macdHist"] = String(format: "%.4f", value)
             }
         }
@@ -692,6 +864,7 @@ final class AppModel: ObservableObject {
         contextViewState.detailTab = detailObscured ? "none" : "chart"
         contextViewState.visibilityScope = detailPresented ? "active_detail_panel" : "selection_workspace"
         contextViewState.workspacePageID = detailObscured ? nil : workspace.layout.selectedPage?.id
+        contextViewState.inkScopeID = detailObscured ? nil : workspaceInkContext?.scopeID
         contextViewState.workspacePageTitle = detailObscured ? nil : workspace.layout.selectedPage?.title
         contextViewState.visibleCardIDs = detailObscured ? [] : (workspace.layout.selectedPage?.visibleCards.map { $0.kind.rawValue } ?? [])
         contextViewState.chartViewport = snapshot.map {

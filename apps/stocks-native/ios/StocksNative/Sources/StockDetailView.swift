@@ -3,6 +3,7 @@ import SwiftUI
 
 struct StockDetailView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var selection: StockSelectionModel
 
     var body: some View {
         Group {
@@ -10,6 +11,7 @@ struct StockDetailView: View {
                 let currentStock = model.displayedStock ?? detail.stock
                 VStack(spacing: 0) {
                     quoteHeader(currentStock, sector: currentStock.sector ?? detail.stock.sector, asOf: detail.asOf)
+                    StockTimelineBar(model: model)
                     if let error = model.detailError {
                         Label(error, systemImage: "exclamationmark.circle")
                             .font(.footnote).foregroundStyle(.red)
@@ -61,6 +63,7 @@ struct StockDetailView: View {
     private func stockIdentity(_ stock: Stock, sector: String?, asOf: String?) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
+                StockFavoriteButton(model: selection, code: stock.code, name: stock.name)
                 Text(stock.name)
                     .font(.system(.title2, design: .rounded, weight: .semibold))
                     .foregroundStyle(AppStyle.ink).lineLimit(1)
@@ -150,13 +153,13 @@ struct CandleChart: View {
     let period: ChartPeriod
     @ObservedObject var annotations: AnnotationStore
     let onContextChange: (VoiceChartSnapshot) async -> Void
-    let onRangeChange: (Int) async -> Void
     var chipDistribution: ChipDistributionResponse? = nil
     var showsChips = false
     var externalContext: VoiceChartContext? = nil
+    var sharedRange: Range<Int>? = nil
+    var contextSuppressed = false
     var currentPrice: Double? = nil
     @State private var pricePlotFrame: CGRect = .zero
-    @State private var window: Range<Int>?
     @State private var selectedTime: String?
     @State private var annotationMode = false
     @State private var annotationTool: AnnotationTool = .pen
@@ -165,13 +168,13 @@ struct CandleChart: View {
 
     private var visibleRange: Range<Int> {
         guard !candles.isEmpty else { return 0..<0 }
-        let requested = window ?? max(0, candles.count - 60)..<candles.count
+        if let sharedRange {
+            return max(0, min(candles.count, sharedRange.lowerBound))..<max(0, min(candles.count, sharedRange.upperBound))
+        }
+        let requested = max(0, candles.count - 60)..<candles.count
         let lower = min(max(requested.lowerBound, 0), candles.count - 1)
         let upper = min(max(requested.upperBound, lower + 1), candles.count)
         return lower..<upper
-    }
-    private var rangeSelection: Binding<Range<Int>> {
-        Binding(get: { visibleRange }, set: { window = $0; selectedTime = nil })
     }
     private var visible: [IndexedCandle] {
         visibleRange.map { IndexedCandle(id: $0, candle: candles[$0]) }
@@ -234,22 +237,14 @@ struct CandleChart: View {
     var body: some View {
         ChartCardViewport { height in
             chartContent(contentHeight: height)
-        } navigator: {
-            if !visible.isEmpty { rangeNavigator }
         }
-        .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
+        .task(id: contextSuppressed ? nil : voiceContextSnapshot) {
+            if !contextSuppressed { await onContextChange(voiceContextSnapshot) }
+        }
         .onChange(of: externalContext) { _, context in
-            guard let context, context.stockCode == stockCode, context.period == period.rawValue,
-                  let first = context.firstVisibleTime, let last = context.lastVisibleTime,
-                  let lower = candles.firstIndex(where: { $0.time == first }),
-                  let upper = candles.firstIndex(where: { $0.time == last }), lower <= upper else { return }
-            let nextWindow = lower..<(upper + 1)
-            if nextWindow != visibleRange { window = nextWindow }
+            guard let context, context.stockCode == stockCode, context.period == period.rawValue else { return }
             let nextSelection = context.selectionSource == "cursor" ? context.selectedPoint?.time : nil
             if selectedTime != nextSelection { selectedTime = nextSelection }
-        }
-        .onChange(of: candles.map(\.time)) { oldTimes, newTimes in
-            reconcileWindow(oldTimes: oldTimes, newTimes: newTimes)
         }
         .onChange(of: visible.map(\.candle.time)) { _, times in
             if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
@@ -270,8 +265,8 @@ struct CandleChart: View {
             }
             if annotationMode { annotationToolbar }
             if visible.isEmpty {
-                ContentUnavailableView("暂无 K 线数据", systemImage: "chart.bar.xaxis", description: Text("服务器尚未提供这只股票的历史行情。"))
-                    .frame(height: 300)
+                ContentUnavailableView("所选范围暂无 K 线", systemImage: "chart.bar.xaxis", description: Text("当前已载入的数据没有覆盖这个时间范围。"))
+                    .frame(maxHeight: .infinity)
             } else {
                 if let item = inspected { candleSummary(item.candle) }
                 movingAverageLegend
@@ -488,52 +483,6 @@ struct CandleChart: View {
         case "orange": return .orange
         case "blue": return .blue
         default: return AppStyle.accent
-        }
-    }
-
-    private var rangeNavigator: some View {
-        VStack(spacing: 6) {
-            HStack {
-                Text("\(visible.first.map { shortDate($0.candle.time) } ?? "—") — \(visible.last.map { shortDate($0.candle.time) } ?? "—")")
-                    .lineLimit(1).minimumScaleFactor(0.8)
-                Spacer(minLength: 8)
-                Button("最新") {
-                    let count = visibleRange.count
-                    window = max(0, candles.count - count)..<candles.count
-                    selectedTime = nil
-                    reportRangeChange()
-                }
-                .disabled(visibleRange.upperBound == candles.count)
-            }
-            .font(.caption).foregroundStyle(.secondary)
-            ChartRangeNavigator(values: candles.map { Optional($0.close) }, selection: rangeSelection,
-                                minimumCount: 12, onEditingChanged: { editing in
-                if !editing { reportRangeChange() }
-            })
-            Text("两端缩放 · 中间平移 · 当前 \(visible.count) 根")
-                .font(.caption2).foregroundStyle(.secondary)
-        }
-    }
-
-    private func reportRangeChange() {
-        let snapshot = voiceContextSnapshot
-        Task {
-            await onContextChange(snapshot)
-            await onRangeChange(snapshot.chart.visiblePointCount)
-        }
-    }
-
-    private func reconcileWindow(oldTimes: [String], newTimes: [String]) {
-        guard !oldTimes.isEmpty, !newTimes.isEmpty else { window = nil; return }
-        let previous = window ?? max(0, oldTimes.count - 60)..<oldTimes.count
-        let count = min(max(previous.count, 1), newTimes.count)
-        if previous.upperBound >= oldTimes.count {
-            window = (newTimes.count - count)..<newTimes.count
-        } else if oldTimes.indices.contains(previous.lowerBound) {
-            let firstTime = oldTimes[previous.lowerBound]
-            let first = newTimes.firstIndex(where: { $0 >= firstTime }) ?? max(0, newTimes.count - count)
-            let lower = min(first, newTimes.count - count)
-            window = lower..<(lower + count)
         }
     }
 

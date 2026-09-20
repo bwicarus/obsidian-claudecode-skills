@@ -28,6 +28,11 @@ if [[ "$MODE" == simulator ]]; then
     "$PROJECT_DIR/../Tests/SelectionDragChecks.swift" \
     -o "$BUILD_ROOT/selection-drag-checks"
   "$BUILD_ROOT/selection-drag-checks"
+  swiftc -swift-version 5 -parse-as-library \
+    "$PROJECT_DIR/Sources/StockTimelineState.swift" \
+    "$PROJECT_DIR/../Tests/StockTimelineChecks.swift" \
+    -o "$BUILD_ROOT/stock-timeline-checks"
+  "$BUILD_ROOT/stock-timeline-checks"
   xcodebuild build -project "$PROJECT_FILE" -scheme StocksNative \
     -configuration Debug -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$BUILD_ROOT/DerivedData-simulator" \

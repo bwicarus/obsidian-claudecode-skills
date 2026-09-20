@@ -34,6 +34,8 @@ final class VoiceSession: ObservableObject {
     var isStarted: Bool { state == .connecting || state == .reconnecting || state == .preparing || state == .active }
 
     private let audio = NativeAudio()
+    private let inkUpload = VoiceInkUpload()
+    @Published private(set) var inkStatus: String?
     private var socket: URLSessionWebSocketTask?
     private var conversationControl: URLSessionWebSocketTask?
     private var receiver: Task<Void, Never>?
@@ -259,6 +261,7 @@ final class VoiceSession: ObservableObject {
     }
 
     func updateContext(_ context: VoiceUIContext) async {
+        inkUpload.context(code: context.selectedCode, scope: context.viewState?.inkScopeID)
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
@@ -291,6 +294,11 @@ final class VoiceSession: ObservableObject {
             self.contextSendInFlight = true
             await self.flushPendingContext(generation: current)
         }
+    }
+
+    func updateInk(_ data: Data, stockCode: String, scopeID: String) {
+        inkUpload.onStatus = { [weak self] value in self?.inkStatus = value }
+        inkUpload.update(data, code: stockCode, scope: scopeID)
     }
 
     private func flushPendingContext(generation current: UUID) async {
@@ -402,6 +410,9 @@ final class VoiceSession: ObservableObject {
                 pendingPlayback.forEach { audio.play($0) }
                 pendingPlayback.removeAll()
                 scheduleContextFlush(delayNanoseconds: 0)
+                if let client = reconnectClient, let device = reconnectDeviceID, let sessionID {
+                    inkUpload.connect(client: client, device: device, session: sessionID)
+                }
             case "closed":
                 let closeReason = event.reason ?? "remote"
                 let message = closeReason == "idle"
@@ -588,6 +599,7 @@ final class VoiceSession: ObservableObject {
     }
 
     private func cleanup(closeSocket: Bool = true) {
+        inkUpload.disconnect()
         conversationControl?.cancel(with: .goingAway, reason: nil)
         conversationControl = nil
         audio.onPCM = nil
