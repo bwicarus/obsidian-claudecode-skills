@@ -30,6 +30,7 @@ struct StocksRootView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
+    @State private var showingNews = false
     @State private var showingCompactInspector = false
     @State private var showingWideInspector = false
     @State private var detailWidth: CGFloat = 0
@@ -76,6 +77,10 @@ struct StocksRootView: View {
                         .accessibilityLabel("设置与设备配对")
                     refreshStockListButton
                     if model.isPaired { monitoringButton }
+                    if model.isPaired {
+                        Button { showingNews = true } label: { Image(systemName: "newspaper") }
+                            .accessibilityLabel("市场与个股新闻")
+                    }
                 }
                 ToolbarItem(placement: .principal) {
                     if model.isPaired { selectionNavigation }
@@ -86,6 +91,8 @@ struct StocksRootView: View {
             }
         }
         .tint(AppStyle.accent)
+        .environmentObject(model.research)
+        .sheet(isPresented: $showingNews) { StockNewsView(model: model) }
         .sheet(isPresented: $showingSettings) { PairingView(model: model) }
         .sheet(item: $monitoringDestination) { destination in
             MonitoringView(model: monitoringModel, destination: destination, onOpenStock: { model.openStock($0) })
@@ -118,6 +125,13 @@ struct StocksRootView: View {
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
                 await monitoringModel.refresh()
+            }
+        }
+        .task(id: "research:\(scenePhase):\(model.planScopeID):\(model.isAIEnabled)") {
+            guard scenePhase == .active, model.isPaired, model.isAIEnabled else { return }
+            while !Task.isCancelled {
+                await model.research.refresh()
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .stocksOpenNotification)) { event in

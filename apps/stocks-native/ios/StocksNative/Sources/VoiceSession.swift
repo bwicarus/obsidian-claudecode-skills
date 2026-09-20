@@ -29,6 +29,7 @@ final class VoiceSession: ObservableObject {
     @Published private(set) var diagnostics: [VoiceDiagnosticEntry] = []
     var onStockSelected: ((String) -> Void)?
     var onPlansChanged: ((String?, String?) -> Void)?
+    var onReportsChanged: ((String?, String?) -> Void)?
     var onCapabilityAction: ((CapabilityAction) -> CapabilityResult)?
     var onSystemCallEnded: ((String) -> Void)?
     private(set) var systemCallID: String?
@@ -78,12 +79,16 @@ final class VoiceSession: ObservableObject {
     func process(for transcript: Transcript) -> VoiceProcess? {
         guard transcript.role == "assistant", let turnID = transcript.turnID,
               transcripts.last(where: { $0.role == "assistant" && $0.turnID == turnID })?.id == transcript.id else { return nil }
-        return processes.first(where: { $0.id == turnID })
+        return processes.first(where: {
+            $0.id == turnID && ($0.state == "running" || !$0.tools.isEmpty || $0.error != nil)
+        })
     }
 
     var unattachedProcesses: [VoiceProcess] {
         let attached = Set(transcripts.filter { $0.role == "assistant" }.compactMap(\.turnID))
-        return processes.filter { !attached.contains($0.id) }
+        return Array(processes.filter {
+            !attached.contains($0.id) && ["running", "failed", "rejected"].contains($0.state)
+        }.suffix(3))
     }
 
     private func consumeProcess(_ event: VoiceEvent, restored: Bool = false) {
@@ -537,6 +542,7 @@ final class VoiceSession: ObservableObject {
         case "history":
             replaceHistory(event.items ?? [])
             onPlansChanged?(nil, nil)
+            onReportsChanged?(nil, nil)
             processes.removeAll()
             for item in event.events ?? [] where item.type == "task" || item.type == "tool" {
                 consumeProcess(item, restored: true)
@@ -570,6 +576,11 @@ final class VoiceSession: ObservableObject {
             NotificationCenter.default.post(name: .stocksSelectionDidChange, object: nil)
         case "plan.changed":
             onPlansChanged?(event.planId, event.code)
+        case "report.changed":
+            onReportsChanged?(event.reportId, event.code)
+        case "monitor.changed":
+            onReportsChanged?(nil, event.code)
+            NotificationCenter.default.post(name: .stocksSelectionDidChange, object: nil)
         case "stock.selected":
             if let code = event.code {
                 stockCode = code

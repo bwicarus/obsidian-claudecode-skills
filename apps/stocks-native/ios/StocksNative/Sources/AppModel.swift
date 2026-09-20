@@ -82,6 +82,7 @@ final class AppModel: ObservableObject {
     private var pendingPlanArchives: [String: StockPlanArchiveRequest] = [:]
     let deviceID: String
     let voice = VoiceSession()
+    let research = StockResearchStore()
     let annotations = AnnotationStore()
     let workspace = WorkspaceLayoutStore()
     private var listGeneration = UUID()
@@ -115,6 +116,10 @@ final class AppModel: ObservableObject {
                 guard let self, self.planScopeID == scope else { return }
                 await self.refreshChangedPlan(id: id, code: code)
             }
+        }
+        voice.onReportsChanged = { [weak self] id, code in
+            guard let self else { return }
+            Task { [weak self] in await self?.research.changed(id: id, code: code) }
         }
         voice.onCapabilityAction = { [weak self] action in
             guard let self else { return CapabilityResult(success: false, message: "App 状态不可用。") }
@@ -166,6 +171,7 @@ final class AppModel: ObservableObject {
         plansGeneration = UUID()
         planScopeID = StockSelectionModel.scopeID(client: isPaired ? client : nil)
         plansAccountScopeID = planScopeID
+        research.configure(client: isPaired && isAIEnabled ? client : nil, scope: planScopeID)
         savedPlans = []
         planLoads = [:]
         pendingPlanArchives = [:]
@@ -187,9 +193,11 @@ final class AppModel: ObservableObject {
         savedPlans = Array(byID.values.sorted {
             $0.createdAt == $1.createdAt ? $0.id > $1.id : $0.createdAt > $1.createdAt
         }.prefix(500))
+        research.mergePlans(incoming)
     }
 
     func refreshPlans(code: String? = nil) async {
+        research.configure(client: isPaired && isAIEnabled ? client : nil, scope: planScopeID)
         if plansAccountScopeID != planScopeID { resetPlanState() }
         guard isPaired, isAIEnabled else { return }
         let scope = planScopeID, generation = plansGeneration, api = client
@@ -223,6 +231,7 @@ final class AppModel: ObservableObject {
                 guard scope == planScopeID, generation == plansGeneration else { return }
                 mergePlans([response.plan])
                 planError = nil
+                await research.refresh(code: code ?? response.plan.code)
                 return
             } catch {
                 guard scope == planScopeID, generation == plansGeneration else { return }
@@ -258,6 +267,7 @@ final class AppModel: ObservableObject {
             pendingPlanArchives.removeValue(forKey: plan.id)
             mergePlans([receipt.plan])
             planError = nil
+            await research.refresh(code: plan.code)
         } catch let failure as StockPlanAPIError {
             guard scope == planScopeID, generation == plansGeneration else { return }
             if (400..<500).contains(failure.status) { pendingPlanArchives.removeValue(forKey: plan.id) }

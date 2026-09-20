@@ -460,6 +460,7 @@ struct VoiceEvent: Decodable {
     let items: [VoiceHistoryItem]?
     let code: String?
     let planId: String?
+    let reportId: String?
     let message: String?
     let actionId: String?
     let capability: String?

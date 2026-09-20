@@ -102,11 +102,14 @@ struct StockPlanAPIError: LocalizedError {
 }
 
 /// One persisted plan is rendered by both the conversation and stock detail.
-/// This surface has no acceptance action and does not imply a running rule.
+/// Saved suggestions and verified monitoring receipts have distinct states.
 struct StockPlanCard: View {
     let plan: StockPlan
     var isArchiving = false
     var onArchive: (() -> Void)? = nil
+    var onChoose: ((StockPlanVariant) -> Void)? = nil
+    var activationBusy = false
+    var adoptedVariantID: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -126,10 +129,10 @@ struct StockPlanCard: View {
             HStack(spacing: 6) {
                 Text(plan.status == "archived" ? "已归档" : "已保存")
                 Text("·")
-                Text("行情 \(plan.basis.marketAsOf.replacingOccurrences(of: "T", with: " "))")
+                Text("行情 \(ResearchStyle.date(plan.basis.marketAsOf))")
             }
             .font(.caption2).foregroundStyle(.secondary)
-            Text("生成于 \(plan.createdAt.replacingOccurrences(of: "T", with: " "))")
+            Text("生成于 \(ResearchStyle.date(plan.createdAt))")
                 .font(.caption2).foregroundStyle(.tertiary)
             if !plan.summary.isEmpty {
                 Text(plan.summary).font(.caption).foregroundStyle(AppStyle.ink)
@@ -137,7 +140,14 @@ struct StockPlanCard: View {
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 8)], alignment: .leading, spacing: 8) {
                 ForEach(plan.variants) { variant in
-                    StockPlanVariantCard(variant: variant, recommended: variant.id == plan.recommendedVariantId)
+                    VStack(spacing: 6) {
+                        StockPlanVariantCard(variant: variant, recommended: variant.id == plan.recommendedVariantId)
+                        if let onChoose, plan.status != "archived" {
+                            Button(adoptedVariantID == variant.id ? "已采用" : "按此方案盯盘") { onChoose(variant) }
+                                .font(.caption).buttonStyle(.bordered).tint(AppStyle.accent)
+                                .disabled(activationBusy || adoptedVariantID != nil || (variant.rules.isEmpty && variant.targetPrice == nil))
+                        }
+                    }
                 }
             }
         }

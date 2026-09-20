@@ -373,6 +373,8 @@ struct MonitoringBanner: View {
 }
 
 struct MonitoringStockRow: View {
+    @EnvironmentObject private var research: StockResearchStore
+    @State private var showingResearch = false
     let record: StockTableRecord
     let columns: [StockTableColumn]
     @ObservedObject var selection: StockSelectionModel
@@ -389,6 +391,8 @@ struct MonitoringStockRow: View {
                 Group {
                     if column == .monitoring {
                         monitorBadge
+                    } else if column == .strategy {
+                        StockStrategyBadge(signal: research.signals[record.code]) { showingResearch = true }
                     } else {
                         Button(action: onOpen) {
                             cell(column)
@@ -403,6 +407,9 @@ struct MonitoringStockRow: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
+        .sheet(isPresented: $showingResearch) {
+            StockRowResearchView(code: record.code, name: record.name, research: research)
+        }
     }
 
     @ViewBuilder private func cell(_ column: StockTableColumn) -> some View {

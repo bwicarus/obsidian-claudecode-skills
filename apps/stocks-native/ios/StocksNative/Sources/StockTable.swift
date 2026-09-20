@@ -2,7 +2,7 @@ import SwiftUI
 
 enum StockTableColumn: String, CaseIterable, Identifiable {
     case identity, price, changePct, volumeRatio, turnoverRate, turnover, marketCap
-    case monitoring, sector, score, amplitude, volume, open, high, low, prevClose, peDynamic, pb
+    case monitoring, strategy, sector, score, amplitude, volume, open, high, low, prevClose, peDynamic, pb
     case changeAmount, floatMarketCap, speed, change5m, change60d, changeYtd, upLimit, downLimit
 
     var id: String { rawValue }
@@ -16,6 +16,7 @@ enum StockTableColumn: String, CaseIterable, Identifiable {
         case .turnover: "成交额"
         case .marketCap: "总市值"
         case .monitoring: "盯盘"
+        case .strategy: "AI 策略"
         case .sector: "行业"
         case .score: "评分"
         case .amplitude: "振幅"
@@ -41,13 +42,14 @@ enum StockTableColumn: String, CaseIterable, Identifiable {
         case .identity: 142
         case .sector: 158
         case .monitoring: 104
+        case .strategy: 132
         case .turnover, .marketCap, .floatMarketCap, .volume, .change5m, .change60d, .changeYtd: 98
         case .changePct, .turnoverRate, .amplitude: 84
         default: 76
         }
     }
     var alignment: Alignment {
-        self == .identity || self == .sector ? .leading : self == .monitoring ? .center : .trailing
+        self == .identity || self == .sector ? .leading : (self == .monitoring || self == .strategy) ? .center : .trailing
     }
     var selectionSortKey: String? {
         switch self {
@@ -56,13 +58,13 @@ enum StockTableColumn: String, CaseIterable, Identifiable {
         default: nil
         }
     }
-    static let defaults: [Self] = [.price, .changePct, .volumeRatio, .turnoverRate, .turnover, .marketCap, .monitoring]
+    static let defaults: [Self] = [.price, .changePct, .strategy, .volumeRatio, .turnoverRate, .turnover, .marketCap, .monitoring]
     static let defaultPreference = defaults.map(\.rawValue).joined(separator: ",")
 
     static func available(in context: StockSelectionSection) -> [Self] {
         context == .market ? allCases.filter { $0 != .score }
             : [.identity, .price, .changePct, .volumeRatio, .turnoverRate, .turnover, .marketCap,
-               .monitoring, .sector, .score, .amplitude]
+               .monitoring, .strategy, .sector, .score, .amplitude]
     }
 
     static func visible(_ preference: String) -> [Self] {
@@ -124,6 +126,17 @@ struct StockTable<Content: View>: View {
             .clipped()
         }
         .sheet(isPresented: $showingColumns) { StockTableColumnsEditor(context: context, preference: $preference) }
+        .onAppear {
+            let key = "stocksNative.stockTable.strategyColumn.v1.\(context.rawValue)"
+            guard !UserDefaults.standard.bool(forKey: key) else { return }
+            var values = StockTableColumn.visible(preference).filter { $0 != .identity }
+            if !values.contains(.strategy) {
+                let position = values.firstIndex(of: .changePct).map { $0 + 1 } ?? 0
+                values.insert(.strategy, at: position)
+                preference = values.map(\.rawValue).joined(separator: ",")
+            }
+            UserDefaults.standard.set(true, forKey: key)
+        }
     }
 
     private var header: some View {

@@ -38,7 +38,7 @@ struct StockDetailView: View {
             }
         }
         .background(AppStyle.canvas)
-        .sheet(isPresented: $showingPlans) { StockPlanHistoryView(model: model) }
+        .sheet(isPresented: $showingPlans) { StockResearchHistoryView(model: model, research: model.research) }
     }
 
     private func quoteHeader(_ stock: Stock, sector: String?, asOf: String?) -> some View {
@@ -82,11 +82,11 @@ struct StockDetailView: View {
                 Text(asOf.map { "资料 \(StockChartLabels.detail($0))" } ?? "等待资料时间").lineLimit(1)
                 if model.isAIEnabled {
                     Button { showingPlans = true } label: {
-                        Label("方案 \(model.selectedStockPlans.filter { $0.status != "archived" }.count)", systemImage: "doc.text")
+                        Label("报告与策略", systemImage: "doc.text")
                             .lineLimit(1).fixedSize()
                     }
                     .buttonStyle(.plain).foregroundStyle(AppStyle.accent)
-                    .accessibilityLabel("查看这只股票的操作方案")
+                    .accessibilityLabel("查看这只股票的报告时间线与操作策略")
                 }
             }
             .font(.caption2).foregroundStyle(.secondary)

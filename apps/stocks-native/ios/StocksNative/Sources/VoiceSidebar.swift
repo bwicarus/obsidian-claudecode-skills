@@ -118,11 +118,8 @@ struct VoiceSidebar: View {
                                 if let process = voice.process(for: message) {
                                     VoiceProcessView(process: process)
                                 }
-                                ForEach(model.plans(for: message)) { plan in
-                                    StockPlanCard(plan: plan, isArchiving: model.archivingPlanIDs.contains(plan.id)) {
-                                        Task { await model.archivePlan(plan) }
-                                    }
-                                }
+                                ConversationReports(transcript: message, research: model.research, voice: voice)
+                                ConversationPlans(transcript: message, model: model, research: model.research)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(message.role == "user" ? 12 : 0)
@@ -130,17 +127,14 @@ struct VoiceSidebar: View {
                                         in: RoundedRectangle(cornerRadius: 12))
                             .id(message.id)
                         }
-                        ForEach(voice.unattachedProcesses) { process in
-                            VoiceProcessView(process: process)
-                        }
-                        if !model.unattachedSidebarPlans.isEmpty {
-                            Text("已保存方案").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                            ForEach(model.unattachedSidebarPlans) { plan in
-                                StockPlanCard(plan: plan, isArchiving: model.archivingPlanIDs.contains(plan.id)) {
-                                    Task { await model.archivePlan(plan) }
+                        if !voice.unattachedProcesses.isEmpty {
+                            DisclosureGroup("后台任务 · \(voice.unattachedProcesses.count)") {
+                                ForEach(voice.unattachedProcesses) { process in
+                                    VoiceProcessView(process: process)
                                 }
-                            }
+                            }.font(.caption).foregroundStyle(.secondary)
                         }
+                        SidebarResearchCards(model: model, research: model.research, voice: voice)
                         if let error = model.planError {
                             HStack(alignment: .top) {
                                 Text(error).font(.caption).foregroundStyle(.secondary)

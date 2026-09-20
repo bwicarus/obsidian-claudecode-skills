@@ -110,6 +110,30 @@ struct APIClient {
         let _: MonitoringDeliveryResponse = try await request("api/notifications/receipt", method: "POST", body: JSONEncoder().encode(payload))
     }
 
+    func reports(code: String? = nil, before: String? = nil) async throws -> ReportListResponse {
+        var query = [URLQueryItem(name: "limit", value: "30")]
+        if let code { query.append(URLQueryItem(name: "code", value: code)) }
+        if let before { query.append(URLQueryItem(name: "before", value: before)) }
+        return try await request("api/reports", query: query)
+    }
+    func report(id: String) async throws -> ReportItemResponse { try await request("api/reports/\(id)") }
+    func researchSignals() async throws -> ReportSignalsResponse { try await request("api/research/signals") }
+    func previewPlan(planID: String, variantID: String) async throws -> PlanActivationPreview {
+        try await request("api/plans/preview", method: "POST", body: JSONEncoder().encode(["planId": planID, "variantId": variantID]))
+    }
+    func activatePlan(_ value: PlanActivationRequest) async throws -> PlanActivationReceipt {
+        try await request("api/plans/activate", method: "POST", body: JSONEncoder().encode(value))
+    }
+    func news(category: String, code: String? = nil, sector: String? = nil, refresh: Bool = false) async throws -> StockNewsResponse {
+        var query = [URLQueryItem(name: "category", value: category), URLQueryItem(name: "refresh", value: refresh ? "1" : "0")]
+        if let code { query.append(URLQueryItem(name: "code", value: code)) }
+        if let sector { query.append(URLQueryItem(name: "sector", value: sector)) }
+        return try await request("api/news", query: query)
+    }
+    func legacySignals(code: String?) async throws -> LegacySignalResponse {
+        try await request("api/research/legacy", query: code.map { [URLQueryItem(name: "code", value: $0)] } ?? [])
+    }
+
     func webSocketURL(deviceID: String) throws -> URL {
         var components = URLComponents(url: baseURL.appendingPathComponent("voice"), resolvingAgainstBaseURL: false)!
         components.scheme = "wss"
@@ -132,7 +156,7 @@ struct APIClient {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw AppError.message("服务器未返回 HTTP 响应。") }
         guard (200..<300).contains(response.statusCode) else {
-            if path.hasPrefix("api/plans") {
+            if path.hasPrefix("api/plans") || path.hasPrefix("api/reports") {
                 let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
                 throw StockPlanAPIError(status: response.statusCode, code: payload?["code"] as? String,
                                         message: payload?["message"] as? String ?? payload?["error"] as? String
