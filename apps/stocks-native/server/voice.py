@@ -332,8 +332,9 @@ class VoiceSession:
         return None
 
     async def capture_selection_tool(self, turn_id, item):
-        if (item.get('type') != 'mcpToolCall' or item.get('server') != 'stocks_selection'
-                or item.get('tool') != 'stocks_selection'):
+        tool_name = item.get('server')
+        if (item.get('type') != 'mcpToolCall' or tool_name not in ('stocks_selection', 'stocks_monitor')
+                or item.get('tool') != tool_name):
             return
         state = self.turn_state(turn_id)
         item_id = str(item.get('id') or '')
@@ -359,7 +360,7 @@ class VoiceSession:
         if not as_of and isinstance(result.get('library'), dict):
             as_of = result['library'].get('asOf')
         receipt = {
-            'type': 'tool', 'name': 'stocks_selection', 'success': success,
+            'type': 'tool', 'name': tool_name, 'success': success,
             'requestId': state['requestId'], 'turnId': turn_id, 'callId': item_id or None,
             'selectionAction': action, 'asOf': as_of,
             'dataReturned': bool(success and action in ('catalog', 'evaluate', 'library')),
@@ -370,7 +371,7 @@ class VoiceSession:
         self.record(receipt)
         await self.event(receipt)
         if mutation:
-            changed = {'type': 'selection.changed', 'revision': result.get('revision'),
+            changed = {'type': 'selection.changed' if tool_name == 'stocks_selection' else 'monitor.changed', 'revision': result.get('revision'),
                        'requestId': result.get('requestId'), 'operation': result.get('operation')}
             self.record(changed)
             await self.event(changed)

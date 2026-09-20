@@ -125,6 +125,26 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse(self.delivery.lease(seconds=30))
         self.assertFalse(other.budget("same-stock", 300))
 
+    def test_combined_budgets_do_not_consume_a_free_budget_if_another_is_blocked(self):
+        self.assertTrue(self.delivery.budget("global", 30))
+        self.assertFalse(self.delivery.budgets({"stock": 300, "global": 30}))
+        self.assertTrue(self.delivery.budget("stock", 300))
+        self.assertFalse(self.delivery.budgets({"other-global": 30, "stock": 300}))
+        self.assertTrue(self.delivery.budget("other-global", 30))
+
+    def test_voice_presence_crosses_instances_expires_and_old_disconnect_cannot_erase_new(self):
+        other = NotificationDelivery(self.directory.name, clock=lambda: self.now)
+        self.delivery.voice_presence("alice", "ipad")
+        self.assertTrue(other.has_voice("alice"))
+        self.assertFalse(other.has_voice("bob"))
+        self.now += 31
+        self.assertFalse(other.has_voice("alice"))
+        other.voice_presence("alice", "ipad")
+        self.delivery.voice_presence("alice", "ipad", False)
+        self.assertTrue(self.delivery.has_voice("alice"))
+        other.voice_presence("alice", "ipad", False)
+        self.assertFalse(self.delivery.has_voice("alice"))
+
 
 class DeliveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -183,6 +203,16 @@ class DeliveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         session.can_announce_notification.return_value = True
         await self.runtime.deliver()
         session.announce_notification.assert_awaited_once()
+
+    async def test_voice_on_another_gateway_suppresses_call_until_presence_expires(self):
+        self.notice()
+        other = NotificationDelivery(self.directory.name, clock=lambda: self.now)
+        other.voice_presence("alice", "ipad")
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 0)
+        self.now += 31
+        await self.runtime.deliver()
+        self.assertEqual(self.call_count(), 1)
 
     async def test_other_account_voice_cannot_receive_notice_or_suppress_urgent_call(self):
         self.notice()

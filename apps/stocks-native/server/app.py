@@ -68,6 +68,9 @@ async def pair(request):
     data = await request.json()
     result = await asyncio.to_thread(request.app['auth'].pair,
         data['code'], data['deviceId'], data['name'])
+    paired = await asyncio.to_thread(request.app['auth'].authenticate, result['token'], data['deviceId'])
+    await asyncio.to_thread(request.app['notifications'].register, paired['ownerId'], data['deviceId'],
+                           {'pushToken': None, 'voipToken': None, 'notificationsEnabled': False})
     return web.json_response(result)
 
 

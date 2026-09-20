@@ -162,6 +162,21 @@ class VoiceSelectionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(tool["actionApplied"])
         self.assertFalse(any(event.get("type") == "selection.changed" for event in self.events))
 
+    async def test_monitor_write_has_verified_receipt_without_selection_change(self):
+        item = {
+            'id': 'monitor-write', 'type': 'mcpToolCall', 'server': 'stocks_monitor',
+            'tool': 'stocks_monitor', 'status': 'completed', 'arguments': {'action': 'mutate'},
+            'result': {'structuredContent': {'ok': True, 'action': 'mutate', 'result': {
+                'success': True, 'revision': 1, 'requestId': 'monitor-intent', 'operation': 'rule.upsert'}}}}
+        await self.session.capture_selection_tool('monitor-turn', item)
+        await self.session.capture_selection_tool('monitor-turn', item)
+        tools = self.session.turn_state('monitor-turn')['tools']
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]['name'], 'stocks_monitor')
+        self.assertTrue(tools[0]['actionApplied'])
+        self.assertTrue(any(event.get('type') == 'monitor.changed' for event in self.events))
+        self.assertFalse(any(event.get('type') == 'selection.changed' for event in self.events))
+
     async def test_selection_read_counts_as_verified_tool_data(self):
         item = {
             "id": "mcp-call-3", "type": "mcpToolCall", "server": "stocks_selection",

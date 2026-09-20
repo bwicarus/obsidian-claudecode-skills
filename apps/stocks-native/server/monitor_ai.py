@@ -56,7 +56,7 @@ async def explain_signal(notification: dict, state_root: Path) -> str:
             events.append(obj)
 
     try:
-        async with asyncio.timeout(120):
+        async def run():
             await rpc("initialize", {"clientInfo": {"name": "stocks_monitor", "version": "0.2.0"},
                                      "capabilities": {"experimentalApi": True}})
             await send({"method": "initialized"})
@@ -97,6 +97,7 @@ async def explain_signal(notification: dict, state_root: Path) -> str:
                     if not answer:
                         raise RuntimeError("后台文字分析没有返回最终正文")
                     return answer[:1600]
+        return await asyncio.wait_for(run(), timeout=120)
     finally:
         if process.returncode is None:
             process.terminate()
