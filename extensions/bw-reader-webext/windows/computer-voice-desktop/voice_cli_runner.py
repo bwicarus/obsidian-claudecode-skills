@@ -3573,14 +3573,14 @@ class Runner:
         if role == "user":
             tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
             self._voice_turn_id = tid
-            self._history_post({"user": text, "via": "voice", "turn_id": tid + ".u"})
-            # 定稿后把草稿换成这句完整的 —— 跟助手侧同一条原则：草稿等于最终文本，
-            # 内容一致就不会跳动，也不会把半截话留在屏幕上。
+            # 先推草稿、再落库（与助手侧同一条顺序）：落库会触发侧栏权威重载，
+            # 草稿必须赶在它前面，否则会在重载后又叠一份 —— 同一句出现两次。
             self._voice_user_stream = ""
             try:
                 self._stream_post(tid + ".u", text, role="user")
             except Exception:
                 pass
+            self._history_post({"user": text, "via": "voice", "turn_id": tid + ".u"})
         elif role == "assistant":
             tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
             self._voice_turn_id = None
@@ -3640,20 +3640,17 @@ class Runner:
                 "upsert_only": 1, "create_if_missing": 1}
         if absorb:
             body["absorb"] = [absorb]
-        self._history_post(body)
-        # ⚠ 落库之后把草稿换成**同一份完整文本**。
-        #   用户 2026-09-19 要求「流式的最终结果直接当最终结果，不要重新整理」，
-        #   于是轮次收尾不再重渲 —— 代价是草稿一旦不对就永远不对。2026-09-20 实录：
-        #   侧栏显示「步： 上一轮…这轮到了七项,」，开头少了「有进」、结尾断在逗号，
-        #   而库里那条正文是完整的 147 字。
-        #   正确的做法不是「不再校对」，而是让**草稿等于最终文本** —— 内容一致就
-        #   不会有跳动，也不会把半截话永久留在屏幕上。
-        # ⚠ 包起来：这是**显示上的收尾**，落库已经完成了，它失败不该把整条路径带下水。
-        #   （补投那次同样的教训：测试桩是个轻量 Runner，没有 settings 之类的属性。）
+        # ⚠ 顺序要紧：**先推草稿、再落库**。
+        #   侧栏收到落库事件会做权威重载（清掉草稿、用库里的内容替换）。
+        #   2026-09-21 我把这条放在落库之后，于是草稿在重载**之后**才到，
+        #   又在权威内容上面加了一份 —— 表现就是同一段话出现两次、或者闪一下又没。
+        #   放在前面：草稿先变成完整文本（治掉半截显示），随后重载把它替换成同一份，
+        #   内容一致所以看不出替换。
         try:
             self._stream_post(owner, (chr(10) + chr(10)).join(acc))
         except Exception:
             pass
+        self._history_post(body)
 
     def _history_enabled(self) -> str:
         url = str(self.settings.get("historyUrl") or "").rstrip("/")
