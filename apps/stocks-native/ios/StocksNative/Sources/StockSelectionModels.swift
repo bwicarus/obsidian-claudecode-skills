@@ -89,6 +89,10 @@ struct SelectionStock: Codable, Identifiable {
     let passed: Bool?
     let matchedGroups: [String]?
     let score: Double?
+    var volumeRatio: Double? = nil
+    var turnover: Double? = nil
+    var marketCap: Double? = nil
+    var amplitude: Double? = nil
     var id: String { code }
 }
 

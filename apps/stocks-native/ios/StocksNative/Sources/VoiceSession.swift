@@ -27,6 +27,8 @@ final class VoiceSession: ObservableObject {
     @Published private(set) var receivedPackets = 0
     var onStockSelected: ((String) -> Void)?
     var onCapabilityAction: ((CapabilityAction) -> CapabilityResult)?
+    var onSystemCallEnded: ((String) -> Void)?
+    private(set) var systemCallID: String?
 
     var isConnected: Bool { state == .active }
     var isStarted: Bool { state == .connecting || state == .reconnecting || state == .preparing || state == .active }
@@ -57,7 +59,7 @@ final class VoiceSession: ObservableObject {
     private var handshakeStockCode: String?
     private var newConversationRequested = false
 
-    func start(client: APIClient, deviceID: String, stockCode: String?) async {
+    func start(client: APIClient, deviceID: String, stockCode: String?, systemCallID: String? = nil) async {
         guard !isStarted else { return }
         guard let token = client.token, !token.isEmpty else {
             fail("请先配对此设备。")
@@ -71,6 +73,7 @@ final class VoiceSession: ObservableObject {
         wantsConnection = true
         reconnectExpectedThreadID = nil
         newConversationRequested = false
+        self.systemCallID = systemCallID
         await connect(client: client, deviceID: deviceID, stockCode: stockCode,
                       token: token, isReconnect: false)
     }
@@ -112,6 +115,7 @@ final class VoiceSession: ObservableObject {
                                        "capabilities": "chart.annotation.v1,ui.context.v1"]
             handshakeStockCode = self.stockCode
             if let handshakeStockCode { start["stockCode"] = handshakeStockCode }
+            if let systemCallID { start["callId"] = systemCallID }
             try await send(start, through: task)
             guard current == generation else { task.cancel(with: .goingAway, reason: nil); return }
             receiver = Task { [weak self] in
@@ -131,6 +135,8 @@ final class VoiceSession: ObservableObject {
     }
 
     func stop() async {
+        let endedCall = systemCallID
+        systemCallID = nil
         wantsConnection = false
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -152,6 +158,7 @@ final class VoiceSession: ObservableObject {
             try? await send(["type": "stop"], through: oldSocket)
             oldSocket.cancel(with: .normalClosure, reason: nil)
         }
+        if let endedCall { onSystemCallEnded?(endedCall) }
     }
 
     func sendText(_ text: String) async {
@@ -307,7 +314,7 @@ final class VoiceSession: ObservableObject {
                         self.handleConnectionLoss("音频被系统中断，正在恢复通话。", reason: "audio")
                     }
                 }
-                do { try audio.start() }
+                do { try audio.start(managedBySystemCall: systemCallID != nil) }
                 catch { fail("无法启动音频：\(error.localizedDescription)"); return }
                 state = .active
                 if reconnectExpectedThreadID == nil || reconnectExpectedThreadID == threadID {
@@ -445,6 +452,17 @@ final class VoiceSession: ObservableObject {
     private func handleConnectionLoss(_ message: String, reason: String) {
         generation = UUID()
         cleanup()
+        // A terminated system call must never silently reopen a billed session.
+        if let callID = systemCallID {
+            systemCallID = nil
+            wantsConnection = false
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            state = .closed
+            error = message
+            onSystemCallEnded?(callID)
+            return
+        }
         if reason == "new_thread", newConversationRequested, wantsConnection {
             newConversationRequested = false
             transcripts.removeAll()
@@ -493,6 +511,8 @@ final class VoiceSession: ObservableObject {
     }
 
     private func fail(_ message: String) {
+        let endedCall = systemCallID
+        systemCallID = nil
         wantsConnection = false
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -500,6 +520,7 @@ final class VoiceSession: ObservableObject {
         cleanup()
         error = message
         state = .failed
+        if let endedCall { onSystemCallEnded?(endedCall) }
     }
 
     private func cleanup(closeSocket: Bool = true) {

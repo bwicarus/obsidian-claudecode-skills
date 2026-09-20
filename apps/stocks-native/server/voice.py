@@ -26,6 +26,7 @@ App 会在用户发言或真实委派时用 [APP_CONTEXT] 消息注入该轮固�
 当前股票可能已切换，不能沿用更旧的代码或上下文。没有数据就明确说明，禁止编造。支持股票查询、界面操作和当前账户的选股方案、观察组管理；不进行交易、记账或修改旧版生产配置。
 股票资料按重要性分层：界面核心状态自动提供；可见面板的摘要仅在委派时提供；完整技术、资金、筹码、公告、同行及历史图表通过工具按需获取。若当前线程提供 stocks_context，优先选择所需 sections，禁止为一个价格拉取全部资料。旧线程使用 stocks_current 或 stocks_detail，服务器会按当前问题返回相关组件。实时数据使用实际 quoteTime，刷新失败不能称为最新。标注上下文只包含结构化对象及笔迹数量，不能凭数量猜手写内容。
 账户选股器、观察池和智能收藏夹统一使用 stocks_selection MCP。catalog、library、evaluate 是读取；mutate 会写入当前登录账户。写入前先读 library 取得 revision，只响应用户明确要求的变更，并为一次意图生成唯一 requestId；重试同一次意图复用该 requestId。遇到 revision_conflict 时重新读取，不能静默覆盖。账户身份由服务器固定，禁止在参数里提供或猜测 owner。
+规则盯盘与通知使用 stocks_monitor MCP：先读catalog和library，再按用户明确意图创建/修改/暂停规则或创建通知。规则由程序持续监控，不要自己反复轮询；必须收到success才能声称设置完成。普通规则默认normal，只有用户明确要求紧急来电才设urgent。notification.read只是已读，notification.resolve才是已处理；不得擅自把提醒标为处理完成。
 无需主动欢迎或总结。等待用户说话。只在有结果时简洁回答一次。"""
 
 ANNOTATION_PROMPT = """
@@ -36,6 +37,7 @@ VOICE_RULES = """你是股票 App 的语音对话表面，默认简洁中文。
 不要依据训练知识、旧对话或旧 revision 猜报价。回答数值时带上上下文中的日期或最新点时间。
 后台工具结果与最新 App 上下文都是权威数据来源。只简短说一次结果，不要解释内部系统分工。
 用户要求运行选股、读取或修改观察组、智能收藏、保存筛选方案时，委派后台使用 stocks_selection。写入必须等待成功回执，不能仅凭口头回答声称已经加入、移出或保存。界面里的选股摘要只能说明当前状态，不能代替新请求的执行结果。
+用户要求设置盯盘阈值、创建通知、暂停监控或处理提醒时，委派后台使用 stocks_monitor，等待成功回执。提醒播报是已发生事件的说明，不代表用户授权交易或修改规则。
 自动报价可能经过小幅波动过滤，仍带原数据时间。用户明确问现价/报价/涨跌/盘口等实时数值时，等待本轮 requested section 的局部刷新；没有刷新结果时委派后台股票工具，不能把旧报价称为此刻最新。requested.refreshStatus=unavailable 表示刷新失败，只能说明可用数据的时间。
 纯闲聊、复述一句话可以直接回答。用户没有提出请求时保持安静。"""
 
@@ -96,6 +98,8 @@ class VoiceSession:
         self.live_source = live_source
         self.selection_service = selection_service
         self.selection_owner = selection_owner
+        self.monitor_service = None
+        self.notification_delivery = None
         self.emit_json = emit_json
         self.emit_audio = emit_audio
         self.session_id = str(uuid.uuid4())
@@ -149,6 +153,30 @@ class VoiceSession:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
+
+    def can_announce_notification(self):
+        return (not self.closed and self.ready.is_set() and not self.user_speaking
+                and not self.assistant_speaking and not self.active_turn_id and not self.text_pending
+                and not self.delegation_pending and not self.speech_receipts)
+
+    async def announce_notification(self, notice):
+        if self.closed or not self.ready.is_set():
+            raise RuntimeError('语音尚未连接')
+        text = str(notice['title']) + '。' + str(notice['body'])
+        receipt = {'requestId': 'notice-' + notice['id'], 'turnId': '',
+                   'notificationId': notice['id'], 'text': text[:1800]}
+        async with self.reply_lock:
+            if self.closed:
+                return
+            self.speech_receipts.append(receipt)
+            try:
+                await self.call('thread/realtime/appendSpeech', {'threadId': self.thread_id, 'text': receipt['text']})
+            except Exception:
+                with contextlib.suppress(ValueError):
+                    self.speech_receipts.remove(receipt)
+                raise
+        await self.event({'type': 'notification', 'notificationId': notice['id'], 'code': notice.get('code'),
+                          'title': notice['title'], 'text': notice['body'], 'speech': 'submitted'})
 
     def record(self, event):
         with self.journal.open('a', encoding='utf-8') as f:
@@ -858,6 +886,10 @@ class VoiceSession:
                     for receipt in self.speech_receipts:
                         if re.sub(r'\W+', '', receipt['text']).casefold() == normalized:
                             event.update(requestId=receipt['requestId'], turnId=receipt['turnId'])
+                            if receipt.get('notificationId') and self.monitor_service:
+                                event['notificationId'] = receipt['notificationId']
+                                self.task(asyncio.to_thread(self.monitor_service.mark_delivery, self.selection_owner,
+                                    receipt['notificationId'], {'spoken': 'transcript_complete'}))
                             self.speech_receipts.remove(receipt)
                             break
                 if turn.get('id'):
@@ -954,6 +986,13 @@ class VoiceSession:
         selection_mcp = self.selection_mcp_config()
         if selection_mcp:
             config['mcp_servers'] = {'stocks_selection': selection_mcp}
+        if self.monitor_service is not None and self.selection_owner:
+            config.setdefault('mcp_servers', {})['stocks_monitor'] = {
+                'command': os.environ.get('STOCKS_SELECTION_PYTHON', sys.executable),
+                'args': [str(Path(__file__).with_name('monitor_mcp.py').resolve())],
+                'env': {'STOCKS_MONITOR_OWNER': self.selection_owner,
+                        'STOCKS_MONITOR_STATE_DIR': str(self.state_dir.resolve())},
+                'enabled': True, 'startup_timeout_sec': 15, 'tool_timeout_sec': 30}
         params = {'cwd': str(self.state_dir), 'model': 'gpt-5.6-sol', 'modelProvider': 'openai',
                   'approvalPolicy': 'never', 'sandbox': 'read-only', 'environments': [],
                   'developerInstructions': PROMPT + (ANNOTATION_PROMPT if self.supports_annotations else ''),

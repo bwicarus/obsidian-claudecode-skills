@@ -5,6 +5,28 @@ multi-period Swift Charts, stock analytics, Apple sign-in, local caching and an
 AVAudioEngine voice sidebar. The app embeds no WebView, HTML chart or website UI.
 The Reader project is a read-only reference.
 
+Rules-based monitoring uses a separate account-scoped SQLite store and deterministic
+15-second quote checks. Only fresh market timestamps can advance confirmation; a
+notification acknowledgement never rearms a still-true condition. Trigger evidence
+is durable before bounded text-only AI analysis starts. The `stocks_monitor` MCP
+shares the same rule and notification APIs as the native editor.
+
+The native notification center and stock-row badges remain visible independently of
+voice. Foreground presence and active-call leases route alerts; urgent background
+events can make one CallKit call. Ringing does not start Codex realtime. Answered
+calls require an authenticated event and system audio activation; missed, rejected,
+disconnected and expired calls do not reconnect. Incoming calls expire after 45
+seconds; an answered system call is capped at 10 minutes. Ordinary App voice retains
+its existing lifecycle. The implementation follows Reader's current native CallKit
+callbacks without modifying Reader.
+
+Enable the gateway worker with `STOCKS_MONITOR_ENABLED=1`. Use an isolated environment
+with `requirements.txt`, `requirements-data.txt` and `requirements-notifications.txt`.
+APNs requires `STOCKS_APNS_KEY_FILE`, `STOCKS_APNS_KEY_ID`, and `STOCKS_APNS_TEAM_ID`;
+the private key belongs outside the release tree. Production APS entitlement is
+checked during signing. Actual iPad push, cold-start call and audio routing require
+device acceptance testing; an APNs acceptance receipt is not a user-read receipt.
+
 The independent bundle is `space.bwicarus.stocksnative`; it can coexist with
 BWReader. Existing Apple distribution signing material is reused through GitHub
 secrets. StocksNative needs its own provisioning profile and App Store Connect

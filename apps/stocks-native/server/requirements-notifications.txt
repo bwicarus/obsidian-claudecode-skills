@@ -1,0 +1,2 @@
+-r requirements-selection.txt
+httpx[http2]==0.28.1

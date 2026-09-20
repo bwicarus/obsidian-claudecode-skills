@@ -25,14 +25,17 @@ final class NativeAudio {
         }
     }
 
-    func start() throws {
+    func start(managedBySystemCall: Bool = false) throws {
         guard !isRunning else { return }
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+        if !managedBySystemCall {
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+        }
         try session.setPreferredSampleRate(sampleRate)
         try session.setPreferredIOBufferDuration(0.02)
-        try session.setActive(true)
-        sessionIsActive = true
+        // CallKit activates and deactivates its own session in provider callbacks.
+        if !managedBySystemCall { try session.setActive(true) }
+        sessionIsActive = !managedBySystemCall
 
         do {
             guard let playbackFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false) else {

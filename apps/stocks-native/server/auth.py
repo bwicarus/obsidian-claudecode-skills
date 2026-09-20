@@ -164,6 +164,8 @@ class AuthStore:
             if row is None or row["used_at"] is not None or row["expires_at"] <= now:
                 raise AuthError("Invalid or expired pairing code")
             connection.execute("UPDATE pairing_codes SET used_at=? WHERE code_hash=?", (now, _digest(normalized)))
+            connection.execute("UPDATE device_tokens SET revoked_at=? WHERE device_id=? AND revoked_at IS NULL",
+                               (now, device_id))
             connection.execute(
                 "INSERT INTO device_tokens(token_hash,device_id,name,created_at,expires_at,access,owner_id) VALUES(?,?,?,?,?,?,?)",
                 (_digest(token), device_id, name.strip(), now, now + self._token_ttl, row["access"],
@@ -198,6 +200,10 @@ class AuthStore:
                 "SELECT access FROM apple_accounts WHERE subject_hash=?", (subject_hash,)
             ).fetchone()
             access = account["access"] if account else "full"
+            # A delayed notification registration from an old login must not
+            # take this physical device's push binding back after account change.
+            connection.execute("UPDATE device_tokens SET revoked_at=? WHERE device_id=? AND revoked_at IS NULL",
+                               (now, device_id))
             connection.execute(
                 "INSERT INTO apple_accounts(subject_hash,created_at,last_login_at,access) VALUES(?,?,?,?) "
                 "ON CONFLICT(subject_hash) DO UPDATE SET last_login_at=excluded.last_login_at",

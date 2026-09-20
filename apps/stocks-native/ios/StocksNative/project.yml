@@ -17,6 +17,13 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+    info:
+      path: Generated/Info.plist
+      properties:
+        UIBackgroundModes:
+          - audio
+          - voip
+          - remote-notification
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.stocksnative

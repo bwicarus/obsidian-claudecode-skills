@@ -16,6 +16,9 @@ from chips import build_chips
 from live import LiveMarketSource
 from selection import SelectionService, SelectionError, SelectionConflict
 from voice import VoiceSession, closes_voice_connection, safe_error
+from monitoring import MonitorService, MonitorError
+from notification_delivery import NotificationDelivery
+from monitor_runtime import MonitorRuntime
 
 log = logging.getLogger(__name__)
 @web.middleware
@@ -28,7 +31,7 @@ async def errors(request, handler):
         response = web.json_response({'error': '未找到该股票'}, status=404)
     except DataUnavailable:
         response = web.json_response({'error': '行情数据暂不可用，请稍后重试'}, status=503)
-    except SelectionError as exc:
+    except (SelectionError, MonitorError) as exc:
         result = {'error': str(exc), 'message': str(exc), 'code': exc.code, **exc.detail}
         if isinstance(exc, SelectionConflict):
             result['revision'] = exc.revision
@@ -85,6 +88,8 @@ async def apple_login(request):
                                      data['deviceId'], data['name'], previous_token)
     previous_owner = result.pop('previousOwnerId', None)
     owner = result.pop('ownerId')
+    await asyncio.to_thread(request.app['notifications'].register, owner, data['deviceId'],
+                           {'pushToken': None, 'voipToken': None, 'notificationsEnabled': False})
     if previous_owner:
         try:
             await asyncio.to_thread(request.app['selection'].move_library, previous_owner, owner)
@@ -126,6 +131,86 @@ async def selection_mutate(request):
                 with contextlib.suppress(ConnectionError, RuntimeError):
                     await entry[1].emit_json(event)
     return web.json_response(result)
+
+
+async def monitor_catalog(request):
+    await identity(request)
+    return web.json_response(request.app['monitor'].catalog())
+
+
+async def monitor_library(request):
+    caller = await identity(request)
+    result = await asyncio.to_thread(request.app['monitor'].library, caller['ownerId'])
+    result['pushConfigured'] = request.app['notifications'].configured()
+    return web.json_response(result)
+
+
+async def monitor_mutate(request):
+    caller = await identity(request)
+    if not caller['aiEnabled']:
+        return web.json_response({'error': '审核账号未开放自动盯盘'}, status=403)
+    payload = await request.json()
+    return web.json_response(await asyncio.to_thread(request.app['monitor'].mutate, caller['ownerId'], payload))
+
+
+async def notification_item(request):
+    caller = await identity(request)
+    item = await asyncio.to_thread(request.app['monitor'].get_notification, caller['ownerId'], request.match_info['id'])
+    if not item:
+        raise web.HTTPNotFound()
+    return web.json_response(item)
+
+
+async def notification_device(request):
+    caller = await identity(request)
+    payload = await request.json()
+    if payload.get('deviceId', caller['deviceId']) != caller['deviceId']:
+        raise AuthError('device mismatch')
+    result = await asyncio.to_thread(request.app['notifications'].register, caller['ownerId'], caller['deviceId'], payload)
+    return web.json_response(result)
+
+
+async def notification_presence(request):
+    caller = await identity(request)
+    payload = await request.json()
+    return web.json_response(await asyncio.to_thread(request.app['notifications'].presence,
+        caller['ownerId'], caller['deviceId'], payload.get('foreground')))
+
+
+async def notification_receipt(request):
+    caller = await identity(request)
+    payload = await request.json()
+    notice_id = payload.get('notificationId', '')
+    item = await asyncio.to_thread(request.app['monitor'].get_notification, caller['ownerId'], notice_id)
+    if not item:
+        raise web.HTTPNotFound()
+    channel, outcome = payload.get('channel'), payload.get('outcome')
+    if channel == 'call':
+        result = await asyncio.to_thread(request.app['notifications'].call_receipt, caller['ownerId'],
+            caller['deviceId'], notice_id, payload.get('callId'), outcome)
+        await asyncio.to_thread(request.app['monitor'].mark_delivery, caller['ownerId'], notice_id, {'call': outcome})
+    elif channel == 'visual' and outcome == 'displayed':
+        await asyncio.to_thread(request.app['notifications'].receipt,
+                               caller['ownerId'], notice_id, channel, caller['deviceId'], outcome)
+        await asyncio.to_thread(request.app['monitor'].mark_delivery, caller['ownerId'], notice_id, {'visual': outcome})
+        result = {'success': True}
+    else:
+        raise ValueError('invalid delivery receipt')
+    return web.json_response(result)
+
+
+async def notification_call(request):
+    caller = await identity(request)
+    call = await asyncio.to_thread(request.app['notifications'].call, caller['ownerId'], caller['deviceId'], request.match_info['id'])
+    if call.get('notificationId'):
+        item = await asyncio.to_thread(request.app['monitor'].get_notification, caller['ownerId'], call['notificationId'])
+        if item:
+            call.update(code=item.get('code'), title=item.get('title'))
+            if item.get('status') == 'resolved':
+                call['valid'] = False
+        else:
+            call['valid'] = False
+    return web.json_response(call)
 
 
 async def stocks(request):
@@ -204,7 +289,8 @@ async def kline(request):
 
 async def health(request):
     return web.json_response({'status': 'ok', 'version': '0.2.0', 'contextProtocol': 2,
-                              'chartDataProtocol': 1, 'selectionProtocol': 1})
+                              'chartDataProtocol': 1, 'selectionProtocol': 1, 'monitorProtocol': 1,
+                              'pushConfigured': request.app['notifications'].configured()})
 
 
 async def chips(request):
@@ -253,6 +339,8 @@ async def voice(request):
     session = None
     start_task = None
     watch_task = None
+    call_id = None
+    call_notice = None
     writes = asyncio.Lock()
     async def emit_json(event):
         async with writes:
@@ -268,6 +356,9 @@ async def voice(request):
     async def start(code, capabilities):
         try:
             await session.start(code, capabilities)
+            if call_notice:
+                if await asyncio.to_thread(request.app['notifications'].reserve_delivery, caller['ownerId'], call_notice['id'], 'spoken', 'account'):
+                    await session.announce_notification(call_notice)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -280,6 +371,17 @@ async def voice(request):
         while not ws.closed:
             await asyncio.sleep(10)
             now = time.monotonic()
+            await asyncio.to_thread(request.app['notifications'].voice_presence, caller['ownerId'], device_id)
+            try:
+                await identity(request, device_id)
+            except AuthError:
+                await emit_json({'type': 'state', 'state': 'closed', 'reason': 'account_changed'})
+                return
+            if call_id:
+                call = await asyncio.to_thread(request.app['notifications'].call, caller['ownerId'], device_id, call_id)
+                if not call.get('valid'):
+                    await emit_json({'type': 'state', 'state': 'closed', 'reason': 'call_ended'})
+                    return
             delegation_busy = (session and session.delegation_pending and
                                now - session.delegation_pending < 30)
             busy = session and (session.active_turn_id or session.text_pending or delegation_busy or
@@ -294,7 +396,10 @@ async def voice(request):
         session = VoiceSession(device_id, request.app['state'], request.app['data'], emit_json, emit_audio,
                                live_source=request.app['live'],
                                selection_service=request.app['selection'], selection_owner=caller['ownerId'])
+        session.monitor_service = request.app['monitor']
+        session.notification_delivery = request.app['notifications']
         active[device_id] = (ws, session)
+        await asyncio.to_thread(request.app['notifications'].voice_presence, caller['ownerId'], device_id)
         watch_task = asyncio.create_task(watch())
         async for msg in ws:
             try:
@@ -305,6 +410,16 @@ async def voice(request):
                     obj = json.loads(msg.data)
                     kind = obj.get('type')
                     if kind == 'start' and start_task is None:
+                        if obj.get('callId'):
+                            call = await asyncio.to_thread(request.app['notifications'].call, caller['ownerId'], device_id, str(obj['callId']))
+                            if not call.get('valid') or call.get('status') != 'answered':
+                                await emit_json({'type': 'error', 'fatal': True, 'message': '来电已结束或尚未接听'})
+                                break
+                            call_id = str(obj['callId'])
+                            call_notice = await asyncio.to_thread(request.app['monitor'].get_notification, caller['ownerId'], call['notificationId'])
+                            if not call_notice or call_notice.get('status') == 'resolved':
+                                await emit_json({'type': 'error', 'fatal': True, 'message': '提醒已处理'})
+                                break
                         start_task = asyncio.create_task(start(obj.get('stockCode'), obj.get('capabilities', '')))
                     elif kind == 'stop':
                         await ws.send_json({'type': 'state', 'state': 'closed', 'reason': 'manual'})
@@ -339,16 +454,29 @@ async def voice(request):
             if session:
                 await session.close()
         finally:
+            if call_id and call_notice:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(request.app['notifications'].call_receipt, caller['ownerId'], device_id,
+                                            call_notice['id'], call_id, 'ended')
             active.pop(device_id, None)
+            await asyncio.to_thread(request.app['notifications'].voice_presence, caller['ownerId'], device_id, False)
             await ws.close()
     return ws
 
 
 async def shutdown(app):
+    if app.get('monitor_runtime'):
+        await app['monitor_runtime'].close()
     for entry in list(app['voices'].values()):
         if entry:
             await entry[0].close(code=1001, message=b'Server shutdown')
     await app['live'].close()
+
+
+async def startup(app):
+    if os.environ.get('STOCKS_MONITOR_ENABLED') == '1':
+        app['monitor_runtime'] = MonitorRuntime(app)
+        app['monitor_runtime'].start()
 
 
 def create_app():
@@ -359,12 +487,22 @@ def create_app():
     app['apple'] = AppleIdentityVerifier(os.environ.get('APPLE_CLIENT_ID', 'space.bwicarus.stocksnative'))
     app['data'] = StockDataStore(os.environ.get('STOCKS_DATA_ROOT', '/root/webapp/data/stocks'))
     app['selection'] = SelectionService(app['data'], state)
+    app['monitor'] = MonitorService(state)
+    app['notifications'] = NotificationDelivery(state)
     app['live'] = LiveMarketSource()
     app['pair_attempts'] = defaultdict(deque)
     app['voices'] = {}
     app['chip_cache'] = {}
     app.add_routes([web.get('/api/health', health), web.post('/api/pair', pair),
                     web.post('/api/auth/apple', apple_login),
+                    web.get('/api/monitor/catalog', monitor_catalog),
+                    web.get('/api/monitor/library', monitor_library),
+                    web.post('/api/monitor/mutate', monitor_mutate),
+                    web.post('/api/notifications/device', notification_device),
+                    web.post('/api/notifications/presence', notification_presence),
+                    web.post('/api/notifications/receipt', notification_receipt),
+                    web.get('/api/notifications/call/{id}', notification_call),
+                    web.get('/api/notifications/{id}', notification_item),
                     web.get('/api/selection/catalog', selection_catalog),
                     web.get('/api/selection/library', selection_library),
                     web.post('/api/selection/evaluate', selection_evaluate),
@@ -378,6 +516,7 @@ def create_app():
                     web.get('/api/stocks/{code}', detail),
                     web.get('/voice', voice)])
     app.on_shutdown.append(shutdown)
+    app.on_startup.append(startup)
     return app
 
 

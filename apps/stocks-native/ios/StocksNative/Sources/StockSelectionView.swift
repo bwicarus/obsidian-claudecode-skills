@@ -203,7 +203,7 @@ struct StockSelectionControls: View {
 }
 
 /// Intrinsic-width native bubbles wrap to the available width and grow vertically.
-private struct SelectionBubbleFlow: Layout {
+struct SelectionBubbleFlow: Layout {
     var spacing: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
@@ -248,6 +248,8 @@ struct StockSelectionSidebar: View {
     let onOpenStock: (String) -> Void
     let onSelectStock: (String) -> Void
     let onOverlayChange: (Bool) -> Void
+    @ObservedObject var monitoring: MonitoringModel
+    let onMonitoring: (String) -> Void
     @State private var groupEditor: SelectionGroupDraft?
     @State private var deletingGroup: SelectionWatchGroup?
     @State private var deletingPreset: SelectionPreset?
@@ -405,25 +407,21 @@ struct StockSelectionSidebar: View {
                 if choosingStocks { batchControls(result: result) }
                 List {
                     ForEach(result.items) { stock in
-                        Button {
+                        MonitoringStockRow(code: stock.code, name: stock.name, sector: stock.sector,
+                                           price: stock.price, changePct: stock.changePct, volumeRatio: stock.volumeRatio,
+                                           turnoverRate: stock.turnoverRate, turnover: stock.turnover, marketCap: stock.marketCap,
+                                           score: stock.score, summary: monitoring.library?.summary[stock.code],
+                                           isSelected: choosingStocks ? model.selectedCodes.contains(stock.code) : nil,
+                                           onOpen: {
                             if choosingStocks {
                                 if model.selectedCodes.contains(stock.code) { model.selectedCodes.remove(stock.code) }
                                 else { model.selectedCodes.insert(stock.code) }
                             } else { onSelectStock(stock.code) }
-                        } label: {
-                            HStack(spacing: 8) {
-                                if choosingStocks {
-                                    Image(systemName: model.selectedCodes.contains(stock.code) ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(model.selectedCodes.contains(stock.code) ? AppStyle.accent : .secondary)
-                                }
-                                SelectionStockRow(stock: stock)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+                        }, onMonitoring: { onMonitoring(stock.code) })
                         .listRowBackground(selectedStockCode == stock.code && !choosingStocks ? AppStyle.accent.opacity(0.08) : Color.clear)
                         .contextMenu {
                             Button("打开股票") { onOpenStock(stock.code) }
+                            Button("盯盘规则") { onMonitoring(stock.code) }
                             Button("加入观察组") { addingCodes = [stock.code] }.disabled(!model.canWrite)
                             if section == .watchlist, let group = model.selectedGroup, !group.isSmart {
                                 Button("移出这个组", role: .destructive) {
@@ -492,25 +490,6 @@ struct StockSelectionSidebar: View {
             if section == .watchlist { await model.loadSelectedGroup() }
             else { await model.run() }
         }
-    }
-}
-
-private struct SelectionStockRow: View {
-    let stock: SelectionStock
-    var body: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(stock.name).font(.subheadline.weight(.medium)).foregroundStyle(AppStyle.ink).lineLimit(1)
-                Text(stock.code + (stock.sector.map { " · " + $0 } ?? "")).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                if let score = stock.score { Text("评分 \(score.formatted(.number.precision(.fractionLength(0...1))))").font(.caption2).foregroundStyle(.secondary) }
-            }
-            Spacer(minLength: 4)
-            VStack(alignment: .trailing, spacing: 4) {
-                Text(AppStyle.price(stock.price)).foregroundStyle(AppStyle.ink)
-                Text(AppStyle.change(stock.changePct)).foregroundStyle(AppStyle.movement(stock.changePct))
-            }
-            .font(.caption).monospacedDigit()
-        }.padding(.vertical, 6)
     }
 }
 

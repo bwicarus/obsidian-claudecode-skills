@@ -26,6 +26,7 @@ enum AppStyle {
 struct StocksRootView: View {
     @ObservedObject var model: AppModel
     @StateObject private var selectionModel = StockSelectionModel()
+    @StateObject private var monitoringModel = MonitoringModel()
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
@@ -37,6 +38,7 @@ struct StocksRootView: View {
     @State private var selectionOverlayPresented = false
     @State private var addingMarketCodes: [String]?
     @State private var selectionControlsHeight: CGFloat = 0
+    @State private var monitoringDestination: MonitoringDestination?
 
     var body: some View {
         NavigationStack {
@@ -59,6 +61,13 @@ struct StocksRootView: View {
                 .onChange(of: geometry.size.width) { _, width in detailWidth = width }
             }
             .background(AppStyle.canvas)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.isPaired, let notice = monitoringModel.banner {
+                    MonitoringBanner(notice: notice, model: monitoringModel) {
+                        monitoringDestination = .init(code: notice.stockCode, notificationId: notice.id)
+                    }
+                }
+            }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -66,6 +75,7 @@ struct StocksRootView: View {
                     Button { showingSettings = true } label: { Image(systemName: "slider.horizontal.3") }
                         .accessibilityLabel("设置与设备配对")
                     refreshStockListButton
+                    if model.isPaired { monitoringButton }
                 }
                 ToolbarItem(placement: .principal) {
                     if model.isPaired { selectionNavigation }
@@ -77,6 +87,9 @@ struct StocksRootView: View {
         }
         .tint(AppStyle.accent)
         .sheet(isPresented: $showingSettings) { PairingView(model: model) }
+        .sheet(item: $monitoringDestination) { destination in
+            MonitoringView(model: monitoringModel, destination: destination, onOpenStock: { model.openStock($0) })
+        }
         .sheet(isPresented: Binding(get: { addingMarketCodes != nil }, set: { if !$0 { addingMarketCodes = nil } })) {
             SelectionAddToGroupSheet(model: selectionModel, codes: addingMarketCodes ?? [])
         }
@@ -93,6 +106,27 @@ struct StocksRootView: View {
                                                mode: "assistant",
                                                presentation: showingCompactInspector ? "sheet" : "sidebar",
                                                settingsPresented: showingSettings)
+        }
+        .task(id: selectionScopeID) {
+            monitoringDestination = nil
+            await monitoringModel.connect(client: model.isPaired ? model.client : nil)
+        }
+        .task(id: "monitor:\(scenePhase):\(selectionScopeID)") {
+            guard scenePhase == .active, model.isPaired else { return }
+            await monitoringModel.connect(client: model.client)
+            await monitoringModel.refresh()
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                await monitoringModel.refresh()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .stocksOpenNotification)) { event in
+            guard model.isPaired else { return }
+            let code = event.userInfo?["code"] as? String
+            let notificationID = event.userInfo?["notificationId"] as? String
+            if let code { model.openStock(code) }
+            monitoringDestination = .init(code: code, notificationId: notificationID)
+            Task { await monitoringModel.refresh() }
         }
         .task(id: selectionScopeID) {
             selectionModel.onContextChange = { section, summary in
@@ -163,9 +197,11 @@ struct StocksRootView: View {
                 await selectionModel.refreshVisibleQuotes()
             }
         }
-        .onChange(of: scenePhase) { _, phase in
-            // MVP does not promise background audio; explicitly release its session when backgrounded.
-            if phase == .background, model.voice.isStarted { Task { await model.voice.stop() } }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            StockNotificationCoordinator.shared.sceneChanged(active: phase == .active)
+            if phase == .background, model.voice.isStarted, !StockNotificationCoordinator.shared.isCallActive {
+                Task { await model.voice.stop() }
+            }
         }
     }
 
@@ -224,6 +260,27 @@ struct StocksRootView: View {
         .accessibilityLabel("刷新股票列表")
     }
 
+    private var monitoringButton: some View {
+        Button {
+            monitoringDestination = .init()
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: monitoringModel.unreadCount > 0 ? "bell.badge" : "bell")
+                if monitoringModel.unreadCount > 0 {
+                    Text(monitoringModel.unreadCount > 99 ? "99+" : "\(monitoringModel.unreadCount)")
+                        .font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 4).padding(.vertical, 2)
+                        .background(AppStyle.up, in: Capsule()).offset(x: 9, y: -9)
+                }
+            }
+        }
+        .accessibilityLabel("盯盘与通知，\(monitoringModel.unreadCount) 条未读")
+    }
+
+    private func openMonitoring(_ code: String) {
+        monitoringDestination = .init(code: code, tab: "rules")
+    }
+
     private var selectionResultsWorkspace: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
@@ -276,7 +333,8 @@ struct StocksRootView: View {
                                       editorPresented: $selectionEditorPresented,
                                       onOpenStock: { model.openStock($0) },
                                       onSelectStock: openStock,
-                                      onOverlayChange: { selectionOverlayPresented = $0 })
+                                      onOverlayChange: { selectionOverlayPresented = $0 },
+                                      monitoring: monitoringModel, onMonitoring: openMonitoring)
             } else { marketStockList }
         }
     }
@@ -305,13 +363,15 @@ struct StocksRootView: View {
                     Text(error).font(.caption).foregroundStyle(.red).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 }
                 List(model.stocks) { stock in
-                    Button { openStock(stock.code) } label: {
-                        StockRow(stock: stock).contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                    MonitoringStockRow(code: stock.code, name: stock.name, sector: stock.sector,
+                                       price: stock.price, changePct: stock.changePct, volumeRatio: stock.volumeRatio,
+                                       turnoverRate: stock.turnoverRate, turnover: stock.turnover, marketCap: stock.marketCap,
+                                       summary: monitoringModel.library?.summary[stock.code],
+                                       onOpen: { openStock(stock.code) }, onMonitoring: { openMonitoring(stock.code) })
                     .listRowBackground(model.detailPresented && model.selectedCode == stock.code ? AppStyle.accent.opacity(0.08) : Color.clear)
                     .contextMenu {
                         Button("打开股票") { model.openStock(stock.code) }
+                        Button("盯盘规则", systemImage: "waveform.path.ecg") { openMonitoring(stock.code) }
                         Button("加入观察组", systemImage: "folder.badge.plus") { addingMarketCodes = [stock.code] }
                             .disabled(!selectionModel.canWrite)
                     }
@@ -338,35 +398,6 @@ struct StocksRootView: View {
 private struct ScreenerControlsHeight: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-private struct StockRow: View {
-    let stock: Stock
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(stock.name).font(.system(.body, design: .rounded, weight: .medium)).lineLimit(1)
-                HStack(spacing: 6) {
-                    Text(stock.code).monospaced()
-                    if let sector = stock.sector, !sector.isEmpty {
-                        Text("·").foregroundStyle(.tertiary)
-                        Text(sector).lineLimit(1)
-                    }
-                }
-                .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 5) {
-                Text(AppStyle.price(stock.price)).font(.system(.body, design: .rounded, weight: .semibold))
-                Text(AppStyle.change(stock.changePct)).font(.caption).foregroundStyle(AppStyle.movement(stock.changePct))
-                if let rate = stock.turnoverRate {
-                    Text("换 \(AppStyle.percent(rate))").font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-            .monospacedDigit()
-        }
-        .padding(.vertical, 6)
-    }
 }
 
 private struct MarketPulseStrip: View {

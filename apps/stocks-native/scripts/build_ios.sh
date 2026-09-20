@@ -55,6 +55,7 @@ with (app / 'Info.plist').open('rb') as stream:
 assert info['CFBundleIdentifier'] == os.environ['BUNDLE_ID'], 'Unexpected app bundle'
 assert 2 in info['UIDeviceFamily'], 'iPad support missing'
 assert info.get('NSMicrophoneUsageDescription'), 'Microphone purpose missing'
+assert {'audio', 'voip', 'remote-notification'} <= set(info.get('UIBackgroundModes', [])), 'Call background modes missing'
 assert not (app / 'PlugIns').exists(), 'MVP must not embed Reader extensions'
 assert not (app / 'Watch').exists(), 'MVP must not embed Reader Watch app'
 options = {

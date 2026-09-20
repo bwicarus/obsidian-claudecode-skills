@@ -260,7 +260,10 @@ final class StockSelectionModel: ObservableObject {
                 return SelectionStock(code: item.code, name: item.name, price: quote.price ?? item.price,
                                       changePct: quote.changePct ?? item.changePct,
                                       turnoverRate: quote.turnoverRate ?? item.turnoverRate, sector: item.sector,
-                                      checks: item.checks, passed: item.passed, matchedGroups: item.matchedGroups, score: item.score)
+                                      checks: item.checks, passed: item.passed, matchedGroups: item.matchedGroups, score: item.score,
+                                      volumeRatio: quote.volumeRatio ?? item.volumeRatio,
+                                      turnover: quote.turnover ?? item.turnover, marketCap: quote.marketCap ?? item.marketCap,
+                                      amplitude: quote.amplitude ?? item.amplitude)
             }
             watchEvaluation = latest
             watchQuoteTime = response.items.compactMap(\.quoteTime).max()

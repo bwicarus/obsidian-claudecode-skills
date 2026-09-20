@@ -77,6 +77,23 @@ struct APIClient {
         try await request("api/selection/mutate", method: "POST", body: JSONEncoder().encode(mutation))
     }
 
+    func monitoringCatalog() async throws -> MonitoringCatalog {
+        try await request("api/monitor/catalog")
+    }
+
+    func monitoringLibrary() async throws -> MonitoringLibrary {
+        try await request("api/monitor/library")
+    }
+
+    func mutateMonitoring(_ mutation: MonitoringMutation) async throws -> MonitoringMutationReceipt {
+        try await request("api/monitor/mutate", method: "POST", body: JSONEncoder().encode(mutation))
+    }
+
+    func recordMonitoringReceipt(id: String) async throws {
+        let payload = MonitoringDeliveryReceipt(notificationId: id, channel: "visual", outcome: "displayed")
+        let _: MonitoringDeliveryResponse = try await request("api/notifications/receipt", method: "POST", body: JSONEncoder().encode(payload))
+    }
+
     func webSocketURL(deviceID: String) throws -> URL {
         var components = URLComponents(url: baseURL.appendingPathComponent("voice"), resolvingAgainstBaseURL: false)!
         components.scheme = "wss"
@@ -99,6 +116,12 @@ struct APIClient {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw AppError.message("服务器未返回 HTTP 响应。") }
         guard (200..<300).contains(response.statusCode) else {
+            if path.hasPrefix("api/monitor/") {
+                let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                throw MonitoringAPIError(status: response.statusCode,
+                                         message: payload?["message"] as? String ?? payload?["error"] as? String
+                                            ?? "请求失败（HTTP \(response.statusCode)）。")
+            }
             if path.hasPrefix("api/selection/") {
                 let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
                 throw SelectionAPIError(status: response.statusCode, code: payload?["code"] as? String,

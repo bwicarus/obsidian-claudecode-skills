@@ -59,13 +59,18 @@ class SelectionOwnershipTests(unittest.TestCase):
 
     def test_library_adoption_requires_valid_matching_device_token(self):
         paired = self.pair("ipad")
+        previous_owner = self.owner(paired)
         self.now += 1
         linked = self.auth.apple_login("apple-user-one", "ipad", "iPad", paired["token"])
-        self.assertEqual(linked["previousOwnerId"], self.owner(paired))
+        self.assertEqual(linked["previousOwnerId"], previous_owner)
+        with self.assertRaises(ValueError):
+            self.auth.authenticate(paired['token'])
         mismatch = self.auth.apple_login("apple-user-one", "other-ipad", "iPad", paired["token"])
         self.assertNotIn("previousOwnerId", mismatch)
         another_account = self.auth.apple_login("apple-user-two", "ipad", "iPad", linked["token"])
         self.assertNotIn("previousOwnerId", another_account)
+        with self.assertRaises(ValueError):
+            self.auth.authenticate(linked['token'])
 
 
 if __name__ == "__main__":

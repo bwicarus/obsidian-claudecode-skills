@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect or provision only StocksNative, including its Apple sign-in capability."""
+"""Inspect or provision only StocksNative, including Apple sign-in and APNs."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class AppleAPI:
         if method not in {"GET", "POST"}:
             raise ValueError("This tool does not modify or delete existing resources")
         if method == "POST" and path not in {"/v1/bundleIds", "/v1/profiles", "/v1/bundleIdCapabilities"}:
-            raise ValueError("Only the StocksNative bundle, Apple sign-in capability, or profile may be created")
+            raise ValueError("Only the StocksNative bundle, its capabilities, or profile may be created")
         now = int(time.time())
         token = jwt.encode(
             {"iss": self.issuer_id, "iat": now - 30, "exp": now + 600,
@@ -110,6 +110,8 @@ def install_profile(profile, destination: Path, team: str, fingerprints: set[str
         raise RuntimeError("Profile does not belong to StocksNative")
     if data.get("Entitlements", {}).get("com.apple.developer.applesignin") != ["Default"]:
         raise RuntimeError("Profile does not include Sign in with Apple")
+    if data.get("Entitlements", {}).get("aps-environment") != "production":
+        raise RuntimeError("Profile does not include production push notifications")
     if data.get("Entitlements", {}).get("get-task-allow"):
         raise RuntimeError("Development profile cannot be used for distribution")
     if data.get("ProvisionedDevices") or data.get("ProvisionsAllDevices"):
@@ -134,7 +136,9 @@ def profile_supports_apple(profile) -> bool:
             ["security", "cms", "-D", "-i", temporary.name],
             check=True, capture_output=True,
         ).stdout
-    return plistlib.loads(decoded).get("Entitlements", {}).get("com.apple.developer.applesignin") == ["Default"]
+    entitlements = plistlib.loads(decoded).get("Entitlements", {})
+    return (entitlements.get("com.apple.developer.applesignin") == ["Default"]
+            and entitlements.get("aps-environment") == "production")
 
 
 def build_status(api: AppleAPI, build_number: str, marketing_version: str):
@@ -264,17 +268,15 @@ def main():
             },
         }})["data"]
         print("Registered only the StocksNative bundle identifier")
-    try:
-        api.request("POST", "/v1/bundleIdCapabilities", {"data": {
-            "type": "bundleIdCapabilities",
-            "attributes": {"capabilityType": "APPLE_ID_AUTH"},
-            "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle["id"]}}},
-        }})
-        print("Enabled Sign in with Apple only for StocksNative")
-    except AppleHTTPError as error:
-        if error.status != 409:
-            raise
-        print("Sign in with Apple is already enabled for StocksNative")
+    existing = api.listing(f"/v1/bundleIds/{bundle['id']}/bundleIdCapabilities", limit=200)
+    enabled = {item['attributes']['capabilityType'] for item in existing}
+    for capability in ('APPLE_ID_AUTH', 'PUSH_NOTIFICATIONS'):
+        if capability not in enabled:
+            api.request("POST", "/v1/bundleIdCapabilities", {"data": {
+                "type": "bundleIdCapabilities", "attributes": {"capabilityType": capability},
+                "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle["id"]}}},
+            }})
+            print(f"Enabled {capability} only for StocksNative")
     profiles = api.listing(f"/v1/bundleIds/{bundle['id']}/profiles", limit=200)
     selected = None
     for profile in profiles:
