@@ -33,12 +33,18 @@ struct StockDetailPanel: View {
         .frame(width: frame.width, height: frame.height)
         .background(.white)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background {
+            // Cast the shadow from a simple shape, not the native chart/list subtree.
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.white)
+                .shadow(color: .black.opacity(0.13), radius: 18, x: 0, y: 6)
+                .allowsHitTesting(false)
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(.black.opacity(0.07), lineWidth: 1)
                 .allowsHitTesting(false)
         }
-        .shadow(color: .black.opacity(0.13), radius: 18, x: 0, y: 6)
         .offset(x: frame.minX, y: frame.minY)
         // This outer frame has no background, gesture, or contentShape. Only the
         // visible panel participates in hit testing; the result list stays usable.
@@ -103,7 +109,7 @@ struct StockDetailPanel: View {
         .font(.system(size: 14, weight: .medium))
         .foregroundStyle(.secondary)
         .frame(height: 44)
-        .background(.ultraThinMaterial)
+        .background(AppStyle.canvas)
     }
 
     private var moveGesture: some Gesture {
