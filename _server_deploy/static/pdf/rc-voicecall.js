@@ -724,7 +724,7 @@
       '#vc-dock-panel::before{content:"";flex:none;width:36px;height:5px;border-radius:3px;background:rgba(235,235,245,.30);margin:6px auto 2px}' +
       '.vc-dkp-hd{display:flex;align-items:center;gap:8px;padding:9px 14px 4px;flex:none}' +
       '.vc-dkp-t{font-size:12px;color:#9fb0cf;flex:1}' +
-      '.vc-dkp-b{border:1px solid #35446b;background:rgba(255,255,255,.05);color:var(--rc-text-muted);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}' +
+      '.vc-dkp-b{border:1px solid var(--rc-border);background:rgba(255,255,255,.05);color:var(--rc-text-muted);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}' +
       '.vc-dkp-b.on{background:#2b3a5f;color:var(--rc-text-strong)}.vc-dkp-b.danger{border-color:#7f2a2a;color:#ff8a80}' +
       // 时间线:天节点=轴上单线条+日期;每张卡上方竖线+具体时刻(用户设计元素,布局取横向时间轴成熟形态)
       '.vc-dkp-sc{flex:1;display:flex;align-items:flex-start;gap:14px;overflow-x:auto;overflow-y:hidden;padding:14px 16px 10px;-webkit-overflow-scrolling:touch;' +
@@ -781,7 +781,7 @@
       '.vc-grip{flex:none;color:#6f7d9e;font-size:13px;letter-spacing:1px;padding:1px 5px;border-radius:6px;background:rgba(255,255,255,.06)}' +
       '.vc-bub-hd{display:flex;align-items:center;justify-content:flex-end;margin:-3px -4px 4px 0;cursor:grab;touch-action:none}' +
       '.vc-if-wt{font-size:26px;font-weight:600;letter-spacing:-.5px}' +
-      '.vc-if-wc{font-size:14px;color:#cdd9f2;margin-top:1px}' +
+      '.vc-if-wc{font-size:14px;color:var(--rc-text);margin-top:1px}' +
       '.vc-if-ws{font-size:12px;color:var(--rc-text-muted);margin-top:2px}' +
       '.vc-if-tip{font-size:12px;color:#b8c6e2;margin-top:6px;padding-top:6px;border-top:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-if-ni{padding:5px 0;border-bottom:0.5px solid rgba(255,255,255,.08)}.vc-if-ni:last-child{border-bottom:none}' +
@@ -876,7 +876,7 @@
       // 记忆起点选择行(v3-⑰c)
       '.vc-recall-pane{display:flex;gap:6px;align-items:center;margin:6px 10px;padding:6px 8px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);border-radius:10px;flex-wrap:wrap}' +
       '.vc-recall-pane input{background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:7px;padding:4px 6px;font-size:12px;flex:1 1 150px;min-width:0}' +
-      '.vc-recall-pane button{background:#1a2233;border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;flex:none}' +
+      '.vc-recall-pane button{background:var(--rc-bg-raised);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;flex:none}' +
       '@keyframes vcCallPulse{0%,100%{box-shadow:0 0 0 0 rgba(26,127,75,.5)}50%{box-shadow:0 0 0 7px rgba(26,127,75,0)}}' +
       // 长按到点确认(㉒):弹一下+变紫,到点瞬间就知道"够了可以松手"
       '@keyframes vcLpPop{0%{transform:scale(1)}45%{transform:scale(1.28)}70%{transform:scale(.92)}100%{transform:scale(1)}}' +
@@ -898,7 +898,7 @@
       '#vc-tool-btn{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:none;align-items:center;justify-content:center;font-size:18px;-webkit-tap-highlight-color:transparent}' +
       '#vc-tool-btn.ok{color:var(--rc-success);border-color:#1f6b4a}' +
       '#vc-tool-btn.err{color:var(--rc-danger-text);border-color:#7f2a2a}' +
-      '.vc-spin{width:15px;height:15px;border:2px solid #3a4a73;border-top-color:#9fcbff;border-radius:50%;display:inline-block;animation:vcSpin .8s linear infinite;vertical-align:-2px}' +
+      '.vc-spin{width:15px;height:15px;border:2px solid #3a4a73;border-top-color:var(--rc-text-muted);border-radius:50%;display:inline-block;animation:vcSpin .8s linear infinite;vertical-align:-2px}' +
       '@keyframes vcSpin{to{transform:rotate(360deg)}}' +
       // 侧栏对话流里的工具调用详情卡(v3-⑯,感叹号式)
       '.vc-tcard{margin:4px 0;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);border-radius:10px;font-size:12px;overflow:hidden}' +
@@ -906,7 +906,7 @@
       '.vc-tc-h{display:flex;align-items:center;gap:7px;padding:6px 10px;cursor:pointer;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}' +
       '.vc-tc-h:active{background:rgba(255,255,255,.06)}' +
       '.vc-tc-st{flex:none}.vc-tcard .vc-tc-st{color:var(--rc-success)}.vc-tcard.err .vc-tc-st{color:#ff6961}' +
-      '.vc-tc-l{flex:1;color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.vc-tc-l{flex:1;color:var(--rc-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.vc-tc-i{flex:none;display:inline-flex;color:#8fa4cc}.vc-tc-i svg{width:13px;height:13px}' +
       '.vc-tc-t{flex:none;color:var(--rc-text-muted);font-size:11px}' +
       '.vc-tc-x{flex:none;color:var(--rc-text-muted)}' +

@@ -72,35 +72,35 @@
     var css = document.createElement('style'); css.id = 'rc-assistant-css';
     css.textContent =
       '.rc-fu-box{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
-      '.rc-fu{background:#13233f;border:1px solid var(--rc-border-control);color:#bcd0ff;border-radius:13px;padding:5px 11px;' +
+      '.rc-fu{background:#13233f;border:1px solid var(--rc-border-control);color:var(--rc-text);border-radius:13px;padding:5px 11px;' +
       'font-size:13px;cursor:pointer;text-align:left;-webkit-tap-highlight-color:transparent;font-family:inherit;line-height:1.4}' +
       '.rc-fu:active{background:#1d3358}' +
       '.rc-asst-ctx{margin-top:7px;display:flex;flex-direction:column;gap:5px}' +
       '.rc-asst-ctx-row{font-size:12px;color:var(--rc-text-strong);background:rgba(255,255,255,.10);border-left:2px solid rgba(255,255,255,.45);' +
       'border-radius:4px;padding:3px 8px;line-height:1.4;word-break:break-word}' +
       '.rc-asst-ctx-row.clk{cursor:pointer}.rc-asst-ctx-row.clk:active{background:rgba(255,255,255,.2)}' +
-      '.rc-asst-ctx-row.fml{text-align:center;white-space:normal;overflow-x:auto;color:#eaf2ff}' +
+      '.rc-asst-ctx-row.fml{text-align:center;white-space:normal;overflow-x:auto;color:var(--rc-text)}' +
       // ── ⚙ 模型设置面板(每任务 后端/型号/深度)── 逐字照搬 25-assistant.js:122-136
       '.ams-mask{position:fixed;inset:0;z-index:2147483400;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
       '.ams-box{background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow-y:auto;padding:14px 14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.6)}' +
       '.ams-h{font-size:15px;color:var(--rc-text-strong);font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
       '.ams-x{background:none;border:none;color:var(--rc-text-muted);font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
       '.ams-sub{font-size:11px;color:var(--rc-text-dim);margin-bottom:10px;line-height:1.5}' +
-      '.ams-task{background:#0a1322;border:1px solid #243152;border-radius:10px;padding:10px;margin-bottom:9px}' +
-      '.ams-tname{font-size:13px;color:#cdd9f2;font-weight:600;margin-bottom:2px}' +
+      '.ams-task{background:#0a1322;border:1px solid var(--rc-bg-raised);border-radius:10px;padding:10px;margin-bottom:9px}' +
+      '.ams-tname{font-size:13px;color:var(--rc-text);font-weight:600;margin-bottom:2px}' +
       '.ams-tdef{font-size:11px;color:var(--rc-text-dim);margin-bottom:7px}' +
       '.ams-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}' +
       '.ams-sel{flex:1 1 28%;min-width:0;font-size:12px;padding:6px 26px 6px 10px}' +
       '.ams-sel:disabled{opacity:.45}' +
       '.ams-fast{background:#141d31;border:1px solid var(--rc-border-control);color:#8998b8;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
       '.ams-fast.on{background:#173a2b;border-color:#2f9c6a;color:#9af0c7}.ams-fast:disabled{opacity:.4;cursor:not-allowed}' +
-      '.ams-rst{background:#1a2233;border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
-      '.ams-rst:active{background:#222d44}' +
+      '.ams-rst{background:var(--rc-bg-raised);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
+      '.ams-rst:active{background:var(--rc-bg-raised)}' +
       '.ams-cur{font-size:11px;color:var(--rc-text-muted);margin-top:6px}' +
       '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}' +
       // 预设条:一排 chips,点=整包应用,长按/右键=删,＋=存当前
       '.ams-profiles{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}' +
-      '.ams-prof{background:#14203a;border:1px solid var(--rc-border-control);color:#cdd9f2;border-radius:14px;padding:4px 12px;font-size:12px;cursor:pointer}' +
+      '.ams-prof{background:var(--rc-bg-surface);border:1px solid var(--rc-border-control);color:var(--rc-text);border-radius:14px;padding:4px 12px;font-size:12px;cursor:pointer}' +
       '.ams-prof:active{background:#1e2c4d}' +
       '.ams-prof.on{background:#2b4a8f;border-color:#5b82d8;color:#fff;font-weight:600}' +   // 当前应用中的预设(单项改过即熄灭=已偏离)
       '.ams-prof-add{background:none;border:1px dashed var(--rc-border-control);color:var(--rc-text-muted)}';
@@ -364,7 +364,7 @@
   function _renderVoiceCfg(container) {
     container.querySelectorAll('.ams-voice-part').forEach(function (n) { n.remove(); });   // 切引擎重绘:先清旧区块
     var h = document.createElement('div'); h.className = 'ams-sub ams-voice-part';
-    h.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
+    h.style.cssText = 'margin-top:12px;font-weight:600;color:var(--rc-text-muted);';
     h.textContent = '— 🎙 语音通话 —';
     container.appendChild(h);
     var card = document.createElement('div'); card.className = 'ams-task ams-voice-part';
@@ -608,7 +608,10 @@
       // 界面开关:回答下方的「追问建议按钮」默认不显示(用户拍板放弃),这里可重新打开(本机 localStorage)。
       var fuRow = document.createElement('label'); fuRow.className = 'ams-sub';
       fuRow.style.cssText = 'display:flex;align-items:center;gap:7px;cursor:pointer;margin:2px 0 8px';
+      // 这一行本来是个**没样式的原生勾选框**，混在全是拨动开关的面板里格外扎眼
+      // （2026-09-20 用户截图里那个黑方块）。设置项就该用同一种控件。
       var fuCk = document.createElement('input'); fuCk.type = 'checkbox';
+      fuCk.className = 'rc-ui-switch';
       try { fuCk.checked = localStorage.getItem('asst-followups-on') === '1'; } catch (_) {}
       fuCk.addEventListener('change', function () { try { localStorage.setItem('asst-followups-on', fuCk.checked ? '1' : '0'); } catch (_) {} });
       fuRow.appendChild(fuCk); fuRow.appendChild(document.createTextNode('回答下方显示「追问建议」按钮(本设备)'));
@@ -677,12 +680,12 @@
       _renderActs(['card_improve', 'agent', 'paper', 'dictation_grade']);
       // 阅读器其它 AI 入口(解释/翻译/字典/语法),跟助手共用同一套脱壳 Claude + Gemini 双后端预设
       var _rh = document.createElement('div'); _rh.className = 'ams-sub';
-      _rh.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
+      _rh.style.cssText = 'margin-top:12px;font-weight:600;color:var(--rc-text-muted);';
       _rh.textContent = '— 阅读器其它 AI —';
       container.appendChild(_rh);
       _renderActs(['explain', 'translate', 'dict', 'grammar', 'pick_video']);   // 服务端没有的 action 自动跳过(向后兼容);pick_video=找视频拟词+筛选
       var _wh = document.createElement('div'); _wh.className = 'ams-sub';
-      _wh.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
+      _wh.style.cssText = 'margin-top:12px;font-weight:600;color:var(--rc-text-muted);';
       _wh.textContent = '— 联网与语音文字环节 —';
       container.appendChild(_wh);
       _renderActs(['web_search', 'route_text', 'img_norm']);   // 91:总面板补全(此前 img_norm 只有感叹号直达)
@@ -958,7 +961,7 @@
     '.asst-msg code,.asst-msg samp,.asst-msg kbd{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}' +
     '.asst-msg pre{box-sizing:border-box;min-width:0;max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow-x:auto}' +
     '.asst-u{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}' +
-    '.asst-a{align-self:flex-start;background:#161d31;border:1px solid #243152;border-bottom-left-radius:4px}' +
+    '.asst-a{align-self:flex-start;background:#161d31;border:1px solid var(--rc-bg-raised);border-bottom-left-radius:4px}' +
     '.asst-a p{margin:.4em 0}.asst-a ul,.asst-a ol{margin:.3em 0;padding-left:1.3em}.asst-a code{background:#0b1220;padding:1px 4px;border-radius:4px}' +
     '.asst-a h1,.asst-a h2,.asst-a h3{font-size:1em;margin:.5em 0 .2em}' +
     /* 内容图给浅色画布 matte:助手气泡恒深底(#161d31),透明底 SVG/图的黑轴黑字看不清 → 白底救场(同 rc-result;MathJax=chtml 无 svg 不误伤) */
@@ -968,7 +971,7 @@
     '.asst-note{align-self:center;background:#2a2410;border:1px solid #5a4a18;color:#e7d28a;font-size:12px;padding:4px 10px;border-radius:9px;max-width:96%}' +
     '.asst-undo{background:#3a1d2a;border:1px solid #6b3550;color:#ffd0e0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
     '.asst-undo:active{background:#52283a}.asst-undo:disabled{opacity:.5}' +
-    '.asst-jump{background:#16293a;border:1px solid #2a4a63;color:#bce0ff;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
+    '.asst-jump{background:var(--rc-bg-surface);border:1px solid var(--rc-border);color:var(--rc-text-muted);border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
     '.asst-jump:active{background:#1d3a52}' +
     '.asst-hl-row{display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:8px;margin-top:5px;background:#161d33}' +
     '.asst-hl-sw{flex:0 0 auto;width:12px;height:12px;border-radius:3px;border:1px solid #ffffff33}' +
@@ -988,12 +991,12 @@
     '.asst-edit-undo:active{background:#2f4061}.asst-edit-undo:disabled{opacity:.55}' +
     '.asst-pc-snack{position:fixed;left:50%;bottom:max(22px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:320;display:flex;align-items:center;gap:12px;max-width:min(92vw,520px);padding:10px 12px 10px 15px;border:1px solid #3a5273;border-radius:12px;background:rgba(19,32,58,.94);box-shadow:0 10px 30px rgba(0,0,0,.4);color:#e9efff;backdrop-filter:blur(10px)}' +
     '.asst-pc-snack-msg{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.asst-pc-snack .asst-edit-undo{flex:0 0 auto;margin:0}' +
-    '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:nowrap;gap:6px;padding:8px 10px;border-top:1px solid #233156;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}' +
+    '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:nowrap;gap:6px;padding:8px 10px;border-top:1px solid var(--rc-bg-raised);overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}' +
     '#asst-quick::-webkit-scrollbar{display:none}' +
     '#asst-quick button{flex:none;white-space:nowrap}' +   // 按钮多了不换行:单行横滑(iOS chips 惯例)
-    '#asst-quick button{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:#bcd0ff;border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
+    '#asst-quick button{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text);border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
     '#asst-quick button:active{background:#22305a}' +
-    '#asst-quick button.asst-learn{background:#16293a;border-color:#2a4a63;color:#bce0ff}' +   // 学习类按钮:跟导航类区分
+    '#asst-quick button.asst-learn{background:var(--rc-bg-surface);border-color:var(--rc-border);color:var(--rc-text-muted)}' +   // 学习类按钮:跟导航类区分
     '#asst-send.stop{background:#b23b3b}' +
     '.vc-bub-grip{position:absolute;top:5px;right:7px;color:#4a5a7d;font-size:11px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;padding:2px 4px}' +
     '.ams-tabs{display:flex;gap:6px;margin:2px 0 10px}' +
@@ -1010,7 +1013,7 @@
     '.vc-inf-pop{position:absolute;right:4px;bottom:26px;z-index:60;min-width:210px;max-width:270px;padding:10px 12px;border-radius:12px;' +
     'background:rgba(24,26,34,.94);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:0.5px solid rgba(255,255,255,.14);box-shadow:0 10px 30px rgba(0,0,0,.45);font-size:12px}' +
     '.vc-inf-r{display:flex;gap:8px;margin:3px 0;color:#c6d1e8}.vc-inf-r span{flex:none;color:#7f8cab}' +
-    '.vc-inf-set{margin-top:7px;width:100%;padding:6px;border-radius:8px;border:1px solid #35446b;background:#1b2338;color:var(--rc-text-muted);cursor:pointer;font-size:12px}' +
+    '.vc-inf-set{margin-top:7px;width:100%;padding:6px;border-radius:8px;border:1px solid var(--rc-border);background:#1b2338;color:var(--rc-text-muted);cursor:pointer;font-size:12px}' +
     '.asst-clip{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;border:none;cursor:pointer;' +
     'font-size:9px;line-height:1;background:rgba(123,108,255,.16);color:#9d8cff;margin:6px 0 0 2px;padding:0 0 0 1px;' +
     '-webkit-tap-highlight-color:transparent;vertical-align:middle;transition:transform .12s ease,background .2s;-webkit-user-select:none;user-select:none}' +
@@ -1028,34 +1031,34 @@
     '.asst-btm .asst-clip{margin:0;flex:0 0 auto}' +
     // AI 答完的「追问建议」chip
     '.asst-followups{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
-    '.asst-fu{background:#13233f;border:1px solid var(--rc-border-control);color:#bcd0ff;border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
+    '.asst-fu{background:#13233f;border:1px solid var(--rc-border-control);color:var(--rc-text);border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
     '.asst-fu:active{background:#1d3358}' +
     // 每条回答右下角的「!」反馈按钮 + 弹出:显示这条回答经过了哪些 AI 调用(各步模型),再给两个回报动作
     '.asst-fb-bar{position:relative;margin-top:7px;display:flex;justify-content:flex-end;align-items:center}' +
-    '.asst-tok{margin-right:auto;font-size:11px;color:#6f7fa3;background:#121a2e;border:1px solid #233156;border-radius:8px;padding:1px 7px}' +
+    '.asst-tok{margin-right:auto;font-size:11px;color:#6f7fa3;background:#121a2e;border:1px solid var(--rc-bg-raised);border-radius:8px;padding:1px 7px}' +
     '.asst-fb-btn{width:22px;height:22px;line-height:20px;text-align:center;border-radius:50%;border:1px solid var(--rc-border-control);background:var(--rc-bg-field);color:var(--rc-text-muted);font-size:13px;font-weight:700;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}' +
     '.asst-fb-btn:active{background:var(--rc-bg-raised)}' +
     '.asst-fb-pop{position:absolute;right:0;bottom:28px;z-index:20;width:320px;max-width:88vw;background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);border-radius:11px;padding:9px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:5px}' +
     '.afp-l-btn{cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px;-webkit-tap-highlight-color:transparent}' +
     '.afp-l-btn:active{opacity:.7}' +
-    '.afp-detail{white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;background:#0a1020;border:1px solid #233156;border-radius:8px;padding:8px 10px;margin:2px 0 4px;font-size:11.5px;color:#bcd0ee;line-height:1.55;-webkit-overflow-scrolling:touch}' +
+    '.afp-detail{white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;background:#0a1020;border:1px solid var(--rc-bg-raised);border-radius:8px;padding:8px 10px;margin:2px 0 4px;font-size:11.5px;color:#bcd0ee;line-height:1.55;-webkit-overflow-scrolling:touch}' +
     '.afp-h{font-size:11px;color:var(--rc-text-muted);margin-bottom:2px}' +
     '.afp-step{display:flex;align-items:center;gap:7px;font-size:12px;line-height:1.5}' +
-    '.afp-l{color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}' +
+    '.afp-l{color:var(--rc-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}' +
     '.afp-m{color:var(--rc-text-muted);flex:none;font-variant-numeric:tabular-nums}' +
     '.afp-gear-btn{flex:none;background:none;border:none;color:var(--rc-text-dim);font-size:13px;cursor:pointer;padding:0 1px;-webkit-tap-highlight-color:transparent}' +
-    '.afp-gear-btn:active{color:#bcd0ff}' +
-    '.afp-gear{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin:1px 0 5px;padding:7px;background:#0a1322;border:1px solid #243152;border-radius:8px}' +
+    '.afp-gear-btn:active{color:var(--rc-text)}' +
+    '.afp-gear{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin:1px 0 5px;padding:7px;background:#0a1322;border:1px solid var(--rc-bg-raised);border-radius:8px}' +
     '.afp-glab{font-size:11px;color:var(--rc-text-muted);width:100%}' +
     '.afp-sel{background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:6px;padding:3px 5px;font-size:12px;flex:1 1 42%;min-width:0}' +
-    '.afp-gset{background:#16293a;border:1px solid #2a4a63;color:#bce0ff;border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;flex:1 1 auto}' +
-    '.afp-gdef{background:#1a2233;border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;flex:none}' +
+    '.afp-gset{background:var(--rc-bg-surface);border:1px solid var(--rc-border);color:var(--rc-text-muted);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;flex:1 1 auto}' +
+    '.afp-gdef{background:var(--rc-bg-raised);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;flex:none}' +
     '.afp-foot{font-size:11px;color:var(--rc-text-dim);margin-top:5px;text-align:right;font-variant-numeric:tabular-nums}' +
     '.afp-acts{display:flex;flex-direction:column;gap:5px;margin-top:4px;border-top:1px solid #1d2742;padding-top:7px}' +
     '.afp-act{text-align:left;border:1px solid var(--rc-border-control);border-radius:8px;padding:6px 9px;font-size:12px;cursor:pointer;color:var(--rc-text-strong)}' +
-    '.afp-q{background:#16293a;border-color:#2a4a63}.afp-q:active{background:#1d3a52}' +
-    '.afp-s{background:#1a2233}.afp-s:active{background:#222d44}' +
-    '#asst-input{flex:0 0 auto;display:flex;gap:8px;padding:10px;border-top:1px solid #233156;align-items:flex-end}' +
+    '.afp-q{background:var(--rc-bg-surface);border-color:var(--rc-border)}.afp-q:active{background:#1d3a52}' +
+    '.afp-s{background:var(--rc-bg-raised)}.afp-s:active{background:var(--rc-bg-raised)}' +
+    '#asst-input{flex:0 0 auto;display:flex;gap:8px;padding:10px;border-top:1px solid var(--rc-bg-raised);align-items:flex-end}' +
     '#asst-ta{flex:1;background:#0b1220;border:1px solid var(--rc-border-control);color:#e6eeff;border-radius:12px;padding:9px 11px;font-size:15px;resize:none;max-height:120px;line-height:1.4;font-family:inherit}' +
     '#asst-send{background:#2563eb;border:none;color:#fff;width:42px;height:42px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}' +
     '#asst-send:disabled{opacity:.5}' +
@@ -1071,8 +1074,8 @@
     '.actx-thumb:active{transform:scale(.94)}' +
     '.actx-sel{font-size:12px;color:var(--rc-text-strong);background:rgba(255,255,255,.13);border-left:2px solid rgba(255,255,255,.5);border-radius:4px;padding:3px 7px;cursor:pointer;line-height:1.4}' +
     '.actx-sel:active{background:rgba(255,255,255,.22)}' +
-    '.actx-sel.actx-fml{text-align:center;white-space:normal;overflow-x:auto;color:#eaf2ff}' +
-    '.actx-page{align-self:flex-start;font-size:11px;color:#eaf2ff;background:rgba(255,255,255,.16);border-radius:9px;padding:2px 9px;cursor:pointer}' +
+    '.actx-sel.actx-fml{text-align:center;white-space:normal;overflow-x:auto;color:var(--rc-text)}' +
+    '.actx-page{align-self:flex-start;font-size:11px;color:var(--rc-text);background:rgba(255,255,255,.16);border-radius:9px;padding:2px 9px;cursor:pointer}' +
     '.actx-page:active{background:rgba(255,255,255,.28)}' +
     // ⚙ 模型设置面板(每任务 后端/型号/深度)
     '.ams-mask{position:fixed;inset:0;z-index:2147483400;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
@@ -1080,16 +1083,16 @@
     '.ams-h{font-size:15px;color:var(--rc-text-strong);font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
     '.ams-x{background:none;border:none;color:var(--rc-text-muted);font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
     '.ams-sub{font-size:11px;color:var(--rc-text-dim);margin-bottom:10px;line-height:1.5}' +
-    '.ams-task{background:#0a1322;border:1px solid #243152;border-radius:10px;padding:10px;margin-bottom:9px}' +
-    '.ams-tname{font-size:13px;color:#cdd9f2;font-weight:600;margin-bottom:2px}' +
+    '.ams-task{background:#0a1322;border:1px solid var(--rc-bg-raised);border-radius:10px;padding:10px;margin-bottom:9px}' +
+    '.ams-tname{font-size:13px;color:var(--rc-text);font-weight:600;margin-bottom:2px}' +
     '.ams-tdef{font-size:11px;color:var(--rc-text-dim);margin-bottom:7px}' +
     '.ams-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}' +
     '.ams-sel{flex:1 1 28%;min-width:0;font-size:12px;padding:6px 26px 6px 10px}' +
     '.ams-sel:disabled{opacity:.45}' +
     '.ams-fast{background:#141d31;border:1px solid var(--rc-border-control);color:#8998b8;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
     '.ams-fast.on{background:#173a2b;border-color:#2f9c6a;color:#9af0c7}.ams-fast:disabled{opacity:.4;cursor:not-allowed}' +
-    '.ams-rst{background:#1a2233;border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
-    '.ams-rst:active{background:#222d44}' +
+    '.ams-rst{background:var(--rc-bg-raised);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
+    '.ams-rst:active{background:var(--rc-bg-raised)}' +
     '.ams-cur{font-size:11px;color:var(--rc-text-muted);margin-top:6px}' +
     '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}' +
     '.asst-imgph{display:inline-block;font-size:12px;color:var(--rc-text-muted);background:#121a2e;border:1px dashed var(--rc-border-control);border-radius:8px;padding:3px 9px;margin:.3em 0}';
@@ -1638,7 +1641,7 @@
       _renderActs(['card_improve', 'agent', 'paper', 'dictation_grade']);
       // PDF 阅读器其它 AI 入口(解释/翻译/字典/语法),跟助手共用同一套脱壳 Claude + Gemini 双后端预设
       var _rh = document.createElement('div'); _rh.className = 'ams-sub';
-      _rh.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
+      _rh.style.cssText = 'margin-top:12px;font-weight:600;color:var(--rc-text-muted);';
       _rh.textContent = '— PDF 阅读器其它 AI —';
       box.appendChild(_rh);
       _renderActs(['explain', 'translate', 'dict', 'grammar', 'pick_video']);   // pick_video=找视频拟词+相关性筛选

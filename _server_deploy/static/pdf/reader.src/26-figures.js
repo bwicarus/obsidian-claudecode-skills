@@ -54,7 +54,7 @@
     '.asst-sel-chip-in.is-fml{border-color:var(--rc-border-accent)}' +
     '.asst-sel-chip-in .asc-icon{flex:none;font-size:14px}' +
     '.asst-sel-chip-in .asc-body{flex:1 1 auto;min-width:0;font-size:12px;color:var(--rc-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-    '.asst-sel-chip-in.is-fml .asc-body{color:#eaf2ff;white-space:normal;max-height:46px;overflow:auto}' +
+    '.asst-sel-chip-in.is-fml .asc-body{color:var(--rc-text);white-space:normal;max-height:46px;overflow:auto}' +
     '.asst-sel-chip-in .asc-x{flex:none;background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;padding:0 2px}' +
     // 点缩略图看大图(合成图)
     '.fig-lightbox{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out}' +

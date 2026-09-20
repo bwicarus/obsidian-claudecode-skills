@@ -3632,7 +3632,7 @@
       '.rv-stats{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '.rv-nav,.rv-btn{border:1px solid var(--rc-border,rgba(84,84,88,.62));border-radius:var(--rc-radius-md,8px);padding:5px 9px;background:rgba(22,32,58,.72);color:var(--rc-text-strong,#fff);cursor:pointer;font:inherit;-webkit-tap-highlight-color:transparent;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}' +
       '.rv-nav:disabled,.rv-btn:disabled{opacity:.35;cursor:default}' +
-      '.rv-card-toggle,.rv-improve-toggle{border:1px solid var(--rc-border-control,#35446b);border-radius:var(--rc-radius-md,8px);padding:5px 8px;background:rgba(22,32,58,.72);color:var(--rc-text-strong,#cbd9f5);cursor:pointer;font:inherit;white-space:nowrap}' +
+      '.rv-card-toggle,.rv-improve-toggle{border:1px solid var(--rc-border-control,rgba(84,84,88,.46));border-radius:var(--rc-radius-md,8px);padding:5px 8px;background:rgba(22,32,58,.72);color:var(--rc-text-strong,#cbd9f5);cursor:pointer;font:inherit;white-space:nowrap}' +
       '.rv-improve-toggle{border-color:rgba(185,168,255,.46);background:rgba(70,55,112,.34);color:#eee8ff}' +
       '.rv-card-toggle:disabled,.rv-improve-toggle:disabled{opacity:.4;cursor:default}' +
       '.rv-card-panel{position:relative;display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}' +
@@ -3665,7 +3665,7 @@
       '.rv-mode{border:0;border-radius:6px;padding:7px 8px;background:transparent;color:var(--rc-text-muted,rgba(235,235,245,.62));font-size:12px;cursor:pointer}' +
       '.rv-mode.on{background:#2c2652;color:#e5ddff;box-shadow:inset 0 0 0 1px #6d5fb3}' +
       '.rv-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}' +
-      '.rv-action{border:1px solid var(--rc-border-control,#35446b);border-radius:8px;padding:8px;background:rgba(22,32,58,.70);color:var(--rc-text-strong,#cbd9f5);font-size:12px;cursor:pointer;white-space:normal;line-height:1.35}' +
+      '.rv-action{border:1px solid var(--rc-border-control,rgba(84,84,88,.46));border-radius:8px;padding:8px;background:rgba(22,32,58,.70);color:var(--rc-text-strong,#cbd9f5);font-size:12px;cursor:pointer;white-space:normal;line-height:1.35}' +
       '.rv-action:disabled{opacity:.45;cursor:default}' +
       '.rv-action.rv-all{border-color:#3d775c;background:#173025;color:#bce8d2}' +
       '.rv-delete-card{border-color:rgba(248,113,113,.48);background:rgba(83,28,36,.52);color:#fecaca}' +

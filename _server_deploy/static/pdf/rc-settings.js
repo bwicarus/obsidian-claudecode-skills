@@ -465,7 +465,7 @@
       meta.style.cssText = 'display:block;color:var(--rc-text-muted);font-size:10px;margin-top:3px;overflow-wrap:anywhere';
       meta.textContent = [String(note.fileName || ''), _nativeNoteDate(note.createdAt)].filter(Boolean).join(' · ');
       var preview = document.createElement('span');
-      preview.style.cssText = 'display:block;color:#aebbd0;font-size:11px;line-height:1.45;margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere';
+      preview.style.cssText = 'display:block;color:var(--rc-text-muted);font-size:11px;line-height:1.45;margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere';
       preview.textContent = String(note.preview || '').slice(0, 240);
       row.appendChild(head); row.appendChild(meta); row.appendChild(preview);
       row.addEventListener('click', function () { _readNativeNote(note.id); });
@@ -668,10 +668,13 @@
       '.rc-set-mask [data-sec] .set-lbl{margin:10px 0 2px}' +
       // 说明文字：iOS 放在卡片**下面**，不是行里。
       '.rc-set-mask [data-sec] .ep-set-note{margin:0;padding:8px 0 10px;color:var(--rc-text-dim)}' +
+      // ⚠ flex:0 0 auto 不能省：.ep-set-modal 是 flex 列 + max-height:88vh，
+      //   不写就会被当成可压缩子项**压扁**，整排分类只露出一半（2026-09-20 实录）。
+      //   以前是下划线 tab、没有底色，压扁看不太出来；有了填充胶囊一压就露馅。
       // 分类切换改成 iOS 分段控件：一条填充底的胶囊，选中项是一块浮起来的白片。
       // 原来是网页式的「下划线 tab」—— 那个形态 iOS 里不存在。
       // ⚠ 项目多时允许横滑（分段控件本身不换行），而不是折成两行。
-      '.rc-set-mask .set-tabs{display:flex;gap:2px;padding:2px;margin-bottom:16px;border:0;border-radius:var(--rc-radius-md,9px);background:var(--rc-bg-control);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}' +
+      '.rc-set-mask .set-tabs{display:flex;flex:0 0 auto;gap:2px;padding:2px;margin-bottom:16px;border:0;border-radius:var(--rc-radius-md,9px);background:var(--rc-bg-control);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}' +
       '.rc-set-mask .set-tabs::-webkit-scrollbar{display:none}' +
       '.rc-set-mask .set-tab{flex:1 0 auto;background:transparent;border:0;border-radius:calc(var(--rc-radius-md,9px) - 2px);color:var(--rc-text-muted);font-size:13px;font-weight:500;padding:7px 14px;cursor:pointer;white-space:nowrap;transition:background var(--rc-motion-fast) var(--rc-ease),color var(--rc-motion-fast) var(--rc-ease)}' +
       '.rc-set-mask .set-tab.active{color:var(--rc-text);font-weight:600;background:var(--rc-bg-raised);box-shadow:0 1px 3px rgba(0,0,0,.28)}' +
@@ -980,7 +983,7 @@
     //      action 预设;配置表由 RC.assistant.renderModelSettings **内嵌**渲染,跟助手 ⚙ 浮层同一实现)════
     var paneAi =
       '<div class="set-pane" data-pane="ai">' +
-        '<div style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin-bottom:16px">' +
+        '<div style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin-bottom:16px">' +
           '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🤖 AI 模型（按功能配 后端 / 型号 / 深度）</div>' +
           '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">解释 / 问 AI / 翻译・例句 / 字典 AI / 语法分析 / 助手 等所有 AI 调用，都走同一套脱壳 Claude + Gemini 双后端（一边失败自动切另一边）。下面按功能分别选：改完即时生效、服务端保存全设备共用；Gemini 免费档优先、过载自动落付费，「💰仅付费」型号（如 3.1-pro）每次调用按量计费。</div>' +
           '<div id="rcset-ai-inline"></div>' +
@@ -1016,7 +1019,7 @@
         '</div>' +
         // 143(用户设计):语音工具的**调用前垫话**总策略。单个工具可在「长按工具卡 → 详情窗」里单独覆盖。
         //   实测垫话和 function_call 同属一个 response ⇒ 这是体验旋钮不是省钱旋钮(见 REALTIME_2_1_API_GUIDE)。
-        '<div style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
+        '<div style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
           '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🗣 语音·调用前垫话</div>' +
           '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">AI 调工具前要不要先说一句「我去查一下」。<b>自动</b> = 按这个工具在账本里的<b>真实中位耗时</b>判：慢过阈值才垫话，秒回的静默直接调（免得啰嗦）。单个工具想固定，长按它的工具卡 → 详情窗里单独设。</div>' +
           '<select class="rc-ui-select" id="set-filler-mode" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
@@ -1029,10 +1032,10 @@
             '<input id="set-filler-th" type="number" step="0.5" min="0.5" max="30" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px">' +
           '</div>' +
         '</div>' +
-        '<div id="rcset-sync-section" data-sec="pwa-sync" style="display:none;background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
+        '<div id="rcset-sync-section" data-sec="pwa-sync" style="display:none;background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
           '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🔄 跨设备同步</div>' +
-          '<div id="rcset-sync-status" style="font-size:12px;color:#aebbd0;line-height:1.55;white-space:pre-wrap">正在读取同步状态……</div>' +
-          '<ul id="rcset-sync-conflicts" style="display:none;margin:8px 0 0;padding-left:18px;color:#8fa0ba;font-size:11px;line-height:1.5"></ul>' +
+          '<div id="rcset-sync-status" style="font-size:12px;color:var(--rc-text-muted);line-height:1.55;white-space:pre-wrap">正在读取同步状态……</div>' +
+          '<ul id="rcset-sync-conflicts" style="display:none;margin:8px 0 0;padding-left:18px;color:var(--rc-text-muted);font-size:11px;line-height:1.5"></ul>' +
         '</div>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
           '<input type="checkbox" id="set-debug" class="rc-ui-switch"> 显示调试日志（左下角浮窗）' +
@@ -1042,7 +1045,7 @@
     // ════ pane: 电脑客户端（Windows 桥接、上下文同步和回退模式集中在这里）════
     var paneComputer =
       '<div class="set-pane" data-pane="computer" style="display:none">' +
-        '<div style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin-bottom:16px">' +
+        '<div style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin-bottom:16px">' +
           '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">电脑客户端桥接</div>' +
           '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">电脑图标按钮是唯一启动入口；普通电话按钮只负责豆包、GPT 或 Grok。查看状态不会启动应用、采音或发送快捷键。</div>' +
           '<div id="rcset-computer-inline"></div>' +
@@ -1061,7 +1064,7 @@
           '</div>' +
           '<div id="set-readerpc-no-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
         '</div>' +
-        '<div id="set-ctx-sync-card" style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
+        '<div id="set-ctx-sync-card" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
           '<label id="set-ctx-sync-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer">' +
             '<input type="checkbox" id="set-ctx-sync" class="rc-ui-switch"> 🔁 旧版文字注入同步' +
           '</label>' +
@@ -1130,7 +1133,7 @@
               '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">起始 PDF 页<input type="number" id="set-toc-start" min="1" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
               '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">结束 PDF 页<input type="number" id="set-toc-end" min="1" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
             '</div>' +
-            '<button id="set-toc-btn" onclick="buildToc()" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">建立目录</button>' +
+            '<button id="set-toc-btn" onclick="buildToc()" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:6px;padding:8px;font-size:13px;cursor:pointer">建立目录</button>' +
           '</div>' +
           HR +
         '</div>' +
@@ -1165,7 +1168,7 @@
             '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">上<input type="number" id="set-crop-t" min="0" max="45" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
             '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">下<input type="number" id="set-crop-b" min="0" max="45" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
           '</div>' +
-          '<button onclick="_applyCropSettings()" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">应用去边并开启</button>' +
+          '<button onclick="_applyCropSettings()" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">应用去边并开启</button>' +
         '</div>' +
         // [PDF] 文字层校准(逐字照搬,onclick/onchange=原生 _charboxToggle/_nudgeChars/_resetCharOffset/_reocrPage/_clearReocr)
         '<div data-sec="pdf-charofs">' +
@@ -1185,7 +1188,7 @@
           '</div>' +
           '<div id="charofs-cur" style="font-size:11px;color:var(--rc-text-dim);margin-bottom:8px">第 — 页　dx 0.0 · dy 0.0</div>' +
           '<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center">' +
-            '<button onclick="_reocrPage()" id="reocr-btn" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">🔁 单页重扫(Google Vision)</button>' +
+            '<button onclick="_reocrPage()" id="reocr-btn" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">🔁 单页重扫(Google Vision)</button>' +
             '<button onclick="_clearReocr()" style="background:#2a1a1a;border:1px solid #5a3030;color:#e6b0b0;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">撤销重扫</button>' +
             '<span id="reocr-status" style="font-size:11px;color:var(--rc-text-dim)"></span>' +
           '</div>' +
@@ -1199,7 +1202,7 @@
             '<label style="cursor:pointer"><input type="checkbox" value="en" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">英语</label>' +
             '<label style="cursor:pointer"><input type="checkbox" value="ja" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">日语</label>' +
           '</div>' +
-          '<button type="button" id="rcset-lang-save" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">保存</button>' +
+          '<button type="button" id="rcset-lang-save" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:6px;padding:8px;font-size:13px;cursor:pointer">保存</button>' +
         '</div>' +
         // [EPUB] 转 PDF
         '<div data-sec="epub-convert">' +
@@ -1272,8 +1275,8 @@
           '<hr class="ep-set-hr">' +
           '<label style="' + LBL + '">📚 App / 扩展共享 Markdown 笔记</label>' +
           '<div class="ep-set-note" style="margin:-2px 0 8px">开启本机线路后，网页扩展与 App 都能创建、查看和读取笔记；扩展创建的内容先进入共享队列，再由 App 自动写入 Obsidian。关闭时保留原有服务器线路。</div>' +
-          '<div id="rcset-native-notes-status" role="status" aria-live="polite" style="font-size:11px;color:#aebbd0;line-height:1.55;white-space:pre-wrap;margin-bottom:8px">尚未读取</div>' +
-          '<button id="rcset-native-notes-refresh" type="button" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:8px;font-size:12px;cursor:pointer">查看 / 刷新</button>' +
+          '<div id="rcset-native-notes-status" role="status" aria-live="polite" style="font-size:11px;color:var(--rc-text-muted);line-height:1.55;white-space:pre-wrap;margin-bottom:8px">尚未读取</div>' +
+          '<button id="rcset-native-notes-refresh" type="button" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:6px;padding:8px;font-size:12px;cursor:pointer">查看 / 刷新</button>' +
           '<div id="rcset-native-notes-list" style="margin-top:8px"></div>' +
           '<div id="rcset-native-notes-detail" style="display:none;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);border-radius:7px;padding:10px;margin-top:10px">' +
             '<div id="rcset-native-notes-title" style="font-size:13px;color:var(--rc-text-strong);font-weight:600;overflow-wrap:anywhere"></div>' +

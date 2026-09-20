@@ -34,7 +34,7 @@
       '#rc-fav-new input{flex:1;min-width:0;background:var(--rc-bg-field);border:1px solid var(--rc-border-control);color:#e6edf3;border-radius:8px;' +
       'padding:8px 10px;font-size:13px;outline:none}' +
       '#rc-fav-new input:focus{border-color:var(--rc-border-accent)}' +
-      '#rc-fav-new button{flex:0 0 auto;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:8px;' +
+      '#rc-fav-new button{flex:0 0 auto;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:var(--rc-text-muted);border-radius:8px;' +
       'padding:0 13px;font-size:13px;cursor:pointer;touch-action:manipulation}' +
       '.rc-fav-spin{display:inline-block;width:13px;height:13px;border:2px solid #2b3f6e;border-top-color:var(--rc-accent-cyan);border-radius:50%;' +
       'animation:rcFavSpin .8s linear infinite;vertical-align:-2px}@keyframes rcFavSpin{to{transform:rotate(360deg)}}' +

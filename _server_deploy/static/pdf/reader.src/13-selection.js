@@ -1084,7 +1084,7 @@ function _ensureFmlPopCss() {
   st.textContent =
     '#fml-pop{position:absolute;z-index:150;background:var(--rc-bg-popover);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border:1px solid var(--rc-border-popover);border-radius:12px;' +
     'box-shadow:0 10px 30px rgba(0,0,0,.55);padding:10px 12px;max-width:min(92vw,560px);color:#e6eeff}' +
-    '#fml-pop .fp-render{overflow-x:auto;overflow-y:hidden;text-align:center;padding:4px 2px 8px;color:#eaf2ff;font-size:18px}' +
+    '#fml-pop .fp-render{overflow-x:auto;overflow-y:hidden;text-align:center;padding:4px 2px 8px;color:var(--rc-text);font-size:18px}' +
     '#fml-pop .fp-tex{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--rc-text-muted);background:#0a1120;' +
     'border:1px solid #22325a;border-radius:7px;padding:5px 7px;white-space:pre-wrap;word-break:break-all;max-height:78px;overflow:auto;margin-bottom:8px}' +
     '#fml-pop .fp-btns{display:flex;gap:7px;flex-wrap:wrap}' +
