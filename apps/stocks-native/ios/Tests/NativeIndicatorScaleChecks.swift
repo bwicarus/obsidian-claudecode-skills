@@ -21,7 +21,9 @@ enum NativeIndicatorScaleChecks {
 
         let tiny = NativeIndicatorScale.macd([-5e-12, 4e-12])
         precondition(tiny.domain.upperBound - tiny.domain.lowerBound < 2e-11)
-        precondition(tiny.label(5e-12) != "0" && tiny.label(5e-12).contains("e"))
+        let tinyLabel = tiny.label(5e-12)
+        precondition(tinyLabel.lowercased().contains("e") && Double(tinyLabel) == 5e-12,
+                     "Tiny indicator value lost precision: \(tinyLabel)")
         precondition(tiny.ticks.allSatisfy(\.isFinite))
         let positive = NativeIndicatorScale.macd([0.001, 0.005])
         precondition(positive.domain.lowerBound < 0 && positive.domain.upperBound > 0.005)
