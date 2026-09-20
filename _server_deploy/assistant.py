@@ -1333,6 +1333,47 @@ def _convo_load_for_history(uid, mode="normal"):
         return messages
 
 
+def _merge_external_parts(existing, incoming, origin="runner"):
+    """Merge identities, never erase a generated card omitted by a partial writer."""
+    parts = [dict(p) for p in existing or [] if isinstance(p, dict)]
+    terminal = {"completed", "done", "failed", "error", "cancelled", "canceled", "aborted", "interrupted"}
+
+    def identity(part):
+        fields = ("call_id", "item_id", "id") if part.get("kind") == "tool" else ("id", "item_id", "call_id", "gid")
+        return next((str(part[k]) for k in fields if part.get(k)), None)
+
+    for index, raw in enumerate(incoming or []):
+        if not isinstance(raw, dict):
+            continue
+        part = dict(raw, origin=raw.get("origin") or origin)
+        key = identity(part)
+        match = None
+        for pos, old in enumerate(parts):
+            if old.get("kind") != part.get("kind") or (old.get("origin") or "runner") != part["origin"]:
+                continue
+            old_key = identity(old)
+            if key and old_key:
+                same = key == old_key
+                # Legacy card-only snapshots did not echo the server-assigned gid.
+                if (not same and part.get("kind") == "cards" and
+                        not any(part.get(k) or old.get(k) for k in ("id", "item_id", "call_id"))):
+                    same = part.get("cards") == old.get("cards") and part.get("seq", index) == old.get("seq", pos)
+                    if same:
+                        part["gid"] = old.get("gid") or part.get("gid")
+            else:
+                # A tool name is not an invocation identity. Legacy entries use
+                # their snapshot slot; two calls of the same tool remain distinct.
+                same = not key and not old_key and part.get("seq", index) == old.get("seq", pos)
+            if same:
+                match = pos
+                break
+        if match is None:
+            parts.append(part)
+        elif not (parts[match].get("status") in terminal and part.get("status") in {"running", "started", "in_progress"}):
+            parts[match] = {**parts[match], **part}
+    return parts
+
+
 def _convo_upsert_turn(
     uid,
     turn_id: str,
@@ -1368,17 +1409,10 @@ def _convo_upsert_turn(
             v = (meta or {}).get(k)
             if v:
                 rec[k] = v
-        # 部件按来源合并（2026-09-15 根治）：来的这批只替换同来源的旧部件，另一来源的保留。
-        # 运行器的（工具/正文）排前，App 的（高亮条/卡片草稿/撤销条）排后 —— 显示上"结果在工具之后"。
         new_parts = (meta or {}).get("parts")
         if isinstance(new_parts, list) and new_parts:
             origin = str((meta or {}).get("origin") or "runner")
-            tagged = [dict(p, origin=(p.get("origin") or origin)) for p in new_parts if isinstance(p, dict)]
-            old = [p for p in (rec.get("parts") or []) if isinstance(p, dict)]
-            keep = [p for p in old if (p.get("origin") or "runner") != origin]
-            runner_side = [p for p in (tagged if origin == "runner" else keep) if (p.get("origin") or "runner") == "runner"]
-            app_side = [p for p in (keep if origin == "runner" else tagged) if (p.get("origin") or "runner") != "runner"]
-            rec["parts"] = runner_side + app_side
+            rec["parts"] = _merge_external_parts(rec.get("parts"), new_parts, origin)
         try:
             _convo_dir(mode).mkdir(parents=True, exist_ok=True)
             p = _convo_path(uid, mode)
@@ -1386,7 +1420,7 @@ def _convo_upsert_turn(
             tmp.write_text(json.dumps(msgs, ensure_ascii=False), "utf-8")
             tmp.replace(p)
         except Exception:
-            pass
+            raise
         return True
 
 
@@ -10949,38 +10983,114 @@ def assistant_compact_history():
     return jsonify({"ok": True, "packed": len(pack), "summary_chars": len(out), "summary": out[:2000]})
 
 
+_EXTERNAL_STREAM_STATE = {}
+_external_stream_lock = threading.RLock()
+
+
+def _external_stream_identity(body):
+    values = {}
+    for key, limit in (("turn_id", 120), ("thread_id", 120), ("item_id", 160)):
+        value = body.get(key) or ""
+        if not isinstance(value, str) or (value and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,%d}" % limit, value)):
+            raise ValueError(key + " 无效")
+        if value:
+            values[key] = value
+    revision = body.get("streamRevision")
+    if revision is not None:
+        if isinstance(revision, bool) or not isinstance(revision, int) or not 0 <= revision <= 9007199254740991:
+            raise ValueError("streamRevision 必须是非负整数")
+        values["streamRevision"] = revision
+    return values
+
+
+def _external_writer(origin, identity):
+    return origin + ":" + str(identity.get("item_id") or "turn")
+
+
+def _external_origin(body, default):
+    origin = body.get("origin", default)
+    if origin not in ("runner", "voice", "app"):
+        raise ValueError("origin 必须是 runner、voice 或 app")
+    return origin
+
+
+def _external_stale(previous, revision, final):
+    if not previous:
+        return False
+    if previous.get("final") and not final:
+        return True
+    last = previous.get("revision")
+    return revision is not None and last is not None and (revision < last or (revision == last and previous.get("final")))
+
+
+def _external_stream_key(uid, role, origin, identity):
+    return (str(uid), identity.get("thread_id", ""), identity.get("turn_id", ""), role,
+            _external_writer(origin, identity))
+
+
+def _remember_external_stream(key, revision, final):
+    previous = _EXTERNAL_STREAM_STATE.get(key) or {}
+    _EXTERNAL_STREAM_STATE[key] = {"revision": revision if revision is not None else previous.get("revision"),
+                                   "final": bool(final)}
+    while len(_EXTERNAL_STREAM_STATE) > 2048:
+        _EXTERNAL_STREAM_STATE.pop(next(iter(_EXTERNAL_STREAM_STATE)))
+
+
+def _public_external_message(message):
+    return {key: value for key, value in message.items() if not key.startswith("_")}
+
+
+def _external_turn_matches(message, identity):
+    return (isinstance(message, dict) and message.get("turn_id") == identity.get("turn_id") and
+            (not identity.get("thread_id") or not message.get("thread_id") or
+             message.get("thread_id") == identity["thread_id"]))
+
+
 @bp.route("/stream", methods=["POST"])
 def assistant_stream_external():
-    """外部流式草稿（2026-09-14，Windows 语音核心）：后台文字模型 / 语音模型的回复边生成边推，
-    **不落库**，只经既有 reader-events 总线发一条 assistant-history {stream:"delta"} 让侧栏就地渲染草稿；
-    最终内容仍由 /log 落库，侧栏收到那条事件后按权威历史重载、草稿被替换。
-    body: {turn_id, content, file?}。"""
+    """Publish one identified cumulative draft; /log persists the matching final."""
     if not _logged_in():
         return jsonify({"ok": False}), 401
     b = request.get_json(silent=True) or {}
-    tid = re.sub(r"[^A-Za-z0-9_.:-]", "", str(b.get("turn_id") or ""))[:40]
+    try:
+        identity = _external_stream_identity(b)
+        origin = _external_origin(b, "runner")
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    tid = identity.get("turn_id")
     if not tid:
         return jsonify({"ok": False, "error": "turn_id"}), 400
-    content = str(b.get("content") or "")[:8000]
-    # 用户 2026-09-21：「我说话时也要实时显示」。用户句的草稿要渲成他自己的气泡，
-    # 所以 role 必须跟着走 —— 不带的话侧栏会把它当成助手正文渲进卡里。
+    content = str(b.get("content") or "")[:32000]
     role = "user" if str(b.get("role") or "") == "user" else "assistant"
     stream = str(b.get("stream") or "delta")
-    if stream not in ("delta", "start"):
+    if stream not in ("delta", "start", "final"):
         return jsonify({"ok": False, "error": "stream"}), 400
-    if stream == "start":
-        # 记住这个用户当前正在跑的后台轮。App 画部件时如果还没收到这条 SSE，会用自己
-        # 生成的临时 id 落库 —— 那条记录就是侧栏里那个空的「制卡」孤框。下面 /log 里
-        # 按这个值把临时 id 改写回真轮次，**不依赖 App 有没有收到推送**。
-        _LIVE_TURN[str(session["user_id"])] = (tid, time.time())
-    delivered = 0
-    try:
-        import reader_events
-        delivered = reader_events.publish(
-            "assistant-history", b.get("file") or "", session["user_id"],
-            {"turn_id": tid, "stream": stream, "content": content, "role": role}) or 0
-    except Exception:
-        pass
+    uid = session["user_id"]
+    key = _external_stream_key(uid, role, origin, identity)
+    payload = {**identity, "stream": stream, "content": content, "role": role, "origin": origin}
+    if stream == "final":
+        if str(identity.get("item_id") or "").startswith("turn:"):
+            with _convo_lock:
+                payload["messages"] = [
+                    {**_public_external_message(m), **identity, "stream_final": True}
+                    if m.get("role") == "assistant" else _public_external_message(m)
+                    for m in _convo_load(uid) if _external_turn_matches(m, identity)]
+        else:
+            payload["messages"] = [{**identity, "role": role, "content": content,
+                                    "origin": origin, "stream_final": True}]
+    with _external_stream_lock:
+        if _external_stale(_EXTERNAL_STREAM_STATE.get(key), identity.get("streamRevision"), stream == "final"):
+            return jsonify({"ok": True, "ignored": True, "reason": "stale_revision", "delivered": 0})
+        try:
+            import reader_events
+            delivered = reader_events.publish(
+                "assistant-history", b.get("file") or "", uid,
+                payload) or 0
+        except Exception:
+            return jsonify({"ok": False, "error": "stream_publish_failed"}), 503
+        _remember_external_stream(key, identity.get("streamRevision"), stream == "final")
+        if stream == "start" and role == "assistant":
+            _LIVE_TURN[str(uid)] = (tid, time.time())
     return jsonify({"ok": True, "delivered": delivered})
 
 
@@ -11001,7 +11111,7 @@ def assistant_history():
         return jsonify({"ok": True, "summary": v["summary"], "messages": v["messages"]})
     return jsonify({
         "ok": True,
-        "messages": messages[-100:],
+        "messages": [_public_external_message(message) for message in messages[-100:]],
     })
 
 
@@ -12288,7 +12398,8 @@ def _sanitize_ext_parts(parts) -> list:
             clean["draft"] = bool(clean.get("draft", True))
             # gid 随 assistant turn 一起持久化，刷新后仍是同一批卡；这里不能调用
             # _entity_reg_cards，否则前端本地入库失败时 Pi 已先产生不可回滚副作用。
-            clean["gid"] = "card_" + __import__("uuid").uuid4().hex
+            if not isinstance(clean.get("gid"), str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", clean["gid"]):
+                clean["gid"] = "card_" + __import__("uuid").uuid4().hex
         clean["seq"] = i
     return out
 
@@ -12474,187 +12585,152 @@ def reader_direct_present_result(
 
 @bp.route("/log", methods=["POST"])
 def assistant_log_external():
-    """外部编排 agent(MCP)桥③:把外部 AI 跟用户的对话写进助手会话历史(标 via:'mcp')——
-    阅读器侧栏能看到这些对话,内置助手接手时也有完整上下文。body: {user?, assistant?, file?, page?}。"""
+    """Persist identified text/parts and publish that turn, without reloading history."""
     if not _logged_in():
         return jsonify({"ok": False}), 401
     b = request.get_json(silent=True) or {}
     uid = session["user_id"]
     try:
-        assistant_mode = _assistant_mode(
-            b.get("assistant_mode")
-            if "assistant_mode" in b
-            else b.get("mode")
-        )
+        assistant_mode = _assistant_mode(b.get("assistant_mode", b.get("mode")))
+        identity = _external_stream_identity(b)
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
-    meta = {"via": b.get("via") if b.get("via") in ("mcp", "voice", "codex-voice") else "mcp"}   # ㉛:通话轮次落库标 voice;codex-voice=Windows 语音同步(2026-09-13)
-    if b.get("thread_id"):   # Codex 语音线程:历史按线程可追溯,侧栏不按它分组
-        meta["thread_id"] = re.sub(r"[^A-Za-z0-9_-]", "", str(b["thread_id"]))[:64]
-    if isinstance(b.get("took_ms"), (int, float)) and not isinstance(b.get("took_ms"), bool) and 0 <= b["took_ms"] <= 86_400_000:
-        meta["took_ms"] = int(b["took_ms"])   # 整轮耗时(用户 2026-09-13:流程看不到耗时不利于调试)
-    if b.get("file"):
-        meta["file_rel"] = b["file"]   # _convo_append 白名单字段名是 file_rel
-    if b.get("page"):
-        meta["page"] = b["page"]
-    # 141(轮次容器):同一 turn_id 再次上报 = 这一轮又产生了新内容(多 response / 工具结果 / 结果卡)
-    #   → **覆盖**那条助手消息,而不是再追加一条。不这么做就会:同一轮渲两遍 + 早期快照缺卡片。
-    _tid = str(b.get("turn_id") or "")[:40]
-    # App 在后台轮跑着的时候画了部件，却还没收到 stream:"start" 那条 SSE —— 它就用
-    # 自己造的临时 id 落库，于是侧栏里多出一个空的「制卡」孤框（用户 2026-09-18 截图
-    # 最下面那个）。这里按服务端记着的「当前正在跑的后台轮」把它改写回去。
-    # ⚠ 修在服务端而不是等 App：推送有没有到达、App 是不是新版本，都不该决定这条记录
-    #   归谁。App 侧的改名+吞并仍然保留，那是同一件事的第二道保险。
-    if _tid and _TEMP_TID_RE.match(_tid):
-        _live = _live_turn_for(uid)
-        if _live:
-            _tid = _live
-    # 轮次收尾：运行器带 turn_end=1，之后再来的临时 id 就不再并进这一轮了。
-    if b.get("turn_end") and _live_turn_for(uid) == _tid:
+    tid = identity.get("turn_id", "")
+    if tid and _TEMP_TID_RE.match(tid):
+        tid = _live_turn_for(uid) or tid
+        identity["turn_id"] = tid
+    via = b.get("via") if b.get("via") in ("mcp", "voice", "codex-voice") else "mcp"
+    try:
+        origin = _external_origin(b, "runner" if via == "codex-voice" else "app")
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    final = bool(b.get("stream_final")) or ("stream_final" not in b and not b.get("upsert_only"))
+    texts = {role: str(b.get(role) or "").strip()[:32000] for role in ("user", "assistant")}
+    parts = None
+    if "parts" in b:
+        # 契约校验: create and upsert must validate the same payload before any write.
+        try:
+            parts = _sanitize_ext_parts(b["parts"])
+            if len(json.dumps(parts, ensure_ascii=False)) >= 128000:
+                raise ValueError("parts 过大（上限 128000 字符）；图必须走 URL")
+        except Exception as error:
+            return jsonify({"ok": False, "error": str(error), "where": "parts",
+                            "contract": "reader_card_contract(唯一来源=前端统一渲染器)"}), 400
+    card = b.get("card") if isinstance(b.get("card"), dict) else None
+    if card is not None and len(json.dumps(card, ensure_ascii=False)) >= 8000:
+        return jsonify({"ok": False, "error": "card 过大"}), 400
+    roles = []
+    if texts["user"]:
+        roles.append("user")
+    if texts["assistant"] or parts or card or (tid and not texts["user"]):
+        roles.append("assistant")
+    meta = {"via": via, "origin": origin, **identity}
+    for source, target in (("file", "file_rel"), ("page", "page")):
+        if b.get(source):
+            meta[target] = b[source]
+    if isinstance(b.get("took_ms"), (int, float)) and not isinstance(b.get("took_ms"), bool) and 0 <= b["took_ms"] <= 86400000:
+        meta["took_ms"] = int(b["took_ms"])
+    clip = re.sub(r"[^A-Za-z0-9_-]", "", str(b.get("clip") or ""))[:40]
+    absorbed_ids = [str(x)[:120] for x in (b.get("absorb") or [])[:24] if x and str(x) != tid] if isinstance(b.get("absorb"), list) else []
+    created = 0
+    changed = []
+    replayed = []
+    ignored = 0
+    absorbed = 0
+    try:
+        with _convo_lock:
+            messages = _convo_load(uid, assistant_mode)
+            for role in roles:
+                rec = next((m for m in reversed(messages) if tid and _external_turn_matches(m, identity) and
+                            m.get("role") == role), None)
+                writer = _external_writer(origin, identity)
+                states = dict((rec or {}).get("_stream_writers") or {})
+                # Older App builds publish several responses/cards in a turn
+                # without item identities. Their final must not close the whole
+                # turn to a later card-only write.
+                previous = states.get(writer) if identity.get("item_id") or "streamRevision" in identity else None
+                if _external_stale(previous, identity.get("streamRevision"), final):
+                    if final and previous.get("final") and identity.get("streamRevision") == previous.get("revision"):
+                        # Re-publish the durable snapshot on a transport retry;
+                        # never trust a changed payload with the same revision.
+                        replayed.append(rec)
+                    ignored += 1
+                    continue
+                if rec is None:
+                    if role == "assistant" and b.get("upsert_only") and not (b.get("create_if_missing") and parts):
+                        continue
+                    if not texts[role] and not parts and not card:
+                        continue
+                    rec = {"history_id": _new_history_id(), "role": role, "content": "", "ts": int(time.time())}
+                    messages.append(rec)
+                    created += 1
+                if not _HISTORY_ID_RE.fullmatch(str(rec.get("history_id") or "")):
+                    rec["history_id"] = _new_history_id()
+                rec.update(meta)
+                if texts[role]:
+                    rec["content"] = texts[role]
+                if role == "assistant":
+                    if parts:
+                        rec["parts"] = _merge_external_parts(rec.get("parts"), parts, origin)
+                    if card:
+                        rec["card"] = card
+                    if clip:
+                        rec["clip"] = clip
+                    if not rec.get("content"):
+                        rec["content"] = str((card or {}).get("brief") or (card or {}).get("title") or "（操作记录）")[:300]
+                rec["stream_final"] = final
+                states[writer] = {"revision": identity.get("streamRevision"), "final": final}
+                while len(states) > 128:
+                    states.pop(next(iter(states)))
+                rec["_stream_writers"] = states
+                changed.append(rec)
+            if changed:
+                kept = [m for m in messages if not (m.get("role") == "assistant" and m.get("turn_id") in absorbed_ids)]
+                absorbed = len(messages) - len(kept)
+                if len(kept) > 200:
+                    _convo_archive(uid, kept[:-200], assistant_mode)
+                    _convo_drop_media(uid, kept[:-200], assistant_mode)
+                path = _convo_path(uid, assistant_mode)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_name(path.name + ".tmp")
+                temporary.write_text(json.dumps(kept[-200:], ensure_ascii=False), "utf-8")
+                os.replace(temporary, path)
+                snapshot = [_public_external_message(m) for m in kept if m in changed or (tid and _external_turn_matches(m, identity))]
+            else:
+                snapshot = [_public_external_message(m) for m in messages if m in replayed or (replayed and tid and _external_turn_matches(m, identity))]
+    except Exception:
+        return jsonify({"ok": False, "error": "history_write_failed", "appended": 0}), 500
+    empty_final = final and not ignored and bool(tid) and bool(b.get("stream_final"))
+    if not changed and not replayed and not empty_final:
+        return jsonify({"ok": True, "n": 0, "appended": 0, "upserted": False,
+                        "ignored": bool(ignored), "reason": "stale_revision" if ignored else "missing_turn",
+                        "event_sent": False, "turn_id": tid})
+    with _external_stream_lock:
+        for rec in changed:
+            key = _external_stream_key(uid, rec["role"], origin, identity)
+            previous = _EXTERNAL_STREAM_STATE.get(key)
+            if not _external_stale(previous, identity.get("streamRevision"), final):
+                _remember_external_stream(key, identity.get("streamRevision"), final)
+    if b.get("turn_end") and _live_turn_for(uid) == tid:
         _LIVE_TURN.pop(str(uid), None)
-    # 2026-09-15 根治：同一轮记录有两个写入者 —— 运行器（via=codex-voice）与 App（其它）。部件按来源打标并按来源合并。
-    _origin = "runner" if str(b.get("via") or "") == "codex-voice" else "app"
-    # 收拢（2026-09-18）：这一轮期间那几条零散的语音记录，正文已并进本轮 parts，删掉它们。
-    # ⚠⚠ 必须在下面那个 upsert 的**早返回之前**做。第一版我放在函数末尾，而记录已存在时
-    #    upsert 成功就直接 return 了（实录：n=0 upserted=true）—— 于是收拢代码**永远执行不到**，
-    #    三条零散记录原封不动留在库里，侧栏照旧是一堆框。而"正常情况"恰恰就是记录已存在。
-    _absorbed = 0
-    _absorbed_ids: list[str] = []
-    if isinstance(b.get("absorb"), list) and b["absorb"]:
-        _absorbed_ids = [str(x)[:64] for x in b["absorb"][:24] if x]
-        _absorbed = _convo_absorb_turns(uid, b["absorb"][:24], mode=assistant_mode)
-    if _tid and _convo_upsert_turn(
-        uid,
-        _tid,
-        (b.get("assistant") or "").strip(),
-        {
-            "origin": _origin,
-            "parts": (
-                b.get("parts")
-                if isinstance(b.get("parts"), list)
-                else None
-            ),
-            "clip": re.sub(
-                r"[^A-Za-z0-9_-]",
-                "",
-                str(b.get("clip") or ""),
-            )[:40] or None,
-        },
-        mode=assistant_mode,
-    ):
-        # 这条早返回原来直接 return，而发布点在函数末尾 —— 于是**连轮次收尾那次写入**
-        # 都发不出事件（收尾也走 upsert），侧栏只能等下一次走完整路径的写入顺带刷出来。
-        # 用户 2026-09-18：「好像直到下一句对话开始才自动进行了合并」。
-        #
-        # ⚠⚠ 只在**收尾**发，中途一次都不发。第一版我在每次 upsert 都发，结果侧栏在
-        #    工具正在执行的当口做了一次权威重载，绑定的快照版本随之变化，卡片投递被判
-        #    BW_READER_REALTIME_OUTPUT_STALE 直接拒收 —— 实录里 _tool_opened 落库之后
-        #    **51 毫秒**工具就失败了，用户那次制卡整个没到侧栏。
-        #    合并可见是体验，投递成功是功能；轮次没结束时，宁可晚一点显示。
-        # ⚠ 轮次容器的写入**一次事件都不发**（中途和收尾都不发）。
-        #   用户 2026-09-19 拍板：「流式传输最终的结果就直接当作最终结果，不需要重新整理」。
-        #   流出来的内容本来就已经是最终形态（工具卡头 + 本轮累计的几句话在卡内），
-        #   收尾再让侧栏做一次权威重载，只是把活的内容冲掉再重画一遍 —— 多一次出错机会，
-        #   而它确实错了：用户实测「说完一瞬间消失，关闭侧边栏打开后正常显示」，
-        #   即存储与从头渲染都对，错的就是这一次重载。
-        #   中途不发的理由另见上文：重载会打断工具投递（BW_READER_REALTIME_OUTPUT_STALE）。
-        #   新开/重开侧栏时按存储从头渲染，那条路一直是对的。
-        # ⚠ 唯一例外（2026-09-19 补）：运行器点名 notify_sidebar —— 那是**一个工具都没调过**
-        #   的轮次。有工具时 App 会自己把卡画在侧栏，不发事件也看得见；没工具时侧栏只有正文，
-        #   而正文走的正是这条 upsert，不发就得等下一次非 upsert 的写入（通常是用户的下一句）
-        #   才被顺带刷出来 —— 用户实测：「在没有调用工具时，下一轮开始后才会显示上一轮内容」。
-        #   这种轮次没有在途的工具投递可打断，放行它不会重演那次 STALE。
-        _sent = False
-        if b.get("notify_sidebar"):
-            try:
-                import reader_events
-                reader_events.publish(
-                    "assistant-history", b.get("file") or "", uid,
-                    # 这条 upsert 路径同样可能带 absorb —— 漏了它，那条路下的
-                    # 残留气泡照样没人清（2026-09-21：第一版只改了下面那处发布）。
-                    {"turn_id": _tid, "n": 0, "absorbed_ids": _absorbed_ids})
-                _sent = True
-            except Exception:
-                pass
-        return jsonify({"ok": True, "n": 0, "upserted": True, "absorbed": _absorbed,
-                        "event_sent": _sent})
-    # ⚠ upsert_only:容器的"内容变了就同步"走这条 —— **记录不存在就什么都不做**。
-    #   否则它可能先于 response.done 到达 → 先建出一条没有用户提问的助手消息 →
-    #   随后 response.done 的落库走 upsert 提前返回 → **用户的提问从历史里彻底消失**。
-    if b.get("upsert_only") and not (b.get("create_if_missing") and isinstance(b.get("parts"), list) and b.get("parts")):
-        return jsonify({"ok": True, "n": 0, "upserted": False})
-    if _tid:
-        meta["turn_id"] = _tid
-    n = 0
-    for role, key in (("user", "user"), ("assistant", "assistant")):
-        txt = (b.get(key) or "").strip()
-        card = b.get("card") if (role == "assistant" and isinstance(b.get("card"), dict)
-                                 and len(json.dumps(b.get("card"), ensure_ascii=False)) < 8000) else None
-        if not txt and card:   # 87:卡片可独立成一条(content=概要,结构在 meta.card)
-            txt = str(card.get("brief") or card.get("title") or "[卡片]")[:300]
-        # 2026-09-15:字幕模式下语音在线时,后台轮只落工具/卡片 parts、不落正文(正文由语音念出来,字幕里已有)。
-        #   没有文字也必须成一条记录,否则工具卡整轮消失、活着的撤销条无处认领(用户实测「撤销按钮出现一瞬间就消失」)。
-        if not txt and role == "assistant" and isinstance(b.get("parts"), list) and b.get("parts"):
-            _tools = [str(p.get("label") or p.get("tool") or "") for p in b["parts"] if isinstance(p, dict) and p.get("kind") == "tool"]
-            txt = ("（操作：" + "、".join([t for t in _tools if t][:4]) + "）") if any(_tools) else "（操作记录）"
-        if txt:
-            m2 = dict(meta)
-            if role == "assistant" and b.get("clip"):   # 66:通话录下的该轮语音,历史回放用
-                m2["clip"] = re.sub(r"[^A-Za-z0-9_-]", "", str(b["clip"]))[:40]
-            # 141(轮次容器):落全量 part 结构 → 历史回放用**同一个渲染器**复原,不再退化成纯文本。
-            #   ⚠ 体积闸:图必须走 URL 不能走 base64(单张 10-50 万字节,几十轮就把历史撑爆;见 ADR §4)。
-            if role == "assistant" and isinstance(b.get("parts"), list):
-                # 契约校验:未知 kind / 字段不合规 → **明确拒绝整包**并回 400 + 具体原因。
-                # 早先是静默丢弃(调用方永远不知道卡为什么没出现),后来改成抛异常又变成 500
-                # (调用方只看到"服务器错误",同样没法自查)——两者都不合格。
-                try:
-                    _sp = _sanitize_ext_parts(b["parts"])
-                    _pj = json.dumps(_sp, ensure_ascii=False)
-                    if len(_pj) >= 24000:
-                        raise ValueError(f"parts 过大({len(_pj)} 字符,上限 24000)——图必须走 URL,不能 base64")
-                except Exception as _ce:   # ContractError/FileNotFoundError 也要变成可读的 400,别漏成 500
-                    return jsonify({"ok": False, "error": str(_ce), "where": "parts",
-                                    "contract": "reader_card_contract(唯一来源=前端统一渲染器)"}), 400
-                if _sp:
-                    m2["parts"] = [dict(p, origin=(p.get("origin") or _origin)) for p in _sp]
-            if card:
-                m2["card"] = card
-            _convo_append(
-                uid,
-                role,
-                txt[:8000],
-                m2,
-                mode=assistant_mode,
-            )
-            n += 1
-    _delivered = 0
-    # ⚠ 轮次**中途**的写入一律不发事件。判据是"这是不是轮次容器的写入"（upsert_only），
-    #   不是"走了哪条分支" —— 第一版我只在 upsert 分支上把关，而 _tool_opened 往往是
-    #   本轮第一次写入、走的是建记录这条路，照样发事件、照样让侧栏在工具执行中途做
-    #   权威重载，卡片投递随即被判 BW_READER_REALTIME_OUTPUT_STALE（实录：落库后 51ms
-    #   工具就失败了）。收尾那次由 turn_end 放行。
-    # 轮次容器的写入（upsert_only）默认不发事件 —— 收尾也不发，理由见上面那段。
-    # 例外同上：无工具轮次由运行器点名 notify_sidebar，它没有在途投递可打断。
-    _mid_turn = bool(b.get("upsert_only")) and not b.get("notify_sidebar")
-    if not _mid_turn:
+    delivered = 0
+    # Every update is a turn-local snapshot. A parts update never seals text.
+    should_publish = final or bool(b.get("notify_sidebar")) or not b.get("upsert_only")
+    if should_publish:
         try:
             import reader_events
-            # 带 turn_id:侧栏收到后能只追加这一轮,不必整段重拉;顺带拿到真实投递数。
-            _delivered = reader_events.publish(
-                "assistant-history", b.get("file") or "", uid,
-                # ⚠ absorbed_ids 必须推给客户端（2026-09-21）。收拢只删了**库里**那几条
-                #   零散语音记录，而屏幕上早就渲出来的那个独立气泡没人去清 —— 表现是
-                #   同一句话在卡外面和卡里面各出现一次，而库里其实只有一条。
-                #   回执里的 absorbed 只到运行器，客户端看不见，所以必须走事件这条路。
-                {"turn_id": meta.get("turn_id") or "", "n": n,
-                 "absorbed_ids": _absorbed_ids}) or 0
+            delivered = reader_events.publish("assistant-history", b.get("file") or "", uid,
+                {**identity, "origin": origin, "stream": "final" if final else "parts", "messages": snapshot,
+                 "role": roles[0] if len(roles) == 1 else "assistant", "absorbed_ids": absorbed_ids,
+                 "n": created}) or 0
         except Exception:
-            pass
-    # 分层回执:appended=已写库;delivered=SSE 推到了几个在线侧栏(0=没人开着,不是失败);
-    # 「前端是否真渲染出来」由前端 /pdf/api/turn-ack 回执补齐,不在这里假定。
-    return jsonify({"ok": True, "appended": n, "delivered": _delivered,
-                    "absorbed": _absorbed, "event_sent": not _mid_turn,
-                    "turn_id": meta.get("turn_id") or ""})
+            return jsonify({"ok": False, "error": "history_publish_failed", "saved": True,
+                            "appended": created, "turn_id": tid}), 503
+    return jsonify({"ok": True, "n": created, "appended": created, "upserted": created == 0,
+                    "replayed": bool(replayed),
+                    "delivered": delivered, "absorbed": absorbed, "event_sent": should_publish,
+                    "turn_id": tid})
+
 
 
 _CLIP_DIR = CLAUDE_DIR / "state" / "voice-clips"

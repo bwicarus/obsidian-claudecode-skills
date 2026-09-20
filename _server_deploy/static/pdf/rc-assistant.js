@@ -3682,7 +3682,7 @@
         delete _liveUserDrafts[tid];
         return;
       }
-      try { RC.turnCard.draftText(tid, draft.text, 'user'); } catch (_) {}
+      try { RC.turnCard.draftText(_streamViewId(tid, 'user'), draft.text, 'user', draft.itemId, draft.origin); } catch (_) {}
     });
   }
   function _historyMarkSeen(tid) {
@@ -3691,84 +3691,134 @@
     _liveSeen[tid] = 1; _liveSeenOrder.push(tid);
     while (_liveSeenOrder.length > 256) delete _liveSeen[_liveSeenOrder.shift()];
   }
+  var _liveStreams = Object.create(null);
+  var _legacyTurnTimer = null;
+  var _legacyTurnInFlight = false;
+  function _streamViewId(tid, role) { return role === 'user' ? 'user:' + tid : tid; }
+  function _streamState(tid, ev) {
+    if (_clearing) return null;
+    var mode = ev.assistant_mode || ev.mode;
+    if (mode && _modeNorm(mode) !== _assistantMode) return null;
+    var state = _liveStreams[tid];
+    if (state && (state.epoch !== _modeEpoch || state.mode !== _assistantMode)) return null;
+    if (!state) {
+      state = _liveStreams[tid] = { epoch: _modeEpoch, mode: _assistantMode, revision: -1, final: false, items: Object.create(null) };
+      var ids = Object.keys(_liveStreams);
+      while (ids.length > 512) delete _liveStreams[ids.shift()];
+    }
+    var roleKey = String(ev.origin || 'runner') + ':' + String(ev.role || 'assistant') + ':';
+    if (ev.item_id && state.items[roleKey + 'legacy'] && state.items[roleKey + 'legacy'].final) return state.items[roleKey + 'legacy'];
+    var itemKey = roleKey + String(ev.item_id || 'legacy');
+    state = state.items[itemKey] || (state.items[itemKey] = { revision: -1, final: false });
+    var revision = Number(ev.streamRevision);
+    if (ev.streamRevision != null && isFinite(revision)) {
+      if (revision < state.revision) return null;
+      state.revision = revision;
+    }
+    return state;
+  }
+  function _streamAck(tid) {
+    try { fetch('/pdf/api/turn-ack', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ turn_id: tid }), keepalive: true }).catch(function () {}); } catch (_) {}
+  }
+  function _streamMessages(ev, final) {
+    var rendered = false;
+    (ev.messages || []).forEach(function (message) {
+      if (!message || (message.role !== 'user' && message.role !== 'assistant')) return;
+      var tid = String(message.turn_id || ev.turn_id || '');
+      if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(tid)) return;
+      var state = _streamState(tid, Object.assign({}, ev, message));
+      if (!state || !(RC.turnCard && RC.turnCard.reconcile)) return;
+      var messageFinal = final && message.stream_final !== false;
+      var node = RC.turnCard.reconcile(_streamViewId(tid, message.role), message, { final: messageFinal, origin: ev.origin || 'runner' });
+      if (!node) return;
+      rendered = true;
+      if (messageFinal) {
+        state.final = true;
+        if (message.role === 'user') delete _liveUserDrafts[tid];
+        _historyMarkSeen(tid);
+        _historyMarkSeen(message.role + ':' + tid);
+        _streamAck(tid);
+      }
+    });
+    if (rendered && Array.isArray(ev.absorbed_ids)) ev.absorbed_ids.forEach(function (id) {
+      id = String(id || '');
+      if (!id || id === ev.turn_id) return;
+      var alias = RC.turnCard.tidByTurnId && RC.turnCard.tidByTurnId(id);
+      RC.turnCard.drop(alias || id);
+      delete _liveUserDrafts[id]; delete _liveStreams[id];
+    });
+    return rendered;
+  }
+  function _legacyTurnDrain() {
+    _legacyTurnTimer = null;
+    if (_legacyTurnInFlight) return;
+    if (_historyReloadInFlight) { _legacyTurnTimer = setTimeout(_legacyTurnDrain, 400); return; }
+    Object.keys(_historyPendingTurns).forEach(function (id) {
+      if (_liveSeen[id]) { delete _historyPendingTurns[id]; _streamAck(id); }
+    });
+    var ids = Object.keys(_historyPendingTurns);
+    if (!ids.length) return;
+    var mode = _assistantMode, epoch = _modeEpoch;
+    _legacyTurnInFlight = true;
+    fetch(_historyUrl(mode)).then(function (r) {
+      if (!r || r.ok === false) throw new Error('history request failed');
+      return r.json();
+    }).then(function (data) {
+      if (epoch !== _modeEpoch || mode !== _assistantMode || !data || !Array.isArray(data.messages)) return;
+      // Older servers send only an invalidation. Fetch once for the batch, but
+      // merge only the requested turns. Never replace the surrounding live DOM.
+      var messages = data.messages.filter(function (m) { return ids.indexOf(String(m.turn_id || '')) >= 0; });
+      _streamMessages({ messages: messages, assistant_mode: mode }, true);
+    }).catch(function () {}).then(function () {
+      ids.forEach(function (id) { delete _historyPendingTurns[id]; });
+      _legacyTurnInFlight = false;
+      if (Object.keys(_historyPendingTurns).length) _legacyTurnTimer = setTimeout(_legacyTurnDrain, 400);
+    });
+  }
   function onHistoryEvent(ev) {
     try {
       if (!ev || !thread) return;
-      var tid = String((ev && ev.turn_id) || '');
+      var tid = String(ev.turn_id || '');
       if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(tid)) return;
-      // 外部流式草稿（2026-09-14，Windows 语音核心 /api/assistant/stream）：不落库、不重载，
-      // 借轮次容器的 draftText 就地渲染 —— 和本地助手逐字渲染同一条路。最终内容由 /log 的
-      // 事件触发权威重载，草稿卡随原子换入消失。用户句用 <id>.u 单独落库，所以这里的 tid
-      // 在最终回复到达前不会被标成"已见过"。
+      var state = _streamState(tid, ev);
+      if (!state) return;
       if (ev.stream === 'start') {
-        // 后台轮开始：这个 id 就是本轮容器身份。本地临时容器若已画了部件（工具结果先到）就整体改名搬过去。
+        if (state.final) return;
+        // Only an unclaimed local container can be adopted. A completed voice
+        // response or a different known turn must never be folded into this one.
+        var previous = window.__bwLiveTurnId;
         window.__bwLiveTurnId = tid;
         _turnModes[tid] = _assistantMode;
-        try {
-          if (_vTid && window.RC && RC.turnCard && RC.turnCard.has(_vTid) && _vTid !== tid) {
-            var _old = _vTid;
-            // ⚠ rename 只搬**内存里的 DOM 容器**。部件在这之前很可能已经以临时 id 落了库
-            //   （_syncParts 防抖 900ms，工具卡往往先到）—— 内存改了名、存储没改，
-            //   下一次权威重载就把那条临时记录又拉回来：用户看到的「一次任务分成四个框」
-            //   里，就有它一个。所以改名必须是两边一起改：
-            //   1) 掐掉还压在防抖里的旧 id 同步，免得它落库后又多一条；
-            //   2) 落库时带 absorb:[旧 id] —— 部件已随 rename 进了新容器，服务端删旧那条。
-            try { clearTimeout(_psT[_old]); } catch (eT) {}
-            delete _psT[_old];
-            RC.turnCard.rename(_old, tid);
-            _vTid = null;
-            _turnModes[tid] = _turnModes[tid] || _turnModes[_old] || _assistantMode;
-            try { _syncPartsNow(tid, [_old]); } catch (eS) {}
-          }
-        } catch (e0) {}
+        if (!previous && _vTid && !_vAnswered && !_liveSeen[_vTid] && RC.turnCard && RC.turnCard.has(_vTid) && _vTid !== tid) {
+          var old = _vTid;
+          clearTimeout(_psT[old]); delete _psT[old];
+          RC.turnCard.rename(old, tid); _vTid = null;
+          _syncPartsNow(tid, [old]);
+        }
         return;
       }
       if (ev.stream === 'delta') {
-        if (_liveSeen[tid] || !(window.RC && RC.turnCard)) return;
-        if (ev.role === 'user' && (_historyPendingTurns[tid] || (_liveUserDrafts[tid] && _liveUserDrafts[tid].finalized))) return;
+        if (state.final || (!ev.item_id && (_liveSeen[(ev.role || 'assistant') + ':' + tid] || _historyPendingTurns[tid])) || !(RC.turnCard && RC.turnCard.draftText)) return;
         if (ev.role === 'user') {
-          _liveUserDrafts[tid] = { text: String(ev.content || ''), mode: _assistantMode, epoch: _modeEpoch };
+          _liveUserDrafts[tid] = { text: String(ev.content || ''), mode: _assistantMode, epoch: _modeEpoch, itemId: ev.item_id, origin: ev.origin || 'runner' };
           var draftIds = Object.keys(_liveUserDrafts);
           while (draftIds.length > 32) delete _liveUserDrafts[draftIds.shift()];
         }
-        // ⭐ 2026-09-18：渲进**同一个容器**，不再用 'live_' 前缀另开一个影子容器。
-        //   影子容器是"一次任务散成好几个框"的一环：草稿在 live_<tid>、工具与卡片在 <tid>、
-        //   语音正文又在 v-<ts> —— 三个框。同一个 tid 之后，工具链、绿点红点、逐字出现的
-        //   回答和最终生成物都落在一张卡里（用户要的形状），权威重载也替换的是同一个容器。
-        // role=user：这是**用户自己正在说的话**，渲成他的气泡（2026-09-21）。
-        try { RC.turnCard.draftText(tid, String(ev.content || ''), ev.role); } catch (e0) {}
+        RC.turnCard.draftText(_streamViewId(tid, ev.role), String(ev.content || ''), ev.role, ev.item_id, ev.origin || 'runner');
         return;
       }
-      // ⚠ 重载是**权威**的：存储里没有的部件，这一刻全被冲掉（本函数上面那条注释
-      //   「草稿卡随原子换入消失」说的就是它）。所以在请求重载之前，先把还压在
-      //   防抖里的 App 部件（卡片草稿、撤销条、高亮条）落下去 —— 否则就是
-      //   用户反复看到的「中途渲出来了，完成后消失」。
-      // ⚠ 先清掉被**收拢**的那几条：它们的正文已经并进本轮 parts、库里那条已被删除，
-      //   但屏幕上早就渲出来的独立气泡没人管 —— 表现是同一句在卡外面和卡里面各一次
-      //   （2026-09-21 用户截图：「还在做,马上好。」重复，而库里只有一条）。
-      //   这一步必须在权威重载**之前**：重载会整页原子换入，残留元素若还在，
-      //   换入的瞬间会连它一起留下。
-      try {
-        var _absorbed = ev && ev.absorbed_ids;
-        if (_absorbed && _absorbed.length && window.RC && RC.turnCard && RC.turnCard.drop) {
-          for (var _ai = 0; _ai < _absorbed.length; _ai++) {
-            var _aid = String(_absorbed[_ai] || '');
-            if (!_aid || _aid === tid) continue;   // 别把本轮自己摘了
-            try { RC.turnCard.drop(_aid); } catch (_e) {}
-            try { delete _liveSeen[_aid]; } catch (_e2) {}
-            try { delete _liveUserDrafts[_aid]; } catch (_e3) {}
-          }
-        }
-      } catch (_eAbs) {}
-      try { _flushPendingParts(); } catch (eFlush) {}
-      if (window.__bwLiveTurnId === tid) window.__bwLiveTurnId = null;   // 这一轮已落库：之后的部件归下一轮
+      if ((ev.stream === 'parts' || ev.stream === 'final') && Array.isArray(ev.messages)) {
+        _streamMessages(ev, ev.stream === 'final');
+        return;
+      }
+      // Keep the most recent source identity for late card deliveries. A new
+      // start replaces it; arrival time does not create a new artificial turn.
       if (_liveSeen[tid] || _historyPendingTurns[tid]) return;
-      if (_liveUserDrafts[tid]) _liveUserDrafts[tid].finalized = true;
-      try { if (window.RC && RC.turnCard && RC.turnCard.has(tid)) RC.turnCard.freezeDraft(tid); } catch (e1) {}
       if (Object.keys(_historyPendingTurns).length >= 64) return;
       _historyPendingTurns[tid] = 1;
-      _requestHistoryReload({ reason: 'assistant-history', publicTrigger: true, ackTurnIds: [tid] });
-    } catch (e) {}
+      if (!_legacyTurnTimer && !_legacyTurnInFlight) _legacyTurnTimer = setTimeout(_legacyTurnDrain, 80);
+    } catch (_) {}
   }
 
   // ⚠ 就地导出:onHistoryEvent 定义在 mountPdfSidebar **内部**,把导出写在这个函数外面
@@ -3833,6 +3883,13 @@
     if (!m || (m.role !== 'user' && m.role !== 'assistant')) throw new Error('invalid history record');
     if (m.role === 'user') {
       state.lastQ = m.content || '';
+      if (m.turn_id && RC.turnCard && RC.turnCard.renderTurn) {
+        var liveUser = RC.turnCard.renderTurn(_historyTurnId(m, mode, scope),
+          [{ kind: 'text', text: m.content || '', role: 'user', item_id: m.item_id }], target,
+          { historyReplay: true, meta: { via: m.via || '', threadId: m.thread_id || '', turnId: _streamViewId(m.turn_id, 'user') } });
+        try { var liveContext = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel, section: m.section, selection_anchor: m.sel_anchor }, false, m.content); if (liveContext && liveUser) liveUser.appendChild(liveContext); } catch (_) {}
+        return;
+      }
       var uel = addMsg('asst-u', esc(m.content));
       try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel, section: m.section, selection_anchor: m.sel_anchor }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}   // section/sel_anchor=EPUB 历史字段(PDF 无此字段不受影响)
       return;
@@ -3857,8 +3914,14 @@
       target.appendChild(ce);
       return;
     }
-    var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || '');
-    renderMd(el, (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text);
+    var _pf = _splitFollowups(m.content || '');
+    var historyText = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text;
+    var el;
+    if (m.turn_id && RC.turnCard && RC.turnCard.renderTurn) {
+      el = RC.turnCard.renderTurn(_historyTurnId(m, mode, scope),
+        [{ kind: 'text', text: historyText, item_id: m.item_id }], target,
+        { historyReplay: true, meta: { via: m.via || '', threadId: m.thread_id || '', turnId: m.turn_id } });
+    } else { el = addMsg('asst-a', ''); renderMd(el, historyText); }
     // 字幕模式(via=voice,Windows 语音核心逐轮落库):这句话本来就是念出来的,▶(TTS 再念)与「!」(编排质量回报)都没意义,不挂(用户 2026-09-15)
     var _isSubtitle = m.via === 'voice';
     if (!_isSubtitle) { try { _attachClipBtn(el, m, mode); } catch (_) {} }   // 66:语音回放按钮(有录音=紫;无=灰,点了 TTS 念+保存)
@@ -3934,6 +3997,7 @@
     options = options || {};
     var historyScope = _historyUrl(mode);
     var histToken = ++_historyEpoch, modeEpoch = _modeEpoch;
+    var liveVersion = RC.turnCard && RC.turnCard.streamVersion ? RC.turnCard.streamVersion() : 0;
     _historyLoadCount++;
     return fetch(historyScope).then(function (r) {
       if (!r || r.ok === false) {
@@ -3975,6 +4039,7 @@
           try { RC.turnCard && RC.turnCard.prune && RC.turnCard.prune(); } catch (_) {}
           return { ok: false, stale: true };
         }
+        if (RC.turnCard && RC.turnCard.preserveLive) RC.turnCard.preserveLive(stage, liveVersion);
         _historyCommit(stage, deferredActions);
         // 别的轮次落库时，下一句用户话可能仍在识别。整页原子替换后恢复
         // 未出现在本次权威快照里的字幕；已落库的同 ID 则只留正式记录。

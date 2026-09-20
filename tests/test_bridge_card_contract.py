@@ -214,14 +214,16 @@ class BridgeAndDeliveryTest(unittest.TestCase):
         ev = (ROOT / "_server_deploy/reader_events.py").read_text("utf-8")
         self.assertRegex(ev, r"return n\b")
         asst = (ROOT / "_server_deploy/assistant.py").read_text("utf-8")
-        self.assertIn('"delivered": _delivered', asst)
+        self.assertRegex(asst, r'"delivered":\s+_?delivered')
 
-    def test_live_event_reuses_the_atomic_history_renderer(self) -> None:
+    def test_live_event_reconciles_one_turn_and_keeps_history_renderer(self) -> None:
         js = (ROOT / "_server_deploy/static/pdf/rc-assistant.js").read_text("utf-8")
-        self.assertIn("_requestHistoryReload({ reason: 'assistant-history'", js,
-                      "实时事件必须进入唯一原子历史刷新队列")
-        self.assertIn("RC.turnCard.renderTurn(\n        _rtid, m.parts, target, { historyReplay: true }", js,
-                      "实时事件最终必须走同一个权威历史渲染器")
+        self.assertIn("ev.stream === 'parts' || ev.stream === 'final'", js)
+        self.assertIn("_streamMessages(ev, ev.stream === 'final')", js,
+                      "实时事件必须按消息身份原位更新，不整页刷新")
+        self.assertIn("RC.turnCard.reconcile(tid, message", js)
+        self.assertIn("RC.turnCard.renderTurn(\n        _rtid, m.parts, target, { historyReplay: true", js,
+                      "重新打开侧栏仍保留同一个历史渲染器")
         self.assertIn("/pdf/api/turn-ack", js, "渲染完要回执")
         for host in ("pdf-tail.js", "epub-html.js"):
             h = (ROOT / "_server_deploy/static/pdf" / host).read_text("utf-8")
@@ -420,5 +422,5 @@ class ContractStaticPathTest(unittest.TestCase):
     def test_log_route_turns_any_contract_failure_into_400(self) -> None:
         asst = (ROOT / "_server_deploy/assistant.py").read_text("utf-8")
         seg = asst.split("契约校验:", 1)[1][:900]
-        self.assertIn("except Exception as _ce", seg,
+        self.assertRegex(seg, r"except Exception as \w+:",
                       "只 catch ValueError 会让 ContractError/FileNotFoundError 漏成 500")

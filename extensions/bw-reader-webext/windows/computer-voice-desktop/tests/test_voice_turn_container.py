@@ -33,12 +33,13 @@ class UserTranscriptIdentityTest(unittest.TestCase):
         r._voice_user_stream = ""
         r._voice_user_turn_id = None
         r._voice_turn_id = VOICE
+        r._voice_stream_owner = None
         r._turn = None
         r._last_backend_turn_id = None
         r._backend_done_at = 0
         r.posted, r.streamed = [], []
         r._history_post = lambda body: r.posted.append(body)
-        r._stream_post = lambda tid, text, role="assistant": r.streamed.append((tid, text, role))
+        r._stream_post = lambda tid, text, role="assistant", **kw: r.streamed.append((tid, text, role))
         r.log = lambda *args, **kwargs: None
         r._promise_watch = lambda *args: None
         return r
@@ -50,10 +51,11 @@ class UserTranscriptIdentityTest(unittest.TestCase):
         r = self._runner()
         self._delta(r, "第一")
         first = r.streamed[-1][0]
-        r._subtitle_done("user", "第一句完整内容")
+        r._transcript_final("user", "第一句完整内容")
+        r._transcript_state().start("user", "second")
         self._delta(r, "第二")
         second = r.streamed[-1][0]
-        r._subtitle_done("user", "第二句补充")
+        r._transcript_final("user", "第二句补充", "second")
         self.assertNotEqual(first, second)
         self.assertEqual([p["turn_id"] for p in r.posted], [first, second])
         self.assertEqual([p["user"] for p in r.posted], ["第一句完整内容", "第二句补充"])
@@ -79,19 +81,22 @@ class UserTranscriptIdentityTest(unittest.TestCase):
         from types import SimpleNamespace
         r = self._runner()
         identifier = "vu-queue.u"
-        queued = iter([("log", {"user": "完整", "turn_id": identifier}), ("stream", identifier)])
+        key = ("", identifier, identifier)
+        queued = iter([("log", {"user": "完整", "turn_id": identifier, "stream_final": 1,
+                                 "streamRevision": 2}), ("stream", key)])
         r._history_q = SimpleNamespace(get=lambda: next(queued))
-        r._stream_latest = {identifier: "完整"}
+        r._stream_latest = {key: {"turn_id": identifier, "item_id": identifier, "content": "完整",
+                                 "streamRevision": 1, "role": "user"}}
         r._stream_role = {identifier: "user"}
-        r._stream_queued = {identifier}
+        r._stream_queued = {key}
         r.history_stats = {"written": 0, "streamed": 0, "errors": 0}
         r.loop = SimpleNamespace(call_soon_threadsafe=lambda fn: fn())
         requests = []
         r._history_request = lambda path, body: requests.append((path, body)) or {}
         with self.assertRaises(StopIteration):
             r._history_worker()
-        self.assertEqual([path for path, _ in requests], ["/api/assistant/log"])
-        self.assertEqual(r._stream_role, {})
+        self.assertEqual([path for path, _ in requests], ["/api/assistant/stream", "/api/assistant/log"])
+        self.assertEqual(r._stream_latest, {})
 
 
 class StreamOwnerTest(unittest.TestCase):
@@ -151,12 +156,14 @@ class ToolOpensContainerTest(unittest.TestCase):
         self.assertNotIn("args", body["parts"][0])
         self.assertNotIn("result", body["parts"][0])
 
-    def test_同一轮里第二个工具不再重复建(self):
+    def test_同一轮第二个工具即时更新同一容器(self):
         rec = {"id": BACKEND}
         r = self._runner(rec)
         r._tool_opened({"type": "mcpToolCall", "tool": "a"})
         r._tool_opened({"type": "mcpToolCall", "tool": "b"})
-        self.assertEqual(len(r.posted), 1)
+        self.assertEqual(len(r.posted), 2)
+        self.assertEqual({body["turn_id"] for body in r.posted}, {BACKEND})
+        self.assertEqual([body["parts"][0]["tool"] for body in r.posted], ["a", "b"])
 
     def test_没有本轮记录时什么都不做(self):
         r = self._runner(None)
@@ -357,6 +364,210 @@ class VoiceDraftTest(unittest.TestCase):
         r._voice_post(BACKEND, "乙")
         parts = [p["text"] for p in r.posted[-1]["parts"]]
         self.assertEqual(r._voice_draft(BACKEND), "\n\n".join(parts))
+
+
+class UnifiedStreamRegressionTest(unittest.TestCase):
+    def _runner(self):
+        import copy
+        from collections import deque
+        r = object.__new__(vcr.Runner)
+        r.settings = {"historyMode": "subtitle", "historyUrl": "http://test.invalid"}
+        r.thread_id, r.session_id = "thread-test", "session-test"
+        r.session_state = "idle"
+        r.dc = object()
+        r.transcripts = deque()
+        r._turn = None
+        r._voice_turn_id = None
+        r._voice_user_turn_id = None
+        r._voice_stream_owner = None
+        r._voice_parts = {}
+        r._pre_turn_voice = None
+        r._last_backend_turn_id = None
+        r._backend_done_at = 0
+        r.posted, r.streamed, r.logs = [], [], []
+        r._history_post = lambda body: r.posted.append(copy.deepcopy(body))
+        r._stream_post = lambda tid, text, role="assistant", **kw: r.streamed.append(
+            {"turn_id": tid, "content": text, "role": role, **kw})
+        r.log = lambda kind, **kw: r.logs.append((kind, kw))
+        r._promise_watch = lambda *args: None
+        r._tool_error_log = lambda *args: None
+        return r
+
+    def test_multiple_segments_of_one_user_turn_are_one_complete_message(self):
+        r = self._runner()
+        r._transcript_state().start("user", "rtc-user-1")
+        r._transcript_delta("user", "第一")
+        identity = r.streamed[-1]["item_id"]
+        r._transcript_segment("user", "第一句。")
+        r._transcript_delta("user", "补充")
+        r._transcript_segment("user", "补充第二句。")
+        self.assertEqual(r.posted, [])
+        self.assertEqual(r.streamed[-1]["content"], "第一句。\n补充第二句。")
+        r._transcript_final("user", source="rtc-user-1")
+        self.assertEqual(len(r.posted), 1)
+        self.assertEqual(r.posted[0]["item_id"], identity)
+        self.assertEqual(r.posted[0]["user"], "第一句。\n补充第二句。")
+        self.assertEqual(r.posted[0]["stream_final"], 1)
+
+    def test_first_delta_before_rtc_start_keeps_identity(self):
+        state = vcr.VoiceTranscriptStreams("session")
+        entry = state.delta("user", "先到")
+        self.assertIs(state.start("user", "actual-id"), entry)
+        self.assertEqual(entry["source"], "actual-id")
+        self.assertEqual(state.finish("user", "完整", "actual-id")["id"], entry["id"])
+
+    def test_rtc_done_before_corrected_segment_does_not_seal_partial(self):
+        r = self._runner()
+        r._transcript_state().start("user", "rtc-user-1")
+        r._transcript_delta("user", "句子半")
+        r._transcript_final("user", source="rtc-user-1")
+        self.assertEqual(r.posted, [])
+        r._transcript_segment("user", "句子完整。", "rtc-user-1")
+        self.assertEqual(r.posted[0]["user"], "句子完整。")
+
+    def test_final_is_idempotent_and_late_delta_cannot_reopen_it(self):
+        state = vcr.VoiceTranscriptStreams("session")
+        state.start("user", "first")
+        state.finish("user", "完整", "first")
+        self.assertIsNone(state.delta("user", "迟到", "first"))
+        self.assertIsNone(state.segment("user", "重复", "first"))
+        self.assertIsNone(state.finish("user", "完整", "first"))
+
+    def test_late_final_for_previous_source_leaves_current_user_speech_intact(self):
+        state = vcr.VoiceTranscriptStreams("session")
+        first = state.start("user", "first")
+        state.segment("user", "第一句", "first")
+        second = state.start("user", "second")
+        state.delta("user", "第二句", "second")
+        self.assertEqual(state.finish("user", "第一句。", "first")["id"], first["id"])
+        self.assertEqual(state.delta("user", "继续")["id"], second["id"])
+        self.assertEqual(second["text"], "第二句继续")
+
+    def test_assistant_final_stays_in_its_original_backend_container(self):
+        r = self._runner()
+        r._turn = {"id": "old-backend"}
+        r._transcript_state().start("assistant", "spoken-1")
+        r._transcript_delta("assistant", "完成")
+        r._turn = {"id": "new-backend"}
+        r._transcript_final("assistant", "完成了。", "spoken-1")
+        self.assertEqual(r.posted[-1]["turn_id"], "old-backend")
+        self.assertEqual(r.posted[-1]["parts"][0]["text"], "完成了。")
+
+    def test_new_direct_reply_is_not_absorbed_by_recent_completed_backend(self):
+        import time
+        r = self._runner()
+        r._last_backend_turn_id = "previous-task"
+        r._backend_done_at = time.time()
+        r._transcript_state().start("assistant", "new-spoken")
+        r._transcript_final("assistant", "另一个问题的回答", "new-spoken")
+        self.assertNotEqual(r.posted[-1]["turn_id"], "previous-task")
+
+    def test_late_backend_events_cannot_write_into_current_turn(self):
+        r = self._runner()
+        r._turn = {"id": "current", "parts": [], "stream": ""}
+        for method, extra in [("item/agentMessage/delta", {"itemId": "old-text", "delta": "旧内容"}),
+                              ("item/completed", {"item": {"id": "old-tool", "type": "mcpToolCall", "tool": "x"}}),
+                              ("turn/completed", {"turn": {"id": "old", "status": "completed"}})]:
+            asyncio.run(r.on_notification(method, {"threadId": "thread-test", "turnId": "old", **extra}))
+        self.assertEqual(r.posted, [])
+        self.assertEqual(r.streamed, [])
+        self.assertEqual(r._turn["id"], "current")
+        self.assertFalse(any(k == "notification_handler_error" for k, _ in r.logs))
+
+    def test_same_tool_name_different_call_ids_are_two_live_steps(self):
+        r = self._runner()
+        r._turn = {"id": BACKEND, "parts": []}
+        one = {"type": "mcpToolCall", "id": "call-1", "tool": "reader_page_text"}
+        two = {**one, "id": "call-2"}
+        r._tool_opened(one)
+        r._tool_opened(two)
+        r._turn_item({**one, "status": "completed", "result": {"content": []}})
+        self.assertEqual([(p["call_id"], p["status"]) for p in r._turn["parts"]],
+                         [("call-1", "completed"), ("call-2", "running")])
+        self.assertEqual(len(r.posted[-1]["parts"]), 1)
+        count = len(r.posted)
+        r._tool_opened(one)
+        r._turn_item({**one, "status": "completed"})
+        self.assertEqual(len(r.posted), count)
+
+    def test_backend_messages_keep_separate_ids_and_completed_item_ignores_delta(self):
+        r = self._runner()
+        r._turn = {"id": BACKEND, "parts": []}
+        for iid, text in [("message-1", "说明"), ("message-2", "结论")]:
+            r._turn_item({"type": "agentMessage", "id": iid, "text": text, "phase": "final_answer"})
+        self.assertEqual([(p["item_id"], p["text"]) for p in r._turn["parts"]],
+                         [("message-1", "说明"), ("message-2", "结论")])
+        self.assertTrue(all(len(body["parts"]) == 1 for body in r.posted))
+        count = len(r.streamed)
+        asyncio.run(r.on_notification("item/agentMessage/delta", {"turnId": BACKEND,
+                                                                 "itemId": "message-1", "delta": "迟到"}))
+        self.assertEqual(len(r.streamed), count)
+
+    def test_failed_speech_tool_is_visible_even_if_transport_completed(self):
+        r = self._runner()
+        r._turn = {"id": BACKEND, "parts": []}
+        item = {"type": "mcpToolCall", "id": "speech-call", "tool": "voice_say"}
+        r._tool_opened(item)
+        self.assertEqual(r.posted, [])
+        r._turn_item({**item, "status": "completed", "result": {
+            "isError": True, "content": [{"type": "text", "text": "设备不可用"}]}})
+        self.assertEqual(r.posted[-1]["parts"][0]["status"], "failed")
+        self.assertEqual(r.posted[-1]["parts"][0]["call_id"], "speech-call")
+
+
+class OrderedDeliveryTest(unittest.TestCase):
+    def _runner(self):
+        import queue
+        from types import SimpleNamespace
+        r = object.__new__(vcr.Runner)
+        r.settings = {"historyUrl": "http://test.invalid"}
+        r.thread_id = "thread-1"
+        r._history_q = queue.Queue()
+        r._stream_latest, r._stream_role, r._stream_queued = {}, {}, set()
+        r.history_stats = {"written": 0, "streamed": 0, "errors": 0}
+        r.log = lambda *args, **kw: None
+        r.loop = SimpleNamespace(call_soon_threadsafe=lambda fn: fn())
+        r.requests = []
+        r._history_request = lambda path, body: r.requests.append((path, body)) or {}
+        return r
+
+    def _drain(self, r):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        entries = []
+        while not r._history_q.empty():
+            entries.append(r._history_q.get_nowait())
+        iterator = iter(entries)
+        r._history_q = SimpleNamespace(get=lambda: next(iterator))
+        with patch.object(vcr.time, "sleep", lambda _: None), self.assertRaises(StopIteration):
+            r._history_worker()
+
+    def test_intermediate_tool_log_cannot_remove_newer_queued_text(self):
+        r = self._runner()
+        r._history_post({"turn_id": BACKEND, "parts": [{"kind": "tool", "id": "tool-1"}],
+                         "item_id": "parts:" + BACKEND})
+        r._stream_post(BACKEND, "仍在流式生成", item_id="message-1")
+        self._drain(r)
+        self.assertEqual([path for path, _ in r.requests], ["/api/assistant/log", "/api/assistant/stream"])
+        self.assertEqual(r.requests[-1][1]["content"], "仍在流式生成")
+
+    def test_final_follows_corrected_snapshot_and_blocks_late_draft(self):
+        r = self._runner()
+        r._stream_post("vu-1.u", "完整", role="user", item_id="vu-1.u")
+        r._history_post({"turn_id": "vu-1.u", "item_id": "vu-1.u", "user": "完整", "stream_final": 1})
+        r._stream_post("vu-1.u", "迟到半句", role="user", item_id="vu-1.u")
+        self._drain(r)
+        self.assertEqual([path for path, _ in r.requests], ["/api/assistant/stream", "/api/assistant/log"])
+        self.assertEqual(r.requests[0][1]["content"], "完整")
+        self.assertLess(r.requests[0][1]["streamRevision"], r.requests[1][1]["streamRevision"])
+
+    def test_switching_threads_cannot_relabel_queued_events(self):
+        r = self._runner()
+        r._stream_post(BACKEND, "上一对话", item_id="message-1")
+        r.thread_id = "thread-2"
+        r._stream_post(BACKEND, "新对话", item_id="message-1")
+        self._drain(r)
+        self.assertEqual([body["thread_id"] for _, body in r.requests], ["thread-1", "thread-2"])
 
 
 if __name__ == "__main__":

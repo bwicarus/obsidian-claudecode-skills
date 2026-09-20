@@ -49,7 +49,7 @@ def _js(name: str) -> Path:
 # 它是渲染器里唯一一个没有 `k === '…'` 字面量的合法 kind,所以只能在这里显式登记。
 FALLBACK_CARD_KIND = "general"
 
-_MAX_TEXT = 8000
+_MAX_TEXT = 32000
 _MAX_ITEMS = 24
 _MAX_STR = 2000
 
@@ -236,6 +236,12 @@ PART_FIELD_SPECS: dict[str, dict] = {
     "meta":   {"req": (), "opt": ("meta", "seq", "origin")},
 }
 
+_PART_ID_FIELDS = ("id", "item_id", "call_id")
+_PART_STATUSES = frozenset(("running", "started", "in_progress", "completed", "done",
+                            "failed", "error", "cancelled", "canceled", "aborted", "interrupted"))
+for _part_spec in PART_FIELD_SPECS.values():
+    _part_spec["opt"] = tuple(dict.fromkeys((*_part_spec["opt"], *_PART_ID_FIELDS, "status")))
+
 
 def contract_gaps() -> list[str]:
     """渲染器支持、但本文件没给字段规格的 kind。非空 = 契约有缺口,必须补齐后才放行。"""
@@ -334,6 +340,15 @@ def validate_parts(parts) -> list[dict]:
             raise ValueError(f"parts[{i}].kind={kind!r} 渲染器画不出来;当前支持:{sorted(allowed)}")
         spec = PART_FIELD_SPECS[kind]
         one = _pick(p, spec["req"], spec["opt"], f"parts[{i}]({kind})")
+        for field in _PART_ID_FIELDS:
+            if field in one:
+                value = one[field]
+                if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value):
+                    raise ValueError(f"parts[{i}].{field}:必须是 1-160 字符的合法身份")
+        if "status" in one and (not isinstance(one["status"], str) or one["status"] not in _PART_STATUSES):
+            raise ValueError(f"parts[{i}].status:未知工具状态")
+        if "origin" in one and (not isinstance(one["origin"], str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,48}", one["origin"])):
+            raise ValueError(f"parts[{i}].origin:来源无效")
         if kind == "text":
             t = str(one["text"]).strip()
             if not t:

@@ -26,6 +26,8 @@ if (window.__bwPwaProviderOnly) return;
 
   var _turns = {};        // turn_id → {el, hd, parts:[], bd, flow, draft}
   var _cur = null;        // 当前轮 turn_id
+  var _streamVersion = 0;
+  function _lookup(tid) { var alias = tidByTurnId(tid); return _turns[tid] || (alias && _turns[alias]); }
 
   function _thread() { return document.getElementById('asst-thread'); }
   function _esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
@@ -47,7 +49,11 @@ if (window.__bwPwaProviderOnly) return;
   function open(tid, target, options) {
     var th = target || _thread();
     if (!th) return null;
+    if (!target) { var live = _lookup(tid); if (live && live.el.isConnected) { _cur = live.tid; return live; } }
     options = options && typeof options === 'object' ? options : {};
+    // A history request may finish while this same live row is still changing.
+    // Its staging projection must not replace the active row in the registry.
+    if (target && _turns[tid] && _turns[tid]._live && _turns[tid].el.parentNode !== target) tid = 'replay:' + tid;
     if (
       _turns[tid] && _turns[tid].el && _turns[tid].el.isConnected &&
       (!target || _turns[tid].el.parentNode === target)
@@ -124,6 +130,7 @@ if (window.__bwPwaProviderOnly) return;
     d.className = 'rc-part rc-part-' + (p.kind || 'text');
     if (p.kind === 'text') {
       if (!(p.text || '').trim()) return null;
+      if (p.role === 'user') d.className += ' rc-part-user';
       _md(d, p.text);
     } else if (p.kind === 'card') {
       // 结果卡(天气/搜索/配图/视频):**复用既有** _infoCardEl —— 别另造一套
@@ -561,13 +568,29 @@ if (window.__bwPwaProviderOnly) return;
   //   只堵一个入口 = 只修一半。
   // 工具部件在正文里不占块（renderPart 对 tool 返回 null，细节收在【流程】里），所以升级
   // 只改字段 + 重画流程面板与卡头，没有 DOM 块要换。
-  function _absorbTool(t, part) {
+  function _absorbTool(t, part, silent) {
     if (!part || part.kind !== 'tool' || !(part.tool || part.label)) return false;
     var key = String(part.tool || part.label);
+    var callId = String(part.call_id || part.callId || part.item_id || part.id || '');
     var rich = function (p) { return (p.result ? 2 : 0) + (p.args ? 1 : 0); };
     for (var j = t.parts.length - 1; j >= 0; j--) {
       var pt = t.parts[j];
       if (pt.kind !== 'tool' || String(pt.tool || pt.label) !== key) continue;
+      var priorId = String(pt.call_id || pt.callId || pt.item_id || pt.id || '');
+      if (callId && priorId) {
+        if (part.origin && pt.origin && part.origin !== pt.origin) continue;
+        if (callId !== priorId) continue;
+        // The producer's invocation identity, not its tool name or content, owns
+        // running -> completed updates and replay deduplication.
+        var terminal = /^(completed|done|failed|error|cancelled)$/.test(String(pt.status || ''));
+        var incomingRunning = /^(running|started|in_progress)$/.test(String(part.status || ''));
+        if (!(terminal && incomingRunning)) {
+          for (var field in part) { if (field !== 'seq' && field.charAt(0) !== '_') pt[field] = part[field]; }
+          _ensureHead(t, pt.label || pt.tool || '工具');
+          if (!t.flow.hidden) _paintFlow(t);
+        }
+        return true;
+      }
       // ⚠ 只吞"光有标签"的那条。同一轮里同一个工具**真被调用两次**是正常的
       //   （连做两张卡），两条都带 args/result 时按两次算，否则就是把用户的第二次
       //   操作从流程里抹掉 —— 去重反而变成丢信息。
@@ -578,7 +601,7 @@ if (window.__bwPwaProviderOnly) return;
         if (!t.flow.hidden) _paintFlow(t);
         // ⚠ 回放时不回写：这一刻正在把存储里的东西画出来，再 onChange 就是拿渲染结果
         //   倒灌回存储，等于让显示层改写权威数据。
-        if (!t.historyReplay) { try { if (RC.turnCard.onChange) RC.turnCard.onChange(t.tid); } catch (e) {} }
+        if (!t.historyReplay && !silent) { try { if (RC.turnCard.onChange) RC.turnCard.onChange(t.tid); } catch (e) {} }
       }
       return true;
     }
@@ -587,8 +610,9 @@ if (window.__bwPwaProviderOnly) return;
 
   // ── 注入 ─────────────────────────────────────────────────────────────────
   function addPart(tid, part) {
-    var t = _turns[tid] || open(tid);
+    var t = _lookup(tid) || open(tid);
     if (!t) return null;
+    t._live = true; t._streamVersion = ++_streamVersion;
     // 同一次工具调用**只留一条**。同一个调用会被两边各画一次：运行器从 app-server 的
     // 条目里记一条（带 args/result/耗时），App 自己执行时也画一条芯片（只有标签）。
     // 两条并存 = 用户 2026-09-18 说的「有重复」。这里按工具名归一：留信息多的那条，
@@ -628,35 +652,142 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   // 流式文字:唯一允许"就地更新"的 part(不变式②的例外)。response 结束调 freezeDraft。
-  function draftText(tid, text, role) {
-    var t = _turns[tid] || open(tid);
+  function _draftKey(itemId, origin, role) { return (origin || 'app') + ':' + (role || 'assistant') + ':' + (itemId || 'legacy'); }
+  function draftText(tid, text, role, itemId, origin) {
+    var t = _lookup(tid) || open(tid);
     if (!t) return;
+    t._live = true; t._liveFinal = false; t._streamVersion = ++_streamVersion;
+    if (role === 'user') t.el.className = 'asst-msg asst-u rc-turn';
+    itemId = String(itemId || '');
+    origin = origin || 'app';
+    var draftKey = _draftKey(itemId, origin, role);
+    t._drafts = t._drafts || Object.create(null);
+    t.draft = t._drafts[draftKey] ||
+      (itemId ? t.parts.filter(function (p) { return p.kind === 'text' && p.item_id === itemId && (p.origin || 'runner') === origin; })[0] : t.draft) || null;
     if (!t.draft) {
-      t.draft = { kind: 'text', text: '', seq: t.parts.length };
+      t.draft = { kind: 'text', text: '', role: role || 'assistant', origin: origin, seq: t.parts.length, _streamText: true };
+      if (itemId) t.draft.item_id = itemId;
       t.parts.push(t.draft);
       t.draft._el = document.createElement('div');
       // role=user：用户自己正在说的话，渲成他的气泡而不是助手正文（2026-09-21）。
       // 复用 .asst-u（已有的蓝色靠右气泡）：实时那条和定稿后那条长得一样，
       // 定稿替换时不会有样式跳变。
       t.draft._el.className = (role === 'user')
-        ? 'rc-part rc-part-text rc-part-user asst-u'
+        ? 'rc-part rc-part-text rc-part-user'
         : 'rc-part rc-part-text';
       t.bd.appendChild(t.draft._el);
     }
+    t._drafts[draftKey] = t.draft;
+    t.draft._draftKey = draftKey;
+    t.draft._streamDraft = true;
     t.draft.text = text;
     _md(t.draft._el, text);
     _scroll();
   }
-  function freezeDraft(tid) {
-    var t = _turns[tid];
-    if (!t || !t.draft) return;
-    if (!(t.draft.text || '').trim()) {   // 空 draft:撤掉,别在历史里留空块
-      try { t.draft._el.remove(); } catch (e) {}
-      t.parts.splice(t.parts.indexOf(t.draft), 1);
-    } else {
-      delete t.draft._el;
+  function _freezePart(t, draft) {
+    if (!draft) return;
+    if (!(draft.text || '').trim()) {   // 空 draft:撤掉,别在历史里留空块
+      try { draft._el.remove(); } catch (e) {}
+      t.parts.splice(t.parts.indexOf(draft), 1);
     }
-    t.draft = null;
+    draft._streamDraft = false;
+    if (t._drafts) delete t._drafts[draft._draftKey];
+    if (t.draft === draft) t.draft = null;
+  }
+  function freezeDraft(tid, itemId, origin, role) {
+    var t = _lookup(tid);
+    if (!t) return;
+    var draft = itemId != null ? (t._drafts && t._drafts[_draftKey(itemId, origin, role)]) : t.draft;
+    _freezePart(t, draft);
+  }
+
+  function _partIdentity(part, index) {
+    var source = String(part.origin || 'runner') + ':';
+    if (part.kind === 'tool') {
+      var call = part.call_id || part.callId || part.item_id || part.id;
+      if (call) return source + 'tool:' + call;
+    }
+    if (part.id || part.item_id) return source + part.kind + ':' + (part.item_id || part.id);
+    var entity = part.gid || part.cid || (part.card && (part.card.gid || part.card.cid));
+    if (entity) return part.kind + ':entity:' + entity;
+    return part.kind + ':' + (part.origin || 'runner') + ':' + (part.seq == null ? index : part.seq);
+  }
+
+  // Reconcile one persisted message. Never rebuild a live turn: card entities,
+  // open tool details and the reader's selection belong to their existing nodes.
+  // Omitted App parts are retained; only explicit absorbed_ids delete a turn.
+  function reconcile(tid, message, options) {
+    options = options || {};
+    var alias = tidByTurnId(tid);
+    var t = (alias && _turns[alias]) || _turns[tid] || open(tid);
+    if (!t) return null;
+    t._live = true; t._streamVersion = ++_streamVersion;
+    t.el.setAttribute('data-turn-id', String(tid));
+    t.meta = { via: message.via || (t.meta && t.meta.via) || '',
+      threadId: message.thread_id || (t.meta && t.meta.threadId) || '', turnId: tid };
+    var role = message.role || 'assistant';
+    var sourceOrigin = message.origin || options.origin || 'runner';
+    var incoming = Array.isArray(message.parts) ? message.parts : [];
+    var textParts = incoming.filter(function (p) { return p && p.kind === 'text'; });
+    var legacySlot = t.parts.filter(function (p) { return p.kind === 'text' && p._streamText && !p.item_id; })[0];
+    if (role === 'user' || !incoming.length || (legacySlot && !textParts.some(function (p) { return p.item_id || p.id; }))) {
+      var text = String(message.content || textParts.map(function (p) { return p.text || ''; }).join('\n\n'));
+      if (!legacySlot && !incoming.length) legacySlot = t.parts.filter(function (p) { return p.kind === 'text' && !p.item_id; })[0];
+      var active = t._drafts && t._drafts[_draftKey(message.item_id, sourceOrigin, role)];
+      if (options.final || !active) {
+        if (legacySlot && !message.item_id) t.draft = legacySlot;
+        draftText(t.tid, text, role, message.item_id, sourceOrigin);
+        if (options.final) freezeDraft(t.tid, message.item_id, sourceOrigin, role);
+      }
+    }
+    incoming.forEach(function (part, index) {
+      if (!part || !part.kind || (part.kind === 'text' && legacySlot && !part.item_id && !part.id)) return;
+      var identity = _partIdentity(part, index);
+      var current = t.parts.filter(function (p, i) { return _partIdentity(p, i) === identity; })[0];
+      if (part.kind === 'tool' && _absorbTool(t, part, true)) return;
+      if (current) {
+        if (part.kind === 'text') {
+          var completesItem = options.final && (!message.item_id || part.item_id === message.item_id || part.id === message.item_id);
+          if ((!current._streamDraft || completesItem) && current.text !== part.text) {
+            current.text = part.text || ''; if (current._el) _md(current._el, current.text);
+          }
+          current.origin = part.origin || 'runner';
+          if (completesItem) _freezePart(t, current);
+        }
+        // Entity-backed cards update through their repository subscriptions.
+        // Recreating their projection here would lose edits and repeat delivery.
+        return;
+      }
+      var copy = {}; Object.keys(part).forEach(function (k) { if (k.charAt(0) !== '_') copy[k] = part[k]; });
+      copy.origin = copy.origin || 'runner';
+      t.parts.push(copy);
+      var wasReplay = t.historyReplay, node;
+      try { t.historyReplay = true; node = renderPart(t, copy); } finally { t.historyReplay = wasReplay; }
+      if (node) copy._el = node;
+    });
+    if (options.final) {
+      if (message.item_id) freezeDraft(t.tid, message.item_id, sourceOrigin, role);
+      else {
+        Object.keys(t._drafts || {}).forEach(function (key) { _freezePart(t, t._drafts[key]); });
+        freezeDraft(t.tid);
+      }
+      idle(t.tid); t._liveFinal = !Object.keys(t._drafts || {}).length;
+    }
+    if (!t.flow.hidden) _paintFlow(t);
+    return t.el;
+  }
+
+  function preserveLive(stage, sinceVersion) {
+    Object.keys(_turns).forEach(function (tid) {
+      var t = _turns[tid];
+      if (!t || !t._live || !t.el.isConnected || t.el.parentNode === stage ||
+          (t._liveFinal && t._streamVersion <= sinceVersion)) return;
+      var realId = t.el.getAttribute('data-turn-id') || tid;
+      var replacement = Array.prototype.filter.call(stage.children || [], function (node) {
+        return (node.getAttribute('data-turn-id') || node.getAttribute('data-turn')) === realId;
+      })[0];
+      if (replacement) replacement.replaceWith(t.el); else stage.appendChild(t.el);
+    });
   }
 
   // ── 进度状态行 ★用户设计 #49/#52:进行中的状态显示在**标题的下面一行**(卡片标题区内),
@@ -686,13 +817,14 @@ if (window.__bwPwaProviderOnly) return;
     _ensureHead(t, label);
     status(tid, '处理中', false);
   }
-  function idle(tid) { var t = _turns[tid]; if (t && t.statusEl) t.statusEl.hidden = true; }
+  function idle(tid) { var t = _lookup(tid); if (t && t.statusEl) t.statusEl.hidden = true; }
 
   // ── 历史回放:**同一个 renderPart**(不变式①)────────────────────────────
   function renderTurn(tid, parts, target, options) {
     var t = open(tid, target, options);
     if (!t) return null;
     (parts || []).forEach(function (p) {
+      if (p && p.kind === 'text' && p.role === 'user') t.el.className = 'asst-msg asst-u rc-turn';
       // 回放同样要去重：存储里可能并存两条同一次调用（运行器一条 + App 芯片一条），
       // 不挡住的话【流程】面板里同一个工具会列两遍。
       if (p && p.kind === 'tool' && _absorbTool(t, p)) return;
@@ -725,14 +857,14 @@ if (window.__bwPwaProviderOnly) return;
   // 卡片长这样:[卡头=任务名][body 增量渲结果][流程按钮]。
   function title(tid, label) { var t = _turns[tid] || open(tid); if (t) _ensureHead(t, label); }
   function partsOf(tid) {
-    var t = _turns[tid];
+    var t = _lookup(tid);
     if (!t) return [];
     // ⚠ 2026-09-18：**还在流的那一条草稿不落库**。它每来一个 delta 就变一次，
     //   而 onChange → _syncParts 会把 partsOf 整个发出去 —— 于是半截话被当成正式内容
     //   写进记录（实录：content=「明白了:正面放中文,背面」，而完整那句在另一条记录里，
     //   侧栏因此同时显示半截和全文两份）。定稿由 freezeDraft 之后的那次同步负责。
-    return t.parts.filter(function (p) { return p !== t.draft; }).map(function (p) {
-      var o = {}; for (var k in p) { if (k !== '_el') o[k] = p[k]; }
+    return t.parts.filter(function (p) { return p !== t.draft && !p._streamDraft; }).map(function (p) {
+      var o = {}; for (var k in p) { if (k.charAt(0) !== '_') o[k] = p[k]; }
       return o;
     });
   }
@@ -745,10 +877,19 @@ if (window.__bwPwaProviderOnly) return;
     if (_turns[newTid]) {   // 真实 id 下已有容器（极少）：把部件并过去
       var dst = _turns[newTid];
       t.parts.forEach(function (p) {
+        if (p.kind === 'text' && p.item_id && dst.parts.some(function (other) { return other.kind === 'text' && other.item_id === p.item_id; })) {
+          try { if (p._el) p._el.remove(); } catch (e) {} return;
+        }
+        if (p === t.draft && dst.draft) { try { if (p._el) p._el.remove(); } catch (e) {} return; }
         if (_absorbTool(dst, p)) { try { if (p._el) p._el.remove(); } catch (e) {} return; }
         p.seq = dst.parts.length; dst.parts.push(p);
+        if (p === t.draft) dst.draft = p;
+        if (p._streamDraft) { dst._drafts = dst._drafts || Object.create(null); dst._drafts[p._draftKey] = p; }
         if (p._el && p._el.isConnected) dst.bd.appendChild(p._el);
       });
+      dst._live = dst._live || t._live;
+      dst._streamVersion = Math.max(dst._streamVersion || 0, t._streamVersion || 0);
+      if (dst.draft) dst._liveFinal = false;
       try { if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (e) {}
       delete _turns[oldTid];
       if (_cur === oldTid) _cur = newTid;
@@ -761,9 +902,9 @@ if (window.__bwPwaProviderOnly) return;
     if (_cur === oldTid) _cur = newTid;
     return true;
   }
-  function flowOpen(tid) { var t = _turns[tid]; return !!(t && t.flow && !t.flow.hidden); }
+  function flowOpen(tid) { var t = _lookup(tid); return !!(t && t.flow && !t.flow.hidden); }
   function openFlow(tid) {
-    var t = _turns[tid]; if (!t || !t.flow) return false;
+    var t = _lookup(tid); if (!t || !t.flow) return false;
     t.flow.hidden = false; _paintFlow(t);
     try { if (t._flowBtn) t._flowBtn.classList.add('on'); } catch (e) {}
     return true;
@@ -945,10 +1086,10 @@ if (window.__bwPwaProviderOnly) return;
   RC.turnCard = {
     drop: drop,
     open: open, addPart: addPart, progress: progress, progressHtml: progressHtml, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
-    renderTurn: renderTurn, partsOf: partsOf, reset: reset, prune: prune, setTaskId: setTaskId, setOrchTaskId: setOrchTaskId, title: title, status: status, cliPart: cliPart,
+    renderTurn: renderTurn, reconcile: reconcile, preserveLive: preserveLive, streamVersion: function () { return _streamVersion; }, partsOf: partsOf, reset: reset, prune: prune, setTaskId: setTaskId, setOrchTaskId: setOrchTaskId, title: title, status: status, cliPart: cliPart,
     current: function () { return _cur; },
     trackCli: trackCli,
-    has: function (tid) { return !!_turns[tid]; },
+    has: function (tid) { return !!_lookup(tid); },
     // 操作条(高亮/卡片改删/便签/自建页)的统一出口:顶部「操作」tab 用
     opItems: opItems, opAction: opAction, markOp: markOp,
     rename: rename, openFlow: openFlow, flowOpen: flowOpen, tidByTurnId: tidByTurnId,

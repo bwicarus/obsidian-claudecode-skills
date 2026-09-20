@@ -81,6 +81,7 @@ class FakeNode {
     node.parentNode = parent;
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] || null; }
 }
 
 function historyHarness(fetchImpl) {
@@ -185,7 +186,19 @@ function coordinatorHarness(fetchImpl) {
     RC: {
       assistant: {},
       sidedrawer: { isOpen: () => true },
-      turnCard: { prune() {}, renderTurn() { return true; } },
+      turnCard: {
+        prune() {},
+        renderTurn(id, parts, target, options) {
+          const node = new FakeNode(); node.setAttribute('data-turn-id', options?.meta?.turnId || id);
+          node.innerHTML = parts.filter(p => p.kind === 'text').map(p => p.text).join('\n\n');
+          target.appendChild(node); return node;
+        },
+        reconcile(id, message) {
+          let node = thread.children.find(n => n.getAttribute('data-turn-id') === id);
+          if (!node) { node = new FakeNode(); node.setAttribute('data-turn-id', id); thread.appendChild(node); }
+          node.innerHTML = message.content; return node;
+        },
+      },
     },
     HOST: {}, document, pane, thread,
     fetch: fetchImpl,
@@ -316,7 +329,7 @@ test("history replay ids prefer stable server identity and never depend on windo
   assert.notEqual(first, harness.historyTurnIdForTest(legacy, "normal", "/book/b/history"));
 });
 
-test("drawer, native sync and repeated assistant-history signals coalesce into one atomic reload", async () => {
+test("drawer reloads coalesce while legacy invalidations use a bounded separate local merge", async () => {
   let historyGets = 0;
   const acknowledgements = [];
   const harness = coordinatorHarness(async (url, options = {}) => {
@@ -350,6 +363,8 @@ test("drawer, native sync and repeated assistant-history signals coalesce into o
   await flushPromises();
   assert.equal(historyGets, 1);
   assert.equal(harness.thread.children.length, 2, "one authoritative replay replaces, rather than appends");
+  harness.clock.tick(400); await flushPromises();
+  assert.equal(historyGets, 2, "legacy-only signals share one local merge request after the snapshot");
   assert.deepEqual(acknowledgements, ["remote-1"]);
 });
 
@@ -390,7 +405,7 @@ test("assistant-history arriving during a full reload is serialized and never du
   harness.clock.tick(400);
   await flushPromises();
   assert.equal(historyGets, 2, "the realtime signal becomes one queued successor load");
-  assert.deepEqual(harness.thread.children.map((node) => node.innerHTML), ["question", "new"]);
+  assert.deepEqual(harness.thread.children.map((node) => node.innerHTML), ["old", "new"], "legacy invalidation updates only its target, without replacing unrelated rows");
   assert.deepEqual(acknowledgements, ["remote-race"]);
 });
 
@@ -400,6 +415,7 @@ function liveUserRenderer(harness) {
     let node = nodes.get(id);
     if (!node || node.parentNode !== harness.thread) {
       node = new FakeNode(); node.className = role === "user" ? "asst-u" : "asst-a";
+      node.setAttribute('data-turn-id', id);
       nodes.set(id, node); harness.thread.appendChild(node);
     }
     node.innerHTML = text;
@@ -414,7 +430,7 @@ test("a different completed turn cannot erase the user's live draft", async () =
   harness.sandbox.RC.assistant.onHistoryEvent({ turn_id: "vu-1.u", role: "user", stream: "delta", content: "still speaking" });
   harness.sandbox.RC.assistant.onHistoryEvent({ turn_id: "a1" });
   harness.clock.tick(80); await flushPromises();
-  assert.deepEqual(harness.thread.children.map(n => n.innerHTML), ["previous reply", "still speaking"]);
+  assert.deepEqual(harness.thread.children.map(n => n.innerHTML), ["still speaking", "previous reply"]);
 });
 
 test("user final replaces its draft once and rejects trailing partial snapshots", async () => {

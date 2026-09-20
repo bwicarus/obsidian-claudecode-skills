@@ -169,7 +169,8 @@ class DirectResultBottomTest(unittest.TestCase):
         ).read_text("utf-8")
         self.assertIn("assistant-history", source)
         self.assertIn("function onHistoryEvent(ev)", source)
-        self.assertIn("_requestHistoryReload({ reason: 'assistant-history'", source)
+        self.assertIn("_streamMessages(ev, ev.stream === 'final')", source)
+        self.assertIn("RC.turnCard.reconcile(tid, message", source)
         self.assertIn(
             "_historyReplayOne(m, mode, state, stage, historyScope",
             source,

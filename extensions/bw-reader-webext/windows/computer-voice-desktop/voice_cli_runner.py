@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import calendar
 import base64
+import copy
 import fractions
+import hashlib
 import json
 import os
 import queue
@@ -884,6 +886,83 @@ def stream_owner(backend_turn_id, voice_turn_id, prev):
     return own, None
 
 
+class VoiceTranscriptStreams:
+    """One identity per RTC turn/role; stdio done completes a segment, not a turn."""
+
+    def __init__(self, session):
+        self.session = session
+        self.entries = {}
+        self.current = {}
+        self.sources = {}
+
+    def start(self, role, source=None):
+        if role not in ("user", "assistant"):
+            return None
+        source = str(source) if source else None
+        if source and (role, source) in self.sources:
+            return self.entries.get(self.sources[(role, source)])
+        entry = self.entries.get(self.current.get(role))
+        if entry and not entry["final"] and entry["source"] is None:
+            entry["source"] = source
+        else:
+            identity = hashlib.sha256((str(self.session) + ":" + role + ":" +
+                                       (source or str(time.time_ns()))).encode()).hexdigest()[:24]
+            mid = ("vu-" if role == "user" else "v-") + identity + (".u" if role == "user" else "")
+            entry = {"id": mid, "role": role, "source": source, "segments": [],
+                     "delta": "", "text": "", "final": False, "owner": None,
+                     "boundary": False}
+            self.entries[mid] = entry
+            self.current[role] = mid
+        if source:
+            self.sources[(role, source)] = entry["id"]
+        while len(self.entries) > 128:
+            removed = next(iter(self.entries))
+            self.entries.pop(removed)
+            self.sources = {key: value for key, value in self.sources.items() if value != removed}
+        return entry
+
+    def get(self, role, source=None):
+        if source:
+            existing = self.entries.get(self.sources.get((role, str(source))))
+            if existing:
+                return existing
+            return self.start(role, source)
+        return self.entries.get(self.current.get(role)) or self.start(role, source)
+
+    def delta(self, role, text, source=None):
+        entry = self.get(role, source)
+        if not entry or entry["final"] or not text:
+            return None
+        entry["delta"] = (entry["delta"] + str(text))[:32000]
+        entry["text"] = "\n".join(entry["segments"] + [entry["delta"]])[:32000]
+        return entry
+
+    def segment(self, role, text, source=None):
+        entry = self.get(role, source)
+        if not entry or entry["final"] or not text:
+            return None
+        entry["segments"].append(str(text)[:32000])
+        entry["delta"] = ""
+        entry["text"] = "\n".join(entry["segments"])[:32000]
+        return entry
+
+    def finish(self, role, text=None, source=None):
+        entry = self.get(role, source)
+        if not entry or entry["final"]:
+            return None
+        if not text and entry["delta"]:
+            # RTC can close before stdio delivers the corrected segment. Do not seal a partial.
+            entry["boundary"] = True
+            return None
+        if text:
+            entry["text"] = str(text)[:32000]
+        if not entry["text"]:
+            entry["boundary"] = True
+            return None
+        entry["final"] = True
+        return entry
+
+
 class Runner:
     def __init__(self, loop: asyncio.AbstractEventLoop):
         self.loop = loop
@@ -978,8 +1057,11 @@ class Runner:
                      # 正文记账：{(file, 页号): (\"full\"|\"part\", 时刻)} —— 见 _ctx_text_ledger
                      "sent_pages": {}}
         self._history_q: queue.Queue = queue.Queue()
-        self._stream_latest: dict[str, str] = {}
-        self._stream_queued: set[str] = set()
+        self._stream_latest: dict[tuple, dict] = {}
+        self._stream_queued: set[tuple] = set()
+        self._history_revision = 0
+        self._stream_terminal = set()
+        self._transcript_streams = None
         threading.Thread(target=self._history_worker, name="history-writer", daemon=True).start()
 
     # ---------- 设置 ----------
@@ -1046,6 +1128,9 @@ class Runner:
 
     async def on_notification(self, m: str, p: dict):
         try:
+            source_thread = p.get("threadId") or p.get("thread_id")
+            if source_thread and source_thread != getattr(self, "thread_id", None):
+                return
             if m == "thread/realtime/sdp":
                 if self.remote_sdp and not self.remote_sdp.done():
                     self.remote_sdp.set_result(p["sdp"])
@@ -1072,16 +1157,15 @@ class Runner:
                 self.log("transcript", role=role, text=text)
                 self._promise_watch(role, text)
                 if self._subtitle_mode():
-                    self._subtitle_done(role, text)
+                    self._transcript_segment(role, text, self._transcript_source(p))
                 # 历史按"轮"写（数据通道 turn.done 带整轮转写），这里的分段只累积：一句话会拆成好几段，
                 # 用户插话时更是交错到达 —— 按段写就是 2026-09-14 那种碎片对话（用户实测）。
                 elif role == "user" and text:
                     self._voice_user_acc = (self._voice_user_acc + " " + text).strip()
             elif m == "thread/realtime/transcript/delta":
-                # 用户 2026-09-21：「我说话时也要实时显示」。此前只有助手侧有逐字流式，
-                # 用户自己说的话要等整句转写定稿才出现 —— 说话当下屏幕上什么都没有。
-                # ⚠ 推到 <tid>.u（用户句的轮次 id，与落库同一个），带 role=user，
-                #   否则会被当成助手正文渲进卡里。
+                if self._subtitle_mode():
+                    self._transcript_delta(p.get("role"), p.get("delta"), self._transcript_source(p))
+                    return
                 if p.get("role") == "user" and p.get("delta"):
                     if self._voice_user_turn_id is None:
                         self._voice_user_turn_id = "vu-" + str(time.time_ns()) + ".u"
@@ -1114,8 +1198,10 @@ class Runner:
                         self._voice_stream_owner = _own
                         self._stream_post(_own, self._voice_draft(_own))
             elif m in ("turn/started", "turn/completed"):
-                self.backend_busy = m == "turn/started"
                 turn = p.get("turn") or {}
+                if m == "turn/completed" and (self._turn is None or turn.get("id") != self._turn["id"]):
+                    return
+                self.backend_busy = m == "turn/started"
                 self.log(m, turnId=turn.get("id"), status=turn.get("status"))
                 # ⚠ 2026-09-17：一轮 failed 时这里只记了 status，错误正文丢在 notify("error") 里
                 #   没人看 —— 用户连着三轮收不到任何回应（后台每次都 400），而唯一的线索是
@@ -1143,10 +1229,15 @@ class Runner:
                     # 这一轮跑完、下一轮还没起 —— 把忙碌期间压着的最新状态送进去
                     await self._ctx_flush_pending()
             elif m == "item/agentMessage/delta":
-                if self._turn is not None and p.get("delta") and not self._voice_owns_text():
-                    self._turn["stream"] += str(p.get("delta"))
-                    self._stream_post(self._turn["id"], self._turn["stream"])
+                if self._matches_backend_turn(p) and p.get("delta") and not self._voice_owns_text():
+                    item_id = str(p.get("itemId") or "legacy-agent")
+                    streams = self._turn.setdefault("item_streams", {})
+                    if item_id not in self._turn.setdefault("completed_items", set()):
+                        streams[item_id] = (streams.get(item_id, "") + str(p["delta"]))[:32000]
+                        self._stream_post(self._turn["id"], streams[item_id], item_id=item_id)
             elif m in ("item/started", "item/completed"):
+                if not self._matches_backend_turn(p):
+                    return
                 item = p.get("item") or {}
                 t = item.get("type")
                 if t in ("agentMessage", "mcpToolCall", "webSearch", "commandExecution", "fileChange", "reasoning"):
@@ -1157,7 +1248,7 @@ class Runner:
                                   "fileChange", "dynamicToolCall", "collabAgentToolCall")):
                     self._tool_opened(item)
                 if m == "item/started" and t == "agentMessage" and self._turn is not None:
-                    self._turn["stream"] = ""   # 一轮里可能有多条 agentMessage（先说"我看一下"再正答）：草稿只显示当前这条
+                    self._turn.setdefault("item_streams", {}).setdefault(str(item.get("id") or "legacy-agent"), "")
                 if m == "item/completed" and self._turn is not None:
                     self._turn_item(item)
             elif m == "thread/tokenUsage/updated":
@@ -1209,6 +1300,11 @@ class Runner:
         t = d.get("type", "?")
         if t in ("turn.created", "turn.done"):
             turn = d.get("turn") or {}
+            if self._subtitle_mode() and turn.get("role") in ("user", "assistant"):
+                if t == "turn.created":
+                    self._transcript_state().start(turn["role"], turn.get("id"))
+                else:
+                    self._transcript_final(turn["role"], turn.get("transcript"), turn.get("id"))
             if turn.get("role") == "user":
                 self.user_speaking = t == "turn.created"
                 if t == "turn.created":
@@ -3401,38 +3497,64 @@ class Runner:
         return text.strip()
 
     def _tool_opened(self, item: dict):
-        """第一个工具一开始调用，就把本轮的容器建出来（用户 2026-09-18：
-        「从第一个工具调用开始生成那个工具调用的对话卡片」）。
+        """Open the task container on its first tool and update every call by source ID.
 
-        ⚠ 这不只是"早点显示"，更是**次序**：记录在历史里的位置由它被创建的那一刻决定。
-          工具部件原来要等轮次收尾才落库，而 App 在工具执行**途中**就登记了生成物
-          （reader-draft:…）—— 于是生成物反而排在工具卡前面，正是用户截图里的样子。
-        ⚠ 只发一条**光有标签**的裸部件。收尾时那条带 args/result/耗时的会整组覆盖它
-          （服务端按 origin 整组替换），前端也会按同名工具就地升级（rc-turncard 的
-          _absorbTool），所以不会变成两个方块。
+        Starting/completing a tool updates the same part; repeated tool names remain
+        separate calls. Generated artifact parts continue to be owned by the App.
         """
         rec = self._turn
-        if rec is None or rec.get("tool_opened"):
+        if rec is None:
+            return
+        call_id = self._item_identity(item)
+        if call_id in rec.setdefault("completed_items", set()):
             return
         t = item.get("type")
         tool = str(item.get("tool") or item.get("name") or t)
         server = item.get("server")
         label = (str(server) + "." if server else "") + tool
+        if tool in ("voice_say", "voice_tell"):
+            return  # Successful speech is already text; a failure is published on completion.
+        first = not rec.get("tool_opened")
         rec["tool_opened"] = True
-        self.log("turn_card_opened", tool=label[:160], turnId=rec.get("id"))
+        if first:
+            self.log("turn_card_opened", tool=label[:160], turnId=rec.get("id"))
         # 委派前那句「好的，我看一下」已经落成独立记录。它就是这次任务的开场白，
         # 把它搬进本轮容器并删掉原记录，侧栏才是用户要的「一个任务一个框」。
-        pre = self._pre_turn_voice
-        self._pre_turn_voice = None
+        pre = self._pre_turn_voice if first else None
+        if first:
+            self._pre_turn_voice = None
         if pre and (time.time() - pre[2]) < 30 and pre[2] >= self._last_user_at():
-            self._voice_post(rec["id"], pre[1], absorb=pre[0])
+            self._voice_post(rec["id"], pre[1], absorb=pre[0], item_id=pre[0], final=True)
             self.log("pre_turn_voice_absorbed", turnId=rec.get("id"), frm=pre[0])
-        self._history_post({
-            "parts": [{"kind": "tool", "tool": label[:160], "label": label[:320],
-                       "origin": "runner"}],
-            "via": "codex-voice", "turn_id": rec["id"],
-            "upsert_only": 1, "create_if_missing": 1,
-        })
+        part = {"kind": "tool", "tool": label[:160], "label": label[:320],
+                "origin": "runner", "id": call_id, "call_id": call_id, "status": "running"}
+        self._put_runner_part(part)
+        self._publish_runner_parts(changed_parts=[part])
+
+    @staticmethod
+    def _item_identity(item):
+        return str(item.get("id") or ("legacy:" + str(item.get("type") or "item") + ":" +
+                                      str(item.get("tool") or item.get("name") or "message")))[:160]
+
+    def _put_runner_part(self, part):
+        parts = self._turn.setdefault("parts", [])
+        for index, old in enumerate(parts):
+            if old.get("id") == part["id"]:
+                parts[index] = part
+                return
+        if len(parts) < 96:
+            parts.append(part)
+
+    def _publish_runner_parts(self, *, item_id=None, final=False, changed_parts=None):
+        rec = self._turn
+        body = {"parts": changed_parts if changed_parts is not None else rec.get("parts", []),
+                "via": "codex-voice", "origin": "runner",
+                "turn_id": rec["id"], "item_id": item_id or ("parts:" + rec["id"]),
+                "role": "assistant", "upsert_only": 1, "create_if_missing": 1,
+                "notify_sidebar": 1}
+        if final:
+            body["stream_final"] = 1
+        self._history_post(body)
 
     def _last_user_at(self) -> float:
         """用户最后一次说话的时刻。
@@ -3450,6 +3572,11 @@ class Runner:
     def _turn_item(self, item: dict):
         rec = self._turn
         t = item.get("type")
+        item_id = self._item_identity(item)
+        completed = rec.setdefault("completed_items", set())
+        if item_id in completed:
+            return
+        completed.add(item_id)
         if t == "userMessage":
             if not rec.get("user") and not rec.get("user_posted"):
                 txt = " ".join(str(c.get("text") or "") for c in (item.get("content") or []) if isinstance(c, dict))
@@ -3459,6 +3586,12 @@ class Runner:
             if txt and item.get("phase") in (None, "final_answer"):
                 rec["assistant"] = txt
                 self._backend_recent = (time.time(), txt)
+            if txt and not self._voice_owns_text():
+                self._stream_post(rec["id"], txt, item_id=item_id)
+                part = {"kind": "text", "text": txt[:32000], "origin": "runner",
+                        "id": item_id, "item_id": item_id}
+                self._put_runner_part(part)
+                self._publish_runner_parts(item_id=item_id, final=True, changed_parts=[part])
         elif t in ("mcpToolCall", "webSearch", "commandExecution", "fileChange", "dynamicToolCall", "collabAgentToolCall"):
             tool = str(item.get("tool") or item.get("name") or t)
             server = item.get("server")
@@ -3492,7 +3625,14 @@ class Runner:
             err = item.get("error")
             if isinstance(err, dict) and err.get("message"):
                 brief = "错误：" + str(err["message"]) + ("\n" + brief if brief else "")
-            part = {"kind": "tool", "tool": label[:160], "label": (label + (" · " + status if status else ""))[:320]}
+            structured = res.get("structuredContent") if isinstance(res, dict) else None
+            failed = (status in ("failed", "error") or bool(err)
+                      or (isinstance(res, dict) and bool(res.get("isError")))
+                      or (isinstance(structured, dict) and structured.get("ok") is False)
+                      or bool(re.match(r'\s*\{\s*"ok"\s*:\s*false', brief or "")))
+            part = {"kind": "tool", "tool": label[:160], "label": label[:320],
+                    "origin": "runner", "id": item_id, "call_id": item_id,
+                    "status": "failed" if failed else status or "completed"}
             if isinstance(args, dict) and args:
                 aj = json.dumps(args, ensure_ascii=False)
                 part["args"] = args if len(aj) <= 2000 else {"_truncated": aj[:2000]}
@@ -3506,13 +3646,15 @@ class Runner:
             #   助手发言显示在侧栏里了，再挂一条「voice_core.voice_say · completed」是重复。
             #   但**失败时必须留着**：上次 voice_say 因为输出设备打不开而失败，
             #   要是顺手一起藏掉，就成了又一处静默失败。
-            speech_only = tool in ("voice_say", "voice_tell") and status in ("completed", "", "ok")
-            if len(rec["parts"]) < 24 and not speech_only:
-                rec["parts"].append(part)
+            speech_only = tool in ("voice_say", "voice_tell") and not failed and status in ("completed", "", "ok")
+            if not speech_only:
+                self._put_runner_part(part)
+                self._publish_runner_parts(changed_parts=[part])
+            else:
+                rec["parts"] = [p for p in rec.get("parts", []) if p.get("id") != item_id]
             # 结果卡不再由运行器代造（2026-09-15 根治）：App 自己画的部件直接 upsert 进同一条记录。
-            failed = status in ("failed", "error") or (isinstance(err, dict) and bool(err.get("message"))) or bool(re.match(r'\s*\{\s*"ok"\s*:\s*false', brief or ""))
             if failed:
-                self._tool_error_log(rec.get("id"), label, args, brief, status or "failed")
+                self._tool_error_log(rec.get("id"), label, args, brief, "failed")
 
     def _finish_turn(self, turn: dict):
         rec, self._turn = self._turn, None
@@ -3524,19 +3666,16 @@ class Runner:
             return
         user = None if rec.get("user_posted") else rec.get("user")
         assistant = rec.get("assistant")
+        if any(p.get("kind") == "text" for p in rec["parts"]):
+            assistant = None   # Item-addressed text is already represented in parts.
         if self._voice_owns_text():
-            # 字幕模式 + 语音在线：文字由语音念出来（字幕里已有），这一轮只留工具/卡片；没有就不写
-            # ⚠ 语音行现在会被并进 parts（见 _subtitle_done），所以"没有 parts"这条早退
-            #   只在真的什么都没有时才成立；有 absorb 就必须发出去，否则零散记录没人来收。
+            # Voice subtitles own the text. Still publish a terminal task event when empty.
             user, assistant = None, None
             if not rec["parts"] and not rec.get("absorb"):
                 self.log("history_skip_backend_text", turnId=rec["id"][:40])
-                return
-        if not (user or assistant or rec["parts"]):
-            return
         body = {"user": user or "", "assistant": assistant or "", "via": "codex-voice", "turn_id": rec["id"][:40]}
-        if rec["parts"]:
-            body["parts"] = rec["parts"]
+        # Every identified part was persisted as it changed. Re-sending the whole
+        # task here grows quadratically and can exceed the endpoint's payload limit.
         # 这一轮期间那几条零散的语音记录：正文已并进上面的 parts，这里告诉服务端把它们删掉，
         # 侧栏重载后就是一个完整容器（见 _subtitle_done 里那段说明）。
         if rec.get("absorb"):
@@ -3545,6 +3684,8 @@ class Runner:
         # （见 assistant.py 的 _LIVE_TURN —— 没有这条就只能靠超时，那期间
         #  App 任何一次画部件都会被错并到已经结束的轮次里）。
         body["turn_end"] = 1
+        body["stream_final"] = 1
+        body["item_id"] = "turn:" + rec["id"]
         # 这一轮**一个工具都没调过** → 侧栏那边没有任何 App 自己画出来的东西，
         # 只有正文；而正文的写入走 upsert，服务端按规矩不发事件（发了会在工具执行
         # 途中打断投递，见 assistant.py）。于是这一轮的内容要等下一次非 upsert 的
@@ -3565,8 +3706,57 @@ class Runner:
         """字幕模式且语音在线：对话文字以字幕为准，后台轮不写正文、不流式正文。"""
         return self._subtitle_mode() and self.session_state == "connected"
 
-    def _subtitle_done(self, role, text):
-        """字幕模式：一条 transcript/done 完成一条字幕记录。
+    def _matches_backend_turn(self, params):
+        rec = self._turn
+        return rec is not None and (not params.get("turnId") or params["turnId"] == rec["id"])
+
+    @staticmethod
+    def _transcript_source(params):
+        return params.get("realtimeTurnId") or params.get("turnId") or params.get("turn_id")
+
+    def _transcript_state(self):
+        session = (getattr(self, "thread_id", None), getattr(self, "session_id", None))
+        state = getattr(self, "_transcript_streams", None)
+        if state is None or state.session != session:
+            state = self._transcript_streams = VoiceTranscriptStreams(session)
+        return state
+
+    def _transcript_publish(self, entry):
+        if not entry:
+            return
+        if entry["role"] == "user":
+            self._voice_user_turn_id = entry["id"]
+            self._voice_user_stream = entry["text"]
+            owner = entry["id"]
+        else:
+            owner, clear = stream_owner(self._turn["id"] if self._turn else None,
+                                        entry["id"], entry["owner"])
+            if clear:
+                self._stream_post(clear, "", item_id=entry["id"])
+            entry["owner"] = owner
+            self._voice_stream_owner = owner
+        self._stream_post(owner, entry["text"], role=entry["role"], item_id=entry["id"])
+
+    def _transcript_delta(self, role, text, source=None):
+        self._transcript_publish(self._transcript_state().delta(role, text, source))
+
+    def _transcript_segment(self, role, text, source=None):
+        entry = self._transcript_state().segment(role, text, source)
+        self._transcript_publish(entry)
+        if entry and (entry["boundary"] or (entry["source"] is None and getattr(self, "dc", None) is None)):
+            # Explicit legacy fallback: no RTC channel means no turn.done will arrive.
+            self._transcript_final(role, None, source)
+
+    def _transcript_final(self, role, text=None, source=None):
+        entry = self._transcript_state().finish(role, text, source)
+        if not entry:
+            return
+        if role == "user":
+            self._voice_pending_user = (time.time(), entry["text"])
+        self._subtitle_done(role, entry["text"], item_id=entry["id"], owner=entry["owner"])
+
+    def _subtitle_done(self, role, text, *, item_id=None, owner=None):
+        """Commit one RTC turn (or an explicit legacy fallback) using its stable identity.
         用户句独立使用 vu-<id>.u，草稿和定稿共用身份，不复用助手轮次。
         """
         text = str(text or "").strip()
@@ -3576,18 +3766,20 @@ class Runner:
             # transcript/done 完成的是一个字幕段，并不保证助手已经回答。
             # 用户连续补充两句/打断助手时，复用助手轮次会覆盖前一句历史；
             # 助手 done 又可能在用户说到一半时清空该轮次，导致草稿与定稿错位。
-            tid = self._voice_user_turn_id or ("vu-" + str(time.time_ns()) + ".u")
+            tid = item_id or self._voice_user_turn_id or ("vu-" + str(time.time_ns()) + ".u")
             self._voice_user_turn_id = None
             # 先推草稿、再落库（与助手侧同一条顺序）：落库会触发侧栏权威重载，
             # 草稿必须赶在它前面，否则会在重载后又叠一份 —— 同一句出现两次。
             self._voice_user_stream = ""
             try:
-                self._stream_post(tid, text, role="user")
+                self._stream_post(tid, text, role="user", item_id=tid)
             except Exception:
                 pass
-            self._history_post({"user": text, "via": "voice", "turn_id": tid})
+            self._history_post({"user": text, "via": "voice", "turn_id": tid,
+                                "item_id": tid, "role": "user", "stream_final": 1})
         elif role == "assistant":
-            tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
+            tid = item_id or self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
+            fixed_owner = owner or self._voice_stream_owner
             self._voice_turn_id = None
             self._voice_stream = ""
             self._voice_stream_owner = None
@@ -3598,21 +3790,20 @@ class Runner:
             #   就**直接作为 part 并进那条轮次记录**，根本不另建 v- 记录 ——
             #   上一版是"先建再收拢"，结果半截草稿、完整句、零散记录三份并存（实录里三样都在）。
             #   不建就没得收，这比事后删干净。
-            #   ⚠ 窗口取到后台轮刚结束 20 秒内：收尾那句「好了，已经放到侧栏」几乎总是
-            #     落在轮外，按时刻切会把它漏成孤条。与 commentary 判据同一个口径。
+            #   已开始流式的句子固定在原 owner；没有绑定时仅认当前后台轮，不按20秒猜。
             rec = self._turn
-            owner = rec["id"] if rec is not None else (
-                self._last_backend_turn_id
-                if (time.time() - self._backend_done_at) < 20 else None)
-            if owner:
-                self._voice_post(owner, text)
+            owner = fixed_owner or (rec["id"] if rec is not None else None)
+            if owner and not str(owner).startswith("v-"):
+                self._voice_post(owner, text, item_id=tid, final=True)
                 # ⚠ 不再往 rec["parts"] 里也塞一份：上面那次投递已经落库了，
                 #   再塞就要靠"按 origin 合并"去重，多一条看不见的暗线。一处写入，一处真相。
             else:
                 # 委派可能紧随其后（「好的，我看一下」→ 起后台轮）。记下来，等第一个工具
                 # 调用时把这条收进那个容器 —— 否则它就永远是工具卡外面的一个孤框。
                 self._pre_turn_voice = (tid, text, time.time())
-                self._history_post({"assistant": text, "via": "voice", "turn_id": tid})
+                self._stream_post(tid, text, item_id=tid)
+                self._history_post({"assistant": text, "via": "voice", "turn_id": tid,
+                                    "item_id": tid, "role": "assistant", "stream_final": 1})
 
     def _voice_draft(self, owner: str) -> str:
         """流式草稿的正文 = 本轮**已说完的几句** + 正在说的这句。
@@ -3627,7 +3818,7 @@ class Runner:
         cur = self._voice_stream
         return "\n\n".join(list(done) + ([cur] if cur else []))
 
-    def _voice_post(self, owner: str, text: str, absorb: str | None = None):
+    def _voice_post(self, owner: str, text: str, absorb: str | None = None, *, item_id=None, final=False):
         """把一句语音正文并进某个后台轮容器。
 
         ⚠ 每次都重发**这一轮累计的全部语音正文**。服务端按 origin 整组替换（见
@@ -3635,14 +3826,31 @@ class Runner:
           2026-09-18 实录里一轮两句都路由对了，存储里却只剩后一句。
         """
         acc = self._voice_parts.setdefault(owner, [])
-        if text and (not acc or acc[-1] != text):
-            acc.append(text[:4000])
+        identities = getattr(self, "_voice_part_ids", None)
+        if identities is None:
+            identities = self._voice_part_ids = {}
+        ids = identities.setdefault(owner, [])
+        while len(ids) < len(acc):
+            ids.append("voice:" + owner + ":" + str(len(ids)))
+        if item_id and item_id in ids:
+            acc[ids.index(item_id)] = text[:32000]
+        elif text and (item_id or not acc or acc[-1] != text):
+            acc.append(text[:32000])
+            ids.append(item_id or "voice:" + owner + ":" + str(time.time_ns()))
         del acc[:-12]
+        del ids[:-12]
         while len(self._voice_parts) > 8:            # 只留最近几个容器，别无限长
-            self._voice_parts.pop(next(iter(self._voice_parts)))
-        body = {"parts": [{"kind": "text", "text": t, "origin": "voice"} for t in acc],
+            old_owner = next(iter(self._voice_parts))
+            self._voice_parts.pop(old_owner)
+            identities.pop(old_owner, None)
+        body = {"parts": [{"kind": "text", "text": t[:32000], "origin": "voice", "id": mid, "item_id": mid}
+                           for t, mid in zip(acc, ids) if not item_id or mid == item_id],
                 "via": "voice", "turn_id": owner,
                 "upsert_only": 1, "create_if_missing": 1}
+        if item_id:
+            body["item_id"] = item_id
+        if final:
+            body["stream_final"] = 1
         if absorb:
             body["absorb"] = [absorb]
         # ⚠ 顺序要紧：**先推草稿、再落库**。
@@ -3652,7 +3860,7 @@ class Runner:
         #   放在前面：草稿先变成完整文本（治掉半截显示），随后重载把它替换成同一份，
         #   内容一致所以看不出替换。
         try:
-            self._stream_post(owner, (chr(10) + chr(10)).join(acc))
+            self._stream_post(owner, text if item_id else (chr(10) + chr(10)).join(acc), item_id=item_id)
         except Exception:
             pass
         self._history_post(body)
@@ -3664,15 +3872,36 @@ class Runner:
     def _history_post(self, body: dict):
         if not self._history_enabled():
             return
-        if self.thread_id:
+        body = copy.deepcopy(body)
+        body.setdefault("origin", "voice" if body.get("via") == "voice" else "runner")
+        if getattr(self, "thread_id", None):
             body.setdefault("thread_id", self.thread_id)
+        body.setdefault("streamRevision", self._next_history_revision())
+        if body.get("stream_final"):
+            terminal = getattr(self, "_stream_terminal", None)
+            if terminal is None:
+                terminal = self._stream_terminal = set()
+            terminal.add(self._history_stream_key(body))
+            if len(terminal) > 512:
+                terminal.intersection_update(list(terminal)[-256:])
         self._history_q.put(("log", body))
+
+    def _next_history_revision(self):
+        self._history_revision = max(getattr(self, "_history_revision", 0) + 1, int(time.time() * 1_000_000))
+        return self._history_revision
+
+    @staticmethod
+    def _history_stream_key(body):
+        return (body.get("thread_id") or "", body.get("turn_id") or "",
+                body.get("item_id") or body.get("turn_id") or "")
 
     def _stream_start_post(self, turn_id: str):
         """后台轮开始：把真实 turn id 推给侧栏（SSE stream:"start"）。"""
         if not self._history_enabled() or not turn_id:
             return
-        self._history_q.put(("stream_start", turn_id))
+        self._history_q.put(("stream_start", {"turn_id": turn_id, "stream": "start",
+                                             "thread_id": getattr(self, "thread_id", None),
+                                             "streamRevision": self._next_history_revision()}))
 
     def _tool_error_log(self, turn_id, tool: str, args, brief: str, status: str):
         """工具调用出错 → voice-cli/tool-errors.jsonl（用户 2026-09-15：自动记下来，我自己去分析）。"""
@@ -3693,16 +3922,22 @@ class Runner:
         except Exception:
             pass
 
-    def _stream_post(self, turn_id: str, text: str, role: str = "assistant"):
-        """流式草稿：只保留每轮最新全文，队列里同一轮最多挂一条（到达节奏快于发送节奏时自然合并）。"""
+    def _stream_post(self, turn_id: str, text: str, role: str = "assistant", *, item_id=None):
+        """Coalesce snapshots per source item, never across text/tool/artifact identities."""
         if not self._history_enabled() or not turn_id:
             return
-        self._stream_latest[turn_id] = text
-        # role 跟着轮次记：用户句的草稿要渲成**他自己的气泡**，不是助手正文。
-        self._stream_role[turn_id] = role
-        if turn_id not in self._stream_queued:
-            self._stream_queued.add(turn_id)
-            self._history_q.put(("stream", turn_id))
+        body = {"thread_id": getattr(self, "thread_id", None), "turn_id": turn_id,
+                "item_id": item_id or turn_id, "content": text[:32000], "role": role,
+                "origin": "voice" if str(item_id or turn_id).startswith(("v-", "vu-")) else "runner",
+                "stream": "delta"}
+        key = self._history_stream_key(body)
+        if key in getattr(self, "_stream_terminal", set()):
+            return
+        body["streamRevision"] = self._next_history_revision()
+        self._stream_latest[key] = body
+        if key not in self._stream_queued:
+            self._stream_queued.add(key)
+            self._history_q.put(("stream", key))
 
     def _history_request(self, path: str, body: dict) -> dict:
         import urllib.request
@@ -3719,7 +3954,7 @@ class Runner:
             kind, payload = self._history_q.get()
             try:
                 if kind == "stream_start":
-                    self._history_request("/api/assistant/stream", {"turn_id": payload, "stream": "start"})
+                    self._history_request("/api/assistant/stream", payload)
                 elif kind == "stream":
                     # 节流：草稿最快每 0.25 s 一条；发的时候取该轮最新全文
                     wait = 0.25 - (time.monotonic() - last_stream_at)
@@ -3728,14 +3963,18 @@ class Runner:
                     self._stream_queued.discard(payload)
                     if payload not in self._stream_latest:
                         continue  # 已经落库的迟到队列项不得再发送空草稿覆盖定稿
-                    text = self._stream_latest.get(payload, "")
-                    self._history_request("/api/assistant/stream", {"turn_id": payload, "content": text[:8000],
-                                                                   "role": self._stream_role.get(payload, "assistant")})
+                    body = self._stream_latest.pop(payload)
+                    self._history_request("/api/assistant/stream", body)
                     last_stream_at = time.monotonic()
                     self.history_stats["streamed"] += 1
                 else:
-                    self._stream_latest.pop(str(payload.get("turn_id") or ""), None)
-                    self._stream_role.pop(str(payload.get("turn_id") or ""), None)
+                    if payload.get("stream_final"):
+                        key = self._history_stream_key(payload)
+                        pending = self._stream_latest.get(key)
+                        if pending and pending.get("streamRevision", 0) <= payload["streamRevision"]:
+                            # Drain this item's last snapshot before its authoritative final.
+                            self._stream_latest.pop(key, None)
+                            self._history_request("/api/assistant/stream", pending)
                     r = self._history_request("/api/assistant/log", payload)
                     self.history_stats["written"] += 1
                     via, tid, n, up = payload.get("via"), payload.get("turn_id"), r.get("n"), r.get("upserted")
@@ -3743,7 +3982,8 @@ class Runner:
                     # （2026-09-18 就是这么查出来收拢代码压根执行不到的）。
                     ab = r.get("absorbed")
                     self.loop.call_soon_threadsafe(
-                        lambda: self.log("history_written", via=via, turnId=tid, n=n, upserted=up, absorbed=ab))
+                        lambda via=via, tid=tid, n=n, up=up, ab=ab:
+                            self.log("history_written", via=via, turnId=tid, n=n, upserted=up, absorbed=ab))
             except urllib.error.HTTPError as e:
                 detail, code = "", e.code
                 try:
@@ -3752,12 +3992,14 @@ class Runner:
                     pass
                 self.history_stats["errors"] += 1
                 self.history_stats["lastError"] = "HTTP %s %s" % (code, detail)
-                self.loop.call_soon_threadsafe(lambda: self.log("history_error", kind=kind, status=code, detail=detail))
+                self.loop.call_soon_threadsafe(lambda kind=kind, code=code, detail=detail:
+                                                self.log("history_error", eventKind=kind, status=code, detail=detail))
             except Exception as e:
                 message = clean(e)
                 self.history_stats["errors"] += 1
                 self.history_stats["lastError"] = message
-                self.loop.call_soon_threadsafe(lambda: self.log("history_error", kind=kind, message=message))
+                self.loop.call_soon_threadsafe(lambda kind=kind, message=message:
+                                                self.log("history_error", eventKind=kind, message=message))
     def audio_stats(self) -> dict:
         return {
             "speakerGaps": self.speaker.gaps if self.speaker else None,
