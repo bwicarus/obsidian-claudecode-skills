@@ -316,11 +316,14 @@ struct ConversationReports: View {
     @ObservedObject var research: StockResearchStore
     @ObservedObject var voice: VoiceSession
     var body: some View {
-        ForEach(research.reports.filter {
+        let reports = research.reports.filter {
             transcript.role == "assistant" && $0.source.turnId == transcript.turnID && transcript.turnID != nil &&
             ($0.source.threadId == nil || voice.threadID == nil || $0.source.threadId == voice.threadID) &&
             voice.transcripts.last(where: { $0.role == "assistant" && $0.turnID == transcript.turnID })?.id == transcript.id
-        }) { report in StockReportCard(report: report, research: research) }
+        }.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        ConversationCardPager(items: reports, title: "分析报告", label: { "\($0.code) · \($0.title)" }) { report in
+            StockReportCard(report: report, research: research)
+        }
     }
 }
 
@@ -330,11 +333,108 @@ struct ConversationPlans: View {
     @ObservedObject var research: StockResearchStore
     var body: some View {
         let reportPlanIDs = Set(research.reports.compactMap(\.planId))
-        ForEach(model.plans(for: transcript).filter { !reportPlanIDs.contains($0.id) }) { plan in
+        let plans = model.plans(for: transcript).filter { !reportPlanIDs.contains($0.id) }
+            .sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+        ConversationCardPager(items: plans, title: "操作方案", label: { "\($0.code) · \($0.title)" }) { plan in
             ResearchPlanCard(plan: plan, research: research,
                              isArchiving: model.archivingPlanIDs.contains(plan.id),
                              onArchive: { Task { await model.archivePlan(plan) } })
         }
+    }
+}
+
+/// One turn's results share a pager; stable entity IDs keep the selected stock
+/// in place as more results arrive. The outer conversation owns vertical scrolling.
+private struct ConversationCardPager<Item: Identifiable, Content: View>: View where Item.ID == String {
+    let items: [Item]
+    let title: String
+    let label: (Item) -> String
+    @ViewBuilder let content: (Item) -> Content
+    @State private var selectedID: String?
+    @State private var heights: [String: CGFloat] = [:]
+
+    private var selectedIndex: Int {
+        items.firstIndex { $0.id == selectedID } ?? 0
+    }
+
+    private func move(_ step: Int) {
+        let index = selectedIndex + step
+        guard items.indices.contains(index) else { return }
+        withAnimation(.easeInOut(duration: 0.2)) { selectedID = items[index].id }
+    }
+
+    var body: some View {
+        if let first = items.first {
+            if items.count == 1 {
+                content(first)
+            } else {
+                let currentID = items[selectedIndex].id
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "rectangle.stack").foregroundStyle(AppStyle.accent)
+                        Text(title).fontWeight(.medium)
+                        Spacer(minLength: 0)
+                        Button { move(-1) } label: {
+                            Image(systemName: "chevron.left").frame(width: 32, height: 36)
+                        }
+                        .disabled(selectedIndex == 0).accessibilityLabel("上一张")
+                        Menu {
+                            ForEach(items) { item in
+                                Button { selectedID = item.id } label: {
+                                    if item.id == currentID { Label(label(item), systemImage: "checkmark") }
+                                    else { Text(label(item)) }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("\(selectedIndex + 1) / \(items.count)").monospacedDigit()
+                                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                            }
+                            .frame(minHeight: 36)
+                        }
+                        .accessibilityLabel("选择\(title)，第 \(selectedIndex + 1) 张，共 \(items.count) 张")
+                        Button { move(1) } label: {
+                            Image(systemName: "chevron.right").frame(width: 32, height: 36)
+                        }
+                        .disabled(selectedIndex == items.count - 1).accessibilityLabel("下一张")
+                    }
+                    .font(.caption).buttonStyle(.plain).foregroundStyle(AppStyle.accent)
+                    TabView(selection: Binding(get: { currentID }, set: { selectedID = $0 })) {
+                        ForEach(items) { item in
+                            content(item)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .background {
+                                    GeometryReader { geometry in
+                                        Color.clear.preference(key: ConversationCardHeight.self,
+                                                               value: [item.id: geometry.size.height])
+                                    }
+                                }
+                                .frame(maxHeight: .infinity, alignment: .top)
+                                .tag(item.id)
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .frame(height: max(1, heights[currentID] ?? 420))
+                    .onPreferenceChange(ConversationCardHeight.self) { measured in
+                        for (id, height) in measured where height > 0 && abs((heights[id] ?? 0) - height) > 0.5 {
+                            heights[id] = height
+                        }
+                    }
+                    .accessibilityHint("左右滑动切换\(title)")
+                }
+                .onChange(of: items.map(\.id)) { _, ids in
+                    if let selectedID, !ids.contains(selectedID) { self.selectedID = ids.first }
+                    heights = heights.filter { ids.contains($0.key) }
+                }
+            }
+        }
+    }
+}
+
+private struct ConversationCardHeight: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, newest in newest })
     }
 }
 
