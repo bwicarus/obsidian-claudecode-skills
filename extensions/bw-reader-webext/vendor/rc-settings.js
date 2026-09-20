@@ -675,6 +675,15 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-set-mask .ep-set-body [data-sec] .set-lbl{margin:10px 0 2px}' +
       // 说明文字：iOS 放在卡片**下面**，不是行里。
       '.rc-set-mask .ep-set-body [data-sec] .ep-set-note{margin:0;padding:8px 0 10px;color:var(--rc-text-dim)}' +
+      // ⚠⚠ 这组覆盖必须**逐条盖住 pdf-styles.css 里同名的旧规则**。
+      //   那份静态 CSS 不能删：pdf-adapter.openSettings 里写着「RC 不可用 → fallback
+      //   到原生模板面板」，那条路就靠它上样式。而 rc-settings 建的面板**复用同一套
+      //   id 与类名**（故意的，好让旧的回填/保存函数零改动复用），于是两份规则同时命中。
+      //   漏掉任何一个属性，旧值就会渗出来 —— 2026-09-20 一天内漏了两个：
+      //     · flex-wrap:wrap  → 分段控件折成两行
+      //     · margin-bottom:-1px（旧下划线 tab 用的）→ 每个按钮被往下拽 1px
+      //   旧 .set-tabs 设: display gap border-bottom flex-wrap
+      //   旧 .set-tab  设: background border border-bottom color font-size padding cursor margin-bottom
       // ⚠ flex:0 0 auto 不能省：.ep-set-modal 是 flex 列 + max-height:88vh，
       //   不写就会被当成可压缩子项**压扁**，整排分类只露出一半（2026-09-20 实录）。
       //   以前是下划线 tab、没有底色，压扁看不太出来；有了填充胶囊一压就露馅。
@@ -683,7 +692,7 @@ if (window.__bwPwaProviderOnly) return;
       // ⚠ 项目多时允许横滑（分段控件本身不换行），而不是折成两行。
       '.rc-set-mask .set-tabs{display:flex;flex:0 0 auto;flex-wrap:nowrap;gap:2px;padding:2px;margin-bottom:16px;border:0;border-radius:var(--rc-radius-md,9px);background:var(--rc-bg-control);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}' +
       '.rc-set-mask .set-tabs::-webkit-scrollbar{display:none}' +
-      '.rc-set-mask .set-tab{flex:1 0 auto;background:transparent;border:0;border-radius:calc(var(--rc-radius-md,9px) - 2px);color:var(--rc-text-muted);font-size:13px;font-weight:500;padding:7px 14px;cursor:pointer;white-space:nowrap;transition:background var(--rc-motion-fast) var(--rc-ease),color var(--rc-motion-fast) var(--rc-ease)}' +
+      '.rc-set-mask .set-tab{flex:1 0 auto;margin:0;background:transparent;border:0;border-radius:calc(var(--rc-radius-md,9px) - 2px);color:var(--rc-text-muted);font-size:13px;font-weight:500;padding:7px 14px;cursor:pointer;white-space:nowrap;transition:background var(--rc-motion-fast) var(--rc-ease),color var(--rc-motion-fast) var(--rc-ease)}' +
       '.rc-set-mask .set-tab:focus{outline:none}' +
       '.rc-set-mask .set-tab:focus-visible{outline:2px solid var(--rc-accent);outline-offset:-2px}' +
       '.rc-set-mask .set-tab.active{color:var(--rc-text);font-weight:600;background:var(--rc-bg-raised);box-shadow:0 1px 3px rgba(0,0,0,.28)}' +
