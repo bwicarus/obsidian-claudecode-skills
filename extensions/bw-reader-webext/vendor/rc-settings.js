@@ -38,7 +38,7 @@ if (window.__bwPwaProviderOnly) return;
  *
  * API(对外不变):RC.settings.open(opts) / close() / aiParams() / hlColors() / injectCss()
  * opts(全部可选):
- *   tab                        打开时定位 tab('ai'|'computer'|'read'|'grammar'|'hl'|'note'|'web')
+ *   tab                        打开时定位 tab('read'|'hl'|'note'|'grammar'|'ai'|'web'|'computer'|'native')
  *   host:'pdf'                 PDF host-bind 模式(见上)
  *   ids:{mask,langChecks}      容器 id 覆盖(PDF 传 settings-mask / lang-checks)
  *   keys:{tab}                 tab 记忆键(PDF 传 pdf-set-tab;默认 eph-set-tab)
@@ -652,9 +652,32 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-set-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:2147483400}' +
       '.rc-set-mask .ep-set-modal{background:var(--rc-bg-surface);border:1px solid var(--rc-border);border-radius:10px;padding:16px 20px;width:420px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column}' +
       '.rc-set-mask .ep-set-h3{margin:0 0 10px;font-size:15px;color:var(--rc-text-strong)}' +
-      '.rc-set-mask .set-tabs{display:flex;gap:2px;border-bottom:1px solid var(--rc-border);flex-wrap:wrap}' +
-      '.rc-set-mask .set-tab{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--rc-text-muted);font-size:13px;padding:7px 13px;cursor:pointer;margin-bottom:-1px}' +
-      '.rc-set-mask .set-tab.active{color:var(--rc-text-strong);border-bottom-color:var(--rc-border-accent);font-weight:600}' +
+      // ══ iOS 分组列表（用户 2026-09-20：「应该全用一种显示方式」）══
+      //
+      // 系统设置的形态是：一组带圆角的卡片，行在卡片里，标签在左、控件在右，
+      // 行与行之间是**从文字起始处内缩**的细分隔线（不是整条通栏），小标题在卡片
+      // 外面、小号灰字。这里把已有的结构类映射过去，不重写 HTML：
+      //   [data-sec] → 分组卡片   .ep-set-row/.ep-set-chk/.ep-set-slrow → 行
+      //   .set-lbl → 卡片外的小标题   .ep-set-hr → 隐藏（卡片本身就是分隔）
+      '.rc-set-mask [data-sec]{background:var(--rc-bg-surface);border:.5px solid var(--rc-border-popover);border-radius:var(--rc-radius-lg);padding:0 14px;margin:0 0 18px;overflow:hidden}' +
+      '.rc-set-mask [data-sec] .ep-set-hr{display:none}' +
+      // 行：最小 44pt，标签左控件右；分隔线内缩到文字起始处，最后一行不画。
+      '.rc-set-mask [data-sec] .ep-set-row,.rc-set-mask [data-sec] .ep-set-chk{min-height:var(--rc-hit,44px);margin:0;padding:8px 0;border-bottom:.5px solid var(--rc-border)}' +
+      '.rc-set-mask [data-sec] .ep-set-row:last-child,.rc-set-mask [data-sec] .ep-set-chk:last-child{border-bottom:0}' +
+      '.rc-set-mask [data-sec] .ep-set-slrow{margin:0;padding:10px 0;border-bottom:.5px solid var(--rc-border)}' +
+      '.rc-set-mask [data-sec] .ep-set-slrow:last-child{border-bottom:0}' +
+      // 小标题移到卡片外：iOS 的分组标题不在卡片里。
+      '.rc-set-mask .set-lbl{font-size:12px;letter-spacing:.02em;color:var(--rc-text-muted);margin:2px 2px 7px;text-transform:none}' +
+      '.rc-set-mask [data-sec] .set-lbl{margin:10px 0 2px}' +
+      // 说明文字：iOS 放在卡片**下面**，不是行里。
+      '.rc-set-mask [data-sec] .ep-set-note{margin:0;padding:8px 0 10px;color:var(--rc-text-dim)}' +
+      // 分类切换改成 iOS 分段控件：一条填充底的胶囊，选中项是一块浮起来的白片。
+      // 原来是网页式的「下划线 tab」—— 那个形态 iOS 里不存在。
+      // ⚠ 项目多时允许横滑（分段控件本身不换行），而不是折成两行。
+      '.rc-set-mask .set-tabs{display:flex;gap:2px;padding:2px;margin-bottom:16px;border:0;border-radius:var(--rc-radius-md,9px);background:var(--rc-bg-control);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}' +
+      '.rc-set-mask .set-tabs::-webkit-scrollbar{display:none}' +
+      '.rc-set-mask .set-tab{flex:1 0 auto;background:transparent;border:0;border-radius:calc(var(--rc-radius-md,9px) - 2px);color:var(--rc-text-muted);font-size:13px;font-weight:500;padding:7px 14px;cursor:pointer;white-space:nowrap;transition:background var(--rc-motion-fast) var(--rc-ease),color var(--rc-motion-fast) var(--rc-ease)}' +
+      '.rc-set-mask .set-tab.active{color:var(--rc-text);font-weight:600;background:var(--rc-bg-raised);box-shadow:0 1px 3px rgba(0,0,0,.28)}' +
       '.rc-set-mask .ep-set-body{overflow-y:auto;flex:1;min-height:0;padding:12px 4px 2px}' +
       '.rc-set-mask .set-lbl{display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:4px}' +
       '.rc-set-mask .ep-set-sel{width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px}' +
@@ -1275,7 +1298,8 @@ if (window.__bwPwaProviderOnly) return;
     var paneNative =
       '<div class="set-pane" data-pane="native" style="display:none">' +
         '<div style="font-size:12px;color:var(--rc-text-muted);margin-bottom:12px">这些开关属于 iPad 上的 App 本体，改完即时生效。凭据、Vault 目录、书库仍在 App 的原生设置里（系统 UI 才能安全地管它们）。</div>' +
-        '<label style="' + LBL + '"><span class="rc-i rc-i-note"></span> 文字识别（设备端）</label>' +
+        '<div data-sec="nat-ocr">' +
+        '<label class="set-lbl"><span class="rc-i rc-i-note"></span> 文字识别（设备端）</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:8px">' +
           '<input type="checkbox" id="rcset-nat-ocr" class="rc-ui-switch"> 启用设备端文字识别' +
         '</label>' +
@@ -1283,7 +1307,9 @@ if (window.__bwPwaProviderOnly) return;
           '<input type="checkbox" id="rcset-nat-ocr-auto" class="rc-ui-switch"> 打开书就自动识别（不必手动触发）' +
         '</label>' +
         HR +
-        '<label style="' + LBL + '"><span class="rc-i rc-i-pencil"></span>️ Apple Pencil 手势</label>' +
+        '</div>' +
+        '<div data-sec="nat-pencil">' +
+        '<label class="set-lbl"><span class="rc-i rc-i-pencil"></span>️ Apple Pencil 手势</label>' +
         '<div style="display:flex;gap:10px;margin-bottom:10px">' +
           '<div style="flex:1"><div style="font-size:12px;color:var(--rc-text-muted);margin-bottom:4px">笔身双击</div>' +
             '<select id="rcset-nat-pen-dtap" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px">' +
@@ -1298,7 +1324,9 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
         HR +
-        '<label style="' + LBL + '"><span class="rc-i rc-i-book"></span> 离线日语词典</label>' +
+        '</div>' +
+        '<div data-sec="nat-dict">' +
+        '<label class="set-lbl"><span class="rc-i rc-i-book"></span> 离线日语词典</label>' +
         '<div id="rcset-nat-dict-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<div id="rcset-nat-dict-bar" style="height:4px;background:var(--rc-bg-raised);border-radius:2px;overflow:hidden;margin-bottom:8px;display:none">' +
           '<div id="rcset-nat-dict-fill" style="height:100%;width:0%;background:#4a9eff;transition:width .3s"></div></div>' +
@@ -1308,7 +1336,9 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 上，由本 App 与它自己的 Safari 扩展共享（同一个 App 组，供扩展离线查词）；不进入书籍附件、服务器或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
         HR +
-        '<label style="' + LBL + '">📁 本机 Obsidian Vault</label>' +
+        '</div>' +
+        '<div data-sec="nat-vault">' +
+        '<label class="set-lbl">📁 本机 Obsidian Vault</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:6px">' +
           '<input type="checkbox" id="rcset-nat-vault-on" class="rc-ui-switch"> 写入 iPad 本地 Vault' +
         '</label>' +
@@ -1319,7 +1349,9 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">选文件夹必须走 App 的系统选择器 —— 只有它给出的授权能长期保存，网页拿不到也不该拿到你的文件路径。</div>' +
         HR +
-        '<label style="' + LBL + '"><span class="rc-i rc-i-pin"></span> 学习地点记录</label>' +
+        '</div>' +
+        '<div data-sec="nat-location">' +
+        '<label class="set-lbl"><span class="rc-i rc-i-pin"></span> 学习地点记录</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:6px">' +
           '<input type="checkbox" id="rcset-nat-loc-on" class="rc-ui-switch"> 记录学习地点' +
         '</label>' +
@@ -1330,7 +1362,9 @@ if (window.__bwPwaProviderOnly) return;
         '<div id="rcset-nat-loc-bgst" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px 22px"></div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">开着时，读页停留记录会带上当时的位置（坐标与地名，建筑物级），用于以后回答"我在哪学的"。首次打开会请求系统定位权限（使用期间）。位置只随学习记录存到你自己的服务器，不发给任何第三方。</div>' +
         HR +
-        '<label style="' + LBL + '">🔑 凭据</label>' +
+        '</div>' +
+        '<div data-sec="nat-credentials">' +
+        '<label class="set-lbl">🔑 凭据</label>' +
         '<div id="rcset-nat-key-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
           '<button type="button" id="rcset-nat-key-set" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">输入 / 替换 OpenAI Key</button>' +
@@ -1340,6 +1374,7 @@ if (window.__bwPwaProviderOnly) return;
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">Key 由 App 保存在 Apple Keychain，输入框是 App 的原生控件 —— 密钥不经过这个网页。App 保存、启动通话与转写都直连 OpenAI，都不连接服务器。</div>' +
         HR +
         '<button type="button" id="rcset-nat-open" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">打开 App 原生设置（其它诊断项）</button>' +
+        '</div>' +
       '</div>';
 
     var paneWeb =
@@ -1408,15 +1443,18 @@ if (window.__bwPwaProviderOnly) return;
     mask.innerHTML =
       '<div class="ep-set-modal">' +
         '<h3 class="ep-set-h3"><span class="rc-i rc-i-gear"></span>️ 设置</h3>' +
+        // 分类按**你要做什么**排，不按它是原生还是网页（用户 2026-09-20）。
+        // 顺序 = 使用频度：先读书、再标注、再语言、最后是 AI/设备这些配好就不常动的。
+        // 「本机」改名「设备」——「本机 vs 其它」是实现视角，用户不关心它由谁实现。
         '<div class="set-tabs">' +
-          '<button type="button" class="set-tab active" data-pane="ai">AI·翻译</button>' +
-          '<button type="button" class="set-tab" data-pane="computer">电脑客户端</button>' +
-          '<button type="button" class="set-tab" data-pane="read">阅读</button>' +
-          '<button type="button" class="set-tab" data-sec="grammar-tab" data-pane="grammar">语法</button>' +
+          '<button type="button" class="set-tab active" data-pane="read">阅读</button>' +
           '<button type="button" class="set-tab" data-pane="hl">高亮</button>' +
           '<button type="button" class="set-tab" data-pane="note">便签</button>' +
+          '<button type="button" class="set-tab" data-sec="grammar-tab" data-pane="grammar">语言</button>' +
+          '<button type="button" class="set-tab" data-pane="ai">AI·翻译</button>' +
           '<button type="button" class="set-tab" data-sec="web-tab" data-pane="web">网页翻译</button>' +
-          '<button type="button" class="set-tab" data-pane="native" id="rcset-tab-native" style="display:none">本机</button>' +
+          '<button type="button" class="set-tab" data-pane="computer">语音·电脑</button>' +
+          '<button type="button" class="set-tab" data-pane="native" id="rcset-tab-native" style="display:none">设备</button>' +
         '</div>' +
         '<div class="ep-set-body">' + paneAi + paneComputer + paneRead + paneGrammar + paneHl + paneNote + paneWeb + paneNative + '</div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid var(--rc-border);margin-top:2px">' +
@@ -1971,7 +2009,8 @@ if (window.__bwPwaProviderOnly) return;
     } else {
       fillInternal();
     }
-    var _t = _opts.tab || lsGet(_tabKey) || 'ai';
+    // 默认落「阅读」：打开设置最常改的是排版，不是 AI 配置（记忆键优先，改不到老用户）。
+    var _t = _opts.tab || lsGet(_tabKey) || 'read';
     if (_t === 'web' && _host !== 'web') _t = 'ai';   // 记忆键停在 web 但当前非 web host → 回落 ai(不显隐藏 pane)
     if (_t === 'grammar' && _host === 'web') _t = 'web';   // web host:语法并入网页 tab,记忆停在 grammar 时改指 web
     setTab(_t);

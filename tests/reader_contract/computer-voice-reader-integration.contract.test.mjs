@@ -345,7 +345,10 @@ test("电脑客户端保留原按钮与设置标签，App 与扩展按宿主分�
     assistant,
     /var voiceEngine = c\.rt_engine === 'computer_client' \? '' : \(c\.rt_engine \|\| ''\)/,
   );
-  assert.match(settings, /data-pane="computer">电脑客户端<\/button>/);
+  // 守的是「这个 tab 没有消失」（当初 computer_client 从引擎下拉里撤掉时差点连设置
+  // 入口一起没了），标签文字是顺带写进来的。2026-09-20 按用途重排分类时它改成了
+  // 「语音·电脑」—— 钉 pane 而不是钉那四个字。
+  assert.match(settings, /class="set-tab"[^>]*data-pane="computer"[^>]*>[^<]+<\/button>/);
   assert.match(settings, /id="rcset-computer-inline"/);
   assert.match(settings, /RC\.computerVoice\.mountSettings\(host\)/);
   assert.match(voicecall, /c\.id = 'asst-computer'; c\.type = 'button'/);
