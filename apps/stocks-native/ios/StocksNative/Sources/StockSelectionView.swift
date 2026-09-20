@@ -1,5 +1,117 @@
 import SwiftUI
 
+/// Persistent controls belong to the workspace, outside the movable chart cards.
+@MainActor
+struct StockSelectionControls: View {
+    @ObservedObject var model: StockSelectionModel
+    let editorPresented: Bool
+    let onEdit: () -> Void
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Label("选股条件", systemImage: "line.3.horizontal.decrease")
+                    .font(.subheadline.weight(.semibold))
+                if model.draft.groups.count > 1 {
+                    Text("组间任一满足").font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                if model.isEvaluating {
+                    ProgressView().controlSize(.small)
+                    Text("更新中").font(.caption).foregroundStyle(.secondary)
+                } else if model.resultsAreCurrent, let result = model.evaluation {
+                    Text("\(result.passed) 只符合").font(.caption.monospacedDigit()).foregroundStyle(AppStyle.accent)
+                } else {
+                    Text("点按条件即可切换").font(.caption).foregroundStyle(.secondary)
+                }
+                Button("编辑", systemImage: "slider.horizontal.3", action: onEdit)
+                    .font(.caption).buttonStyle(.bordered).disabled(model.catalog == nil)
+            }
+            if model.draft.groups.isEmpty {
+                Button("添加筛选条件", systemImage: "plus", action: onEdit)
+                    .font(.subheadline).frame(minHeight: 44)
+            } else {
+                ScrollView(.vertical) {
+                    VStack(spacing: 2) {
+                        ForEach(model.draft.groups) { group in conditionGroup(group) }
+                    }
+                }
+                .frame(height: CGFloat(min(model.draft.groups.count, 3)) * 46)
+            }
+            if model.requiresPresetConfirmation {
+                Text("旧方案需在编辑中核对并保存确认。").font(.caption).foregroundStyle(.orange)
+            } else if let message = model.validationMessage {
+                Text(message).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(AppStyle.canvas)
+        .task(id: "\(scenePhase):\(editorPresented):\(model.liveEvaluationKey)") {
+            guard scenePhase == .active, !editorPresented else { return }
+            await model.runLive()
+        }
+    }
+
+    private func conditionGroup(_ group: SelectionRuleGroup) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                guard let index = model.draft.groups.firstIndex(where: { $0.id == group.id }) else { return }
+                model.draft.groups[index].enabled.toggle()
+                model.onContextChange?("screener", "条件组“\(group.name)”已\(group.enabled ? "停用" : "启用")，选股结果待更新")
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: group.enabled ? "checkmark.circle.fill" : "circle")
+                    Text(group.name).lineLimit(1)
+                }
+                .font(.caption.weight(.semibold)).frame(width: 100, height: 44, alignment: .leading)
+                .foregroundStyle(group.enabled ? AppStyle.accent : Color.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("条件组：\(group.name)")
+            .accessibilityValue(group.enabled ? "已启用" : "已停用")
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    ForEach(group.and, id: \.self) { id in conditionSwitch(id, group: group, excluded: false) }
+                    ForEach(group.not, id: \.self) { id in conditionSwitch(id, group: group, excluded: true) }
+                    if group.and.isEmpty && group.not.isEmpty {
+                        Button("添加条件", systemImage: "plus", action: onEdit).font(.caption).frame(height: 44)
+                    }
+                }
+            }
+            .scrollIndicators(.visible)
+        }
+        .disabled(model.catalog == nil || model.requiresPresetConfirmation)
+    }
+
+    private func conditionSwitch(_ id: String, group: SelectionRuleGroup, excluded: Bool) -> some View {
+        let key = group.id + "|" + (excluded ? "not:" : "") + id
+        let enabled = !model.draft.disabled.contains(key)
+        let name = model.catalog?.criteria.first(where: { $0.id == id })?.label ?? id
+        let title = (excluded ? "排除 · " : "") + name
+        return Button {
+            model.setCriterionEnabled(groupID: group.id, criterionID: id, excluded: excluded, enabled: !enabled)
+            model.onContextChange?("screener", "“\(title)”已\(enabled ? "停用" : "启用")，选股结果待更新")
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: enabled ? "checkmark.circle.fill" : "circle")
+                Text(title).lineLimit(1)
+            }
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .foregroundStyle(enabled ? (excluded ? AppStyle.up : AppStyle.accent) : Color.secondary)
+            .background(enabled ? (excluded ? AppStyle.up : AppStyle.accent).opacity(0.08) : Color.white,
+                        in: RoundedRectangle(cornerRadius: 8))
+            .frame(minHeight: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!group.enabled)
+        .accessibilityLabel(title)
+        .accessibilityValue(enabled ? "已启用" : "已停用")
+        .accessibilityHint("点按切换并更新选股结果")
+    }
+}
+
 @MainActor
 struct StockSelectionSidebar: View {
     @ObservedObject var model: StockSelectionModel
@@ -110,18 +222,15 @@ struct StockSelectionSidebar: View {
                 }
             }
             HStack {
-                Button("编辑条件", systemImage: "line.3.horizontal.decrease") { editorPresented = true }
-                    .buttonStyle(.bordered).disabled(model.catalog == nil)
-                Spacer()
+                Text("在工作区顶部直接切换条件").font(.caption2).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
                 Button { Task { await model.run() } } label: {
                     if model.isEvaluating { ProgressView() } else { Label("选股", systemImage: "play.fill") }
                 }
                 .buttonStyle(.borderedProminent).disabled(model.isEvaluating || model.catalog == nil || model.validationMessage != nil || model.requiresPresetConfirmation)
             }
-            Text("\(model.draft.groups.filter(\.enabled).count) 个条件组 · 组内同时满足，组间任一满足")
-                .font(.caption2).foregroundStyle(.secondary)
             if model.evaluation != nil && !model.resultsAreCurrent {
-                Text("条件已修改，运行后更新结果。").font(.caption).foregroundStyle(.orange)
+                Text("条件已修改，以下仍为上次结果。").font(.caption).foregroundStyle(.orange)
             }
             if let warnings = model.selectedPreset?.warnings, !warnings.isEmpty { SelectionWarnings(warnings: warnings) }
             if model.requiresPresetConfirmation {

@@ -62,8 +62,17 @@ struct StocksRootView: View {
             GeometryReader { geometry in
                 let showsInspector = sizeClass == .regular && geometry.size.width >= 900 && showingWideInspector
                 HStack(spacing: 0) {
-                    StockDetailView(model: model)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    VStack(spacing: 0) {
+                        if model.isPaired && selectionSection == .screener {
+                            StockSelectionControls(model: selectionModel,
+                                                   editorPresented: selectionEditorPresented,
+                                                   onEdit: { selectionEditorPresented = true })
+                            Divider()
+                        }
+                        StockDetailView(model: model)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if showsInspector {
                         Divider()
                         StockAssistantInspector(

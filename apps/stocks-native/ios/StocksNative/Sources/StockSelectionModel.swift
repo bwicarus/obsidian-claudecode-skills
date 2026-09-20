@@ -32,6 +32,8 @@ final class StockSelectionModel: ObservableObject {
     private var scope: String?
     private var generation = UUID()
     private var evaluationGeneration = UUID()
+    private var evaluationSort: String?
+    private var evaluationDescending: Bool?
     private var groupGeneration = UUID()
     private var cacheURL: URL?
     private var lastSmartRefresh: Date?
@@ -43,7 +45,22 @@ final class StockSelectionModel: ObservableObject {
     var selectedGroup: SelectionWatchGroup? { library?.groups.first { $0.id == selectedGroupID } }
     var selectedPreset: SelectionPreset? { library?.presets.first { $0.id == selectedPresetID } }
     var requiresPresetConfirmation: Bool { selectedPreset?.status == "needs_migration" }
-    var resultsAreCurrent: Bool { evaluation != nil && evaluationDefinition == draft }
+    var resultsAreCurrent: Bool {
+        evaluation != nil && evaluationDefinition == draft && evaluationSort == sort
+            && evaluationDescending == descending && !requiresPresetConfirmation
+    }
+    var liveEvaluationKey: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+        let definition = (try? encoder.encode(draft))?.base64EncodedString() ?? "invalid"
+        let parts = [scope ?? "signed-out", client == nil ? "offline" : "connected",
+                     catalog == nil ? "no-catalog" : "catalog-\(catalog?.schemaVersion ?? 0)",
+                     selectedPresetID ?? "temporary", selectedPreset?.status ?? "ready",
+                     validationMessage ?? "valid", sort, descending ? "descending" : "ascending", definition]
+        return SHA256.hash(data: Data(parts.joined(separator: "\n").utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
     var canWrite: Bool { isLibraryFresh && !isMutating && pendingMutation == nil && client != nil }
     var validationMessage: String? {
         for parameter in catalog?.parameters ?? [] {
@@ -69,6 +86,7 @@ final class StockSelectionModel: ObservableObject {
         client = next; scope = nextScope; cacheURL = nil
         catalog = nil; library = nil; evaluation = nil; watchEvaluation = nil
         pendingMutation = nil; evaluationDefinition = nil; isLibraryFresh = false
+        evaluationSort = nil; evaluationDescending = nil
         selectedCodes = []; selectedGroupID = nil; selectedPresetID = nil
         error = nil; notice = nil; isLoading = false; isEvaluating = false; isLoadingGroup = false; isMutating = false
         lastSmartRefresh = nil; lastGroupID = nil; draft = SelectionDefinition()
@@ -125,12 +143,33 @@ final class StockSelectionModel: ObservableObject {
         selectedPresetID = id
         if let preset = selectedPreset { draft = preset.definition }
         else if let catalog { draft = catalog.defaults }
-        evaluation = nil; evaluationDefinition = nil; selectedCodes = []
+        selectedCodes = []
         onContextChange?("screener", selectedPreset?.name ?? "临时方案")
     }
 
     func run(append: Bool = false, includeHistory: Bool = false) async {
+        await evaluate(append: append, includeHistory: includeHistory, recordPresetRun: true)
+    }
+
+    func runLive() async {
+        let current = generation
+        let key = liveEvaluationKey
+        do {
+            try await Task.sleep(for: .milliseconds(350))
+            while isEvaluating {
+                guard current == generation, key == liveEvaluationKey, !Task.isCancelled else { return }
+                try await Task.sleep(for: .milliseconds(80))
+            }
+        } catch { return }
+        guard current == generation, key == liveEvaluationKey, !Task.isCancelled,
+              catalog != nil, validationMessage == nil, !requiresPresetConfirmation,
+              !resultsAreCurrent else { return }
+        await evaluate(append: false, includeHistory: false, recordPresetRun: false)
+    }
+
+    private func evaluate(append: Bool, includeHistory: Bool, recordPresetRun: Bool) async {
         guard let client, !isEvaluating else { return }
+        guard !Task.isCancelled, !append || resultsAreCurrent else { return }
         guard !requiresPresetConfirmation else {
             error = "这个旧方案含尚未迁移的条件。请打开“编辑条件”逐项检查，并明确保存确认后再运行。"
             return
@@ -139,28 +178,36 @@ final class StockSelectionModel: ObservableObject {
         let current = generation
         let requestGeneration = UUID(); evaluationGeneration = requestGeneration
         let definition = draft
+        let requestedSort = sort
+        let requestedDescending = descending
+        let requestedKey = liveEvaluationKey
         let offset = append && resultsAreCurrent ? (evaluation?.items.count ?? 0) : 0
         isEvaluating = true; error = nil
         defer { if current == generation && requestGeneration == evaluationGeneration { isEvaluating = false } }
-        if offset == 0, !includeHistory, sort == "code", !descending,
+        if recordPresetRun, offset == 0, !includeHistory, requestedSort == "code", !requestedDescending,
            let preset = selectedPreset, preset.definition == definition, canWrite {
             _ = await mutate(operation: "preset.run", payload: SelectionMutationPayload(id: preset.id))
             return
         }
         do {
             var result = try await client.evaluateSelection(SelectionEvaluateRequest(definition: definition, offset: offset,
-                                                                                    sort: sort, descending: descending,
+                                                                                    sort: requestedSort, descending: requestedDescending,
                                                                                     includeHistory: includeHistory))
-            guard current == generation, requestGeneration == evaluationGeneration, !Task.isCancelled else { return }
-            if offset > 0, let previous = evaluation, evaluationDefinition == definition {
+            guard current == generation, requestGeneration == evaluationGeneration, !Task.isCancelled,
+                  requestedKey == liveEvaluationKey, definition == draft,
+                  requestedSort == sort, requestedDescending == descending else { return }
+            if offset > 0, let previous = evaluation, resultsAreCurrent {
                 let existing = Set(previous.items.map(\.code))
                 result.items = previous.items + result.items.filter { !existing.contains($0.code) }
             }
+            evaluationSort = requestedSort; evaluationDescending = requestedDescending
             evaluation = result; evaluationDefinition = definition
             if offset == 0 { selectedCodes = [] }
             onContextChange?("screener", "\(result.passed) 只符合条件，数据 \(result.asOf ?? "时间未知")")
         } catch {
-            guard current == generation, requestGeneration == evaluationGeneration else { return }
+            guard current == generation, requestGeneration == evaluationGeneration, !Task.isCancelled,
+                  requestedKey == liveEvaluationKey, definition == draft,
+                  requestedSort == sort, requestedDescending == descending else { return }
             self.error = error.localizedDescription
         }
     }
@@ -239,8 +286,7 @@ final class StockSelectionModel: ObservableObject {
     private func performPending() async -> Bool {
         guard let client, let mutation = pendingMutation, !isMutating else { return false }
         let current = generation
-        let appliedDefinition = mutation.payload.definition
-            ?? library?.presets.first(where: { $0.id == mutation.payload.id })?.definition
+        let requestGeneration = evaluationGeneration
         isMutating = true; error = nil
         defer { if current == generation { isMutating = false } }
         do {
@@ -252,7 +298,14 @@ final class StockSelectionModel: ObservableObject {
             }
             accept(receipt.library); isLibraryFresh = true; pendingMutation = nil
             lastSavedGroupID = receipt.groupId; lastSavedPresetID = receipt.presetId
-            if let result = receipt.evaluation { evaluation = result; evaluationDefinition = appliedDefinition }
+            if mutation.operation == "preset.run", let result = receipt.evaluation,
+               let appliedDefinition = receipt.library.presets.first(where: { $0.id == mutation.payload.id })?.definition,
+               requestGeneration == evaluationGeneration, !Task.isCancelled,
+               selectedPresetID == mutation.payload.id, appliedDefinition == draft,
+               sort == "code", !descending, !requiresPresetConfirmation {
+                evaluationSort = "code"; evaluationDescending = false
+                evaluation = result; evaluationDefinition = appliedDefinition
+            }
             notice = receipt.replayed == true ? "已确认上次操作已保存。" : "已保存并同步。"
             persist()
             if mutation.operation.hasPrefix("group."), selectedGroupID != nil { await loadSelectedGroup() }
