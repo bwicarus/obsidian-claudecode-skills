@@ -264,7 +264,7 @@ struct StockSelectionSidebar: View {
             Divider()
             results
         }
-        .sheet(isPresented: $editorPresented) { SelectionRuleEditor(model: model) }
+        .fullScreenCover(isPresented: $editorPresented) { SelectionRuleEditor(model: model) }
         .sheet(item: $groupEditor) { draft in
             SelectionGroupEditor(model: model, initial: draft)
         }
@@ -549,49 +549,42 @@ private struct SelectionWarnings: View {
 private struct SelectionRuleEditor: View {
     @ObservedObject var model: StockSelectionModel
     @Environment(\.dismiss) private var dismiss
-    @State private var pickerTarget: CriterionPickerTarget?
+    @State private var search = ""
+    @State private var selectedCriterionID: String?
+    @State private var selectedTargetID: String?
+    @State private var hoveredTargetID: String?
+    @State private var parameterCriterionID: String?
+    @State private var parametersExpanded = false
     @State private var savingPreset = false
     @State private var saveAsNew = false
     @State private var presetName = ""
 
+    private var criteria: [SelectionCriterion] { model.catalog?.criteria ?? [] }
+    private var categoryKeys: [String] {
+        let present = Set(criteria.map { $0.category ?? "other" })
+        let ordered = ["basic", "technical", "fund", "chips"]
+        return ordered.filter { present.contains($0) } + present.subtracting(ordered).sorted()
+    }
+    private var cannotRun: Bool {
+        model.isEvaluating || model.catalog == nil || model.validationMessage != nil || model.requiresPresetConfirmation
+    }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    SelectionStatusView(model: model)
-                    if let message = model.validationMessage { Text(message).font(.caption).foregroundStyle(.red) }
-                    if model.requiresPresetConfirmation {
-                        Text("此旧方案含尚未迁移的条件，暂不能运行。请核对下面保留下来的条件；确认符合你的意图后，使用右上“方案 → 保存当前方案”明确确认。")
-                            .font(.subheadline).foregroundStyle(.orange)
-                        SelectionWarnings(warnings: model.selectedPreset?.warnings ?? [])
+            GeometryReader { geometry in
+                let libraryWidth = min(260, max(180, geometry.size.width * 0.27))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        criterionLibrary.frame(width: libraryWidth)
+                        Divider()
+                        ruleCanvas.frame(width: max(320, geometry.size.width - libraryWidth - 1))
                     }
-                    Text("组内条件需要同时满足（AND）；不同条件组满足任意一组即可（OR）。排除项命中时剔除，资料缺失不会被当作符合。").font(.subheadline).foregroundStyle(.secondary)
-                    ForEach(model.draft.groups) { group in ruleGroup(group) }
-                    Button("添加条件组（OR）", systemImage: "plus.circle") {
-                        model.draft.groups.append(SelectionRuleGroup(name: "条件组 \(model.draft.groups.count + 1)"))
-                    }.buttonStyle(.bordered)
-                    if model.draft.groups.isEmpty {
-                        Text("尚未添加条件组。空条件会返回全市场，请先添加你需要的条件。").font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let result = model.evaluation, model.resultsAreCurrent {
-                        Text("最近结果：\(result.passed) / \(result.total) 只；\(result.unknown ?? 0) 只资料不全。")
-                            .font(.subheadline.weight(.medium))
-                        if let history = result.history { SelectionHistoryView(history: history) }
-                    }
-                    Button {
-                        Task { await model.run(includeHistory: true) }
-                    } label: { Label("查看近期历史效果", systemImage: "clock.arrow.circlepath") }
-                    .buttonStyle(.bordered).disabled(model.isEvaluating || model.catalog == nil || model.validationMessage != nil || model.requiresPresetConfirmation)
-                    Button {
-                        Task { await model.run(); if model.resultsAreCurrent { dismiss() } }
-                    } label: {
-                        HStack { Spacer(); if model.isEvaluating { ProgressView() }; Text("运行选股"); Spacer() }.padding(.vertical, 6)
-                    }
-                    .buttonStyle(.borderedProminent).disabled(model.isEvaluating || model.catalog == nil || model.validationMessage != nil || model.requiresPresetConfirmation)
+                    .frame(height: geometry.size.height)
                 }
-                .padding(24).frame(maxWidth: 820).frame(maxWidth: .infinity)
+                .scrollBounceBehavior(.basedOnSize)
             }
             .background(AppStyle.canvas)
+            .safeAreaInset(edge: .bottom, spacing: 0) { actionBar }
             .navigationTitle("选股条件")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -604,12 +597,17 @@ private struct SelectionRuleEditor: View {
                         if model.selectedPreset != nil {
                             Button("另存为新方案") { presetName = "新选股方案"; saveAsNew = true; savingPreset = true }
                         }
-                        Button("恢复初始条件") { if let catalog = model.catalog { model.draft = catalog.defaults } }
+                        Button("恢复初始条件") {
+                            if let catalog = model.catalog { model.draft = catalog.defaults }
+                            selectedCriterionID = nil; selectedTargetID = nil
+                        }
                     } label: { Label("方案", systemImage: "square.and.arrow.down") }
                     .disabled(!model.canWrite)
                 }
             }
-            .sheet(item: $pickerTarget) { target in CriterionPicker(model: model, target: target) }
+            .sheet(isPresented: Binding(get: { parameterCriterionID != nil }, set: { if !$0 { parameterCriterionID = nil } })) {
+                parameterInspector
+            }
             .alert("保存选股方案", isPresented: $savingPreset) {
                 TextField("方案名称", text: $presetName)
                 Button("取消", role: .cancel) { }
@@ -628,73 +626,354 @@ private struct SelectionRuleEditor: View {
         }
     }
 
+    private var criterionLibrary: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("条件库").font(.headline)
+            Text("拖到右侧方框，或先点条件再点方框")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("搜索条件", text: $search).textInputAutocapitalization(.never).autocorrectionDisabled()
+                if !search.isEmpty {
+                    Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        .buttonStyle(.plain).accessibilityLabel("清除条件搜索")
+                }
+            }
+            .font(.subheadline).padding(9).background(AppStyle.canvas, in: RoundedRectangle(cornerRadius: 9))
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(categoryKeys, id: \.self) { category in
+                        let items = criteria.filter { ($0.category ?? "other") == category && matchesSearch($0) }
+                        if !items.isEmpty {
+                            Text(categoryTitle(category)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .padding(.top, 8)
+                            ForEach(items) { criterion in libraryItem(criterion) }
+                        }
+                    }
+                    if !criteria.contains(where: matchesSearch) {
+                        Text(model.catalog == nil ? "正在读取条件…" : "没有匹配的条件")
+                            .font(.caption).foregroundStyle(.secondary).padding(.vertical, 12)
+                    }
+                }
+                .padding(.bottom, 12)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .padding(14).background(.white)
+    }
+
+    private func libraryItem(_ criterion: SelectionCriterion) -> some View {
+        let selected = selectedCriterionID == criterion.id
+        return Button {
+            selectedCriterionID = selected ? nil : criterion.id
+        } label: {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(criterionTitle(criterion.id)).font(.subheadline).foregroundStyle(AppStyle.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let description = criterion.description, !description.isEmpty {
+                        Text(description).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: selected ? "checkmark.circle.fill" : "line.3.horizontal")
+                    .font(.caption).foregroundStyle(selected ? AppStyle.accent : Color.secondary)
+            }
+            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? AppStyle.accent.opacity(0.1) : AppStyle.canvas, in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .draggable(SelectionCriterionTransfer(criterionID: criterion.id).stringValue) { dragPreview(criterion.id) }
+        .accessibilityLabel(criterionTitle(criterion.id))
+        .accessibilityValue(selected ? "已选中，点右侧方框放入" : "可拖动或点选")
+    }
+
+    private var ruleCanvas: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                SelectionStatusView(model: model)
+                if let message = model.validationMessage { Text(message).font(.caption).foregroundStyle(.red) }
+                if model.requiresPresetConfirmation {
+                    Text("旧方案含尚未迁移的条件。请核对保留的条件，并从“方案”保存确认后再运行。")
+                        .font(.subheadline).foregroundStyle(.orange)
+                    SelectionWarnings(warnings: model.selectedPreset?.warnings ?? [])
+                }
+                HStack {
+                    Text("条件组").font(.headline)
+                    Spacer()
+                    Text("组内全部满足 · 组间任一满足").font(.caption).foregroundStyle(.secondary)
+                }
+                DisclosureGroup("筛选参数 · 整个方案共用", isExpanded: $parametersExpanded) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 10) {
+                        ForEach(model.catalog?.parameters ?? []) { parameter in parameterField(parameter) }
+                    }.padding(.top, 10)
+                }
+                .font(.subheadline).padding(12).background(.white, in: RoundedRectangle(cornerRadius: 12))
+                ForEach(Array(model.draft.groups.enumerated()), id: \.element.id) { index, group in
+                    if index > 0 {
+                        HStack { Rectangle().frame(height: 1); Text("或者 · OR").fixedSize(); Rectangle().frame(height: 1) }
+                            .font(.caption.weight(.medium)).foregroundStyle(.secondary.opacity(0.65))
+                    }
+                    ruleGroup(group)
+                }
+                Button {
+                    let group = SelectionRuleGroup(name: "条件组 \(model.draft.groups.count + 1)")
+                    model.draft.groups.append(group)
+                    selectedTargetID = group.id + "|and"
+                    model.onContextChange?("screener", "新增选股条件组，选股结果待更新")
+                } label: {
+                    HStack { Image(systemName: "plus.circle"); Text("添加条件组（OR）"); Spacer() }
+                        .font(.subheadline).padding(14).frame(maxWidth: .infinity)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 12))
+                }.buttonStyle(.plain)
+                if model.draft.groups.isEmpty {
+                    Text("先添加一个条件组，再把左侧条件拖入方框。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if model.resultsAreCurrent, let history = model.evaluation?.history {
+                    SelectionHistoryView(history: history)
+                }
+            }
+            .padding(18)
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
     private func ruleGroup(_ group: SelectionRuleGroup) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
                 TextField("条件组名称", text: Binding(get: { model.draft.groups.first { $0.id == group.id }?.name ?? "" }, set: { value in
                     if let index = model.draft.groups.firstIndex(where: { $0.id == group.id }) { model.draft.groups[index].name = value }
                 })).font(.headline)
                 Toggle("启用条件组", isOn: Binding(get: { model.draft.groups.first { $0.id == group.id }?.enabled ?? false }, set: { value in
                     if let index = model.draft.groups.firstIndex(where: { $0.id == group.id }) { model.draft.groups[index].enabled = value }
-                })).labelsHidden()
+                })).labelsHidden().fixedSize()
                 Button(role: .destructive) { model.removeRuleGroup(group.id) } label: { Image(systemName: "trash") }
-                    .buttonStyle(.borderless).accessibilityLabel("删除条件组")
+                    .buttonStyle(.plain).accessibilityLabel("删除条件组 \(group.name)")
             }
-            Text("同时满足以下条件").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            ForEach(group.and, id: \.self) { criterion in criterionRow(criterion, group: group, excluded: false) }
-            Button("添加条件", systemImage: "plus") { pickerTarget = CriterionPickerTarget(groupID: group.id, excluded: false) }
-            Divider()
-            Text("排除以下情况").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            ForEach(group.not, id: \.self) { criterion in criterionRow(criterion, group: group, excluded: true) }
-            Button("添加排除项", systemImage: "minus.circle") { pickerTarget = CriterionPickerTarget(groupID: group.id, excluded: true) }
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 10) {
+                    conditionZone(group, excluded: false).frame(minWidth: 250)
+                    conditionZone(group, excluded: true).frame(minWidth: 250)
+                }
+                VStack(spacing: 10) {
+                    conditionZone(group, excluded: false)
+                    conditionZone(group, excluded: true)
+                }
+            }
+            if group.and.isEmpty && group.not.isEmpty {
+                    Text("空组不参与筛选；所有组均无条件时返回全市场。")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             if model.resultsAreCurrent, let effect = model.evaluation?.groups?.first(where: { $0.id == group.id }) {
-                Text("本组通过 \(effect.baselinePassed ?? 0) 只；资料不全 \(effect.unknown ?? 0) 只")
+                Text("本组通过 \(effect.baselinePassed ?? 0) 只 · 资料不全 \(effect.unknown ?? 0) 只")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
-        .padding(18).background(.white, in: RoundedRectangle(cornerRadius: 18))
+        .padding(14).background(.white, in: RoundedRectangle(cornerRadius: 16))
     }
 
-    private func criterionRow(_ id: String, group: SelectionRuleGroup, excluded: Bool) -> some View {
-        let criterion = model.catalog?.criteria.first { $0.id == id }
-        let disabledKey = group.id + "|" + (excluded ? "not:" : "") + id
-        let enabled = !model.draft.disabled.contains(disabledKey)
-        let effect = model.resultsAreCurrent ? model.evaluation?.groups?.first { $0.id == group.id } : nil
-        let impact = excluded ? effect?.notImpacts?[id] : effect?.impacts?[id]
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Toggle(criterion?.label ?? id, isOn: Binding(get: { !model.draft.disabled.contains(disabledKey) }, set: {
-                    model.setCriterionEnabled(groupID: group.id, criterionID: id, excluded: excluded, enabled: $0)
-                })).font(.subheadline)
-                Button { model.setCriterion(groupID: group.id, criterionID: id, excluded: excluded, present: false) } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                }.buttonStyle(.borderless).accessibilityLabel("移除条件")
-            }
-            if let description = criterion?.description, !description.isEmpty {
-                Text(description).font(.caption).foregroundStyle(.secondary)
-            }
-            if let impact { Text("关闭此项将多出 \(impact) 只").font(.caption2).foregroundStyle(.secondary) }
-            ForEach(criterion?.parameters ?? [], id: \.self) { parameterID in
-                if let parameter = model.catalog?.parameters.first(where: { $0.id == parameterID }) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(parameter.label).font(.caption)
-                            if let minimum = parameter.minimum, let maximum = parameter.maximum {
-                                Text("\(minimum.formatted()) – \(maximum.formatted())").font(.caption2).foregroundStyle(.tertiary)
-                            }
-                        }
-                        Spacer()
-                        TextField(parameter.label, value: Binding(get: { model.draft.parameters[parameterID] ?? parameter.defaultValue ?? 0 }, set: { value in
-                            if value.isFinite { model.draft.parameters[parameterID] = value }
-                        }), format: .number)
-                        .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
-                        .textFieldStyle(.roundedBorder).frame(width: 100).font(.caption.monospacedDigit())
-                    }
+    private func conditionZone(_ group: SelectionRuleGroup, excluded: Bool) -> some View {
+        let zoneID = group.id + (excluded ? "|not" : "|and")
+        let highlighted = hoveredTargetID == zoneID || selectedTargetID == zoneID
+        let tint = excluded ? AppStyle.up : AppStyle.accent
+        let ids = excluded ? group.not : group.and
+        return VStack(alignment: .leading, spacing: 10) {
+            Button { placeSelected(in: group.id, excluded: excluded) } label: {
+                HStack {
+                    Text(excluded ? "排除条件" : "满足条件").font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 4)
+                    Text(excluded ? "NOT · 全部不满足" : "AND · 全部满足").font(.caption2)
+                }
+                .foregroundStyle(tint).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            if ids.isEmpty {
+                Button { placeSelected(in: group.id, excluded: excluded) } label: {
+                    Text(selectedCriterionID == nil ? "将左侧条件拖到这里" : "点此放入选中的条件")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 50, alignment: .center)
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+            } else {
+                SelectionBubbleFlow(spacing: 7) {
+                    ForEach(ids, id: \.self) { id in criterionChip(id, group: group, excluded: excluded) }
+                }
+                if selectedCriterionID != nil {
+                    Button("放入选中条件", systemImage: "plus") { placeSelected(in: group.id, excluded: excluded) }
+                        .font(.caption).buttonStyle(.plain)
                 }
             }
-            .disabled(!enabled)
         }
-        .padding(10).background(AppStyle.canvas, in: RoundedRectangle(cornerRadius: 10))
+        .padding(12).frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
+        .background {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(tint.opacity(highlighted ? 0.1 : 0.035))
+                .onTapGesture { placeSelected(in: group.id, excluded: excluded) }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(tint.opacity(highlighted ? 0.7 : 0.25), style: StrokeStyle(lineWidth: highlighted ? 2 : 1, dash: highlighted ? [] : [5, 4]))
+                .allowsHitTesting(false)
+        }
+        .dropDestination(for: String.self) { items, _ in
+            acceptDrop(items, groupID: group.id, excluded: excluded)
+        } isTargeted: { targeted in
+            if targeted { hoveredTargetID = zoneID }
+            else if hoveredTargetID == zoneID { hoveredTargetID = nil }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(group.name)，\(excluded ? "排除条件" : "满足条件")放置区")
+    }
+
+    private func criterionChip(_ id: String, group: SelectionRuleGroup, excluded: Bool) -> some View {
+        let key = group.id + "|" + (excluded ? "not:" : "") + id
+        let enabled = !model.draft.disabled.contains(key)
+        let tint = excluded ? AppStyle.up : AppStyle.accent
+        let hasParameters = !(criteria.first { $0.id == id }?.parameters ?? []).isEmpty
+        let effect = model.resultsAreCurrent ? model.evaluation?.groups?.first { $0.id == group.id } : nil
+        let impact = excluded ? effect?.notImpacts?[id] : effect?.impacts?[id]
+        return HStack(spacing: 5) {
+            Button {
+                model.setCriterionEnabled(groupID: group.id, criterionID: id, excluded: excluded, enabled: !enabled)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: enabled ? "checkmark.circle.fill" : "circle")
+                    Text(criterionTitle(id)).fixedSize(horizontal: false, vertical: true)
+                    if let impact, impact > 0 { Text("+\(impact)").foregroundStyle(.orange).monospacedDigit() }
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityValue(enabled && group.enabled ? "已启用" : "已停用")
+            if hasParameters {
+                Button { parameterCriterionID = id } label: { Image(systemName: "slider.horizontal.3") }
+                    .buttonStyle(.plain).accessibilityLabel("调整\(criterionTitle(id))的参数")
+            }
+            Button { model.setCriterion(groupID: group.id, criterionID: id, excluded: excluded, present: false) } label: {
+                Image(systemName: "xmark").font(.caption2)
+            }.buttonStyle(.plain).accessibilityLabel("移除\(criterionTitle(id))")
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(enabled && group.enabled ? tint : Color.secondary)
+        .padding(.horizontal, 9).padding(.vertical, 8)
+        .background(enabled && group.enabled ? tint.opacity(0.1) : Color.white, in: RoundedRectangle(cornerRadius: 9))
+        .draggable(SelectionCriterionTransfer(criterionID: id, sourceGroupID: group.id, sourceExcluded: excluded).stringValue) {
+            dragPreview(id)
+        }
+    }
+
+    private func dragPreview(_ id: String) -> some View {
+        Text(criterionTitle(id)).font(.subheadline.weight(.medium))
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .foregroundStyle(AppStyle.accent).background(.white, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func placeSelected(in groupID: String, excluded: Bool) {
+        selectedTargetID = groupID + (excluded ? "|not" : "|and")
+        guard let id = selectedCriterionID else { return }
+        _ = acceptDrop([SelectionCriterionTransfer(criterionID: id).stringValue], groupID: groupID, excluded: excluded)
+    }
+
+    private func acceptDrop(_ items: [String], groupID: String, excluded: Bool) -> Bool {
+        guard !items.isEmpty, model.catalog != nil else { return false }
+        let transfers = items.compactMap(SelectionCriterionTransfer.decode)
+        guard transfers.count == items.count else { return false }
+        var next = model.draft
+        let allowedIDs = Set(criteria.map(\.id))
+        for transfer in transfers {
+            guard next.applyCriterionDrop(transfer, targetGroupID: groupID, excluded: excluded, allowedIDs: allowedIDs) else { return false }
+        }
+        if next != model.draft {
+            model.draft = next
+            model.onContextChange?("screener", "选股条件已拖入\(excluded ? "排除" : "满足")方框，选股结果待更新")
+        }
+        selectedCriterionID = nil
+        selectedTargetID = groupID + (excluded ? "|not" : "|and")
+        hoveredTargetID = nil
+        return true
+    }
+
+    private func matchesSearch(_ criterion: SelectionCriterion) -> Bool {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty || criterion.label.localizedCaseInsensitiveContains(query)
+            || categoryTitle(criterion.category ?? "other").localizedCaseInsensitiveContains(query)
+            || criterion.id.localizedCaseInsensitiveContains(query)
+    }
+
+    private func categoryTitle(_ key: String) -> String {
+        ["basic": "基础行情", "technical": "技术走势", "fund": "资金动向", "chips": "筹码分布"][key] ?? "其他条件"
+    }
+
+    private func parameterValue(_ id: String) -> Double {
+        model.draft.parameters[id] ?? model.catalog?.parameters.first { $0.id == id }?.defaultValue ?? 0
+    }
+
+    private func criterionTitle(_ id: String) -> String {
+        func value(_ key: String) -> String { parameterValue(key).formatted(.number.precision(.fractionLength(0...2))) }
+        switch id {
+        case "price_below_limit": return "股价 ≤ \(value("max_price")) 元"
+        case "price_above_min": return "股价 ≥ \(value("min_price")) 元"
+        case "turnover_in_range": return "换手率 \(value("turnover_rate_min"))–\(value("turnover_rate_max"))%"
+        case "profit_ratio_above": return "筹码获利 ≥ \(value("profit_ratio_above_value"))%"
+        case "profit_ratio_below": return "筹码获利 ≤ \(value("profit_ratio_below_value"))%"
+        case "chip_concentration_below": return "筹码集中度 ≤ \(value("chip_concentration_max_value"))%"
+        case "kdj_recent_cross": return "近 \(value("kdj_cross_days")) 日 KDJ 金叉"
+        default: return criteria.first { $0.id == id }?.label ?? id
+        }
+    }
+
+    private func parameterField(_ parameter: SelectionParameter) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(parameter.label).font(.caption)
+                if let minimum = parameter.minimum, let maximum = parameter.maximum {
+                    Text("\(minimum.formatted()) – \(maximum.formatted())").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+            TextField(parameter.label, value: Binding(get: { parameterValue(parameter.id) }, set: { value in
+                if value.isFinite { model.draft.parameters[parameter.id] = value }
+            }), format: .number)
+                .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
+                .textFieldStyle(.roundedBorder).frame(width: 100).font(.caption.monospacedDigit())
+        }
+    }
+
+    private var parameterInspector: some View {
+        NavigationStack {
+            Form {
+                Text("参数在整个方案中共用；修改后，同一条件的所有气泡一起更新。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let id = parameterCriterionID, let criterion = criteria.first(where: { $0.id == id }) {
+                    if let description = criterion.description { Text(description).font(.subheadline) }
+                    ForEach(criterion.parameters ?? [], id: \.self) { parameterID in
+                        if let parameter = model.catalog?.parameters.first(where: { $0.id == parameterID }) { parameterField(parameter) }
+                    }
+                }
+                if let message = model.validationMessage { Text(message).font(.caption).foregroundStyle(.red) }
+            }
+            .navigationTitle("条件参数").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { parameterCriterionID = nil } } }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 14) {
+            Button { Task { await model.run(includeHistory: true) } } label: {
+                Label("近期效果", systemImage: "clock.arrow.circlepath")
+            }.font(.subheadline).disabled(cannotRun)
+            Spacer(minLength: 4)
+            if model.resultsAreCurrent, let result = model.evaluation {
+                Text("\(result.passed) / \(result.total) 只符合").font(.caption).foregroundStyle(.secondary)
+            }
+            Button {
+                Task { await model.run(); if model.resultsAreCurrent { dismiss() } }
+            } label: {
+                HStack(spacing: 6) { if model.isEvaluating { ProgressView() }; Text("运行选股") }
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+            }.buttonStyle(.borderedProminent).disabled(cannotRun)
+        }
+        .padding(.horizontal, 18).padding(.vertical, 10).background(.white)
+        .overlay(alignment: .top) { Divider() }
     }
 }
 
@@ -721,41 +1000,6 @@ private struct SelectionHistoryView: View {
             }
         }
         .padding(16).background(.white, in: RoundedRectangle(cornerRadius: 16))
-    }
-}
-
-private struct CriterionPickerTarget: Identifiable {
-    let groupID: String
-    let excluded: Bool
-    var id: String { groupID + (excluded ? "not" : "and") }
-}
-
-@MainActor
-private struct CriterionPicker: View {
-    @ObservedObject var model: StockSelectionModel
-    let target: CriterionPickerTarget
-    @Environment(\.dismiss) private var dismiss
-    @State private var search = ""
-    private var criteria: [SelectionCriterion] {
-        (model.catalog?.criteria ?? []).filter { search.isEmpty || $0.label.localizedCaseInsensitiveContains(search) || ($0.category?.localizedCaseInsensitiveContains(search) ?? false) }
-    }
-    var body: some View {
-        NavigationStack {
-            List(criteria) { criterion in
-                Toggle(isOn: Binding(get: {
-                    guard let group = model.draft.groups.first(where: { $0.id == target.groupID }) else { return false }
-                    return (target.excluded ? group.not : group.and).contains(criterion.id)
-                }, set: { model.setCriterion(groupID: target.groupID, criterionID: criterion.id, excluded: target.excluded, present: $0) })) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(criterion.label)
-                        if let category = criterion.category { Text(category).font(.caption).foregroundStyle(.secondary) }
-                    }
-                }
-            }
-            .searchable(text: $search, prompt: "搜索条件")
-            .navigationTitle(target.excluded ? "添加排除项" : "添加条件")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
-        }
     }
 }
 

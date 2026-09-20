@@ -23,6 +23,11 @@ if [[ "$MODE" == simulator ]]; then
     "$PROJECT_DIR/../Tests/WorkspaceGridChecks.swift" \
     -o "$BUILD_ROOT/workspace-grid-checks"
   "$BUILD_ROOT/workspace-grid-checks"
+  swiftc -swift-version 5 -parse-as-library \
+    "$PROJECT_DIR/Sources/StockSelectionModels.swift" \
+    "$PROJECT_DIR/../Tests/SelectionDragChecks.swift" \
+    -o "$BUILD_ROOT/selection-drag-checks"
+  "$BUILD_ROOT/selection-drag-checks"
   xcodebuild build -project "$PROJECT_FILE" -scheme StocksNative \
     -configuration Debug -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$BUILD_ROOT/DerivedData-simulator" \

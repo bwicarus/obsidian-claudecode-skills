@@ -78,6 +78,105 @@ struct SelectionDefinition: Codable, Equatable {
     }
 }
 
+struct SelectionCriterionTransfer: Codable {
+    let criterionID: String
+    let sourceGroupID: String?
+    let sourceExcluded: Bool
+    private static let prefix = "stocks-criterion:v1:"
+    private static let maximumLength = 2048
+
+    init(criterionID: String, sourceGroupID: String? = nil, sourceExcluded: Bool = false) {
+        self.criterionID = criterionID
+        self.sourceGroupID = sourceGroupID
+        self.sourceExcluded = sourceExcluded
+    }
+
+    var stringValue: String {
+        guard isValid else { return "" }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(self), let json = String(data: data, encoding: .utf8) else { return "" }
+        let result = Self.prefix + json
+        return result.utf8.count <= Self.maximumLength ? result : ""
+    }
+
+    static func decode(_ value: String) -> Self? {
+        guard value.utf8.count <= maximumLength, value.hasPrefix(prefix),
+              let transfer = try? JSONDecoder().decode(Self.self, from: Data(value.dropFirst(prefix.count).utf8)),
+              transfer.isValid else { return nil }
+        return transfer
+    }
+
+    fileprivate var isValid: Bool {
+        Self.validIdentifier(criterionID)
+            && (sourceGroupID.map(Self.validIdentifier) ?? !sourceExcluded)
+    }
+
+    fileprivate static func validIdentifier(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 128 && value.utf8.allSatisfy {
+            (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0)
+                || $0 == 95 || $0 == 46 || $0 == 45
+        }
+    }
+}
+
+extension SelectionDefinition {
+    @discardableResult
+    mutating func applyCriterionDrop(_ transfer: SelectionCriterionTransfer, targetGroupID: String,
+                                     excluded: Bool, allowedIDs: Set<String>) -> Bool {
+        let id = transfer.criterionID
+        let targets = groups.indices.filter { groups[$0].id == targetGroupID }
+        guard transfer.isValid, allowedIDs.contains(id), SelectionCriterionTransfer.validIdentifier(targetGroupID),
+              targets.count == 1, let targetIndex = targets.first else { return false }
+        let sourceIndex: Int?
+        if let sourceID = transfer.sourceGroupID {
+            let sources = groups.indices.filter { groups[$0].id == sourceID }
+            guard sources.count == 1, let index = sources.first,
+                  (transfer.sourceExcluded ? groups[index].not : groups[index].and).contains(id) else { return false }
+            sourceIndex = index
+        } else { sourceIndex = nil }
+
+        func key(_ groupID: String, _ excluded: Bool) -> String { groupID + "|" + (excluded ? "not:" : "") + id }
+        let targetKey = key(targetGroupID, excluded)
+        let destinationPosition = (excluded ? groups[targetIndex].not : groups[targetIndex].and).firstIndex(of: id)
+        let disabledPosition = disabled.firstIndex(of: targetKey)
+        let preserveDisabled: Bool
+        if let sourceIndex {
+            preserveDisabled = disabled.contains(key(groups[sourceIndex].id, transfer.sourceExcluded))
+                || (sourceIndex != targetIndex && !groups[sourceIndex].enabled)
+        } else {
+            // Reusing a pool item keeps an existing destination item's switch state.
+            preserveDisabled = (groups[targetIndex].and.contains(id) && disabled.contains(key(targetGroupID, false)))
+                || (groups[targetIndex].not.contains(id) && disabled.contains(key(targetGroupID, true)))
+        }
+
+        var next = self
+        var affectedKeys = Set([key(targetGroupID, false), key(targetGroupID, true)])
+        if let sourceIndex {
+            next.groups[sourceIndex].and.removeAll { $0 == id }
+            next.groups[sourceIndex].not.removeAll { $0 == id }
+            affectedKeys.insert(key(groups[sourceIndex].id, false))
+            affectedKeys.insert(key(groups[sourceIndex].id, true))
+        }
+        next.groups[targetIndex].and.removeAll { $0 == id }
+        next.groups[targetIndex].not.removeAll { $0 == id }
+        if excluded {
+            let position = min(destinationPosition ?? next.groups[targetIndex].not.count, next.groups[targetIndex].not.count)
+            next.groups[targetIndex].not.insert(id, at: position)
+        } else {
+            let position = min(destinationPosition ?? next.groups[targetIndex].and.count, next.groups[targetIndex].and.count)
+            next.groups[targetIndex].and.insert(id, at: position)
+        }
+        next.disabled.removeAll { affectedKeys.contains($0) }
+        if preserveDisabled {
+            let position = disabledPosition ?? disabled.firstIndex { affectedKeys.contains($0) } ?? next.disabled.count
+            next.disabled.insert(targetKey, at: min(position, next.disabled.count))
+        }
+        self = next
+        return true
+    }
+}
+
 struct SelectionStock: Codable, Identifiable {
     let code: String
     let name: String
