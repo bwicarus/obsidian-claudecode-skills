@@ -354,7 +354,7 @@ html.rc-side-width-preview body.ep-side-open:not(.ep-side-floating) #html-conten
 #ep-side{font-family:var(--rc-font-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);font-size:13px;line-height:1.55}
 #ep-side button,#ep-side input,#ep-side textarea,#ep-side select{font-family:inherit}
 #ep-side .asst-msg,#ep-side .vc-card-bd,#ep-side .bw-pane-list,#ep-side .rc-hl-item .rc-hl-tx,#ep-side .kg-node .sum{font-size:13px;line-height:1.55}
-#ep-side .asst-tool,#ep-side .vc-card-meta,#ep-side small,#ep-side .rc-hl-nt{font-size:11.5px;line-height:1.45}
+#ep-side .asst-tool,#ep-side .vc-card-meta,#ep-side small,#ep-side .rc-hl-nt{font-size:11px;line-height:1.45}
 #ep-side #asst-ta,#ep-side textarea.asst-ta{font-size:14px;line-height:1.5}
 /* 原生滚动槽在窄侧栏/textarea 里会形成一圈灰框；保留触摸、滚轮和键盘滚动，只隐藏槽体。 */
 #ep-side,#ep-side *{scrollbar-width:none}

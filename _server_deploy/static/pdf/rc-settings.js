@@ -35,7 +35,7 @@
  *
  * API(对外不变):RC.settings.open(opts) / close() / aiParams() / hlColors() / injectCss()
  * opts(全部可选):
- *   tab                        打开时定位 tab('read'|'hl'|'note'|'grammar'|'ai'|'web'|'computer'|'native')
+ *   tab                        打开时定位 tab('read'|'note'|'grammar'|'ai'|'web'|'computer'|'native')。'hl' 已并入 'note'（标注），传进来会自动映射
  *   host:'pdf'                 PDF host-bind 模式(见上)
  *   ids:{mask,langChecks}      容器 id 覆盖(PDF 传 settings-mask / lang-checks)
  *   keys:{tab}                 tab 记忆键(PDF 传 pdf-set-tab;默认 eph-set-tab)
@@ -1237,7 +1237,9 @@
 
     // ════ pane: 高亮(逐字照搬 PDF)════
     var paneHl =
-      '<div class="set-pane" data-pane="hl" style="display:none">' +
+      // 高亮与便签都是「标注」，本来就该在一个分类里（用户 2026-09-20：分类需要重整）。
+      // 这里不再是独立 pane，而是「标注」分类下的一张分组卡片。
+      '<div data-sec="hl-colors">' +
         '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px"><span class="rc-i rc-i-brush"></span> 高亮颜色（点击 <span class="rc-i rc-i-close"></span> 删除）</label>' +
         '<div id="set-hl-colors" class="set-hl-row"></div>' +
         '<div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">' +
@@ -1284,7 +1286,7 @@
             '<pre id="rcset-native-notes-body" style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text;color:#dbe7f7;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace"></pre>' +
           '</div>' +
         '</div>' +
-      '</div>';
+      '</div>' + paneHl;
 
     // 网页翻译 tab（仅 host:'web' 显示，gateSections 门控 data-sec="web-tab"）。收纳纯网页翻译设置，
     // 消费端=web-immersive；语言=全局 bw-set-target-langs（settings-sync 桥全站一致）；显示方式=rcWebTrStyle。
@@ -1322,7 +1324,7 @@
               '<option value="showPalette">打开绘图面板</option><option value="toggleSelection">切换选区笔</option>' +
             '</select></div>' +
         '</div>' +
-        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
+        '<div style="font-size:11px;color:#7c8bab;line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
         HR +
         '</div>' +
         '<div data-sec="nat-dict">' +
@@ -1331,10 +1333,10 @@
         '<div id="rcset-nat-dict-bar" style="height:4px;background:var(--rc-bg-raised);border-radius:2px;overflow:hidden;margin-bottom:8px;display:none">' +
           '<div id="rcset-nat-dict-fill" style="height:100%;width:0%;background:#4a9eff;transition:width .3s"></div></div>' +
         '<div style="display:flex;gap:8px;margin-bottom:6px">' +
-          '<button type="button" id="rcset-nat-dict-dl" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">下载离线日语词典</button>' +
-          '<button type="button" id="rcset-nat-dict-rm" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">删除</button>' +
+          '<button type="button" id="rcset-nat-dict-dl" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">下载离线日语词典</button>' +
+          '<button type="button" id="rcset-nat-dict-rm" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">删除</button>' +
         '</div>' +
-        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 上，由本 App 与它自己的 Safari 扩展共享（同一个 App 组，供扩展离线查词）；不进入书籍附件、服务器或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
+        '<div style="font-size:11px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 上，由本 App 与它自己的 Safari 扩展共享（同一个 App 组，供扩展离线查词）；不进入书籍附件、服务器或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
         HR +
         '</div>' +
         '<div data-sec="nat-vault">' +
@@ -1344,10 +1346,10 @@
         '</label>' +
         '<div id="rcset-nat-vault-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<div style="display:flex;gap:8px">' +
-          '<button type="button" id="rcset-nat-vault-pick" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">选择 / 更换文件夹</button>' +
-          '<button type="button" id="rcset-nat-vault-clr" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">移除授权</button>' +
+          '<button type="button" id="rcset-nat-vault-pick" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">选择 / 更换文件夹</button>' +
+          '<button type="button" id="rcset-nat-vault-clr" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">移除授权</button>' +
         '</div>' +
-        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">选文件夹必须走 App 的系统选择器 —— 只有它给出的授权能长期保存，网页拿不到也不该拿到你的文件路径。</div>' +
+        '<div style="font-size:11px;color:#7c8bab;line-height:1.6;margin-top:6px">选文件夹必须走 App 的系统选择器 —— 只有它给出的授权能长期保存，网页拿不到也不该拿到你的文件路径。</div>' +
         HR +
         '</div>' +
         '<div data-sec="nat-location">' +
@@ -1360,20 +1362,20 @@
           '<input type="checkbox" id="rcset-nat-loc-bg" class="rc-ui-switch"> 不开 App 时也更新地点' +
         '</label>' +
         '<div id="rcset-nat-loc-bgst" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px 22px"></div>' +
-        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">开着时，读页停留记录会带上当时的位置（坐标与地名，建筑物级），用于以后回答"我在哪学的"。首次打开会请求系统定位权限（使用期间）。位置只随学习记录存到你自己的服务器，不发给任何第三方。</div>' +
+        '<div style="font-size:11px;color:#7c8bab;line-height:1.6;margin-top:6px">开着时，读页停留记录会带上当时的位置（坐标与地名，建筑物级），用于以后回答"我在哪学的"。首次打开会请求系统定位权限（使用期间）。位置只随学习记录存到你自己的服务器，不发给任何第三方。</div>' +
         HR +
         '</div>' +
         '<div data-sec="nat-credentials">' +
         '<label class="set-lbl">🔑 凭据</label>' +
         '<div id="rcset-nat-key-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-          '<button type="button" id="rcset-nat-key-set" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">输入 / 替换 OpenAI Key</button>' +
-          '<button type="button" id="rcset-nat-key-clr" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">清除本机 Key</button>' +
-          '<button type="button" id="rcset-nat-pi-login" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">登录或重新登录 Pi</button>' +
+          '<button type="button" id="rcset-nat-key-set" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">输入 / 替换 OpenAI Key</button>' +
+          '<button type="button" id="rcset-nat-key-clr" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">清除本机 Key</button>' +
+          '<button type="button" id="rcset-nat-pi-login" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">登录或重新登录 Pi</button>' +
         '</div>' +
-        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">Key 由 App 保存在 Apple Keychain，输入框是 App 的原生控件 —— 密钥不经过这个网页。App 保存、启动通话与转写都直连 OpenAI，都不连接服务器。</div>' +
+        '<div style="font-size:11px;color:#7c8bab;line-height:1.6;margin-top:6px">Key 由 App 保存在 Apple Keychain，输入框是 App 的原生控件 —— 密钥不经过这个网页。App 保存、启动通话与转写都直连 OpenAI，都不连接服务器。</div>' +
         HR +
-        '<button type="button" id="rcset-nat-open" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">打开 App 原生设置（其它诊断项）</button>' +
+        '<button type="button" id="rcset-nat-open" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12px">打开 App 原生设置（其它诊断项）</button>' +
         '</div>' +
       '</div>';
 
@@ -1448,15 +1450,14 @@
         // 「本机」改名「设备」——「本机 vs 其它」是实现视角，用户不关心它由谁实现。
         '<div class="set-tabs">' +
           '<button type="button" class="set-tab active" data-pane="read">阅读</button>' +
-          '<button type="button" class="set-tab" data-pane="hl">高亮</button>' +
-          '<button type="button" class="set-tab" data-pane="note">便签</button>' +
+          '<button type="button" class="set-tab" data-pane="note">标注</button>' +
           '<button type="button" class="set-tab" data-sec="grammar-tab" data-pane="grammar">语言</button>' +
           '<button type="button" class="set-tab" data-pane="ai">AI·翻译</button>' +
           '<button type="button" class="set-tab" data-sec="web-tab" data-pane="web">网页翻译</button>' +
           '<button type="button" class="set-tab" data-pane="computer">语音·电脑</button>' +
           '<button type="button" class="set-tab" data-pane="native" id="rcset-tab-native" style="display:none">设备</button>' +
         '</div>' +
-        '<div class="ep-set-body">' + paneAi + paneComputer + paneRead + paneGrammar + paneHl + paneNote + paneWeb + paneNative + '</div>' +
+        '<div class="ep-set-body">' + paneAi + paneComputer + paneRead + paneGrammar + paneNote + paneWeb + paneNative + '</div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid var(--rc-border);margin-top:2px">' +
           '<button id="rcset-cancel" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>' +
           '<button id="rcset-save" style="background:var(--rc-bg-active);border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>' +
@@ -2011,6 +2012,8 @@
     }
     // 默认落「阅读」：打开设置最常改的是排版，不是 AI 配置（记忆键优先，改不到老用户）。
     var _t = _opts.tab || lsGet(_tabKey) || 'read';
+    // 'hl' 并进了「标注」(note)。老用户的记忆键里可能还存着它，不映射就会落到一个不存在的 pane —— 表现是设置页打开一片空白。
+    if (_t === 'hl') _t = 'note';
     if (_t === 'web' && _host !== 'web') _t = 'ai';   // 记忆键停在 web 但当前非 web host → 回落 ai(不显隐藏 pane)
     if (_t === 'grammar' && _host === 'web') _t = 'web';   // web host:语法并入网页 tab,记忆停在 grammar 时改指 web
     setTab(_t);

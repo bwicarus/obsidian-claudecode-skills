@@ -211,14 +211,14 @@ if (window.__bwPwaProviderOnly) return;
       '.rcvp-bar{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:6px 8px;background:rgba(0,0,0,.3);cursor:grab;touch-action:none;-webkit-touch-callout:none}' +
       '.rcvp-bar.drag{cursor:grabbing}' +
       '.rcvp-grip{color:var(--rc-text-dim);font-size:14px;flex:none}' +
-      '.rcvp-title{flex:1 1 auto;min-width:0;color:#cdd8f5;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.rcvp-title{flex:1 1 auto;min-width:0;color:#cdd8f5;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '.rcvp-x{flex:none;background:transparent;border:none;color:var(--rc-text-muted);font-size:16px;cursor:pointer;padding:2px 6px;line-height:1;-webkit-tap-highlight-color:transparent}' +
       '.rcvp-x:active{color:#fff}' +
       '.rcvp-stage{position:relative;width:100%;background:#000;flex:1 1 auto;min-height:0}' +   // 占左列剩余高度;视频比例由 YouTube iframe 内部 letterbox 处理(浮层可自由改宽高)
       '.rcvp-if{width:100%;height:100%;border:0;display:block}' +
       '.rcvp-fallback{position:absolute;inset:0;z-index:4;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:16px;text-align:center;background:rgba(4,8,16,.76);pointer-events:none}' +
       '.rcvp-fallback-msg{color:#d7e2f5;font-size:12px;line-height:1.45}' +
-      '.rcvp-external{pointer-events:auto;border:1px solid rgba(125,211,252,.7);border-radius:8px;background:rgba(10,132,255,.22);color:#dff5ff;padding:7px 12px;font-size:12.5px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+      '.rcvp-external{pointer-events:auto;border:1px solid rgba(125,211,252,.7);border-radius:8px;background:rgba(10,132,255,.22);color:#dff5ff;padding:7px 12px;font-size:12px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
       '.rcvp-external:active{transform:scale(.96)}' +
       '.rcvp-fallback.ready{inset:8px 8px auto auto;padding:0;background:transparent;display:block}' +
       '.rcvp-fallback.ready .rcvp-fallback-msg{display:none}' +
@@ -230,7 +230,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rcvp-sub.rcvp-noen .rcvp-en{display:none}' +   // 原文开关:关=只中文
       // 外部字幕:视频与底部按钮之间的**固定高度**空白区,字幕在其中居中 → 内容 1 行/2 行/空都不改变布局(不抖)
       '.rcvp-sub.rcvp-out{position:static;left:auto;right:auto;bottom:auto;flex:0 0 auto;height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2px 12px;background:transparent;border:none;overflow:hidden}' +
-      '.rcvp-sub.rcvp-out .rcvp-zh{font-size:14.5px;text-shadow:none}' +
+      '.rcvp-sub.rcvp-out .rcvp-zh{font-size:14px;text-shadow:none}' +
       '.rcvp-sub.rcvp-out .rcvp-en{font-size:12px;text-shadow:none;color:#9aa4af}' +
       // 控制条:Apple 简约风——透明/无重边框,hover 淡底,active=iOS 蓝 tint(而非重填充)
       '.rcvp-ctrls{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:4px 5px;padding:7px 10px;background:transparent}' +
@@ -240,12 +240,12 @@ if (window.__bwPwaProviderOnly) return;
       '.rcvp-grp{display:inline-flex;align-items:center;gap:2px;color:var(--rc-text-muted);font-size:12px}' +
       '.rcvp-t{width:26px;background:rgba(255,255,255,.06);border:none;color:#e6eeff;border-radius:5px;padding:3px 2px;font-size:12px;text-align:center;outline:none}' +
       '.rcvp-cn{color:var(--rc-text-dim)}' +
-      '.rcvp-now,.rcvp-btn{background:transparent;border:none;color:var(--rc-text-muted);border-radius:7px;padding:4px 9px;font-size:12.5px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background .12s,color .12s}' +
+      '.rcvp-now,.rcvp-btn{background:transparent;border:none;color:var(--rc-text-muted);border-radius:7px;padding:4px 9px;font-size:12px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background .12s,color .12s}' +
       '.rcvp-now:hover,.rcvp-btn:hover{background:rgba(255,255,255,.09)}' +
       '.rcvp-now:active,.rcvp-btn:active{transform:scale(.93)}' +
       '.rcvp-btn.on{background:rgba(10,132,255,.2);color:#5aa9ff}' +
       '.rcvp-sel{background:rgba(255,255,255,.06);border:none;color:var(--rc-text-strong);border-radius:6px;padding:3px 5px;font-size:12px;outline:none}' +
-      '.rcvp-ck{display:inline-flex;align-items:center;gap:4px;color:var(--rc-text-muted);font-size:12.5px;cursor:pointer}' +
+      '.rcvp-ck{display:inline-flex;align-items:center;gap:4px;color:var(--rc-text-muted);font-size:12px;cursor:pointer}' +
       '.rcvp-rm{color:#ff6b81}' +
       '.rcvp-rm:hover{background:rgba(255,80,100,.14)}' +
       '.rcvp-rs{position:absolute;right:0;bottom:0;width:22px;height:22px;cursor:nwse-resize;touch-action:none;z-index:5}' +
@@ -262,9 +262,9 @@ if (window.__bwPwaProviderOnly) return;
       '.rcvp-tline{display:flex;gap:7px;padding:5px 9px;cursor:pointer;border-left:2px solid transparent}' +
       '.rcvp-tline:hover{background:rgba(255,255,255,.05)}' +
       '.rcvp-tline.cur{background:rgba(59,109,181,.22);border-left-color:var(--rc-accent-cyan)}' +
-      '.rcvp-tt{flex:none;color:var(--rc-text-dim);font-size:10.5px;font-variant-numeric:tabular-nums;padding-top:2px;min-width:30px}' +
+      '.rcvp-tt{flex:none;color:var(--rc-text-dim);font-size:10px;font-variant-numeric:tabular-nums;padding-top:2px;min-width:30px}' +
       '.rcvp-tx{flex:1 1 auto;min-width:0}' +
-      '.rcvp-tzh{display:block;color:#e6eeff;font-size:12.5px;line-height:1.35;word-break:break-word}' +
+      '.rcvp-tzh{display:block;color:#e6eeff;font-size:12px;line-height:1.35;word-break:break-word}' +
       '.rcvp-ten{display:block;color:var(--rc-text-muted);font-size:11px;line-height:1.3;word-break:break-word;margin-top:1px}';
     document.head.appendChild(s);
   }

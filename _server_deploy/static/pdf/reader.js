@@ -10961,7 +10961,7 @@ window.onChat = () => {
 };
 // 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
 function _openChat(lastSelText, context) {
-  let html = '<div style="font-size:12.5px;line-height:1.65">'
+  let html = '<div style="font-size:12px;line-height:1.65">'
     + '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px"><span class="rc-i rc-i-pin"></span> 原文</div>'
     + '<div style="color:var(--rc-text-strong);white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
   if (context && context.trim() !== lastSelText.trim()) {
@@ -11371,14 +11371,14 @@ async function _connProbe() {
     '.asst-jump:active{background:#1d3a52}' +
     '.asst-hl-row{display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:8px;margin-top:5px;background:#161d33}' +
     '.asst-hl-sw{flex:0 0 auto;width:12px;height:12px;border-radius:3px;border:1px solid #ffffff33}' +
-    '.asst-hl-tx{flex:1 1 auto;min-width:0;font-size:12.5px;color:#cdd8f5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+    '.asst-hl-tx{flex:1 1 auto;min-width:0;font-size:12px;color:#cdd8f5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
     '.asst-hl-del{flex:0 0 auto;background:#3a1d1d;border:1px solid #6b3535;color:#ffd0d0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer}' +
     '.asst-hl-del:active{background:#522828}.asst-hl-del:disabled{opacity:.5}' +
     '.asst-hl-redo{flex:0 0 auto;background:#1d3a2a;border:1px solid #2f6347;color:#bfead0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer}.asst-hl-redo:active{background:#244a35}.asst-hl-redo:disabled{opacity:.5}' +   // M9:删完转「↪ 重做」
     '.asst-edit-card{align-self:flex-start;max-width:92%;background:#13203a;border:1px solid #294060;border-radius:11px;padding:8px 11px;display:flex;flex-direction:column;gap:7px}' +
-    '.asst-edit-h{font-size:12.5px;color:#bfe0c8}' +
+    '.asst-edit-h{font-size:12px;color:#bfe0c8}' +
     '.asst-edit-chips{display:flex;flex-wrap:wrap;gap:6px}' +
-    '.asst-edit-undo{align-self:flex-start;background:#26344f;border:1px solid #3a5273;color:var(--rc-text-strong);border-radius:8px;padding:3px 12px;font-size:12.5px;cursor:pointer}' +
+    '.asst-edit-undo{align-self:flex-start;background:#26344f;border:1px solid #3a5273;color:var(--rc-text-strong);border-radius:8px;padding:3px 12px;font-size:12px;cursor:pointer}' +
     '.asst-edit-undo:active{background:#2f4061}.asst-edit-undo:disabled{opacity:.55}' +
     '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid var(--rc-bg-raised)}' +
     '#asst-quick button{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text);border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
@@ -11397,7 +11397,7 @@ async function _connProbe() {
     '.asst-fb-pop{position:absolute;right:0;bottom:28px;z-index:20;width:320px;max-width:88vw;background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);border-radius:11px;padding:9px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:5px}' +
     '.afp-l-btn{cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px;-webkit-tap-highlight-color:transparent}' +
     '.afp-l-btn:active{opacity:.7}' +
-    '.afp-detail{white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;background:#0a1020;border:1px solid var(--rc-bg-raised);border-radius:8px;padding:8px 10px;margin:2px 0 4px;font-size:11.5px;color:#bcd0ee;line-height:1.55;-webkit-overflow-scrolling:touch}' +
+    '.afp-detail{white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;background:#0a1020;border:1px solid var(--rc-bg-raised);border-radius:8px;padding:8px 10px;margin:2px 0 4px;font-size:11px;color:#bcd0ee;line-height:1.55;-webkit-overflow-scrolling:touch}' +
     '.afp-h{font-size:11px;color:var(--rc-text-muted);margin-bottom:2px}' +
     '.afp-step{display:flex;align-items:center;gap:7px;font-size:12px;line-height:1.5}' +
     '.afp-l{color:var(--rc-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}' +
@@ -12131,7 +12131,7 @@ async function _connProbe() {
       if (!d || !Array.isArray(d.items) || !d.items.length) return;
       var fileRel = d.file_rel || '';
       var box = document.createElement('div'); box.className = 'asst-msg asst-a';
-      var head = document.createElement('div'); head.style.cssText = 'margin-bottom:4px;opacity:.85;font-size:12.5px';
+      var head = document.createElement('div'); head.style.cssText = 'margin-bottom:4px;opacity:.85;font-size:12px';
       head.textContent = '共 ' + d.items.length + ' 处高亮 —— 点「跳转」去看,点「删除」移除:';
       box.appendChild(head);
       d.items.forEach(function (it) {

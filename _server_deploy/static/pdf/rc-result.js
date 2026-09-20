@@ -69,9 +69,9 @@
       '#result-content img,#result-content svg{background:#fff;border-radius:8px;padding:10px;max-width:100%;height:auto;box-sizing:border-box;display:block;margin:12px auto}' +
       '#result-modal .actions{flex-shrink:0;margin-top:14px;padding-top:10px;border-top:1px solid var(--rc-border);display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;align-items:center}' +
       '#result-followup{flex-shrink:0;display:flex;gap:6px;margin-top:10px}' +
-      '#result-followup input{flex:1;background:var(--rc-bg-canvas,#000);border:1px solid var(--rc-border,rgba(84,84,88,.62));color:var(--rc-text-strong,#fff);border-radius:var(--rc-radius-sm,6px);padding:8px 11px;font-size:12.5px}' +
+      '#result-followup input{flex:1;background:var(--rc-bg-canvas,#000);border:1px solid var(--rc-border,rgba(84,84,88,.62));color:var(--rc-text-strong,#fff);border-radius:var(--rc-radius-sm,6px);padding:8px 11px;font-size:12px}' +
       '#result-followup input:focus{outline:none;border-color:var(--rc-border-accent,rgba(10,132,255,.58))}' +
-      '#result-followup button{background:var(--rc-bg-active,rgba(10,132,255,.26));border:1px solid var(--rc-border-accent,rgba(10,132,255,.58));color:#fff;border-radius:var(--rc-radius-sm,6px);padding:8px 16px;cursor:pointer;font-size:12.5px;white-space:nowrap}' +
+      '#result-followup button{background:var(--rc-bg-active,rgba(10,132,255,.26));border:1px solid var(--rc-border-accent,rgba(10,132,255,.58));color:#fff;border-radius:var(--rc-radius-sm,6px);padding:8px 16px;cursor:pointer;font-size:12px;white-space:nowrap}' +
       '#result-followup button:hover{background:#2c4f86}' +
       '#result-modal .actions #vocab-actions{display:none;flex:1;align-items:center;gap:8px;flex-wrap:wrap}' +
       '#result-modal .actions #vocab-actions.show{display:flex}' +
@@ -719,7 +719,7 @@
     text = text || ''; ctx = ctx || '';
     _applyOpts(opts);
     _curMeta = { text: text, sentence: ctx || text, kind: (opts && opts.kind) || 'note' };
-    var html = '<div style="font-size:12.5px;line-height:1.65">' +
+    var html = '<div style="font-size:12px;line-height:1.65">' +
       '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px"><span class="rc-i rc-i-pin"></span> 原文</div>' +
       '<div style="color:var(--rc-text-strong);white-space:pre-wrap">' + _esc(text) + '</div>';
     if (ctx && ctx.trim() !== text.trim()) {

@@ -698,7 +698,7 @@ window.onChat = () => {
 };
 // 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
 function _openChat(lastSelText, context) {
-  let html = '<div style="font-size:12.5px;line-height:1.65">'
+  let html = '<div style="font-size:12px;line-height:1.65">'
     + '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px"><span class="rc-i rc-i-pin"></span> 原文</div>'
     + '<div style="color:var(--rc-text-strong);white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
   if (context && context.trim() !== lastSelText.trim()) {

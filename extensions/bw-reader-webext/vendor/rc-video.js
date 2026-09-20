@@ -274,7 +274,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-vid-src.is-yt{background:rgba(220,40,40,.92)}' +       /* YouTube 红 */
       '.rc-vid-dur{position:absolute;right:6px;bottom:6px;z-index:3;font-size:10px;line-height:1;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:#fff;pointer-events:none}' +
       '.rc-vid-meta{padding:7px 9px}' +
-      '.rc-vid-title{font-size:12.5px;color:var(--rc-text-strong);line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
+      '.rc-vid-title{font-size:12px;color:var(--rc-text-strong);line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.rc-vid-ch{font-size:11px;color:var(--rc-text-muted);margin-top:3px}' +
       /* 中文字幕:🇨🇳字幕 / 🎯精翻 两档按钮 + 下方字幕条(跟播放进度高亮) */
       /* 偏好 toggle:混进 quick 栏(同「模型」一行),尺寸/圆角对齐 quick button,用透明描边+选中蓝区分是开关不是即时动作 */

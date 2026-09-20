@@ -343,13 +343,13 @@
         'text-align:left;max-width:100%;word-break:break-word;position:relative;' +
         'animation:vcCapIn .34s var(--rc-ease-out);transition:opacity .3s}' +
       '@keyframes vcCapIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}' +
-      '#vc-cap .vc-cap-prev{opacity:.42;font-size:13.5px;font-weight:400;padding-bottom:1px}' +   // 上一句:淡一档、小一档
+      '#vc-cap .vc-cap-prev{opacity:.42;font-size:13px;font-weight:400;padding-bottom:1px}' +   // 上一句:淡一档、小一档
       // 你说的话:左侧一条蓝细条(不整块变蓝);AI 无条
       '#vc-cap .vc-cap-u::before{content:"";position:absolute;left:0;top:7px;bottom:7px;width:2.5px;border-radius:2px;background:var(--rc-accent)}' +
       '#vc-cap .vc-cap-u{color:rgba(255,255,255,.92)}' +
       // 状态行 / "正在听":做成小 chip,不跟字幕同宽
       '#vc-cap .vc-cap-st,#vc-cap .vc-cap-wait{align-self:flex-start;display:flex;align-items:center;gap:7px;' +
-        'font-size:12.5px;font-weight:450;color:rgba(255,255,255,.8);background:rgba(255,255,255,.09);' +
+        'font-size:12px;font-weight:450;color:rgba(255,255,255,.8);background:rgba(255,255,255,.09);' +
         'border-radius:10px;padding:4px 10px 4px 9px;margin-top:3px;box-shadow:none;letter-spacing:0}' +
       '#vc-cap .vc-cap-st svg,#vc-cap .vc-cap-wait svg{width:13px;height:13px;flex:none;opacity:.85}' +
       '#vc-cap .vc-cap-st.vc-st-ok{background:rgba(48,209,88,.16);color:#a8ebbb}' +
@@ -476,7 +476,7 @@
       '.vc-card.vc-resizing{transition:none!important;will-change:width,height;box-shadow:0 18px 46px rgba(0,0,0,.52),0 0 0 1px rgba(157,140,255,.68)!important}' +
       '@keyframes vcRsIn{from{opacity:0;transform:scale(.65)}to{opacity:1;transform:none}}' +
       '.vc-card.vc-lift{box-shadow:0 22px 60px rgba(0,0,0,.55),0 0 0 0.5px rgba(255,255,255,.2);cursor:grabbing}' +
-      '.vc-card-sum{display:none;font-size:12.5px;color:#aab8d4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.vc-card-sum{display:none;font-size:12px;color:#aab8d4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '.vc-card.vc-min .vc-card-bd{display:none}.vc-card.vc-min .vc-card-sum{display:block}' +
       '.vc-card.vc-min{padding:9px 13px}' +
       // ── 工具指示器 v2(用户设计):在这张卡上加**第三态=圆形标记**,并让标记本身当形态控制按钮 ──
@@ -596,7 +596,7 @@
         'transform:scale(.94);transition:transform .26s var(--rc-ease-spring)}' +
       '#vc-dtl.on .vc-dtl-w{transform:scale(1)}' +
       '.vc-dtl-h{display:flex;align-items:center;gap:8px;padding:13px 15px;border-bottom:0.5px solid rgba(255,255,255,.1);flex:none}' +
-      '.vc-dtl-h b{flex:1;font-size:14.5px;font-weight:650}' +
+      '.vc-dtl-h b{flex:1;font-size:14px;font-weight:650}' +
       '.vc-dtl-h .vc-dtl-x{width:26px;height:26px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#dfe6f5;' +
         'display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;font-size:14px;line-height:1}' +
       '.vc-dtl-b{overflow-y:auto;padding:10px 13px 14px;-webkit-overflow-scrolling:touch}' +
@@ -604,41 +604,41 @@
       '.vc-dtl-r>.h{display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
       '.vc-dtl-r>.h:active{background:rgba(255,255,255,.07)}' +
       '.vc-dtl-r .nm{flex:1;font-size:13px;color:#e6ecf8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-      '.vc-dtl-r .md{flex:none;font-size:10.5px;padding:2px 7px;border-radius:6px;background:rgba(123,108,255,.2);color:#c3b7ff;font-weight:600}' +
+      '.vc-dtl-r .md{flex:none;font-size:10px;padding:2px 7px;border-radius:6px;background:rgba(123,108,255,.2);color:#c3b7ff;font-weight:600}' +
       '.vc-dtl-r .sc{flex:none;font-size:11px;color:#8195b8;font-variant-numeric:tabular-nums}' +
       '.vc-dtl-r .ar{flex:none;font-size:10px;color:#8195b8;transition:transform .2s}' +
       '.vc-dtl-r.on .ar{transform:rotate(90deg)}' +
-      '.vc-dtl-r .bd{padding:2px 11px 11px;font-size:12.5px;line-height:1.6;color:#c9d4e8;word-break:break-word;max-height:230px;overflow:auto}' +
+      '.vc-dtl-r .bd{padding:2px 11px 11px;font-size:12px;line-height:1.6;color:#c9d4e8;word-break:break-word;max-height:230px;overflow:auto}' +
       '.vc-dtl-r .bd pre{white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:11px}' +
       // 140(用户):工具的说明 / 内部 prompt —— 凡是会进 AI 并实际产生影响的,都能在这里直接改
       // 143:调用前垫话策略(详情窗里的分段控件)
       // 148:工具卡面板的「模型」段(跟 .vc-fl 同一套配色/间距,视觉上是同族)
       '.vc-md{margin-bottom:12px;padding-bottom:11px;border-bottom:0.5px solid rgba(255,255,255,.1)}' +
-      '.vc-md-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
+      '.vc-md-t{font-size:11px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
       '.vc-md-t em{font-style:normal;color:var(--rc-text-dim);font-weight:400}' +
       '.vc-md-r{display:flex;gap:6px}' +
       '.vc-md-r select{flex:1;min-width:0;padding:7px 8px;font-size:12px;font-weight:600;cursor:pointer;\n        border-radius:10px;border:0.5px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);\n        color:#c6d2e8;-webkit-appearance:none;appearance:none;text-overflow:ellipsis}' +
       '.vc-md-fast{flex:none;border-radius:10px;border:.5px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);color:#8fa1c4;padding:7px 9px;font-size:11px;font-weight:650;cursor:pointer}' +
       '.vc-md-fast.on{background:rgba(39,165,104,.20);border-color:rgba(70,220,143,.55);color:#9af0c7}.vc-md-fast:disabled{opacity:.38;cursor:not-allowed}' +
-      '.vc-md-st{font-size:10.5px;color:var(--rc-text-dim);margin-top:5px}' +
+      '.vc-md-st{font-size:10px;color:var(--rc-text-dim);margin-top:5px}' +
       '.vc-fl{margin-bottom:12px;padding-bottom:11px;border-bottom:0.5px solid rgba(255,255,255,.1)}' +
-      '.vc-fl-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
+      '.vc-fl-t{font-size:11px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
       '.vc-fl-t em{font-style:normal;color:var(--rc-text-dim);font-weight:400}' +
       '.vc-fl-seg{display:flex;gap:0;border-radius:10px;overflow:hidden;border:0.5px solid rgba(255,255,255,.14)}' +
       '.vc-fl-seg button{flex:1;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;border:none;\n        background:rgba(255,255,255,.05);color:#9db0d4;-webkit-appearance:none;appearance:none;\n        border-right:0.5px solid rgba(255,255,255,.12)}' +
       '.vc-fl-seg button:last-child{border-right:none}' +
       '.vc-fl-seg button.on{background:var(--rc-indigo);color:#fff}' +
-      '.vc-fl-st{font-size:10.5px;color:var(--rc-text-dim);margin-top:5px}' +
+      '.vc-fl-st{font-size:10px;color:var(--rc-text-dim);margin-top:5px}' +
       '.vc-tp{margin-top:12px;padding-top:10px;border-top:0.5px solid rgba(255,255,255,.1)}' +
-      '.vc-tp-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:2px}' +
+      '.vc-tp-t{font-size:11px;color:#9db0d4;font-weight:600;margin-bottom:2px}' +
       '.vc-tp-t em{font-style:normal;color:var(--rc-text-dim);font-weight:400}' +
       '.vc-tp-f{margin-top:9px}' +
-      '.vc-tp-f label{display:block;font-size:11.5px;color:#c6d2e8;margin-bottom:4px}' +
+      '.vc-tp-f label{display:block;font-size:11px;color:#c6d2e8;margin-bottom:4px}' +
       '.vc-tp-f textarea{width:100%;box-sizing:border-box;min-height:74px;resize:vertical;border-radius:10px;padding:8px 10px;' +
         'background:rgba(0,0,0,.28);border:0.5px solid rgba(255,255,255,.14);color:#e6ecf8;' +
-        'font-size:12.5px;line-height:1.55;font-family:-apple-system,system-ui,sans-serif;-webkit-appearance:none}' +
+        'font-size:12px;line-height:1.55;font-family:-apple-system,system-ui,sans-serif;-webkit-appearance:none}' +
       '.vc-tp-f textarea:focus{outline:none;border-color:var(--rc-indigo);box-shadow:0 0 0 2px rgba(123,108,255,.25)}' +
-      '.vc-tp-f .st{font-size:10.5px;color:var(--rc-text-dim);margin-top:3px}' +
+      '.vc-tp-f .st{font-size:10px;color:var(--rc-text-dim);margin-top:3px}' +
       '.vc-tp-btns{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}' +
       '.vc-tp-btns button{flex:1;min-width:78px;border-radius:10px;padding:8px 6px;font-size:12px;font-weight:600;cursor:pointer;' +
         'border:0.5px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#dbe4f5;-webkit-appearance:none}' +
@@ -653,8 +653,8 @@
         'transition:transform .12s}' +
       '.vc-fp-tts:active{transform:scale(.85)}' +
       '.vc-fp-tts svg{width:11px;height:11px}' +
-      '.vc-fn-t{flex:1;font-size:12.5px;color:#e2e9f7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-      '.vc-fn-m{flex:none;font-size:10.5px;color:var(--rc-text-dim);font-variant-numeric:tabular-nums}' +
+      '.vc-fn-t{flex:1;font-size:12px;color:#e2e9f7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.vc-fn-m{flex:none;font-size:10px;color:var(--rc-text-dim);font-variant-numeric:tabular-nums}' +
       '.vc-fn-x{flex:none;font-size:10px;color:var(--rc-text-dim);transition:transform .2s}' +
       '.vc-fn.on .vc-fn-x{transform:rotate(90deg)}' +
       // 连接线:表示数据从上一个方块流到下一个
@@ -663,17 +663,17 @@
         'border-bottom:1.5px solid color-mix(in srgb,var(--vc-tc) 60%,transparent);transform:rotate(45deg)}' +
       // 方块展开出来的载荷(markdown / 公式 / 图 / JSON 都在这里正常渲染)
       '.vc-fp{margin:6px 0 0 19px;padding:8px 10px;border-left:1.5px solid rgba(255,255,255,.12);' +
-        'font-size:12.5px;line-height:1.6;color:#dbe4f5;max-height:230px;overflow:auto;word-break:break-word}' +
+        'font-size:12px;line-height:1.6;color:#dbe4f5;max-height:230px;overflow:auto;word-break:break-word}' +
       '.vc-fp pre,.vc-fp code{font-family:ui-monospace,Menlo,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:#b9c6e0}' +
       '.vc-fp img{max-width:100%;border-radius:6px;display:block;margin-top:5px}' +
       '.vc-fp p{margin:.35em 0}.vc-fp ul,.vc-fp ol{margin:.35em 0;padding-left:1.2em}' +
       // 头部:标题 + 状态(一行长条里状态就显示在这)
       '.vc-hd-l{flex:none;font-weight:600}' +
-      '.vc-hd-s{flex:1;font-size:11.5px;color:#93a4c6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.vc-hd-s{flex:1;font-size:11px;color:#93a4c6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       // Anki 完整卡片预览(正/反面翻页 + 挖空 + 公式/图由 MathJax/img 渲染)
       '.vc-fc{margin-top:7px;background:rgba(0,0,0,.26);border:0.5px solid rgba(255,255,255,.1);border-radius:9px;padding:7px 9px;color:#e6ecf8;font-size:13px}' +
       '.vc-fc img{max-width:100%;border-radius:6px;margin-top:5px;display:block}' +
-      '.vc-fc-t{font-size:9.5px;letter-spacing:.1em;color:#7c8bab;font-weight:700;margin-bottom:3px}' +
+      '.vc-fc-t{font-size:9px;letter-spacing:.1em;color:#7c8bab;font-weight:700;margin-bottom:3px}' +
       // 删掉「正面/背面」标题后，靠底色深一档区分背面（.vc-fc 本身已有边框和间距）。
       '.vc-fc-back{background:rgba(0,0,0,.36)}' +
       '.vc-cz{background:rgba(123,108,255,.22);border-bottom:1.5px solid var(--rc-indigo);border-radius:3px;padding:0 5px;color:#cdc6ff;font-weight:600}' +
@@ -731,7 +731,7 @@
       'scroll-snap-type:x proximity;scroll-padding:0 50%}' +
       '.vc-dkp-cell{scroll-snap-align:center;transition:width .28s ease}' +
       '.vc-dkp-cell[data-lvl="0"]{width:min(76vw,330px)}' +
-      '.vc-dkp-cell[data-lvl="0"] .vc-dkp-txt{-webkit-line-clamp:9;font-size:12.5px}' +
+      '.vc-dkp-cell[data-lvl="0"] .vc-dkp-txt{-webkit-line-clamp:9;font-size:12px}' +
       '.vc-dkp-cell[data-lvl="1"]{width:180px}' +
       '.vc-dkp-cell[data-lvl="1"] .vc-dkp-txt{-webkit-line-clamp:3}' +
       '.vc-dkp-cell[data-lvl="2"]{width:112px}' +
@@ -747,20 +747,20 @@
       '.vc-dk-card.vc-picked{box-shadow:0 0 0 1.5px rgba(123,108,255,.85)}' +
       '.vc-dk-card.del-mark{box-shadow:0 0 0 1.5px rgba(255,90,80,.9);position:relative}' +
       '.vc-dk-card.del-mark::after{content:"✕";position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:#e0463c;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center}' +
-      '.vc-dkp-txt{color:#aab6cf;font-size:11.5px;line-height:1.45;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
+      '.vc-dkp-txt{color:#aab6cf;font-size:11px;line-height:1.45;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.vc-dk-empty{color:#7f8aa6;font-size:12px;text-align:center;padding:12px 4px}' +
       '.vc-drag-ghost{position:fixed;left:0;top:0;z-index:2147481460;pointer-events:none;opacity:.92;border-radius:14px;overflow:hidden;color:#dde6f5;font-size:13px;line-height:1.5;' +
       'background:rgba(30,32,42,.94);border:1px solid rgba(126,171,255,.48);box-shadow:0 18px 50px rgba(0,0,0,.55),0 0 0 2px rgba(126,171,255,.15);' +
       'padding:10px 12px;max-height:min(280px,60vh);contain:layout paint;will-change:transform;transition:none!important}' +
       '.vc-drag-ghost *{animation:none!important;transition:none!important}' +
-      '.vc-dk-m{font-size:10.5px;color:#6f7d9e;margin-top:3px}' +
+      '.vc-dk-m{font-size:10px;color:#6f7d9e;margin-top:3px}' +
       '.vc-fav-b{position:absolute;right:28px;bottom:5px;width:18px;height:18px;border-radius:50%;border:none;cursor:pointer;' +
       'background:rgba(255,255,255,.1);color:#8fa0c2;display:flex;align-items:center;justify-content:center;padding:0}' +
       '.vc-fav-b.on{color:#ffd54f;background:rgba(255,213,79,.15)}' +
       '.vc-pin-chip{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:10px;' +
       'background:rgba(123,108,255,.12);border:1px solid rgba(123,108,255,.4);max-width:100%}' +
       '.vc-pc-l{font-size:12px;color:#c9bcff;font-weight:600;flex:none}' +
-      '.vc-pc-s{font-size:11.5px;color:#8d97b4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}' +
+      '.vc-pc-s{font-size:11px;color:#8d97b4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}' +
       '.vc-pc-x{margin-left:auto;flex:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#cfd6ea;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
       // 70 结构化信息卡(天气/新闻/事实)+双击选中态(带入 2.1 上下文)
       // 结果卡头部 = 直接套用我们方块的头部(小字主题色 + 整条当把手);⠿ 那个多余的拖动按钮已删
@@ -806,19 +806,19 @@
       '.vc-ig-img{width:100%;display:block;border-radius:10px 10px 0 0;cursor:pointer}' +
       // 图卡说明整段显示（2026-09-06 用户实拍：AI 给人物照配的一段简介被截成一行省略号）。
       // 说明是内容不是标签：能换行就换行，长了让卡片长高，不裁。
-      '.vc-ig-t{font-size:11.5px;line-height:1.45;color:#b7c4dc;padding:4px 7px 6px;white-space:normal;overflow:visible;text-overflow:clip;word-break:break-word}' +
+      '.vc-ig-t{font-size:11px;line-height:1.45;color:#b7c4dc;padding:4px 7px 6px;white-space:normal;overflow:visible;text-overflow:clip;word-break:break-word}' +
       '.vc-vg-wrap{position:relative}' +
       '.vc-vg-empty{display:flex;align-items:center;justify-content:center;min-height:84px;color:#7d8db0;font-size:11px;background:#10182b}' +
       '.vc-vg-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:34px;height:34px;border-radius:50%;border:none;' +
       'background:rgba(0,0,0,.6);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2}' +
       '.vc-vg-tag{position:absolute;top:4px;left:4px;z-index:2;font-size:9px;padding:1px 5px;border-radius:5px;background:#c00;color:#fff}' +
       '.vc-vg-tag.bili{background:#fb7299}' +
-      '.vc-vg-ch{color:#7d8db0;font-size:9.5px}' +
+      '.vc-vg-ch{color:#7d8db0;font-size:9px}' +
       '.vc-ig-x{position:absolute;top:4px;right:4px;width:18px;height:18px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;' +
       'font-size:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;z-index:2}' +
       '.vc-if-fa{font-size:15px;font-weight:600}' +
-      '.vc-if-fd{font-size:12.5px;color:#b8c6e2;margin-top:3px}' +
-      '.vc-if-g{font-size:13.5px;line-height:1.55}' +
+      '.vc-if-fd{font-size:12px;color:#b8c6e2;margin-top:3px}' +
+      '.vc-if-g{font-size:13px;line-height:1.55}' +
       '.vc-if-srcs{margin-top:7px;font-size:11px}.vc-if-srcs a{color:#7ea2e6;text-decoration:none}' +
       '.vc-pinnable{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}' +
       '.vc-picked{box-shadow:0 0 0 2px rgba(123,108,255,.85),0 12px 40px rgba(0,0,0,.4) !important;border-radius:16px}' +

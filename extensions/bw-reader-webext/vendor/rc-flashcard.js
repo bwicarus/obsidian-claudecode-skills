@@ -298,14 +298,14 @@ if (window.__bwPwaProviderOnly) return;
       '.fc-lbl{font-size:12px;color:var(--rc-text-dim,rgba(235,235,245,.38));margin-bottom:5px;font-weight:650;letter-spacing:.02em}' +
       '.fc-ed{width:100%;box-sizing:border-box;background:#10182c;border:1px solid var(--rc-border);border-radius:8px;color:var(--rc-text);font:inherit;font-size:14px;line-height:1.6;padding:10px 12px;min-height:72px;resize:vertical;margin-bottom:8px}' +
       '.fc-btns{display:flex;gap:7px;margin-top:10px}' +
-      '.fc-btns button{flex:1;border-radius:9px;padding:7px 0;font-size:12.5px;cursor:pointer;border:1px solid var(--rc-border);background:var(--rc-bg-raised);color:var(--rc-text-strong);-webkit-tap-highlight-color:transparent}' +
+      '.fc-btns button{flex:1;border-radius:9px;padding:7px 0;font-size:12px;cursor:pointer;border:1px solid var(--rc-border);background:var(--rc-bg-raised);color:var(--rc-text-strong);-webkit-tap-highlight-color:transparent}' +
       // 上下滑手势的视觉反馈:卡片跟手位移 + 到阈值后辉光与提示。
       // 按钮**保留**(只收窄):手势在不同设备上的可靠性没法在这里验证,
       // 留着按钮意味着即使手势失灵也不会让卡片没法操作。
       '.fc-slide.fc-swiping{transition:none}' +
       '.fc-slide.fc-swipe-settle{transition:transform .22s var(--rc-ease)}' +
       '.fc-swipe-tip{position:absolute;left:0;right:0;display:flex;align-items:center;justify-content:center;'
-        + 'font-size:12.5px;font-weight:650;letter-spacing:.03em;pointer-events:none;opacity:0;transition:opacity .14s;z-index:4}' +
+        + 'font-size:12px;font-weight:650;letter-spacing:.03em;pointer-events:none;opacity:0;transition:opacity .14s;z-index:4}' +
       '.fc-swipe-tip.up{top:6px;color:#fca5a5}' +
       '.fc-swipe-tip.down{bottom:6px;color:#86efac}' +
       '.fc-swipe-tip.on{opacity:1}' +

@@ -475,7 +475,7 @@
       var sb = document.createElement('span');
       sb.className = 'up2-b-btn'; sb.setAttribute('role', 'button'); sb.setAttribute('tabindex', '0');
       sb.textContent = '💾 保存为工具';
-      sb.style.cssText = 'display:inline-flex;padding:6px 14px;border-radius:9px;background:#3b6fd4;color:#fff;font-size:12.5px;cursor:pointer;-webkit-appearance:none;appearance:none';
+      sb.style.cssText = 'display:inline-flex;padding:6px 14px;border-radius:9px;background:#3b6fd4;color:#fff;font-size:12px;cursor:pointer;-webkit-appearance:none;appearance:none';
       if (isCli) { var _hint = document.createElement('div'); _hint.className = 'rc-flow-selhint'; _hint.textContent = '↓ 点工具前的圆点取消选中,只把选中的打包成工具'; sv.appendChild(_hint); }
       sb.addEventListener('click', function (ev) {
         ev.stopPropagation();

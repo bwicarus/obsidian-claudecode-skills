@@ -5311,7 +5311,7 @@ if (window.__bwPwaProviderOnly) return;
       });
       if (!visible.length) {
         box.innerHTML =
-          '<div style="color:#5a6680;font-size:12.5px;padding:8px 2px">' +
+          '<div style="color:#5a6680;font-size:12px;padding:8px 2px">' +
           '没有待办通知。</div>';
         return;
       }
@@ -5352,13 +5352,13 @@ if (window.__bwPwaProviderOnly) return;
       var box = document.getElementById('bw-ntf-list');
       if (!box) return;
       box.innerHTML =
-        '<div style="color:#5a6680;font-size:12.5px;padding:8px 2px">加载…</div>';
+        '<div style="color:#5a6680;font-size:12px;padding:8px 2px">加载…</div>';
       queryNotifications().then(function (items) {
         lastItems = items;
         render(box, items);
       }).catch(function () {
         box.innerHTML =
-          '<div style="color:#5a6680;font-size:12.5px;padding:8px 2px">' +
+          '<div style="color:#5a6680;font-size:12px;padding:8px 2px">' +
           '通知暂不可读（电脑桥离线时没有通知）。</div>';
       });
     }

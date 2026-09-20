@@ -22,8 +22,8 @@ if (window.__bwPwaProviderOnly) return;
     var css = document.createElement('style'); css.id = 'rc-hl-css';
     css.textContent =
       '.rc-hl-pop{position:fixed;z-index:140;min-width:min(280px,92vw);max-width:min(380px,92vw);box-sizing:border-box;background:var(--rc-bg-popover,rgba(30,30,32,.78));backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border:1px solid var(--rc-border-popover,rgba(255,255,255,.14));border-radius:var(--rc-radius-popover,11px);box-shadow:var(--rc-shadow-pop,0 10px 30px rgba(0,0,0,.6));padding:10px;color:#e6edf3;-webkit-tap-highlight-color:transparent}' +
-      '.rc-hl-pop .rc-hl-prev{font-size:12.5px;line-height:1.5;color:var(--rc-text-strong);background:rgba(0,0,0,.25);border-left:2px solid var(--rc-accent);border-radius:4px;padding:6px 9px;margin-bottom:8px;word-break:break-word}' +
-      '.rc-hl-pop .rc-hl-sent{font-size:11.5px;line-height:1.5;color:#9fb0d6;margin-bottom:8px;word-break:break-word}' +
+      '.rc-hl-pop .rc-hl-prev{font-size:12px;line-height:1.5;color:var(--rc-text-strong);background:rgba(0,0,0,.25);border-left:2px solid var(--rc-accent);border-radius:4px;padding:6px 9px;margin-bottom:8px;word-break:break-word}' +
+      '.rc-hl-pop .rc-hl-sent{font-size:11px;line-height:1.5;color:#9fb0d6;margin-bottom:8px;word-break:break-word}' +
       // AI 译文/解释正文行(照搬 PDF #hl-popover .hl-snip-row.body:带 kind 标签 译文/解释/备注)
       '.rc-hl-pop .rc-hl-body{font-size:12px;line-height:1.5;color:var(--rc-text-strong);margin-bottom:8px;word-break:break-word}' +
       // 预览块单行省略 + 点击展开(照搬 PDF #hl-popover .hl-snip-content / .expanded)

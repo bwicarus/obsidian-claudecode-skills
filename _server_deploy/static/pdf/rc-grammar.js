@@ -114,7 +114,7 @@
       '.rc-grammar .grammar-block .gb-fu-answers{display:none;padding:0 12px}' +
       '.rc-grammar .grammar-block.open .gb-fu-answers{display:block}' +
       '.rc-grammar .grammar-block .gb-fu-q{margin-top:10px;padding-top:8px;border-top:1px solid var(--rc-border);color:var(--rc-text-strong);font-size:12px;font-weight:600}' +
-      '.rc-grammar .grammar-block .gb-fu-a{margin-top:5px;color:var(--rc-text);font-size:12.5px;line-height:1.6}' +
+      '.rc-grammar .grammar-block .gb-fu-a{margin-top:5px;color:var(--rc-text);font-size:12px;line-height:1.6}' +
       '.rc-grammar .grammar-block .gb-followup{display:none;gap:6px;padding:8px 12px 12px}' +
       '.rc-grammar .grammar-block.open .gb-followup{display:flex}' +
       '.rc-grammar .grammar-block .gb-fu-input{flex:1;min-width:0;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 10px;font-size:12px}' +

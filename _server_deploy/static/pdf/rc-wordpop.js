@@ -124,13 +124,13 @@
       '#result-content .jk-tag.jk-kun{background:#9fe0b8}',
       '#result-content .jk-mean{color:#8fb0d8;font-size:12px;margin-top:3px}',
       '#result-content .jp-ex-ja{color:#dfe9ff;font-size:14px;line-height:1.6;margin-top:7px}',
-      '#result-content .jp-ex-zh{color:#8fb0d8;font-size:12.5px;line-height:1.45}',
+      '#result-content .jp-ex-zh{color:#8fb0d8;font-size:12px;line-height:1.45}',
       '#result-content .jp-ai-btn{margin-top:14px;width:100%;background:#1a2748;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:8px;padding:9px;cursor:pointer;font-size:13px}',
       '#result-content .jp-ai-btn:disabled{opacity:.6}',
       '#result-content .jp-ai-out{margin-top:10px;color:var(--rc-text-strong);line-height:1.7}',
       '#word-pop .wp-freq{color:var(--rc-text-dim);font-size:11px;margin-left:auto}',
       '#word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:var(--rc-text-strong);cursor:pointer;border-top:1px solid var(--rc-border)}',
-      '#word-pop .wp-pos-tag{display:inline-block;font-size:10.5px;color:var(--rc-text-dim);background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:4px;padding:0 5px;margin-right:7px;vertical-align:1px;font-weight:500}',
+      '#word-pop .wp-pos-tag{display:inline-block;font-size:10px;color:var(--rc-text-dim);background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:4px;padding:0 5px;margin-right:7px;vertical-align:1px;font-weight:500}',
       // 日语变形分析行(原形 + 语法标签);word-pop 小框 + 完整字典(result-content)共用
       '#word-pop .jp-inflect,#result-content .jp-inflect{font-size:12px;color:#9fb4cf;padding:6px 14px 0;line-height:1.5}',
       '#result-content .jp-inflect{padding:6px 0 0}',
@@ -1816,10 +1816,10 @@
       html += '<div class="jp-zh">' + esc(fullMeaning) + '</div>';
     }
     if (d.meaning_source === 'pc-codex-cli') {
-      html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">电脑 ReaderPC · Codex CLI 上下文中文释义' +
+      html += '<div style="margin-top:4px;color:#6f7e96;font-size:10px">电脑 ReaderPC · Codex CLI 上下文中文释义' +
         (d.cli_cached ? ' · 本地缓存' : '') + '</div>';
     } else if (d.source === 'local-jmdict') {
-      html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">App 本地 JMdict' +
+      html += '<div style="margin-top:4px;color:#6f7e96;font-size:10px">App 本地 JMdict' +
         (d.local_zh ? ' · 中文 Wiktionary 释义' : ' · 暂无本地中文释义') + '</div>';
     }
     html += _jpInflectHtml(d.inflect, word, d.lemma);   // 当前形 + 原形 + 语法标签
