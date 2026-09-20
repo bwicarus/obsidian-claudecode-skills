@@ -35,6 +35,7 @@ final class VoiceSession: ObservableObject {
 
     private let audio = NativeAudio()
     private var socket: URLSessionWebSocketTask?
+    private var conversationControl: URLSessionWebSocketTask?
     private var receiver: Task<Void, Never>?
     private var connectionTimeout: Task<Void, Never>?
     private var audioSender: Task<Void, Never>?
@@ -57,7 +58,7 @@ final class VoiceSession: ObservableObject {
     private var wantsConnection = false
     private var reconnectExpectedThreadID: String?
     private var handshakeStockCode: String?
-    private var newConversationRequested = false
+    @Published private(set) var newConversationRequested = false
 
     func start(client: APIClient, deviceID: String, stockCode: String?, systemCallID: String? = nil) async {
         guard !isStarted else { return }
@@ -172,12 +173,71 @@ final class VoiceSession: ObservableObject {
         }
     }
 
-    func newConversation() async {
-        guard isConnected, let task = socket else { return }
+    func newConversation(client: APIClient, deviceID: String) async {
+        guard !newConversationRequested, !isStarted || isConnected else { return }
+        guard let token = client.token, !token.isEmpty else {
+            error = "请先登录，再创建新对话。"
+            return
+        }
         let current = generation
         newConversationRequested = true
         error = nil
+        if !isConnected {
+            // The existing control route accepts thread.new without starting
+            // Codex or requesting microphone access. Wait for its receipt before
+            // clearing the visible conversation, including on a fresh launch.
+            defer { if current == generation { newConversationRequested = false } }
+            do {
+                var request = URLRequest(url: try client.webSocketURL(deviceID: deviceID))
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                let control = URLSession.shared.webSocketTask(with: request)
+                conversationControl = control
+                let timeout = Task {
+                    do { try await Task.sleep(nanoseconds: 15_000_000_000) }
+                    catch { return }
+                    control.cancel(with: .goingAway, reason: nil)
+                }
+                defer {
+                    timeout.cancel()
+                    control.cancel(with: .normalClosure, reason: nil)
+                    if conversationControl === control { conversationControl = nil }
+                }
+                control.resume()
+                try await send(["type": "thread.new"], through: control)
+                while true {
+                    let message = try await control.receive()
+                    guard current == generation else { return }
+                    guard case .string(let text) = message,
+                          let data = text.data(using: .utf8) else { continue }
+                    let event = try JSONDecoder().decode(VoiceEvent.self, from: data)
+                    if event.type == "error" {
+                        throw AppError.message(event.message ?? "新对话创建失败。")
+                    }
+                    if event.type == "state", event.state == "closed", event.reason == "new_thread" {
+                        transcripts.removeAll()
+                        threadID = nil
+                        sessionID = nil
+                        state = .idle
+                        return
+                    }
+                }
+            } catch {
+                guard current == generation else { return }
+                self.error = "新对话未获确认：\(error.localizedDescription)；请重试。"
+            }
+            return
+        }
+        guard let task = socket else {
+            newConversationRequested = false
+            return
+        }
         do {
+            connectionTimeout = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 15_000_000_000) }
+                catch { return }
+                guard let self, current == self.generation, self.newConversationRequested else { return }
+                self.handleConnectionLoss("新对话未获确认，请重新连接后重试。", reason: "reset_timeout")
+            }
             try await send(["type": "thread.new"], through: task)
         } catch {
             guard current == generation, socket === task else { return }
@@ -452,6 +512,13 @@ final class VoiceSession: ObservableObject {
     private func handleConnectionLoss(_ message: String, reason: String) {
         generation = UUID()
         cleanup()
+        let requestedNewConversation = newConversationRequested
+        newConversationRequested = false
+        if reason == "new_thread", requestedNewConversation {
+            transcripts.removeAll()
+            threadID = nil
+            sessionID = nil
+        }
         // A terminated system call must never silently reopen a billed session.
         if let callID = systemCallID {
             systemCallID = nil
@@ -463,17 +530,13 @@ final class VoiceSession: ObservableObject {
             onSystemCallEnded?(callID)
             return
         }
-        if reason == "new_thread", newConversationRequested, wantsConnection {
-            newConversationRequested = false
-            transcripts.removeAll()
-            threadID = nil
-            sessionID = nil
+        if reason == "new_thread", requestedNewConversation, wantsConnection {
             reconnectAttempts = 0
             error = nil
             scheduleReconnect(reason: reason)
             return
         }
-        let intentionalReasons: Set<String> = ["idle", "manual", "stop", "new_thread"]
+        let intentionalReasons: Set<String> = ["idle", "manual", "stop", "new_thread", "reset_timeout"]
         if intentionalReasons.contains(reason) || !wantsConnection {
             wantsConnection = false
             reconnectTask?.cancel()
@@ -514,6 +577,7 @@ final class VoiceSession: ObservableObject {
         let endedCall = systemCallID
         systemCallID = nil
         wantsConnection = false
+        newConversationRequested = false
         reconnectTask?.cancel()
         reconnectTask = nil
         generation = UUID()
@@ -524,6 +588,8 @@ final class VoiceSession: ObservableObject {
     }
 
     private func cleanup(closeSocket: Bool = true) {
+        conversationControl?.cancel(with: .goingAway, reason: nil)
+        conversationControl = nil
         audio.onPCM = nil
         audio.onInterrupted = nil
         audio.stop()

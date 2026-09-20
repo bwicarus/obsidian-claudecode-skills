@@ -55,16 +55,18 @@ struct VoiceSidebar: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(voice.isStarted ? Color.secondary : AppStyle.accent)
-                    .disabled(!model.isPaired || !model.isAIEnabled)
+                    .disabled(!model.isPaired || !model.isAIEnabled ||
+                              (voice.newConversationRequested && !voice.isStarted))
 
                     Button {
-                        Task { await voice.newConversation() }
+                        Task { await voice.newConversation(client: model.client, deviceID: model.deviceID) }
                     } label: {
                         Label("新对话", systemImage: "square.and.pencil")
                             .font(.subheadline.weight(.medium)).padding(.vertical, 6)
                     }
                     .buttonStyle(.bordered)
-                    .disabled(!voice.isConnected)
+                    .disabled(!model.isPaired || !model.isAIEnabled || voice.newConversationRequested ||
+                              (voice.isStarted && !voice.isConnected))
                 }
             }
             .padding(20)
