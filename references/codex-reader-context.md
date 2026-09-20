@@ -27,8 +27,9 @@ git -C . log --oneline -5
   [共享状态](reader-collaboration-status.md) 为准，不以本文、聊天记录或记忆为准。
 - 工作区长期脏且含未跟踪文件（多 agent 共享检出 + 每晚 daily 重写 `anki/records`、
   `dashboard.json`）。候选由文件摘要和测试证明，**不等于一个可由 Git commit 单独重建的发布点**。
-- 2026-07-29 起 Windows 是第二份工作副本，Pi 仍是唯一部署源；跨机规则见
-  [跨机开发](cross-machine-dev-setup.md)。
+- Reader 服务端目前由 Windows 桥承载，Pi webapp 已停用（`handoff_check.py`
+  的 `ACTIVE_PWA_ORIGIN` 及 2026-09-05 协作记录）。部署前核验当前监听进程的工作目录；
+  不要按历史 Pi 步骤重启旧服务。iOS 纯界面改动通过现有 Actions/TestFlight 发布。
 
 ## 2. 产品与所有权
 

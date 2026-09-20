@@ -4410,3 +4410,11 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **修复**：首次只在 tailnet 自测，未覆盖真实插件链路；用户截图证明公网调用仍报内部错误，最终定位为 VPS nginx 还指向已退出的 Pi `100.101.15.57:8766`。现已把 MCP/OAuth 七条公网路由改到 Windows Tailscale Serve，并迁移旧 OAuth 状态。
 - **验证**：代理单测 `3/3`、部署清单测试 `15/15`、Python 编译和 diff 检查通过；`https://bwicarus.space/mcp` 已由 `502` 恢复为标准 OAuth `401`，public base、PRM 均为 `bwicarus.space`；静态 token 与迁移的旧 OAuth token 均能列出 22 个工具，公网代理能读取 `reader-context-snapshot/1`。
 - **运行/回退**：ReaderPC 主服务已重启并重新拉起 MCP PID `29328`；Windows 凭据备份在 `C:\Users\bwica\.config\mcp-auth-backup-20260905T184654`，VPS nginx 备份在 `/root/nginx-backups/default.bak-20260905T174901-reader-mcp-windows`。未改 Reader 数据。
+
+## Codex：Reader 原生导航与 AI 侧栏第一阶段（2026-09-21 JST）
+- **用户确认**：先统一书库/导航、AI 侧栏、标准生成物与设置的原生风格；保留书页排版和批注定位，不能为了迁移删除既有功能。
+- **回退点**：Git tag `reader-native-baseline-20260921-9078aecf` 已推送；TestFlight `1.1.82 (753)` 已确认 `VALID / IN_BETA_TESTING`，构建 `35531053702`、状态查询 `35532330739`。
+- **候选**：独立分支 `codex/reader-native-shell-20260921`，`1.1.83`。SwiftUI 工作台、流式侧栏、标准知识卡/Anki 预览、批量卡片横滑、工具计数与统一配色；原始会话仍由既有 Reader 管线持有，不新增历史库或数据迁移。
+- **完整性**：原生投影带账户/书籍/模式 scope；原件操作始终定位现有实体。Anki 修改评分/导出、复杂 HTML/媒体、工具参数/视觉输入/保存 skill 等仍通过显式完整界面操作。复习文字保留原有独立会话语义。关闭侧栏不停止通话，设置可关闭原生界面恢复原 UI。
+- **验证**：本地阅读启动、原生偏好与接口兼容合同 17 项通过；独立离线 Chromium 集成覆盖真实 turnCard 投影、语音发送分支、卡片原件定位和生命周期。Swift 编译/签名及 TestFlight 状态待本次发布回执补充。
+- **尚未实机验证**：iPad Apple Pencil、横竖屏/键盘交互、真实语音及完整 Anki 导出；不能把原件兼容入口称为全功能原生重写。PDF/EPUB 文档引擎和 Safari 扩展继续使用现有实现。

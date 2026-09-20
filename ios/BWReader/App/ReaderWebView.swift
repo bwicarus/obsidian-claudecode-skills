@@ -10,6 +10,7 @@ private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
 private let nativePencilInkMessageName = "bwNativePencilInk"
 private let nativeLocalNotesMessageName = "bwNativeLocalNotes"
 private let nativeAnkiMobileMessageName = "bwNativeAnkiMobile"
+private let nativeConversationMessageName = "bwNativeConversation"
 
 struct ReaderLastLocalBookReference: Codable, Equatable, Sendable {
     let libraryID: String
@@ -301,6 +302,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     let webView: WKWebView
+    let nativeConversation = ReaderNativeConversationModel()
     private let localRuntimeServer: ReaderLocalRuntimeServer?
     private let localRuntimeInitializationError: String?
 
@@ -316,6 +318,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     @Published private(set) var realtimeKeyPresentationRequestID: UUID?
     @Published private(set) var piLoginPresentationRequestID: UUID?
     private var nativeComputerVoiceMessageProxy: WeakScriptMessageHandler?
+    private var nativeConversationMessageProxy: WeakScriptMessageHandler?
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
@@ -378,6 +381,37 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private let ankiMobilePendingStore = ReaderAnkiMobilePendingStore.shared
     private var pendingAnkiMobileExports = [String: PendingAnkiMobileExport]()
 
+    func setNativeConversationMode(_ enabled: Bool) async {
+        guard isTrustedReaderURL(webView.url), !isLoading else { return }
+        _ = try? await webView.callAsyncJavaScript(
+            "if (window.__bwNativeConversation) { window.__bwNativeConversation.setNativeMode(enabled); }",
+            arguments: ["enabled": enabled], in: nil, contentWorld: .page
+        )
+    }
+
+    private func performNativeConversationCommand(_ command: [String: Any]) async -> String? {
+        let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
+            "showLegacy", "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
+            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory"]
+        guard let action = command["action"] as? String, allowed.contains(action),
+              JSONSerialization.isValidJSONObject(command),
+              isTrustedReaderURL(webView.url), !isLoading else {
+            return "阅读页尚未准备好，请稍后重试"
+        }
+        do {
+            let result = try await webView.callAsyncJavaScript(
+                "if (!window.__bwNativeConversation) return {ok:false,error:'阅读页尚未准备好'}; return await window.__bwNativeConversation.perform(command);",
+                arguments: ["command": command], in: nil, contentWorld: .page
+            )
+            guard let receipt = result as? [String: Any], receipt["ok"] as? Bool == true else {
+                return (result as? [String: Any])?["error"] as? String ?? "操作未完成，请在完整阅读界面重试"
+            }
+            return nil
+        } catch {
+            return "操作未完成：\(error.localizedDescription)"
+        }
+    }
+
     func bindNativeVisualCaptureCanvas(_ canvas: UIView) {
         localRuntimeServer?.visualCaptureBroker.bind(
             webView: webView,
@@ -416,6 +450,18 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         restorePendingAnkiMobileExports()
 
         let contentController = webView.configuration.userContentController
+        let conversationProxy = WeakScriptMessageHandler(delegate: self)
+        nativeConversationMessageProxy = conversationProxy
+        contentController.add(conversationProxy, name: nativeConversationMessageName)
+        contentController.addUserScript(WKUserScript(
+            source: ReaderNativeConversationScript.source,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+        nativeConversation.commandHandler = { [weak self] command in
+            guard let self else { return "阅读页已关闭" }
+            return await self.performNativeConversationCommand(command)
+        }
         let nativeComputerVoiceMessageProxy =
             WeakScriptMessageHandler(delegate: self)
         self.nativeComputerVoiceMessageProxy =
@@ -4071,7 +4117,15 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        if message.name == nativeComputerVoiceMessageName {
+        if message.name == nativeConversationMessageName {
+            guard message.frameInfo.isMainFrame,
+                  message.webView === webView,
+                  isTrustedReaderURL(webView.url),
+                  isTrustedReaderURL(message.frameInfo.request.url),
+                  let body = message.body as? [String: Any],
+                  body["version"] as? Int == 1 else { return }
+            nativeConversation.receive(body)
+        } else if message.name == nativeComputerVoiceMessageName {
             // 只读采样,不影响下面 guard 的判定;仅用于 guard 失败时说明是哪一条。
             let sampledBody = message.body as? [String: Any]
             let rejection: [String: Any] = [
@@ -4333,6 +4387,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
 
 extension ReaderWebViewModel: WKNavigationDelegate {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        nativeConversation.resetForNavigation()
         webContentProcessNeedsReload = true
         isLoading = false
         guard readerForeground, isLocalRuntimeURL(webView.url) else { return }
@@ -4345,6 +4400,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
     ) {
         isLoading = true
         loadError = nil
+        nativeConversation.resetForNavigation()
         nativePencilInk.invalidateDocument()
         bookUserStateImportTask?.cancel()
         bookUserStateImportTask = nil
@@ -4360,6 +4416,10 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         webContentProcessNeedsReload = false
         isLoading = false
         loadError = nil
+        Task { @MainActor [weak self] in
+            let enabled = UserDefaults.standard.object(forKey: "reader.nativeInterfaceEnabled") as? Bool ?? true
+            await self?.setNativeConversationMode(enabled)
+        }
         if let navigation,
            let pending = pendingLocalBookNavigation,
            pending.navigation === navigation {

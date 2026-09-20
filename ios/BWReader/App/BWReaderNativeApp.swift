@@ -125,10 +125,23 @@ private struct ReaderRootView: View {
     @State private var startupRouteOverrideRequested = false
     @State private var libraryStartupNotice: String?
     @State private var nativeToolsInitialAction: ReaderNativeFeatureAction?
+    @AppStorage("reader.nativeInterfaceEnabled") private var nativeInterfaceEnabled = true
 
     var body: some View {
+        ReaderNativeWorkspace(
+            reader: reader,
+            conversation: reader.nativeConversation,
+            voiceBridge: voiceBridge,
+            enabled: $nativeInterfaceEnabled,
+            openLibrary: { showsLibrary = true },
+            openSettings: {
+                nativeToolsInitialAction = .openNativeTools
+                showsNativeTools = true
+            },
+            openDiagnostics: { showsDiagnostics = true }
+        ) {
         ZStack {
-            Color.black.ignoresSafeArea()
+            ReaderNativeTheme.canvas.ignoresSafeArea()
 
             ReaderWebView(model: reader)
                 .ignoresSafeArea(edges: .bottom)
@@ -141,7 +154,7 @@ private struct ReaderRootView: View {
 
             if reader.isLoading {
                 ProgressView()
-                    .tint(.white)
+                    .tint(ReaderNativeTheme.accent)
                     .padding(12)
                     .background(.ultraThinMaterial, in: Capsule())
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -151,7 +164,7 @@ private struct ReaderRootView: View {
 
             if startupResolutionPending && !reader.isLoading {
                 ProgressView("正在恢复上次阅读")
-                    .tint(.white)
+                    .tint(ReaderNativeTheme.accent)
                     .padding(14)
                     .background(.ultraThinMaterial, in: Capsule())
                     .allowsHitTesting(false)
@@ -233,7 +246,9 @@ private struct ReaderRootView: View {
             .padding(.trailing, 10)
 
         }
-        .preferredColorScheme(.dark)
+        }
+        .preferredColorScheme(nativeInterfaceEnabled ? nil : .dark)
+        .tint(ReaderNativeTheme.accent)
         .task {
             voiceBridge.bind(reader: reader)
             nativeCommandReceiver.bind(

@@ -87,6 +87,7 @@ struct ReaderLocalLibraryView: View {
                     }
                     .pickerStyle(.segmented)
                 }
+                .listRowBackground(ReaderNativeTheme.card)
 
                 if let startupNotice, !startupNotice.isEmpty {
                     Section {
@@ -97,9 +98,11 @@ struct ReaderLocalLibraryView: View {
                         .font(.footnote)
                         .foregroundStyle(.orange)
                     }
+                    .listRowBackground(ReaderNativeTheme.card)
                 }
 
                 localFolderSection
+                    .listRowBackground(ReaderNativeTheme.card)
 
                 // 远端来源=Windows 服务器书库(2026-09-02 用户:Pi 退出这条线路)。
                 // Pi 书库那套 remoteBooksSection/remoteBookRow 不再挂进页面;Pi OCR
@@ -107,15 +110,28 @@ struct ReaderLocalLibraryView: View {
                 switch selectedSource {
                 case .local:
                     localBooksSection(library.books)
+                        .listRowBackground(ReaderNativeTheme.card)
                 case .pi:
                     serverBooksSection(serverOnlyBooks)
+                        .listRowBackground(ReaderNativeTheme.card)
                 case .all:
                     localBooksSection(library.books)
+                        .listRowBackground(ReaderNativeTheme.card)
                     serverBooksSection(serverOnlyBooks)
+                        .listRowBackground(ReaderNativeTheme.card)
                 }
 
                 statusSections
+                    .listRowBackground(ReaderNativeTheme.card)
             }
+            .listStyle(.insetGrouped)
+            .listSectionSpacing(12)
+            .environment(\.defaultMinListRowHeight, 44)
+            .scrollContentBackground(.hidden)
+            .background(ReaderNativeTheme.canvas)
+            .font(.subheadline)
+            .toolbarBackground(ReaderNativeTheme.card, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .navigationTitle("书库")
             // ⚠ 备份闸拦住时**必须说为什么**。这条规矩最常见的失败是
             // 「服务器没开」,而那跟「这本书有问题」该做的事完全不同 ——
@@ -149,6 +165,7 @@ struct ReaderLocalLibraryView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
+                        .fontWeight(.semibold)
                 }
             }
             .fileImporter(
@@ -210,6 +227,7 @@ struct ReaderLocalLibraryView: View {
                 )
             }
         }
+        .tint(ReaderNativeTheme.accent)
     }
 
     @ViewBuilder
@@ -321,12 +339,12 @@ struct ReaderLocalLibraryView: View {
 
     @ViewBuilder
     private func serverBookRow(_ book: ReaderServerLibrary.Book) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 10) {
                 bookIcon(kind: (book.name as NSString).pathExtension.lowercased())
                 VStack(alignment: .leading, spacing: 3) {
                     Text(book.name)
-                        .font(.body.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(2)
                     Text("\((book.name as NSString).pathExtension.uppercased()) · \(byteCount(Int64(book.bytes))) · 仅在\(ReaderServer.displayName)")
                         .font(.caption2)
@@ -344,17 +362,19 @@ struct ReaderLocalLibraryView: View {
                     }
                 }
                 Spacer(minLength: 4)
-            }
-            HStack {
-                Spacer()
                 Button("下载并打开") {
                     Task { await downloadFromServerAndOpen(book) }
                 }
                 .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(.small)
+                .fixedSize()
                 .disabled(!library.isConfigured || serverDownloading[book.id] != nil)
             }
         }
         .padding(.vertical, 2)
+        .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
+        .listRowSeparatorTint(ReaderNativeTheme.separator)
     }
 
     private func downloadFromServerAndOpen(_ book: ReaderServerLibrary.Book) async {
@@ -409,12 +429,12 @@ struct ReaderLocalLibraryView: View {
     @ViewBuilder
     private func localBookRow(_ book: ReaderLocalBookRecord) -> some View {
         let remoteBook = remote.remoteBook(for: book)   // 仅供 Pi OCR 预处理面板
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 10) {
                 bookIcon(kind: book.format.rawValue)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(book.title)
-                        .font(.body.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(2)
                     Text(book.relativePath)
                         .font(.caption)
@@ -461,15 +481,14 @@ struct ReaderLocalLibraryView: View {
                 actionProgress(
                     ids: [book.id] + (remoteBook.map { [$0.bookId] } ?? [])
                 )
-            }
-
-            HStack {
-                Spacer()
                 // 传服务器不再是一个按钮:「打开」自动完成(备份闸),状态写在上一行。
                 Button("打开") {
                     Task { await openLocal(book) }
                 }
                 .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(.small)
+                .fixedSize()
                 .disabled(backupGate.uploading.contains(book.id) || openBusy.contains(book.id))
             }
 
@@ -495,6 +514,8 @@ struct ReaderLocalLibraryView: View {
             }
         }
         .padding(.vertical, 2)
+        .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
+        .listRowSeparatorTint(ReaderNativeTheme.separator)
     }
 
     @ViewBuilder
@@ -504,12 +525,12 @@ struct ReaderLocalLibraryView: View {
             library.books.first(where: { $0.id == localID })
         }
         let syncState = remote.syncState(for: book)
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 10) {
                 bookIcon(kind: book.kind)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(book.name)
-                        .font(.body.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(2)
                     Text(book.rel)
                         .font(.caption)
@@ -548,6 +569,8 @@ struct ReaderLocalLibraryView: View {
                     .disabled(!library.isConfigured || remote.activeBookID != nil)
                 }
             }
+            .buttonBorderShape(.capsule)
+            .controlSize(.small)
 
             if expandedPreprocessingBookIDs.contains("remote:\(book.bookId)") {
                 preprocessingPanel(remoteBook: book, localBook: localBook)
@@ -569,6 +592,8 @@ struct ReaderLocalLibraryView: View {
             }
         }
         .padding(.vertical, 2)
+        .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
+        .listRowSeparatorTint(ReaderNativeTheme.separator)
     }
 
     @ViewBuilder
@@ -742,7 +767,7 @@ struct ReaderLocalLibraryView: View {
                     let selected = metadata.layer == state.selected
                     HStack(spacing: 8) {
                         Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                            .foregroundStyle(selected ? ReaderNativeTheme.accent : ReaderNativeTheme.muted)
                         Text(textLayerOptionTitle(metadata))
                             .font(.caption)
                             .foregroundStyle(selected ? Color.primary : Color.secondary)
@@ -940,7 +965,7 @@ struct ReaderLocalLibraryView: View {
                                 .font(.caption2)
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
-                                .background(Color.accentColor.opacity(0.18))
+                                .background(ReaderNativeTheme.accentWash)
                                 .clipShape(Capsule())
                         }
                         Spacer()
@@ -1428,8 +1453,10 @@ struct ReaderLocalLibraryView: View {
 
     private func bookIcon(kind: String) -> some View {
         Image(systemName: kind.lowercased() == "pdf" ? "doc.richtext" : "books.vertical")
-            .foregroundStyle(.tint)
-            .frame(width: 24)
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(ReaderNativeTheme.accent)
+            .frame(width: 34, height: 38)
+            .background(ReaderNativeTheme.accentWash, in: RoundedRectangle(cornerRadius: 9))
     }
 
     @ViewBuilder
@@ -1995,7 +2022,7 @@ struct ReaderLocalLibraryView: View {
             Spacer()
             Text(kjScanTitle(scan, unavailable: unavailable))
                 .font(.caption2)
-                .foregroundStyle(scan?.isActive == true ? Color.accentColor : Color.secondary)
+                .foregroundStyle(scan?.isActive == true ? ReaderNativeTheme.accent : ReaderNativeTheme.muted)
                 .lineLimit(2)
                 .multilineTextAlignment(.trailing)
             if let scan, scan.isActive {

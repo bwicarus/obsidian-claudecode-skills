@@ -198,36 +198,64 @@ struct NativeReaderToolsView: View {
         NavigationStack {
             Form {
                 dataHubSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 storageSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 currentPageSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 nativeActionsSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 recognitionSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 textRecognitionSettingsSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 offlineDictionarySection
+                    .listRowBackground(ReaderNativeTheme.card)
                 localLibrarySection
+                    .listRowBackground(ReaderNativeTheme.card)
                 realtimeCredentialsSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 piSyncDetailSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 localNotesSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 quickNotesSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 // 展示板的手动操作面（2026-09-05）：看有哪些板子、停用、清空、删除。
                 // 开关只由用户决定 —— AI 不许调 enable（能力说明里明写）。
                 ReaderDisplayBoardSection()
+                    .listRowBackground(ReaderNativeTheme.card)
                 NativePencilSettingsSection()
+                    .listRowBackground(ReaderNativeTheme.card)
                 touchInputSection
+                    .listRowBackground(ReaderNativeTheme.card)
                 buildIdentitySection
+                    .listRowBackground(ReaderNativeTheme.card)
                 statusSection
+                    .listRowBackground(ReaderNativeTheme.card)
             }
+            .formStyle(.grouped)
+            .listSectionSpacing(12)
+            .environment(\.defaultMinListRowHeight, 44)
+            .scrollContentBackground(.hidden)
+            .background(ReaderNativeTheme.canvas)
+            .font(.subheadline)
+            .toolbarBackground(ReaderNativeTheme.card, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .navigationTitle("原生阅读工具")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("刷新") {
+                    Button {
                         Task { await coordinator.refresh(using: reader) }
+                    } label: {
+                        Label("刷新", systemImage: "arrow.clockwise")
                     }
                     .disabled(coordinator.activity.isBusy)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
+                        .fontWeight(.semibold)
                 }
             }
             .task {
@@ -299,6 +327,7 @@ struct NativeReaderToolsView: View {
                 }
             }
         }
+        .tint(ReaderNativeTheme.accent)
     }
 
     @ViewBuilder
