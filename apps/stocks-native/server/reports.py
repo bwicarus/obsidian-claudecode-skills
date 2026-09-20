@@ -331,7 +331,12 @@ class ReportService:
             for item in items.values():
                 item["summary"] = item["summary"][:240]
             items = dict(sorted(items.items(), key=lambda item: item[1]["createdAt"], reverse=True))
-            return {"revision": self._revision(db, owner), "items": items, "asOf": _iso(self.clock())}
+            # Older standalone cards remain visible in history even when a newer
+            # plan wins the per-stock signal. Return every adoption in this
+            # account so clients can restore its current paused/removed state.
+            adoptions = {row["plan_id"]: self._adoption_status(json.loads(row["document"]), library)
+                         for row in db.execute("SELECT plan_id,document FROM adoptions WHERE owner=?", (owner,))}
+            return {"revision": self._revision(db, owner), "items": items, "adoptions": adoptions, "asOf": _iso(self.clock())}
 
     def _receipt(self, db, owner, request_id, digest):
         row = db.execute("SELECT digest,response FROM receipts WHERE owner=? AND request_id=?", (owner, request_id)).fetchone()

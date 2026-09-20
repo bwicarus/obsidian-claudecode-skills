@@ -314,6 +314,23 @@ class ReportServiceTests(unittest.TestCase):
         self.assertEqual(len(signals), 101)
         self.assertIn("000000", signals)
 
+    def test_signal_adoptions_restore_older_standalone_card_with_real_paused_state(self):
+        with patch("plans._now", return_value="2026-09-21T02:29:00+00:00"):
+            old = self.plans.save("owner-a", {"requestId": "old-strategy", "expectedRevision": 0, "plan": actionable_plan()})
+        accepted = self.service.apply("owner-a", {"requestId": "adopt-old", "expectedRevision": 0,
+            "planId": old["planId"], "variantId": "standard"})
+        with patch("plans._now", return_value="2026-09-21T02:31:00+00:00"):
+            new = self.plans.save("owner-a", {"requestId": "new-strategy", "expectedRevision": 1, "plan": actionable_plan()})
+        for index, rule_id in enumerate(accepted["adoption"]["ruleIds"]):
+            self.monitor.mutate("owner-a", {"requestId": f"pause-{index}", "operation": "rule.pause", "id": rule_id})
+        response = self.service.signals("owner-a")
+        self.assertEqual(response["items"]["000001"]["planId"], new["planId"])
+        self.assertIsNone(response["items"]["000001"]["adoption"])
+        self.assertEqual(response["adoptions"][old["planId"]]["state"], "paused")
+        self.assertEqual(response["adoptions"][old["planId"]]["enabledCount"], 0)
+        self.assertEqual(response["adoptions"][old["planId"]]["ruleIds"], accepted["adoption"]["ruleIds"])
+        self.assertEqual(self.service.signals("owner-b")["adoptions"], {})
+
 
 if __name__ == "__main__":
     unittest.main()
