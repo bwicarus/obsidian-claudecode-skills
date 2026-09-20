@@ -335,6 +335,8 @@ class SelectionService:
     def _evaluate(self, definition, market):
         asof, rows, features, sectors, warnings = market
         effective = [g for g in _effective_groups(definition) if g["and"] or g["not"]]
+        has_conditions = any(g["and"] or g["not"] for g in definition["groups"])
+        disabled_all = has_conditions and not effective
         stats = {g["id"]: {"id": g["id"], "name": g["name"], "enabled": g["enabled"],
                   "baselinePassed": 0, "unknown": 0, "impacts": {k: 0 for k in g["and"]},
                   "notImpacts": {k: 0 for k in g["not"]}} for g in effective}
@@ -362,7 +364,7 @@ class SelectionService:
                     if could_pass:
                         acc["unknown"] += 1
                         possible = True
-            passed = bool(matched) or not effective
+            passed = bool(matched) or not has_conditions
             if possible and not passed:
                 unknown += 1
             if passed:
@@ -379,7 +381,7 @@ class SelectionService:
             group_stats.append(item)
         return {"asOf": asof, "source": "published_daily_snapshot", "total": len(rows), "passed": len(items),
                 "unknown": unknown, "items": items, "groups": group_stats, "warnings": list(warnings),
-                "unfiltered": not effective, "definition": definition}
+                "unfiltered": not has_conditions, "disabledAll": disabled_all, "definition": definition}
 
     def evaluate(self, owner, request):
         self._owner(owner)
@@ -627,6 +629,8 @@ class SelectionService:
                     extra["refresh"] = {"groupId": group["id"], "count": len(codes), "status": status, "warnings": warnings}
                 group["updatedAt"] = now
         elif operation == "preset.save":
+            definition = normalize_definition(payload.get("definition"))
+            definition["disabled"] = []
             preset_id = payload.get("id")
             if preset_id:
                 preset = self._find(library["presets"], preset_id, "preset")
@@ -636,7 +640,7 @@ class SelectionService:
                 preset = {"id": "preset-" + uuid.uuid4().hex}
                 library["presets"].append(preset)
             preset.update({"name": self._name(payload.get("name")),
-                           "definition": normalize_definition(payload.get("definition")), "updatedAt": now,
+                           "definition": definition, "updatedAt": now,
                            "status": "ready", "warnings": []})
             extra["presetId"] = preset["id"]
         elif operation == "preset.delete":

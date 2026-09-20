@@ -4,9 +4,13 @@ import SwiftUI
 @MainActor
 struct StockSelectionControls: View {
     @ObservedObject var model: StockSelectionModel
+    let isScreenerActive: Bool
     let editorPresented: Bool
+    let onActivate: () -> Void
     let onEdit: () -> Void
     @Environment(\.scenePhase) private var scenePhase
+    @State private var conditionsHeight: CGFloat = 44
+    @AppStorage("stocksNative.selectionExpandedCommonGroups") private var expandedCommonGroups = "[]"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -17,6 +21,16 @@ struct StockSelectionControls: View {
                     Text("组间任一满足").font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 4)
+                if !model.draft.disabled.isEmpty || model.draft.groups.contains(where: { !$0.enabled }) {
+                    Button {
+                        model.draft.disabled = []
+                        for index in model.draft.groups.indices { model.draft.groups[index].enabled = true }
+                        onActivate()
+                        model.onContextChange?("screener", "已恢复全部条件气泡，选股结果待更新")
+                    } label: { Image(systemName: "arrow.counterclockwise") }
+                    .accessibilityLabel("恢复全部条件").frame(minWidth: 36, minHeight: 36)
+                    .disabled(model.requiresPresetConfirmation)
+                }
                 if model.isEvaluating {
                     ProgressView().controlSize(.small)
                     Text("更新中").font(.caption).foregroundStyle(.secondary)
@@ -33,82 +47,209 @@ struct StockSelectionControls: View {
                     .font(.subheadline).frame(minHeight: 44)
             } else {
                 ScrollView(.vertical) {
-                    VStack(spacing: 2) {
+                    VStack(spacing: 6) {
                         ForEach(model.draft.groups) { group in conditionGroup(group) }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(key: SelectionControlsHeight.self, value: geometry.size.height)
+                        }
+                    }
                 }
-                .frame(height: CGFloat(min(model.draft.groups.count, 3)) * 46)
+                .frame(height: min(max(44, conditionsHeight), 220))
+                .onPreferenceChange(SelectionControlsHeight.self) { conditionsHeight = $0 }
             }
             if model.requiresPresetConfirmation {
                 Text("旧方案需在编辑中核对并保存确认。").font(.caption).foregroundStyle(.orange)
             } else if let message = model.validationMessage {
                 Text(message).font(.caption).foregroundStyle(.red)
+            } else if model.draft.groups.contains(where: { !conditionKeys($0).isEmpty })
+                        && !model.draft.groups.contains(where: { groupIsEnabled($0) }) {
+                Text("全部气泡已关闭；点任一气泡即可恢复该条件。").font(.caption).foregroundStyle(.secondary)
+            } else if model.resultsAreCurrent {
+                Text("＋N：单独关闭此条件后，本组新增通过的股票数。")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(AppStyle.canvas)
-        .task(id: "\(scenePhase):\(editorPresented):\(model.liveEvaluationKey)") {
-            guard scenePhase == .active, !editorPresented else { return }
+        .task(id: "\(scenePhase):\(isScreenerActive):\(editorPresented):\(model.liveEvaluationKey)") {
+            guard scenePhase == .active, isScreenerActive, !editorPresented else { return }
             await model.runLive()
         }
     }
 
     private func conditionGroup(_ group: SelectionRuleGroup) -> some View {
-        HStack(spacing: 8) {
+        let enabled = groupIsEnabled(group)
+        let common = commonConditions
+        let commonAnd = Set(common.and)
+        let commonNot = Set(common.not)
+        let commonCount = commonAnd.count + commonNot.count
+        let expanded = expandedGroupIDs.contains(group.id)
+        return HStack(alignment: .top, spacing: 8) {
             Button {
                 guard let index = model.draft.groups.firstIndex(where: { $0.id == group.id }) else { return }
-                model.draft.groups[index].enabled.toggle()
-                model.onContextChange?("screener", "条件组“\(group.name)”已\(group.enabled ? "停用" : "启用")，选股结果待更新")
+                let keys = Set(conditionKeys(group))
+                guard !keys.isEmpty else { return }
+                var disabled = Set(model.draft.disabled)
+                if enabled { disabled.formUnion(keys) } else { disabled.subtract(keys) }
+                model.draft.groups[index].enabled = true
+                model.draft.disabled = disabled.sorted()
+                onActivate()
+                model.onContextChange?("screener", "条件组“\(group.name)”已\(enabled ? "停用" : "启用")，选股结果待更新")
             } label: {
                 HStack(spacing: 5) {
-                    Image(systemName: group.enabled ? "checkmark.circle.fill" : "circle")
+                    Image(systemName: enabled ? "checkmark.circle.fill" : "circle")
                     Text(group.name).lineLimit(1)
                 }
                 .font(.caption.weight(.semibold)).frame(width: 100, height: 44, alignment: .leading)
-                .foregroundStyle(group.enabled ? AppStyle.accent : Color.secondary)
+                .foregroundStyle(enabled ? AppStyle.accent : Color.secondary)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("条件组：\(group.name)")
-            .accessibilityValue(group.enabled ? "已启用" : "已停用")
-            ScrollView(.horizontal) {
-                HStack(spacing: 6) {
-                    ForEach(group.and, id: \.self) { id in conditionSwitch(id, group: group, excluded: false) }
-                    ForEach(group.not, id: \.self) { id in conditionSwitch(id, group: group, excluded: true) }
-                    if group.and.isEmpty && group.not.isEmpty {
-                        Button("添加条件", systemImage: "plus", action: onEdit).font(.caption).frame(height: 44)
+            .accessibilityValue(enabled ? "已启用" : "已停用")
+            SelectionBubbleFlow(spacing: 6) {
+                ForEach(group.and.filter { !commonAnd.contains($0) }, id: \.self) { id in
+                    conditionSwitch(id, group: group, excluded: false)
+                }
+                ForEach(group.not.filter { !commonNot.contains($0) }, id: \.self) { id in
+                    conditionSwitch(id, group: group, excluded: true)
+                }
+                if commonCount > 0 && !conditionKeys(group).isEmpty {
+                    Button {
+                        var ids = expandedGroupIDs
+                        if expanded { ids.remove(group.id) } else { ids.insert(group.id) }
+                        expandedCommonGroups = String(data: (try? JSONEncoder().encode(ids.sorted())) ?? Data(), encoding: .utf8) ?? "[]"
+                    } label: {
+                        Label("公共 ×\(commonCount)", systemImage: expanded ? "chevron.down" : "chevron.right")
+                            .font(.caption).padding(.horizontal, 10).frame(height: 44)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .accessibilityHint("只展开本组的公共条件；开关仍只影响本组")
+                    if expanded {
+                        ForEach(common.and, id: \.self) { id in conditionSwitch(id, group: group, excluded: false) }
+                        ForEach(common.not, id: \.self) { id in conditionSwitch(id, group: group, excluded: true) }
                     }
                 }
+                if group.and.isEmpty && group.not.isEmpty {
+                    Button("添加条件", systemImage: "plus", action: onEdit).font(.caption).frame(height: 44)
+                }
             }
-            .scrollIndicators(.visible)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .opacity(enabled ? 1 : 0.5)
         }
         .disabled(model.catalog == nil || model.requiresPresetConfirmation)
     }
 
     private func conditionSwitch(_ id: String, group: SelectionRuleGroup, excluded: Bool) -> some View {
         let key = group.id + "|" + (excluded ? "not:" : "") + id
-        let enabled = !model.draft.disabled.contains(key)
+        let enabled = group.enabled && !model.draft.disabled.contains(key)
         let name = model.catalog?.criteria.first(where: { $0.id == id })?.label ?? id
         let title = (excluded ? "排除 · " : "") + name
+        let effect = model.resultsAreCurrent && enabled && group.enabled
+            ? model.evaluation?.groups?.first(where: { $0.id == group.id }) : nil
+        let impact = excluded ? effect?.notImpacts?[id] : effect?.impacts?[id]
         return Button {
+            if !group.enabled, let index = model.draft.groups.firstIndex(where: { $0.id == group.id }) {
+                model.draft.disabled = Set(model.draft.disabled).union(conditionKeys(group)).sorted()
+                model.draft.groups[index].enabled = true
+            }
             model.setCriterionEnabled(groupID: group.id, criterionID: id, excluded: excluded, enabled: !enabled)
+            onActivate()
             model.onContextChange?("screener", "“\(title)”已\(enabled ? "停用" : "启用")，选股结果待更新")
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: enabled ? "checkmark.circle.fill" : "circle")
                 Text(title).lineLimit(1)
+                if let impact, impact > 0 {
+                    Text("+\(impact)").font(.caption2.monospacedDigit().weight(.bold))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 4).padding(.vertical, 2)
+                        .background(.orange.opacity(impact >= 10 ? 0.15 : 0.07), in: Capsule())
+                }
             }
             .font(.caption.weight(.medium))
             .padding(.horizontal, 10).padding(.vertical, 8)
             .foregroundStyle(enabled ? (excluded ? AppStyle.up : AppStyle.accent) : Color.secondary)
             .background(enabled ? (excluded ? AppStyle.up : AppStyle.accent).opacity(0.08) : Color.white,
-                        in: RoundedRectangle(cornerRadius: 8))
+                        in: Capsule())
+            .overlay {
+                if let impact, impact > 0 {
+                    Capsule().stroke(Color.orange.opacity(impact >= 10 ? 0.5 : impact >= 3 ? 0.3 : 0.15), lineWidth: 1)
+                }
+            }
+            .opacity(impact == 0 ? 0.65 : 1)
             .frame(minHeight: 44).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).disabled(!group.enabled)
+        .buttonStyle(.plain)
         .accessibilityLabel(title)
         .accessibilityValue(enabled ? "已启用" : "已停用")
-        .accessibilityHint("点按切换并更新选股结果")
+        .accessibilityHint(impact.map { "关闭此条件后，本组多通过 \($0) 只。点按切换并更新选股结果" }
+                           ?? "点按切换并更新选股结果")
+    }
+
+    private func conditionKeys(_ group: SelectionRuleGroup) -> [String] {
+        group.and.map { group.id + "|" + $0 } + group.not.map { group.id + "|not:" + $0 }
+    }
+
+    private func groupIsEnabled(_ group: SelectionRuleGroup) -> Bool {
+        group.enabled && conditionKeys(group).contains { !model.draft.disabled.contains($0) }
+    }
+
+    private var expandedGroupIDs: Set<String> {
+        Set((try? JSONDecoder().decode([String].self, from: Data(expandedCommonGroups.utf8))) ?? [])
+    }
+
+    private var commonConditions: (and: [String], not: [String]) {
+        let groups = model.draft.groups.filter { !$0.and.isEmpty || !$0.not.isEmpty }
+        guard groups.count >= 2, let first = groups.first else { return ([], []) }
+        let sharedAnd = first.and.filter { id in groups.allSatisfy { $0.and.contains(id) } }
+        let sharedNot = !first.not.isEmpty && groups.allSatisfy { Set($0.not) == Set(first.not) } ? first.not : []
+        return (sharedAnd, sharedNot)
+    }
+}
+
+private struct SelectionControlsHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 44
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// Intrinsic-width native bubbles wrap within the fixed workspace control area.
+private struct SelectionBubbleFlow: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrangement(width: proposal.width ?? 600, subviews: subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = arrangement(width: bounds.width, subviews: subviews)
+        for (index, subview) in subviews.enumerated() {
+            let frame = result.frames[index]
+            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                          anchor: .topLeading, proposal: ProposedViewSize(frame.size))
+        }
+    }
+
+    private func arrangement(width: CGFloat, subviews: Subviews) -> (size: CGSize, frames: [CGRect]) {
+        let width = max(1, width)
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var frames: [CGRect] = []
+        for subview in subviews {
+            let ideal = subview.sizeThatFits(.unspecified)
+            let size = subview.sizeThatFits(ProposedViewSize(width: min(width, ideal.width), height: nil))
+            if x > 0 && x + size.width > width {
+                x = 0; y += rowHeight + spacing; rowHeight = 0
+            }
+            frames.append(CGRect(x: x, y: y, width: min(width, size.width), height: size.height))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        return (CGSize(width: width, height: y + rowHeight), frames)
     }
 }
 
@@ -502,8 +643,9 @@ private struct SelectionRuleEditor: View {
                     let name = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !name.isEmpty else { return }
                     let id = saveAsNew ? nil : model.selectedPresetID
+                    let definition = SelectionDefinition(groups: model.draft.groups, parameters: model.draft.parameters)
                     Task {
-                        if await model.mutate(operation: "preset.save", payload: SelectionMutationPayload(id: id, name: name, definition: model.draft)) {
+                        if await model.mutate(operation: "preset.save", payload: SelectionMutationPayload(id: id, name: name, definition: definition)) {
                             model.selectedPresetID = model.lastSavedPresetID ?? id
                         }
                     }

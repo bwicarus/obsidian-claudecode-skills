@@ -63,10 +63,15 @@ struct StocksRootView: View {
                 let showsInspector = sizeClass == .regular && geometry.size.width >= 900 && showingWideInspector
                 HStack(spacing: 0) {
                     VStack(spacing: 0) {
-                        if model.isPaired && selectionSection == .screener {
+                        if model.isPaired {
                             StockSelectionControls(model: selectionModel,
+                                                   isScreenerActive: selectionSection == .screener,
                                                    editorPresented: selectionEditorPresented,
-                                                   onEdit: { selectionEditorPresented = true })
+                                                   onActivate: { selectionSection = .screener },
+                                                   onEdit: {
+                                                       selectionSection = .screener
+                                                       selectionEditorPresented = true
+                                                   })
                             Divider()
                         }
                         StockDetailView(model: model)

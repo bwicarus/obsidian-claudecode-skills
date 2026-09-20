@@ -76,9 +76,39 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result["groups"][1]["baselinePassed"], 1)
 
     def test_explicit_no_conditions_is_unfiltered(self):
-        result = self.query([])
-        self.assertTrue(result["unfiltered"])
-        self.assertEqual(result["passed"], 4)
+        for groups in ([], [{"id": "empty", "and": [], "not": []}]):
+            with self.subTest(groups=groups):
+                result = self.query(groups)
+                self.assertTrue(result["unfiltered"])
+                self.assertFalse(result["disabledAll"])
+                self.assertEqual(result["passed"], 4)
+
+    def test_all_configured_conditions_disabled_returns_no_matches(self):
+        cases = [
+            ([{"id": "a", "and": ["price_below_limit"], "not": ["above_ma5"]}],
+             ["a|price_below_limit", "a|not:above_ma5"]),
+            ([{"id": "a", "and": ["price_below_limit"], "enabled": False}], []),
+            ([{"id": "a", "and": ["price_below_limit"], "enabled": False},
+              {"id": "b", "not": ["above_ma5"]}, {"id": "empty"}], ["b|not:above_ma5"]),
+        ]
+        for groups, disabled in cases:
+            with self.subTest(groups=groups, disabled=disabled):
+                result = self.query(groups, disabled=disabled)
+                self.assertTrue(result["disabledAll"])
+                self.assertFalse(result["unfiltered"])
+                self.assertEqual(result["passed"], 0)
+                self.assertEqual(result["items"], [])
+
+    def test_restoring_one_chip_filters_without_reenabling_the_other_conditions(self):
+        groups = [{"id": "a", "and": ["price_below_limit", "above_ma5"]},
+                  {"id": "b", "not": ["above_ma5"]}]
+        disabled = ["a|price_below_limit", "a|above_ma5", "b|not:above_ma5"]
+        self.assertEqual(self.query(groups, disabled=disabled)["passed"], 0)
+        disabled.remove("a|above_ma5")
+        result = self.query(groups, disabled=disabled)
+        self.assertFalse(result["disabledAll"])
+        self.assertFalse(result["unfiltered"])
+        self.assertEqual([item["code"] for item in result["items"]], ["000001", "688001"])
 
     def test_unknown_condition_and_bad_disabled_are_rejected(self):
         for request in ({"groups": [{"and": ["not_a_feature"]}]}, {"disabled": ["g1|above_ma5"]}):
@@ -156,6 +186,20 @@ class SelectionTests(unittest.TestCase):
         result = self.mutate("preset.run", {"id": preset})
         self.assertEqual(result["evaluation"]["passed"], 3)
         self.assertEqual(result["library"]["lastRun"]["presetId"], preset)
+
+    def test_preset_save_ignores_temporary_disabled_chips_without_mutating_the_draft(self):
+        definition = {"groups": [{"id": "a", "and": ["price_below_limit", "above_ma5"]}],
+                      "disabled": ["a|above_ma5"]}
+        self.assertEqual(self.service.evaluate(self.owner, definition)["passed"], 3)
+        preset_id = None
+        for _ in range(2):
+            receipt = self.mutate("preset.save", {"id": preset_id, "name": "基础方案", "definition": definition})
+            preset_id = receipt["presetId"]
+            saved = next(p for p in receipt["library"]["presets"] if p["id"] == preset_id)
+            self.assertEqual(saved["definition"]["disabled"], [])
+            self.assertEqual(saved["definition"]["groups"][0]["and"], definition["groups"][0]["and"])
+            self.assertEqual(definition["disabled"], ["a|above_ma5"])
+            self.assertEqual(self.mutate("preset.run", {"id": preset_id})["evaluation"]["passed"], 1)
 
     def test_legacy_import_appends_and_retains_unmigrated_rules(self):
         self.mutate("group.create", {"name": "原生自选"})
