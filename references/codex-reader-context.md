@@ -33,6 +33,11 @@ git -C . log --oneline -5
 
 ## 2. 产品与所有权
 
+> **2026-09-21 新的 iOS 目标**：用户已确认包括阅读区在内的完整原生化，原逻辑和功能必须
+> 保留，不接受在操作中切回旧网页界面。旧 HTML 原件保留并逐类重做。实施/验收边界见
+> [Reader 完整原生化](reader-native-migration.md)。下文的内置网页 renderer 描述的是当前
+> 已发布实现，不能用作阻止原生迁移的设计约束。
+
 正式客户端只有本地优先 iOS App 与浏览器扩展；**PWA 阅读器界面已于 2026-08-14 退役**（`_server_deploy/reader_pwa_retirement.py` 让 `/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view` 返回 410），下面几条关于 PWA 的分档只作历史参考：
 
 - iOS App：安装包内置同一 Reader renderer/共享组件；Swift 拥有本机文件、数据、生命周期与

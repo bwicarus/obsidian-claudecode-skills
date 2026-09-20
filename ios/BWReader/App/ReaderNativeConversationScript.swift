@@ -131,18 +131,16 @@ enum ReaderNativeConversationScript {
       }
       function projectMessage(node, index) {
         const id = messageID(node, index), tid = node.getAttribute('data-turn') || '';
-        let source = [];
-        try { if (tid && rc().turnCard?.partsOf) source = rc().turnCard.partsOf(tid) || []; } catch (_) {}
-        const role = node.classList.contains('asst-u') || node.querySelector('.rc-part-user') ? 'user' : 'assistant';
-        const textNodes = Array.from(node.querySelectorAll(':scope > .rc-turn-bd > .rc-part-text'));
-        const completedText = source.filter(part => part.kind === 'text');
-        // Final source text preserves Markdown, links and formulas. During a
-        // draft, read its actual rendered text without treating tools as prose.
-        const body = node.__vcCard || flashGroup(node) ? '' : (textNodes.length
-          ? (completedText.length === textNodes.length ? completedText.map(part => text(part.text)) : textNodes.map(el => cleanText(el))).join('\n\n')
-          : (tid ? '' : cleanText(node)));
-        const status = node.querySelector(':scope > .rc-turn-status');
-        const streaming = textNodes.length > completedText.length || node.matches('.mfx-streaming,.mfx-typing') || !!node.querySelector('.mfx-streaming,.mfx-typing') || !!(status && !status.hidden && !status.classList.contains('done'));
+        let presentation = null;
+        try { if (tid) presentation = rc().turnCard?.presentationOf(tid); } catch (_) {}
+        const source = presentation?.parts || [];
+        const role = presentation?.role || (node.classList.contains('asst-u') ? 'user' : 'assistant');
+        // Structured turns include live drafts without reading a rendered web
+        // bubble. Standalone legacy messages remain pending migration.
+        const body = presentation
+          ? source.filter(part => part.kind === 'text').map(part => text(part.text)).join('\n\n')
+          : (!tid && !node.__vcCard && !flashGroup(node) ? cleanText(node) : '');
+        const streaming = presentation ? presentation.streaming : (!tid && (node.matches('.mfx-streaming,.mfx-typing') || !!node.querySelector('.mfx-streaming,.mfx-typing')));
         const parts = [];
         const contentNodes = Array.from(node.querySelectorAll(':scope > .rc-turn-bd > .rc-part:not(.rc-part-text)'));
         const usedContent = new Set();

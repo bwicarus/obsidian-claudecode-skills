@@ -72,6 +72,10 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertEqual(page.locator('#ep-side').evaluate('(n)=>getComputedStyle(n).visibility'), 'hidden')
             page.evaluate("RC.turnCard.draftText('user:u','我的','user','u-item','runner')")
             user = snapshot()['messages'][0]
+            # A web renderer may shorten/reformat the bubble. Native speech
+            # still follows the semantic draft, including its Markdown.
+            page.evaluate("document.querySelector('[data-turn=\"user:u\"] .rc-part-text').textContent='错误网页文字'")
+            self.assertEqual(snapshot()['messages'][0]['text'], '我的')
             page.evaluate("RC.turnCard.draftText('user:u','我的问题','user','u-item','runner');RC.turnCard.freezeDraft('user:u','u-item','runner','user')")
             final_user = snapshot()['messages'][0]
             self.assertEqual(user['id'], final_user['id'])

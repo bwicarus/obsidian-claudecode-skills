@@ -143,6 +143,48 @@ test("还在流的草稿不进 partsOf（半截话不得落库）", () => {
   assert.deepEqual(Array.from(tc.partsOf("t1").map((p) => p.kind)), ["text"]);
 });
 
+test("原生展示读取完整流式原文，不依赖网页正文，也不把草稿落库", () => {
+  const { tc } = loadTurnCard();
+  const turn = tc.open("native-user");
+  tc.draftText("native-user", "**用户** [引用](https://example.org) $x^2$", "user", "speech-1", "runner");
+  turn.bd.children.length = 0;
+  turn.el.querySelector = () => { throw Error("presentation must not read rendered text"); };
+  const live = tc.presentationOf("native-user");
+  assert.equal(live.contract, "reader-turn-presentation/1");
+  assert.equal(live.role, "user");
+  assert.equal(live.parts[0].text, "**用户** [引用](https://example.org) $x^2$");
+  assert.equal(live.parts[0].item_id, "speech-1");
+  assert.equal(live.streaming, true);
+  assert.equal(tc.partsOf("native-user").length, 0);
+  tc.freezeDraft("native-user", "speech-1", "runner", "user");
+  const final = tc.presentationOf("native-user");
+  assert.equal(final.tid, live.tid);
+  assert.equal(final.parts[0].item_id, live.parts[0].item_id);
+  assert.equal(final.streaming, false);
+  assert.equal(tc.partsOf("native-user").length, 1);
+  assert.equal("streaming" in tc.partsOf("native-user")[0], false);
+});
+
+test("原生快照保留原件和实体身份，修改快照不能改写会话", () => {
+  const { tc } = loadTurnCard();
+  const turn = tc.open("native-original");
+  // A stored part can be read even before a renderer for its type exists.
+  turn.parts.push({ kind: "card", card: { id: "card_1", cid: "card_1", gid: "card_1",
+    kind: "html", data: { html: "<button>原件</button>", _st: "draft" } }, _el: turn.el });
+  const copy = tc.presentationOf("native-original");
+  assert.equal(copy.parts[0].card.data.html, "<button>原件</button>");
+  assert.equal(copy.parts[0].card.data._st, "draft");
+  assert.equal("_el" in copy.parts[0], false);
+  copy.parts[0].card.data.html = "modified";
+  assert.equal(tc.partsOf("native-original")[0].card.data.html, "<button>原件</button>");
+  tc.status("native-original", "保存中", false);
+  assert.equal(tc.presentationOf("native-original").streaming, true);
+  tc.idle("native-original");
+  assert.equal(tc.presentationOf("native-original").streaming, false);
+  tc.reset();
+  assert.equal(tc.presentationOf("native-original"), null);
+});
+
 test("步骤超出可用宽度后显示真实状态计数，仍保留完整工具详情", () => {
   const { tc } = loadTurnCard();
   tc.open("many");

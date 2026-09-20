@@ -805,6 +805,7 @@ if (window.__bwPwaProviderOnly) return;
   function status(tid, text, done) {
     var t = _turns[tid] || open(tid);
     if (!t) return;
+    t.presentationStatus = { text: String(text || ''), done: !!done };
     var s = _statusEl(t);
     if (!text) { s.hidden = true; return; }
     s.hidden = false;
@@ -818,7 +819,12 @@ if (window.__bwPwaProviderOnly) return;
     _ensureHead(t, label);
     status(tid, '处理中', false);
   }
-  function idle(tid) { var t = _lookup(tid); if (t && t.statusEl) t.statusEl.hidden = true; }
+  function idle(tid) {
+    var t = _lookup(tid);
+    if (!t) return;
+    t.presentationStatus = { text: '', done: true };
+    if (t.statusEl) t.statusEl.hidden = true;
+  }
 
   // ── 历史回放:**同一个 renderPart**(不变式①)────────────────────────────
   function renderTurn(tid, parts, target, options) {
@@ -868,6 +874,31 @@ if (window.__bwPwaProviderOnly) return;
       var o = {}; for (var k in p) { if (k.charAt(0) !== '_') o[k] = p[k]; }
       return o;
     });
+  }
+  // Display and persistence have different contracts: native views need the
+  // current draft, while partsOf must never persist an unfinished transcript.
+  // Read model state, not rendered Markdown/DOM. Return detached JSON so a
+  // native renderer cannot accidentally mutate the authoritative turn.
+  function presentationOf(tid) {
+    var t = _lookup(tid);
+    if (!t) return null;
+    var parts = t.parts.map(function (p) {
+      var out = {};
+      Object.keys(p).forEach(function (key) {
+        if (key.charAt(0) !== '_') out[key] = p[key];
+      });
+      out.streaming = !!p._streamDraft;
+      return out;
+    });
+    var state = t.presentationStatus || { text: '', done: true };
+    return JSON.parse(JSON.stringify({
+      contract: 'reader-turn-presentation/1',
+      tid: t.tid,
+      role: parts.some(function (p) { return p.kind === 'text' && p.role === 'user'; }) ? 'user' : 'assistant',
+      parts: parts,
+      status: state,
+      streaming: parts.some(function (p) { return p.streaming; }) || !!(state.text && !state.done)
+    }));
   }
   function reset() { _turns = {}; _cur = null; }
   // 容器改名（2026-09-15 根治）：运行器推来真实 turn id 时，把本地临时容器连同已画的部件搬到真实 id 下
@@ -1117,6 +1148,7 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   RC.turnCard = {
+    presentationOf: presentationOf,
     drop: drop,
     open: open, addPart: addPart, progress: progress, progressHtml: progressHtml, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
     renderTurn: renderTurn, reconcile: reconcile, preserveLive: preserveLive, streamVersion: function () { return _streamVersion; }, partsOf: partsOf, reset: reset, prune: prune, setTaskId: setTaskId, setOrchTaskId: setOrchTaskId, title: title, status: status, cliPart: cliPart,
