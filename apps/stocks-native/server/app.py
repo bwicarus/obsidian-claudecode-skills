@@ -25,6 +25,7 @@ from reports import ReportService, ReportError
 from news import NewsService
 from schedules import ScheduleService, ScheduleError
 from schedule_runtime import ScheduleRuntime
+from voice_settings import VoiceSettingsService, VoiceSettingsError
 
 log = logging.getLogger(__name__)
 @web.middleware
@@ -37,7 +38,7 @@ async def errors(request, handler):
         response = web.json_response({'error': '未找到该股票'}, status=404)
     except DataUnavailable:
         response = web.json_response({'error': '行情数据暂不可用，请稍后重试'}, status=503)
-    except (SelectionError, MonitorError, PlanError, ScheduleError, ReportError) as exc:
+    except (SelectionError, MonitorError, PlanError, ScheduleError, ReportError, VoiceSettingsError) as exc:
         result = {'error': str(exc), 'message': str(exc), 'code': exc.code, **exc.detail}
         if isinstance(exc, SelectionConflict):
             result['revision'] = exc.revision
@@ -435,6 +436,29 @@ async def voice_ink(request):
     return web.json_response(result)
 
 
+async def voice_settings_get(request):
+    caller = await identity(request)
+    if not caller['aiEnabled']:
+        raise web.HTTPForbidden()
+    settings = await asyncio.to_thread(request.app['voice_settings'].load, caller['ownerId'])
+    return web.json_response({'settings': settings, 'applies': 'next_connection'})
+
+
+async def voice_settings_save(request):
+    caller = await identity(request)
+    if not caller['aiEnabled']:
+        raise web.HTTPForbidden()
+    settings = await request.app['voice_settings'].save(caller['ownerId'], await request.json())
+    return web.json_response({'settings': settings, 'applies': 'next_connection'})
+
+
+async def voice_catalog(request):
+    caller = await identity(request)
+    if not caller['aiEnabled']:
+        raise web.HTTPForbidden()
+    return web.json_response(await request.app['voice_settings'].catalog())
+
+
 async def voice(request):
     device_id = request.query.get('deviceId')
     if not device_id:
@@ -514,6 +538,7 @@ async def voice(request):
         session.plan_service = request.app['plans']
         session.report_service = request.app['reports']
         session.notification_delivery = request.app['notifications']
+        session.voice_settings_service = request.app['voice_settings']
         active[device_id] = (ws, session)
         await asyncio.to_thread(request.app['notifications'].voice_presence, caller['ownerId'], device_id)
         watch_task = asyncio.create_task(watch())
@@ -623,12 +648,16 @@ def create_app():
     app['news'] = NewsService(app['data'], state)
     app['schedules'] = ScheduleService(state)
     app['notifications'] = NotificationDelivery(state)
+    app['voice_settings'] = VoiceSettingsService(state)
     app['live'] = LiveMarketSource()
     app['pair_attempts'] = defaultdict(deque)
     app['voices'] = {}
     app['chip_cache'] = {}
     app.add_routes([web.get('/api/health', health), web.post('/api/pair', pair),
                     web.post('/api/voice/ink', voice_ink),
+                    web.get('/api/voice/settings', voice_settings_get),
+                    web.post('/api/voice/settings', voice_settings_save),
+                    web.get('/api/voice/catalog', voice_catalog),
                     web.post('/api/auth/apple', apple_login),
                     web.get('/api/monitor/catalog', monitor_catalog),
                     web.get('/api/monitor/library', monitor_library),
