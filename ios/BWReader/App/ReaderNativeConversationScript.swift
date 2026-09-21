@@ -679,31 +679,48 @@ enum ReaderNativeConversationScript {
               if (window.__focusSel?.text !== selection) return { ok: false, error: '选区暂未进入对话，请重试' };
             }
           } else if (action === 'nativeSelectionHighlight') {
-            // 原生选区菜单的划线。**不另写保存逻辑**：转交阅读器自己的
-            // __bwReaderHighlightExactText —— AI 划线走的同一条路径、同一套存储、
-            // 同一份色板。这里只做形状校验和 mutationId 生成。
+            // 原生阅读区的划线。
+            //
+            // ⚠ 这里**不再走 __bwReaderHighlightExactText**（它要先
+            //   `_pdfExactTextPage` 把那一页在网页里渲出来取 __charBoxes，
+            //   `dataset.loaded === '1'` 是硬条件）—— 那正是"两套渲染器同时渲同一本书"
+            //   的来源，用户 2026-09-21 报的崩溃就指着它。
+            //   原生那侧已经有自己的字符层和选区核心，点坐标的矩形它自己就算得出来，
+            //   所以这里直接拼出**和网页保存时一模一样的记录**，交给本地 runtime 落库。
+            //   记录形状以 reader.src/17-highlight.js::saveHighlight 的 payload 为准。
             const value = command.value;
-            const colors = ['yellow', 'green', 'blue', 'pink'];
+            const palette = { yellow: '#fff59d', green: '#a7f3d0', blue: '#a3d4ff', pink: '#fda4af' };
+            const okRect = r => Array.isArray(r) && r.length === 4 && r.every(n => Number.isFinite(n));
             if (!value || typeof value.text !== 'string' || !value.text.trim() ||
-                value.text.length > 2000 || !Number.isSafeInteger(value.page) || value.page < 1 ||
-                !colors.includes(value.color)) return { ok: false, error: '划线参数无效' };
-            // 书身份取阅读器自己的那一份（reader.src/01-boot.js：FILE_REL = __PDF_CFG.file_rel），
-            // 不另存一份 —— 两份书身份对不上时划线会静默落到别处。
+                value.text.length > 4000 || !Number.isSafeInteger(value.page) || value.page < 1 ||
+                !palette[value.color] || !Array.isArray(value.rects) || !value.rects.length ||
+                value.rects.length > 512 || !value.rects.every(okRect) ||
+                !(Number(value.pageWidth) > 0) || !(Number(value.pageHeight) > 0)) {
+              return { ok: false, error: '划线参数无效' };
+            }
+            const runtime = window.__BW_READER_RUNTIME__;
             const fileRel = window.__PDF_CFG && window.__PDF_CFG.file_rel;
-            if (typeof window.__bwReaderHighlightExactText !== 'function' ||
-                typeof fileRel !== 'string' || !fileRel) return { ok: false, error: '划线尚未就绪' };
-            // mutationId 形状由阅读器那侧校验：^c_[a-f0-9]{8,32}$
+            if (!runtime || typeof runtime.savePDFHighlight !== 'function' ||
+                typeof fileRel !== 'string' || !fileRel) return { ok: false, error: '本地存储尚未就绪' };
             const bytes = new Uint8Array(12);
             (window.crypto || {}).getRandomValues?.(bytes);
-            const mutationId = 'c_' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
             const captured = scope;
-            const saved = await window.__bwReaderHighlightExactText({
-              file: fileRel,
-              target: { kind: 'pdf', page: value.page },
-              text: value.text, color: value.color, mutationId: mutationId
-            });
+            let saved;
+            try {
+              saved = await runtime.savePDFHighlight({
+                file: fileRel, page: value.page, rects: value.rects,
+                color: palette[value.color], text: value.text,
+                kind: 'note', sentence: typeof value.sentence === 'string' ? value.sentence.slice(0, 600) : '',
+                body: '', note: '',
+                page_w: Number(value.pageWidth), page_h: Number(value.pageHeight),
+                id: 'c_' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+              });
+            } catch (error) {
+              return { ok: false, error: String(error && error.message || error).slice(0, 200) };
+            }
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换，请在原书核对结果' };
-            return { ok: true, value: { id: saved?.id || '', page: value.page } };
+            if (!saved || saved.ok !== true) return { ok: false, error: '划线未落库' };
+            return { ok: true, value: { id: (saved.highlight && saved.highlight.id) || saved.id || '', page: value.page } };
           } else if (action === 'nativeSelectionLookup') {
             // 原生阅读区的查词/翻译。**只取数据**，渲染在原生那侧。
             // 语言路由和端点都在阅读器自己的 __bwReaderLookupData 里，这里不复制。

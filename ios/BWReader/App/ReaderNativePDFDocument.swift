@@ -55,7 +55,20 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     var onSelection: (([CharacterSelection]) -> Void)?
     var onGeometry: (() -> Void)?
     /// 选区菜单里点了划线：(页码, 原文, 颜色键)。交给壳走阅读器自己的划线路径。
-    var onHighlight: ((Int, String, String) -> Void)?
+    /// 选区菜单里点了划线。带上**点坐标的矩形和页面尺寸** —— 原生这侧自己就能拼出
+    /// 完整的高亮记录，不必再让网页层把那一页渲出来取 `__charBoxes`
+    /// （`_pdfExactTextPage` 要求 `dataset.loaded === '1'`，那正是双份渲染的来源）。
+    /// 矩形格式与阅读器存储一致：[x0, y0, x1, y1]，PDF 点，左上原点。
+    struct HighlightRequest {
+        let page: Int
+        let text: String
+        let sentence: String
+        let color: String
+        let rects: [[Double]]
+        let pageWidth: Double
+        let pageHeight: Double
+    }
+    var onHighlight: ((HighlightRequest) -> Void)?
     /// 选区菜单里点了查词/翻译：(页码, 原文, "dict" | "translate")。
     var onLookup: ((Int, String, String) -> Void)?
     private var access: ReaderLocalBookAccess?
@@ -562,7 +575,16 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         overlay.onSelect = { [weak self] value in self?.acceptOCRSelection(value, page: number) }
         overlay.onError = { [weak self] in self?.error = "当前文字层无法确认这段选区的位置。" }
         overlay.onHighlight = { [weak self] value, color in
-            self?.onHighlight?(number, value.text, color)
+            guard let self, let chars = self.characterPages[number] else { return }
+            // 归一化矩形还原成点坐标：选区核心本来给的就是点，Swift 侧只为了绘制
+            // 才除过一次（ReaderNativePDFSelection: x0/width …）。存储要的是点。
+            let rects = value.rects.map { rect -> [Double] in
+                [rect.minX * chars.pageWidth, rect.minY * chars.pageHeight,
+                 rect.maxX * chars.pageWidth, rect.maxY * chars.pageHeight]
+            }
+            self.onHighlight?(HighlightRequest(
+                page: number, text: value.text, sentence: value.sentence, color: color,
+                rects: rects, pageWidth: chars.pageWidth, pageHeight: chars.pageHeight))
         }
         overlay.onLookup = { [weak self] value, mode in
             self?.onLookup?(number, value.text, mode)

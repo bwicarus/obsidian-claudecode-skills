@@ -523,10 +523,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 && self.nativeConversation.scope == scope
         }
         activeNativePDFDocument = document
-        document.onHighlight = { [weak self] page, text, color in
+        document.onHighlight = { [weak self] request in
             Task { @MainActor [weak self] in
                 await self?.highlightFromNativeSelection(
-                    page: page, text: text, color: color, bookID: bookID, contentSHA256: digest)
+                    request, bookID: bookID, contentSHA256: digest)
             }
         }
         document.onLookup = { [weak self] page, text, mode in
@@ -623,15 +623,23 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 写入成功后本地 runtime 会 ping 回来，投影把它画到原生正文上（见
     /// scheduleNativePDFProjectionRefresh），所以这里不必自己重画。
     private func highlightFromNativeSelection(
-        page: Int, text: String, color: String, bookID: String, contentSHA256: String
+        _ request: ReaderNativePDFDocument.HighlightRequest,
+        bookID: String, contentSHA256: String
     ) async {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 2000, page > 0,
-              ["yellow", "green", "blue", "pink"].contains(color),
+        let trimmed = request.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 4000, request.page > 0,
+              !request.rects.isEmpty, request.rects.count <= 512,
+              request.pageWidth > 0, request.pageHeight > 0,
+              ["yellow", "green", "blue", "pink"].contains(request.color),
               nativePDFDocument?.matches(bookID: bookID, contentSHA256: contentSHA256) == true else { return }
         let receipt = await requestNativeConversationCommand([
             "action": "nativeSelectionHighlight",
-            "value": ["page": page, "text": trimmed, "color": color],
+            "value": [
+                "page": request.page, "text": trimmed, "color": request.color,
+                "sentence": String(request.sentence.prefix(600)),
+                "rects": request.rects,
+                "pageWidth": request.pageWidth, "pageHeight": request.pageHeight,
+            ],
         ])
         if receipt["ok"] as? Bool != true {
             nativePDFMountFailure = "划线失败：" + ((receipt["error"] as? String) ?? "未知原因")
