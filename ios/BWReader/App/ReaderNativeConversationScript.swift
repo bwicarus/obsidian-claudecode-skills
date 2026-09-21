@@ -396,11 +396,14 @@ enum ReaderNativeConversationScript {
         if (typeof window.__clearFocusSel === 'function') out.push('clearSelection');
         if (typeof drawer()?.open === 'function' && typeof drawer()?.close === 'function') out.push('toggleAssistant');
         if (typeof window.__asstSend === 'function') out.push('send');
-        if (document.getElementById('asst-send')) out.push('stop');
+        if (rc().assistant?.conversationService?.stop) out.push('stop');
+        if (rc().assistant?.conversationService?.clear) out.push('clearConversation');
+        if (conversationMode() === 'normal' && rc().voicecall?.canStartNewTopic?.()) out.push('newConversation');
         if (typeof rc().assistant?.openModelSettings === 'function') out.push('openModels');
         if (rc().assistant?.settingsService) out.push('nativeSettings');
         if (rc().readerSearch?.search) out.push('nativeSearch', 'openSearch');
         if (rc().readerNavigation?.state && rc().readerNavigation?.perform) out.push('nativeNavigation', 'openNavigation');
+        if (rc().readerPreferences?.state && rc().readerPreferences?.perform) out.push('nativeReadingSettings', 'openSettings');
         if (typeof window.openSettings === 'function' || document.getElementById('ep-set-btn')) out.push('openSettings');
         if (rc().review?.performNativeInteraction) out.push('openReview', 'reviewAction');
         else if (document.getElementById('asst-review-toggle')) out.push('openReview');
@@ -568,8 +571,9 @@ enum ReaderNativeConversationScript {
         if (command.scope && command.scope !== scope) return { ok: false, error: '会话已切换，请重新操作' };
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
+        if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
-        if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction') parameterKeys.push('value');
+        if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
         if (Object.keys(command).some(key => !parameterKeys.includes(key))) return { ok: false, error: '不支持的操作参数' };
         const action = command.action;
         try {
@@ -602,9 +606,13 @@ enum ReaderNativeConversationScript {
             if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected) return { ok: false, error: '内容已更新，请重试' };
             await target.run(command);
           } else if (action === 'stop') {
-            const button = document.getElementById('asst-send');
-            if (!button?.classList.contains('stop') || button.disabled) return { ok: false, error: '当前没有可停止的文字回复' };
-            button.click();
+            if (rc().assistant?.conversationService?.stop?.() !== true) return { ok: false, error: '当前没有可停止的文字回复' };
+          } else if (action === 'clearConversation') {
+            if (!rc().assistant?.conversationService?.clear) return { ok: false, error: '对话尚未准备好' };
+            await rc().assistant.conversationService.clear(command.value);
+          } else if (action === 'newConversation') {
+            if (conversationMode() !== 'normal' || !rc().voicecall?.canStartNewTopic?.()) return { ok: false, error: '当前通话不支持新话题' };
+            rc().voicecall.startNewTopic();
           } else if (action === 'toggleVoice' || action === 'toggleComputerVoice') {
             const button = document.getElementById(action === 'toggleVoice' ? 'asst-call' : 'asst-computer');
             if (!button || button.disabled || button.classList.contains('vc-review-disabled')) return { ok: false, error: '当前无法使用这项语音功能' };
@@ -613,6 +621,14 @@ enum ReaderNativeConversationScript {
             setLegacy(action === 'showLegacy');
           } else if (action === 'refresh') {
             rc().assistant?.reloadHistory?.();
+          } else if (action === 'readingSettingsRead' || action === 'readingSettingsWrite') {
+            const owner = rc().readerPreferences, captured = scope;
+            if (!owner?.state || !owner?.perform || command.scope !== scope) return { ok: false, error: '阅读设置尚未就绪' };
+            if (action === 'readingSettingsWrite') await owner.perform(command.key, command.value);
+            else if (owner.read) await owner.read();
+            if (captured !== scope || getScopeKey() !== scopeKey || owner !== rc().readerPreferences) return { ok: false, error: '书籍已切换，请在原书核对保存结果' };
+            schedule();
+            return { ok: true, value: owner.state() };
           } else if (action === 'navigationRead' || action === 'navigationAction') {
             const owner = rc().readerNavigation, captured = scope;
             if (!owner?.state || !owner?.perform || command.scope !== scope) return { ok: false, error: '导航尚未就绪' };

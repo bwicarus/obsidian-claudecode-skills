@@ -138,6 +138,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var error: String?
     @Published var inspection: ReaderNativeArtifactInspection?
     @Published var settingsPanel: ReaderNativeSettingsModel?
+    @Published var readingSettingsPanel: ReaderNativeReadingSettingsModel?
     @Published var searchPanel: ReaderNativeSearchModel?
     @Published var tocPanel: ReaderNativeTOCModel?
     @Published var navigationPanel: ReaderNativeNavigationModel?
@@ -200,6 +201,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         if nextScope != scope {
             inspection = nil
             settingsPanel = nil
+            readingSettingsPanel = nil
             searchPanel = nil
             tocPanel = nil
             navigationPanel = nil
@@ -240,6 +242,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     func resetForNavigation() {
         inspection = nil
         settingsPanel = nil
+        readingSettingsPanel = nil
         searchPanel = nil
         tocPanel = nil
         navigationPanel = nil
@@ -315,6 +318,10 @@ final class ReaderNativeConversationModel: ObservableObject {
 
     @discardableResult
     func perform(_ action: String, parameters: [String: Any] = [:]) async -> Bool {
+        if action == "openSettings", supports("nativeReadingSettings"), let inspectionHandler {
+            readingSettingsPanel = ReaderNativeReadingSettingsModel(scope: scope, request: inspectionHandler)
+            return true
+        }
         if action == "openNavigation", supports("nativeNavigation"), let inspectionHandler {
             navigationPanel = ReaderNativeNavigationModel(scope: scope, request: inspectionHandler)
             return true

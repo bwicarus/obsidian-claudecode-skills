@@ -24,6 +24,81 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
         allowed = transport.split('let allowed: Set<String> = [', 1)[1].split(']', 1)[0]
         cls.transport_actions = set(re.findall(r'"([A-Za-z]+)"', allowed))
 
+    def test_native_reading_preferences_keep_book_identity_and_confirm_saves(self):
+        bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
+        boot = (ROOT / '_server_deploy/static/pdf/reader.src/01-boot.js').read_text(encoding='utf-8')
+        owners = 'async function saveBookFigures(on) {' + boot.split('async function saveBookFigures(on) {', 1)[1].split("window.dlog('PDF_URL", 1)[0]
+        source = (ROOT / '_server_deploy/static/pdf/reader.src/21-misc-ai.js').read_text(encoding='utf-8')
+        preferences = 'RC.readerPreferences = {' + source.split('RC.readerPreferences = {', 1)[1].split('function _applyDebugVisibility()', 1)[0]
+        loader = (ROOT / '_server_deploy/static/pdf/reader.src/03-loader.js').read_text(encoding='utf-8')
+        crop = 'async function saveCropSettings(crop, autoOn) {' + loader.split('async function saveCropSettings(crop, autoOn) {', 1)[1].split('\n}', 1)[0] + '\n}'
+        with sync_playwright() as p:
+            browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
+            page = browser.new_page()
+            page.route('**/*', lambda r: r.fulfill(status=200, content_type='text/html; charset=utf-8', body='<div id="asst-thread"></div>') if r.request.url == 'http://reader.test/' else r.abort())
+            page.goto('http://reader.test/')
+            page.evaluate('''() => {
+              window.receipts=[];window.writes=[];window.__asstSend=()=>{};
+              window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};
+              window.RC={turnCard:{}};window.FILE_REL='original/book.pdf';window.BOOK_LANGS=[];
+              window._crop={l:0,r:0,t:0,b:0};window._cropOn=false;window.__figBookOn=false;
+              window._grammarViewMode='components';window.pdfDoc={};window.currentPage=4;
+              window.renderPage=async p=>{window.rendered=p};window._refitToWidth=async()=>{window.refits=(window.refits||0)+1};
+              window._updateCropBtn=()=>{};window._cropKey=()=>FILE_REL+'-crop';
+              window._rerenderVisibleFigs=()=>{};window._applyDebugVisibility=()=>{};
+              window.getHlColors=()=>JSON.parse(localStorage.getItem('pdf-hl-colors')||'null')||['#fff59d'];
+              window.saveHlColors=v=>localStorage.setItem('pdf-hl-colors',JSON.stringify(v));
+              window.setGrammarView=v=>{window._grammarViewMode=v;};
+              window.bookConfig={langs:['ja'],enabled:false,crop:{l:3,r:4,t:2,b:1}};
+              window.fetch=async (url, opts)=>{
+                const body=opts?.body?JSON.parse(opts.body):null;
+                if(body)writes.push({url,body});
+                if(window.failSave)return {ok:false,status:500,json:async()=>({ok:false,error:'disk failed'})};
+                if(body?.langs)bookConfig.langs=body.langs;
+                if(body&&'enabled' in body)bookConfig.enabled=body.enabled;
+                if(body?.crop)bookConfig.crop=body.crop;
+                return {ok:true,status:200,json:async()=>({ok:true,...bookConfig})};
+              };
+            }''')
+            page.add_script_tag(content=owners + crop + preferences)
+            page.add_script_tag(content=bridge)
+            page.evaluate('__bwNativeConversation.setNativeMode(true)')
+            page.wait_for_function('receipts.at(-1)?.capabilities?.includes("nativeReadingSettings")')
+            scope = page.evaluate('receipts.at(-1).scope')
+            def command(key=None, value=None):
+                args = dict(action='readingSettingsWrite' if key else 'readingSettingsRead', scope=scope)
+                self.assertIn(args['action'], self.transport_actions)
+                if key: args.update(key=key, value=value)
+                return page.evaluate('(c)=>__bwNativeConversation.perform(c)', args)
+            self.assertEqual(command()['value']['languages'], ['ja'])
+            self.assertEqual(command()['value']['crop']['l'], 3)
+            self.assertTrue(command('vocabulary', False)['ok'])
+            self.assertEqual(page.evaluate('localStorage.getItem("pdf-vocab-underline")'), '0')
+            self.assertEqual(page.evaluate('rendered'), 4)
+            self.assertFalse(command('vocabulary', 'false')['ok'])
+            self.assertTrue(command('languages', ['en', 'ja'])['ok'])
+            self.assertEqual(page.evaluate('writes.at(-1).body.file'), 'original/book.pdf')
+            self.assertFalse(command('languages', ['unknown'])['ok'])
+            self.assertTrue(command('crop', dict(l=5,r=4,t=3,b=2))['ok'])
+            self.assertTrue(page.evaluate('_cropOn'))
+            self.assertFalse(command('crop', dict(l=99,r=0,t=0,b=0))['ok'])
+            self.assertTrue(command('grammar', 'tree')['ok'])
+            self.assertTrue(command('colors', ['#abc','#aabbccdd'])['ok'])
+            self.assertFalse(command('colors', ['url(javascript:bad)'])['ok'])
+            page.evaluate('window.failSave=true')
+            self.assertFalse(command('figures', True)['ok'])
+            self.assertFalse(page.evaluate('__figBookOn'))
+            self.assertFalse(command('languages', [])['ok'])
+            self.assertEqual(page.evaluate('BOOK_LANGS'), ['en', 'ja'])
+            self.assertFalse(command('crop', dict(l=0,r=0,t=0,b=0))['ok'])
+            self.assertEqual(page.evaluate('_crop.l'), 5)
+            self.assertFalse(command()['ok'])
+            count = page.evaluate('writes.length')
+            page.evaluate('history.replaceState(null,"","/?file=another.pdf")')
+            self.assertFalse(command('figures', True)['ok'])
+            self.assertEqual(page.evaluate('writes.length'), count)
+            browser.close()
+
     def test_native_page_navigation_preserves_offsets_volumes_and_return_anchor(self):
         bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
         source = (ROOT / '_server_deploy/static/pdf/reader.src/05-nav.js').read_text(encoding='utf-8')
@@ -433,6 +508,61 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertFalse(failed['ok'])
             self.assertIn('保存失败', failed['error'])
             self.assertFalse(page.evaluate('receipts[receipts.length-1].legacyVisible'))
+            browser.close()
+
+    def test_native_conversation_lifecycle_uses_confirmed_clear_and_non_destructive_voice_topic(self):
+        source = (ROOT / '_server_deploy/static/pdf/rc-assistant.js').read_text(encoding='utf-8')
+        clear = 'async function _clearCurrentConversation()' + source.split('async function _clearCurrentConversation()',1)[1].split('  // 快捷按钮',1)[0]
+        service = 'function _stopCurrentResponse()' + source.split('function _stopCurrentResponse()',1)[1].split('  // ── 苹果风格语音按钮',1)[0]
+        voice = (ROOT / '_server_deploy/static/pdf/rc-voicecall.js').read_text(encoding='utf-8')
+        topic = 'function canStartNewTopic()' + voice.split('function canStartNewTopic()',1)[1].split('  RC.voicecall =',1)[0]
+        bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""',1)[1].rsplit('"""#',1)[0]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
+            page = browser.new_page()
+            page.route('**/*',lambda r:r.fulfill(status=200,content_type='text/html; charset=utf-8',body='<div id="side-pane-asst"><div id="asst-thread">历史仍在</div></div>'))
+            page.goto('http://reader.test/')
+            page.evaluate('''() => {
+              window.RC={assistant:{},turnCard:{},toolChip:{clearAll:()=>{}}};window.receipts=[];window.calls=[];
+              window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};window.__asstSend=()=>{};
+              window.thread=document.getElementById('asst-thread');window._assistantMode='normal';window._modeEpoch=0;window._historyEpoch=0;
+              window._clearing=false;window.streaming=true;window._recovering=false;window._abort={abort:()=>calls.push('stop')};
+              window.micStop=()=>{};window._setSendMode=()=>{};window._setClearingUi=x=>{_clearing=x;};window._clearUrl=m=>'/clear/'+m;
+              window.greet=()=>{thread.textContent='新的开始';};window.loadHistory=async()=>{thread.textContent='恢复历史';};
+              window.fetch=async()=>{calls.push('delete-history');await new Promise(r=>window.finishClear=r);return {ok:!window.failClear,json:async()=>({ok:true})};};
+              window._assistantInReview=()=>_assistantMode==='review';window._computerVoiceActive=()=>!!window.computerActive;
+              window._computerVoiceStarting=false;window._connecting=false;window._rtc={on:true};window.mode='s2s';window.ws={};
+              window.teardown=()=>{calls.push('end-voice');};window.setSt=()=>{};window.toggle={_opts:{},_connect:()=>calls.push('new-voice')};
+            }''')
+            page.add_script_tag(content=topic)
+            page.evaluate('RC.voicecall={canStartNewTopic,startNewTopic,setRecallCutoff:async()=>{calls.push("reset-recall");}}')
+            page.add_script_tag(content=clear+service)
+            page.add_script_tag(content=bridge)
+            page.evaluate('__bwNativeConversation.snapshot()')
+            scope=page.evaluate('receipts.at(-1).scope')
+            def command(action, **values):
+                self.assertIn(action,self.transport_actions)
+                return page.evaluate('(c)=>__bwNativeConversation.perform(c)',dict(action=action,scope=scope,**values))
+            self.assertTrue(command('stop')['ok'])
+            self.assertEqual(page.evaluate('calls'),['stop'])
+            self.assertTrue(command('newConversation')['ok'])
+            self.assertEqual(page.evaluate('thread.textContent'),'历史仍在')
+            self.assertNotIn('delete-history',page.evaluate('calls'))
+            page.evaluate('computerActive=true')
+            self.assertFalse(command('newConversation')['ok'])
+            page.evaluate('computerActive=false')
+            self.assertFalse(command('clearConversation',value={})['ok'])
+            page.evaluate('(scope)=>{window.clearDone=false;window.pendingClear=__bwNativeConversation.perform({action:"clearConversation",scope,value:{confirmed:true,resetRecall:true}}).then(x=>{clearDone=true;return x;});}',scope)
+            page.wait_for_function('typeof finishClear==="function"')
+            self.assertFalse(page.evaluate('clearDone'))
+            page.evaluate('finishClear()')
+            self.assertTrue(page.evaluate('pendingClear')['ok'])
+            self.assertEqual(page.evaluate('calls.at(-1)'),'reset-recall')
+            page.evaluate('(scope)=>{window.failClear=true;window.pendingClear=__bwNativeConversation.perform({action:"clearConversation",scope,value:{confirmed:true}});}',scope)
+            page.wait_for_function('_clearing')
+            page.evaluate('finishClear()')
+            self.assertFalse(page.evaluate('pendingClear')['ok'])
+            self.assertEqual(page.evaluate('thread.textContent'),'恢复历史')
             browser.close()
 
     def test_projection_commands_and_lifecycle(self):

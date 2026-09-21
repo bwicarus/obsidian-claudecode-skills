@@ -160,6 +160,10 @@
   }
 
   var POLICIES = [
+    networkRead('reader.document.preferences', ['/pdf/api/book-langs', '/pdf/api/book-figures', '/pdf/api/book-crop'], {
+      local: { owner: 'native-local-runtime', data: 'active-book-preferences' },
+      reason: '打开或刷新本书设置时读取当前保存值；读取失败不以空白默认值覆盖原配置。'
+    }),
     networkRead('reader.document.search', ['/pdf/api/search', '/pdf/api/epub-search'], {
       local: { owner: 'native-local-runtime', data: 'active-book-text-and-ocr' },
       reason: '显式全文检索；App 由本地阅读 runtime 和 OCR 索引接管，其他宿主沿用既有查询通道。结果保留未识别页面状态。'

@@ -10567,12 +10567,7 @@ if (window.__bwPwaProviderOnly) return;
         box.querySelector('.vc-grab').style.display = 'none';
       }
       box.querySelector('.vc-x').addEventListener('click', function () { teardown(true); });
-      box.querySelector('.vc-new').addEventListener('click', function () {   // ↺ 新话题:挂断 → 重连(豆包带 fresh=1 清 dialog_id;WebRTC 每连接本就是新会话)
-        teardown(false);
-        toggle._fresh = true;
-        setSt('已清空记忆,重新开始…');
-        toggle._connect(toggle._opts || {});
-      });
+      box.querySelector('.vc-new').addEventListener('click', startNewTopic);
       // 抓手拖拽:上拖=对话区变高(窗在输入框上方,向上扩展),高度存 localStorage 下次直接复原
       (function () {
         var g = box.querySelector('.vc-grab'), sub = box.querySelector('.vc-sub');
@@ -11147,7 +11142,26 @@ if (window.__bwPwaProviderOnly) return;
     _syncAdapterNow();
   }, 2000);
 
+  function canStartNewTopic() {
+    return !_assistantInReview() && !_connecting && !_computerVoiceActive() && !_computerVoiceStarting &&
+      !!(_rtc.on || (mode === 's2s' && ws));
+  }
+  function startNewTopic() {
+    if (!canStartNewTopic()) throw new Error('请在普通语音通话连接后创建新话题');
+    teardown(false);
+    toggle._fresh = true;
+    setSt('正在开始新话题…');
+    toggle._connect(toggle._opts || {});
+    return { accepted: true };
+  }
   RC.voicecall = { toggle: toggle,
+    canStartNewTopic: canStartNewTopic,
+    startNewTopic: startNewTopic,
+    setRecallCutoff: function (seconds) {
+      if (!Number.isFinite(seconds) || seconds < 0) return Promise.reject(new Error('记忆起点无效'));
+      return new Promise(function (resolve, reject) {
+        _setCutoff(Math.floor(seconds), function (ok) { if (ok) resolve(true); else reject(new Error('记忆起点未保存')); });
+      });
     acceptRealtimeOutput: _acceptReaderRealtimeOutput,
     canCaptureComputerVoiceGesture: function () { return !_assistantInReview(); },
     isOpen: function () {

@@ -10,6 +10,8 @@ struct ReaderNativeConversationView: View {
 
     @State private var nearBottom = true
     @State private var resumeAtBottom = false
+    @State private var confirmsClear = false
+    @State private var resetsRecall = false
     @GestureState private var interacting = false
 
     private var isReview: Bool { model.conversationMode == "review" }
@@ -56,9 +58,32 @@ struct ReaderNativeConversationView: View {
         .background(ReaderNativeTheme.canvas)
         .foregroundStyle(ReaderNativeTheme.ink)
         .tint(ReaderNativeTheme.accent)
-        .onChange(of: model.scope) { _, _ in resumeAtBottom = false }
+        .onChange(of: model.scope) { _, _ in resumeAtBottom = false; confirmsClear = false }
         .sheet(item: $model.inspection) { _ in
             ReaderNativeArtifactInspector(model: model)
+        }
+        .sheet(isPresented: $confirmsClear) {
+            NavigationStack {
+                Form {
+                    Section {
+                        Text(isReview ? "清空当前复习对话，普通助手记录保留。学习卡和评分不受影响。" : "清空当前普通助手的对话记录，复习对话保留。书籍、卡片和学习记录不受影响。")
+                        if !isReview {
+                            Toggle("回顾学习从现在开始", isOn: $resetsRecall)
+                            Text("开启后，回顾学习不再引用之前的记录；学习档案仍会保留。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Button("清空当前对话", role: .destructive) {
+                        Task {
+                            let ok = await model.perform("clearConversation", parameters: ["value": ["confirmed": true, "resetRecall": resetsRecall]])
+                            if ok { confirmsClear = false }
+                        }
+                    }.disabled(model.isPerforming("clearConversation"))
+                    if let error = model.error { Text(error).font(.caption).foregroundStyle(.red) }
+                }
+                .navigationTitle("清空对话").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { confirmsClear = false } } }
+            }.presentationDetents([.medium])
         }
     }
 
@@ -111,7 +136,7 @@ struct ReaderNativeConversationView: View {
                     Button {
                         Task { await model.perform("newConversation") }
                     } label: {
-                        Label("新对话", systemImage: "square.and.pencil")
+                        Label("新话题", systemImage: "square.and.pencil")
                             .font(.subheadline).padding(.vertical, 3)
                     }
                     .buttonStyle(.bordered)
@@ -326,6 +351,11 @@ struct ReaderNativeConversationView: View {
                                 .accessibilityLabel("移除\(item.title)")
                             }
                             .padding(9).background(ReaderNativeTheme.accentWash, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                        if model.supports("clearConversation") {
+                            Button("清空当前对话", systemImage: "trash", role: .destructive) {
+                                resetsRecall = false; confirmsClear = true
+                            }
                         }
                     }
                 }.scrollIndicators(.hidden)

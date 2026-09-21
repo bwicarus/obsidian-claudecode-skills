@@ -82,6 +82,9 @@ struct ReaderNativeWorkspace<Document: View>: View {
         .sheet(item: $conversation.settingsPanel) { panel in
             ReaderNativeSettingsView(model: panel)
         }
+        .sheet(item: $conversation.readingSettingsPanel) { panel in
+            ReaderNativeReadingSettingsView(model: panel)
+        }
         .sheet(item: $conversation.searchPanel) { panel in
             ReaderNativeSearchView(model: panel)
         }

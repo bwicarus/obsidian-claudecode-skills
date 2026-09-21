@@ -128,30 +128,39 @@ async function loadBookFig() {
     if (window.__figBookOn) _rerenderVisibleFigs();   // 进书时本书已开 → 立刻把已渲染页的徽标画上(防 race)
   } catch (e) { window.__figBookOn = false; }
 }
-window.saveFigToggle = async function(on) {   // 设置面板「本书插图描述」开关,即时 POST
-  try {
+async function saveBookFigures(on) {
     const r = await fetch('/pdf/api/book-figures', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ file: FILE_REL, enabled: !!on }),
     });
     const d = await r.json();
-    window.__figBookOn = !!(d && d.ok && d.enabled);
+    if (!r.ok || d?.ok !== true || typeof d.enabled !== 'boolean') throw new Error(d?.error || '插图设置未确认保存');
+    window.__figBookOn = d.enabled;
     (typeof _toast === 'function') && _toast(window.__figBookOn ? '已开启本书插图描述（翻页后逐页生成，首次需点 AI 几秒）' : '已关闭本书插图描述');
     // 即时反映:开→重渲已渲染页的徽标;关→清掉已画的徽标
     if (window.__figBookOn) _rerenderVisibleFigs();
     else { document.querySelectorAll('.fig-layer').forEach(l => l.innerHTML = ''); }
-  } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
+    return window.__figBookOn;
+}
+window.saveFigToggle = async function(on) {   // 网页与原生面板共用保存事务
+  try { return await saveBookFigures(!!on); }
+  catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
 };
 window.openLangPicker = function() { window.openSettings?.(); };   // 语言已并入设置面板,旧入口转开设置
-window.saveLangPicker = async function() {   // 设置面板「保存本书语言」按钮(每本书独立,POST book-langs by FILE_REL)
-  const langs = Array.from(document.querySelectorAll('#lang-checks input:checked')).map(c => c.value);
-  try {
+async function saveBookLanguages(langs) {
     const r = await fetch('/pdf/api/book-langs', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ file: FILE_REL, langs }),
     });
     const d = await r.json();
-    if (d.ok) BOOK_LANGS = d.langs || langs;
+    if (!r.ok || d?.ok !== true || !Array.isArray(d.langs)) throw new Error(d?.error || '书籍语言未确认保存');
+    BOOK_LANGS = d.langs;
+    return BOOK_LANGS.slice();
+}
+window.saveLangPicker = async function() {   // 设置面板「保存本书语言」按钮
+  const langs = Array.from(document.querySelectorAll('#lang-checks input:checked')).map(c => c.value);
+  try {
+    await saveBookLanguages(langs);
     (typeof _toast === 'function') && _toast('已保存需要翻译的语言：' + (BOOK_LANGS.join(' / ') || '无(全部免于翻译)'));
   } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
 };

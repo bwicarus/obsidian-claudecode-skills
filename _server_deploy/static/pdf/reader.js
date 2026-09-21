@@ -173,30 +173,39 @@ async function loadBookFig() {
     if (window.__figBookOn) _rerenderVisibleFigs();   // 进书时本书已开 → 立刻把已渲染页的徽标画上(防 race)
   } catch (e) { window.__figBookOn = false; }
 }
-window.saveFigToggle = async function(on) {   // 设置面板「本书插图描述」开关,即时 POST
-  try {
+async function saveBookFigures(on) {
     const r = await fetch('/pdf/api/book-figures', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ file: FILE_REL, enabled: !!on }),
     });
     const d = await r.json();
-    window.__figBookOn = !!(d && d.ok && d.enabled);
+    if (!r.ok || d?.ok !== true || typeof d.enabled !== 'boolean') throw new Error(d?.error || '插图设置未确认保存');
+    window.__figBookOn = d.enabled;
     (typeof _toast === 'function') && _toast(window.__figBookOn ? '已开启本书插图描述（翻页后逐页生成，首次需点 AI 几秒）' : '已关闭本书插图描述');
     // 即时反映:开→重渲已渲染页的徽标;关→清掉已画的徽标
     if (window.__figBookOn) _rerenderVisibleFigs();
     else { document.querySelectorAll('.fig-layer').forEach(l => l.innerHTML = ''); }
-  } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
+    return window.__figBookOn;
+}
+window.saveFigToggle = async function(on) {   // 网页与原生面板共用保存事务
+  try { return await saveBookFigures(!!on); }
+  catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
 };
 window.openLangPicker = function() { window.openSettings?.(); };   // 语言已并入设置面板,旧入口转开设置
-window.saveLangPicker = async function() {   // 设置面板「保存本书语言」按钮(每本书独立,POST book-langs by FILE_REL)
-  const langs = Array.from(document.querySelectorAll('#lang-checks input:checked')).map(c => c.value);
-  try {
+async function saveBookLanguages(langs) {
     const r = await fetch('/pdf/api/book-langs', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ file: FILE_REL, langs }),
     });
     const d = await r.json();
-    if (d.ok) BOOK_LANGS = d.langs || langs;
+    if (!r.ok || d?.ok !== true || !Array.isArray(d.langs)) throw new Error(d?.error || '书籍语言未确认保存');
+    BOOK_LANGS = d.langs;
+    return BOOK_LANGS.slice();
+}
+window.saveLangPicker = async function() {   // 设置面板「保存本书语言」按钮
+  const langs = Array.from(document.querySelectorAll('#lang-checks input:checked')).map(c => c.value);
+  try {
+    await saveBookLanguages(langs);
     (typeof _toast === 'function') && _toast('已保存需要翻译的语言：' + (BOOK_LANGS.join(' / ') || '无(全部免于翻译)'));
   } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
 };
@@ -10575,6 +10584,72 @@ window.saveSettings = async () => {
   } catch (ex) {
     window.dlog?.('saveSettings ERROR: ' + ex.message, '#ff453a');
     _toast?.('设置保存出错：' + ex.message);
+  }
+};
+// Semantic settings surface. UI clients never synthesize settings DOM or click
+// buttons; book writes retain the original repository and confirmed receipts.
+window.RC = window.RC || {};
+RC.readerPreferences = {
+  async read() {
+    const book = FILE_REL;
+    const get = async path => {
+      // @interaction reader.document.preferences
+      const response = await fetch(path + '?file=' + encodeURIComponent(book));
+      const data = await response.json();
+      if (!response.ok || data?.ok !== true) throw new Error(data?.error || '本书设置读取失败');
+      return data;
+    };
+    const [langs, figures, crop] = await Promise.all([
+      get('/pdf/api/book-langs'), get('/pdf/api/book-figures'), get('/pdf/api/book-crop')
+    ]);
+    if (book !== FILE_REL) throw new Error('书籍已切换');
+    if (!Array.isArray(langs.langs) || typeof figures.enabled !== 'boolean' || !crop.crop ||
+        ['l','r','t','b'].some(k => !Number.isFinite(crop.crop[k]) || crop.crop[k] < 0 || crop.crop[k] > 45)) throw new Error('本书设置格式无效');
+    BOOK_LANGS = langs.langs; window.__figBookOn = figures.enabled; _crop = { ...crop.crop };
+    return this.state();
+  },
+  state() {
+    const on = (key, fallback) => localStorage.getItem(key) === null ? fallback : localStorage.getItem(key) === '1';
+    return { host: 'pdf', book: FILE_REL, vocabulary: on('pdf-vocab-underline', true),
+      clickTranslate: on('pdf-click-translate-unmastered', true), autoOrient: on('pdf-auto-orient', false),
+      debug: on('pdf-debug', false), languages: BOOK_LANGS.slice(), figures: !!window.__figBookOn,
+      grammar: RC.grammar?.getViewMode('pdf-grammar-view') || _grammarViewMode,
+      colors: getHlColors().slice(), crop: { ..._crop }, cropEnabled: !!_cropOn };
+  },
+  async perform(key, value) {
+    const booleans = { vocabulary: 'pdf-vocab-underline', clickTranslate: 'pdf-click-translate-unmastered',
+      autoOrient: 'pdf-auto-orient', debug: 'pdf-debug' };
+    if (Object.hasOwn(booleans, key)) {
+      if (typeof value !== 'boolean') throw new Error('设置值必须为开关');
+      localStorage.setItem(booleans[key], value ? '1' : '0');
+      if (key === 'autoOrient' && value) window._rememberOrientLayout?.();
+      if (key === 'debug') _applyDebugVisibility();
+      if ((key === 'vocabulary' || key === 'clickTranslate') && pdfDoc) await renderPage(currentPage);
+    } else if (key === 'languages') {
+      if (!Array.isArray(value) || value.length > 2 || value.some(v => !['en', 'ja'].includes(v))) throw new Error('语言选项无效');
+      await saveBookLanguages([...new Set(value)]);
+    } else if (key === 'figures') {
+      if (typeof value !== 'boolean') throw new Error('设置值必须为开关');
+      await saveBookFigures(value);
+    } else if (key === 'crop') {
+      if (!value || typeof value !== 'object' || ['l','r','t','b'].some(k => !Number.isFinite(value[k]) || value[k] < 0 || value[k] > 45)) throw new Error('每边去边比例应在 0–45% 之间');
+      await saveCropSettings({l:value.l,r:value.r,t:value.t,b:value.b}, true);
+    } else if (key === 'cropEnabled') {
+      if (typeof value !== 'boolean') throw new Error('设置值必须为开关');
+      if (value && !Object.values(_crop).some(v => v > 0)) throw new Error('请先设置去边比例');
+      localStorage.setItem(_cropKey(), value ? '1' : '0'); _cropOn = value;
+      _updateCropBtn(); await _refitToWidth(true); window._rememberOrientLayout?.();
+    } else if (key === 'grammar') {
+      if (!['deps','skeleton','components','tree'].includes(value)) throw new Error('语法显示选项无效');
+      localStorage.setItem('pdf-grammar-view', value);
+      window.setGrammarView(value);
+    } else if (key === 'colors') {
+      if (!Array.isArray(value) || !value.length || value.length > 32 || value.some(v => typeof v !== 'string' || !/^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v))) throw new Error('请使用有效的颜色值');
+      saveHlColors([...new Set(value)]);
+      if (typeof renderHlPicker === 'function') renderHlPicker();
+      if (typeof renderHlColorSetting === 'function') renderHlColorSetting();
+    } else throw new Error('未知阅读设置');
+    return this.state();
   }
 };
 function _applyDebugVisibility() {

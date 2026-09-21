@@ -3578,9 +3578,33 @@
 
   sendBtn.addEventListener('click', function () {
     if (_clearing) return;
-    if (streaming) { try { _abort && _abort.abort(); } catch (_) {} return; }   // 流式中点 ■ → 中止本轮
+    if (streaming) { _stopCurrentResponse(); return; }   // 流式中点 ■ → 中止本轮
     micStop(); var v = ta.value; ta.value = ''; autorow(); send(v);
   });
+
+  function _stopCurrentResponse() {
+    if (_clearing || !streaming || !_abort) return false;
+    _abort.abort();
+    return true;
+  }
+  RC.assistant.conversationService = {
+    stop: _stopCurrentResponse,
+    clear: async function (options) {
+      if (!options || options.confirmed !== true) throw new Error('请确认清空当前对话');
+      var mode = _assistantMode;
+      if (_clearing) throw new Error('当前对话正在清空');
+      var resetVoice = mode === 'normal' && RC.voicecall && RC.voicecall.canStartNewTopic && RC.voicecall.canStartNewTopic();
+      var ok = await _clearCurrentConversation();
+      if (!ok) throw new Error('对话尚未确认清空，请重试');
+      if (resetVoice && RC.voicecall.canStartNewTopic()) RC.voicecall.startNewTopic();
+      if (mode === 'normal' && options.resetRecall === true) {
+        if (!RC.voicecall || !RC.voicecall.setRecallCutoff) throw new Error('对话已清空，记忆起点服务未就绪');
+        try { await RC.voicecall.setRecallCutoff(Date.now() / 1000); }
+        catch (_) { throw new Error('对话已清空，但回顾学习的记忆起点未保存'); }
+      }
+      return { cleared: true, mode: mode };
+    }
+  };
 
   // ── 苹果风格语音按钮:持续聆听,只手动停(再点麦克风 / 点发送即停)。设备原生 STT(iOS=Siri 级)。
   //    iOS 的 SpeechRecognition 静默时会自己结束,所以只要用户没手动停,onend 就重启 = 真·持续聆听。

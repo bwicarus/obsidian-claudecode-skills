@@ -260,6 +260,72 @@ window.saveSettings = async () => {
     _toast?.('设置保存出错：' + ex.message);
   }
 };
+// Semantic settings surface. UI clients never synthesize settings DOM or click
+// buttons; book writes retain the original repository and confirmed receipts.
+window.RC = window.RC || {};
+RC.readerPreferences = {
+  async read() {
+    const book = FILE_REL;
+    const get = async path => {
+      // @interaction reader.document.preferences
+      const response = await fetch(path + '?file=' + encodeURIComponent(book));
+      const data = await response.json();
+      if (!response.ok || data?.ok !== true) throw new Error(data?.error || '本书设置读取失败');
+      return data;
+    };
+    const [langs, figures, crop] = await Promise.all([
+      get('/pdf/api/book-langs'), get('/pdf/api/book-figures'), get('/pdf/api/book-crop')
+    ]);
+    if (book !== FILE_REL) throw new Error('书籍已切换');
+    if (!Array.isArray(langs.langs) || typeof figures.enabled !== 'boolean' || !crop.crop ||
+        ['l','r','t','b'].some(k => !Number.isFinite(crop.crop[k]) || crop.crop[k] < 0 || crop.crop[k] > 45)) throw new Error('本书设置格式无效');
+    BOOK_LANGS = langs.langs; window.__figBookOn = figures.enabled; _crop = { ...crop.crop };
+    return this.state();
+  },
+  state() {
+    const on = (key, fallback) => localStorage.getItem(key) === null ? fallback : localStorage.getItem(key) === '1';
+    return { host: 'pdf', book: FILE_REL, vocabulary: on('pdf-vocab-underline', true),
+      clickTranslate: on('pdf-click-translate-unmastered', true), autoOrient: on('pdf-auto-orient', false),
+      debug: on('pdf-debug', false), languages: BOOK_LANGS.slice(), figures: !!window.__figBookOn,
+      grammar: RC.grammar?.getViewMode('pdf-grammar-view') || _grammarViewMode,
+      colors: getHlColors().slice(), crop: { ..._crop }, cropEnabled: !!_cropOn };
+  },
+  async perform(key, value) {
+    const booleans = { vocabulary: 'pdf-vocab-underline', clickTranslate: 'pdf-click-translate-unmastered',
+      autoOrient: 'pdf-auto-orient', debug: 'pdf-debug' };
+    if (Object.hasOwn(booleans, key)) {
+      if (typeof value !== 'boolean') throw new Error('设置值必须为开关');
+      localStorage.setItem(booleans[key], value ? '1' : '0');
+      if (key === 'autoOrient' && value) window._rememberOrientLayout?.();
+      if (key === 'debug') _applyDebugVisibility();
+      if ((key === 'vocabulary' || key === 'clickTranslate') && pdfDoc) await renderPage(currentPage);
+    } else if (key === 'languages') {
+      if (!Array.isArray(value) || value.length > 2 || value.some(v => !['en', 'ja'].includes(v))) throw new Error('语言选项无效');
+      await saveBookLanguages([...new Set(value)]);
+    } else if (key === 'figures') {
+      if (typeof value !== 'boolean') throw new Error('设置值必须为开关');
+      await saveBookFigures(value);
+    } else if (key === 'crop') {
+      if (!value || typeof value !== 'object' || ['l','r','t','b'].some(k => !Number.isFinite(value[k]) || value[k] < 0 || value[k] > 45)) throw new Error('每边去边比例应在 0–45% 之间');
+      await saveCropSettings({l:value.l,r:value.r,t:value.t,b:value.b}, true);
+    } else if (key === 'cropEnabled') {
+      if (typeof value !== 'boolean') throw new Error('设置值必须为开关');
+      if (value && !Object.values(_crop).some(v => v > 0)) throw new Error('请先设置去边比例');
+      localStorage.setItem(_cropKey(), value ? '1' : '0'); _cropOn = value;
+      _updateCropBtn(); await _refitToWidth(true); window._rememberOrientLayout?.();
+    } else if (key === 'grammar') {
+      if (!['deps','skeleton','components','tree'].includes(value)) throw new Error('语法显示选项无效');
+      localStorage.setItem('pdf-grammar-view', value);
+      window.setGrammarView(value);
+    } else if (key === 'colors') {
+      if (!Array.isArray(value) || !value.length || value.length > 32 || value.some(v => typeof v !== 'string' || !/^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v))) throw new Error('请使用有效的颜色值');
+      saveHlColors([...new Set(value)]);
+      if (typeof renderHlPicker === 'function') renderHlPicker();
+      if (typeof renderHlColorSetting === 'function') renderHlColorSetting();
+    } else throw new Error('未知阅读设置');
+    return this.state();
+  }
+};
 function _applyDebugVisibility() {
   const el = document.getElementById('debug-log');
   if (!el) return;
