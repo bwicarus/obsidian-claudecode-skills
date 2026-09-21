@@ -53,6 +53,9 @@ struct ReaderNativeConversationView: View {
         .foregroundStyle(ReaderNativeTheme.ink)
         .tint(ReaderNativeTheme.accent)
         .onChange(of: model.scope) { _, _ in resumeAtBottom = false }
+        .sheet(item: $model.inspection) { _ in
+            ReaderNativeArtifactInspector(model: model)
+        }
     }
 
     private var header: some View {

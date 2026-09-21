@@ -99,6 +99,7 @@ enum ReaderNativeConversationScript {
             successCount: steps.filter(x => statusOf(x) === 'completed').length,
             failureCount: steps.filter(x => statusOf(x) === 'failed').length,
             runningCount: steps.filter(x => statusOf(x) === 'running').length };
+          actions.get(result.actionId).inspect = () => ({ kind: 'tool', title: result.title, content: part });
           return [result];
         }
         if (kind === 'cards' && Array.isArray(part.cards)) {
@@ -106,6 +107,8 @@ enum ReaderNativeConversationScript {
             const result = artifact(id + '-c-' + index, node, card.title || '学习卡片');
             result.kind = 'anki'; result.status = part.draft ? 'draft' : 'saved';
             result.actionId = registerAction(result.id, node, () => reveal(node, '', index));
+            actions.get(result.actionId).inspect = () => ({ kind: 'anki', title: result.title,
+              content: { gid: part.gid, cardIndex: index, card: flashGroup(node)?.__fc.cards[index] || card } });
             result.data = { ...safeFields(card, ['front', 'back', 'question', 'answer', 'type', 'cloze', 'text', 'explanation']), draft: !!part.draft, gid: text(part.gid, 160) };
             result.data.front = result.data.front ?? result.data.question ?? result.data.cloze ?? result.data.text ?? '';
             result.data.back = result.data.back ?? result.data.answer ?? '';
@@ -115,6 +118,7 @@ enum ReaderNativeConversationScript {
         if (kind === 'card' && part.card) {
           const card = part.card, data = card.data || {};
           const result = artifact(id, node, card.title || '生成物');
+          actions.get(result.actionId).inspect = () => ({ kind: card.kind || 'artifact', title: result.title, content: card });
           if (['fact', 'general', 'weather', 'news'].includes(card.kind)) {
             result.kind = card.kind;
             result.data = safeFields(data, ['answer', 'detail', 'text', 'summary', 'description', 'loc', 'date', 'lo', 'hi', 'cond', 'precip', 'tip']);
@@ -175,14 +179,28 @@ enum ReaderNativeConversationScript {
           if (!node?.isConnected) continue;
           const group = flashGroup(node);
           const cardIndex = Number(part.id.match(/-c-(\d+)$/)?.[1] || 0);
+          if (typeof window.__setFocusSel === 'function') {
+            const selectionOwner = part.id;
+            part.data.selectId = registerAction(part.id + '-select', node, command => {
+              if (typeof command.text !== 'string' || command.text.length > 16000) throw new Error('选区内容无效或过长');
+              const selection = command.text.trim();
+              if (!selection) {
+                if (window.__bwNativeSelection?.owner === selectionOwner) window.__bwNativeSelection.active = false;
+                return;
+              }
+              window.__bwNativeSelection = { text: selection, active: true, owner: selectionOwner, scope };
+              window.__setFocusSel(selection, 'text');
+              if (window.__focusSel?.text !== selection) throw new Error('选区暂未进入对话，请重试');
+            });
+          }
           if (group?.__fc.cards[cardIndex]?._removed) { part.removed = true; continue; }
           const interaction = group && rc().flashcard?.interactionState(group, cardIndex);
-          const slide = group?.querySelector('.fc-slide[data-i="' + cardIndex + '"]');
           if (interaction && (part.kind === 'anki' || part.kind === 'artifact')) {
             part.kind = 'anki';
             part.data.live = true;
             part.data.state = String(interaction.state || '');
-            part.data.body = cleanText(slide, 24000);
+            part.data.faces = interaction.presentation.faces;
+            part.data.notice = interaction.presentation.notice;
             part.data.editable = interaction.editable;
             part.data.controls = interaction.controls.map(control => ({
               id: registerAction(part.id + '-control-' + control.key, group, () =>
@@ -257,7 +275,7 @@ enum ReaderNativeConversationScript {
         if (document.querySelector('#ep-side-tabs .ep-side-tab[data-pane="toc"],#ep-side .side-tab[data-pane="toc"]')) out.push('openTOC');
         if (document.getElementById('asst-call')) out.push('toggleVoice');
         if (document.getElementById('asst-computer')) out.push('toggleComputerVoice');
-        if (actions.size) out.push('openArtifact', 'action');
+        if (actions.size) out.push('openArtifact', 'action', 'inspectArtifact');
         return out;
       }
       function applyVisualMode() {
@@ -285,6 +303,7 @@ enum ReaderNativeConversationScript {
           // Do not relabel the previous DOM as the new account's conversation.
           if (scopeKey) previousNodes.forEach(node => excludedNodes.add(node));
           scopeKey = nextKey; scope = 'reader-' + hash(nextKey); actions.clear(); nodeIDs = new WeakMap(); lastSignature = '';
+          window.__bwNativeSelection = null;
         }
         actions = new Map();
         const all = thread ? Array.from(thread.children).filter(el => el.matches('.asst-msg,.vc-card,.vc-if,.rc-turn')) : [];
@@ -405,6 +424,7 @@ enum ReaderNativeConversationScript {
           } else if (action === 'clearSelection') {
             if (typeof window.__clearFocusSel !== 'function') return { ok: false, error: '选区尚未准备好' };
             window.__clearFocusSel();
+            window.__bwNativeSelection = null;
           } else if (action === 'liveAction') {
             const target = actions.get(command.actionId);
             if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected) return { ok: false, error: '内容已更新，请重试' };
@@ -421,6 +441,12 @@ enum ReaderNativeConversationScript {
             setLegacy(action === 'showLegacy');
           } else if (action === 'refresh') {
             rc().assistant?.reloadHistory?.();
+          } else if (action === 'inspectArtifact') {
+            const target = actions.get(command.actionId);
+            if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected || !target.inspect) {
+              return { ok: false, error: '此项内容暂不可读取，请刷新后重试' };
+            }
+            return { ok: true, detail: JSON.parse(JSON.stringify(target.inspect())) };
           } else if (action === 'openArtifact' || action === 'action') {
             const target = actions.get(command.actionId);
             if (!target || target.scope !== scope || !target.node?.isConnected) return { ok: false, error: '内容已更新，请重新打开' };

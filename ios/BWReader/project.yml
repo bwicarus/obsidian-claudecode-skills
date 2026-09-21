@@ -20,6 +20,9 @@ settings:
     TARGETED_DEVICE_FAMILY: "1,2"
 
 packages:
+  swiftSoup:
+    url: https://github.com/scinfu/SwiftSoup.git
+    exactVersion: 2.13.9
   flyingFox:
     url: https://github.com/swhitty/FlyingFox.git
     exactVersion: 0.27.1
@@ -93,6 +96,8 @@ targets:
         product: FlyingFox
       - package: flyingFox
         product: FlyingSocks
+      - package: swiftSoup
+        product: SwiftSoup
 
   BWReaderSafariExtension:
     type: app-extension

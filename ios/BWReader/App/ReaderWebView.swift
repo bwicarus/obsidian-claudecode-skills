@@ -403,13 +403,18 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func performNativeConversationCommand(_ command: [String: Any]) async -> String? {
+        let receipt = await requestNativeConversationCommand(command)
+        return receipt["ok"] as? Bool == true ? nil : (receipt["error"] as? String ?? "操作未完成，请重试")
+    }
+
+    private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             "showLegacy", "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
-            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection"]
+            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {
-            return "阅读页尚未准备好，请稍后重试"
+            return ["ok": false, "error": "阅读页尚未准备好，请稍后重试"]
         }
         do {
             let result = try await webView.callAsyncJavaScript(
@@ -417,11 +422,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 arguments: ["command": command], in: nil, contentWorld: .page
             )
             guard let receipt = result as? [String: Any], receipt["ok"] as? Bool == true else {
-                return (result as? [String: Any])?["error"] as? String ?? "操作未完成，请在完整阅读界面重试"
+                return ["ok": false, "error": (result as? [String: Any])?["error"] as? String ?? "操作未完成，请重试"]
             }
-            return nil
+            return receipt
         } catch {
-            return "操作未完成：\(error.localizedDescription)"
+            return ["ok": false, "error": "操作未完成：\(error.localizedDescription)"]
         }
     }
 
@@ -474,6 +479,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeConversation.commandHandler = { [weak self] command in
             guard let self else { return "阅读页已关闭" }
             return await self.performNativeConversationCommand(command)
+        }
+        nativeConversation.inspectionHandler = { [weak self] command in
+            guard let self else { return ["ok": false, "error": "阅读页已关闭"] }
+            return await self.requestNativeConversationCommand(command)
         }
         let nativeComputerVoiceMessageProxy =
             WeakScriptMessageHandler(delegate: self)

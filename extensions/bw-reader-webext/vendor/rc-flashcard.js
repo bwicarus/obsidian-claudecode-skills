@@ -558,7 +558,35 @@ if (window.__bwPwaProviderOnly) return;
     }
     return { gid: st.gid, cardIndex: i, state: c._st, pending: pending,
       editable: c._st === 'draft' && !pending && !st.readonly,
-      fields: fields, controls: controls };
+      fields: fields, controls: controls, presentation: cardPresentation(st, c) };
+  }
+  function cardPresentation(st, c) {
+    function face(side) {
+      var custom = side === 'front' ? c._displayFrontHtml : c._displayBackHtml;
+      if (st.opts && typeof st.opts.projectFaceHtml === 'function') custom = st.opts.projectFaceHtml(c, side);
+      var raw = custom != null ? String(custom) : String(c.type === 'cloze' ? c.cloze || '' : c[side] || '');
+      if (custom == null && c.type === 'cloze') {
+        raw = raw.replace(/\{\{c\d+::(.*?)(::[^}]*)?\}\}/g, side === 'back' ? '**$1**' : '**[…]**');
+      }
+      return { side: side, format: custom != null || /<[a-z][\s\S]*>/i.test(raw) ? 'html' : 'markdown', content: raw };
+    }
+    var showBack = c._st === 'done' || c._st === 'preview' || (!!c._showBack && !c._addPending);
+    var faces = st.controlledReview && c._revealMode === 'replace' && showBack ? [] : [face('front')];
+    if (showBack) faces.push(face('back'));
+    var notice = '';
+    if (c._addPending) notice = c._addQueued ? '保存结果待核对，请勿重复提交' : '正在保存到 Reader 卡库';
+    else if (c._syncPending) notice = '评分待同步';
+    else if (c._ratingPending) notice = '正在提交评分';
+    else if (c._st === 'done') notice = '已复习 · 距下次复习 ' + nextLabel(c._next);
+    else if (showBack && c._ratingUnavailable) {
+      notice = { external: '已发送到外部 Anki；请在对应 Anki 中复习。',
+        'export-pending': '已打开外部 Anki，正在等待回到 Reader 的确认。',
+        'export-unknown': '外部 Anki 接收结果未知，已阻止重复发送。',
+        missing: '暂未取得唯一 Anki 卡号，请在 Anki 中复习。',
+        multiple: '这条 Anki 笔记生成了多张卡，请在 Anki 中选择具体卡片复习。'
+      }[c._ratingUnavailableReason] || '';
+    }
+    return { faces: faces, notice: notice };
   }
   function editDraftField(container, i, field, value) {
     var st = container.__fc;

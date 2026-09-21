@@ -193,14 +193,21 @@ private struct ReaderNativeConversationArtifactCard: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(fields[index]["key"] == "front" ? "正面" : fields[index]["key"] == "cloze" ? "填空" : "背面")
                                     .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
-                                ReaderNativeConversationMarkdown(text: readable(fields[index]["value"] ?? ""))
+                                richContent(fields[index]["value"] ?? "")
                             }
                         }
                         Button("修改内容", systemImage: "pencil") { editing = true }
                             .font(.caption).buttonStyle(.bordered)
                             .disabled(part.data["editable"] as? Bool != true)
                     } else {
-                        ReaderNativeConversationMarkdown(text: part.string("body"))
+                        let faces = part.data["faces"] as? [[String: String]] ?? []
+                        ForEach(faces.indices, id: \.self) { index in
+                            if index > 0 { Divider() }
+                            richContent(faces[index]["content"] ?? "", format: faces[index]["format"])
+                        }
+                        if !part.string("notice").isEmpty {
+                            Text(part.string("notice")).font(.caption).foregroundStyle(ReaderNativeTheme.muted)
+                        }
                     }
                     if !controls.isEmpty {
                         ViewThatFits(in: .horizontal) {
@@ -209,17 +216,17 @@ private struct ReaderNativeConversationArtifactCard: View {
                         }
                     }
                 } else {
-                    Text("学习卡正在同步，完整操作可随时打开。")
+                    Text("学习卡正在同步…")
                         .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
                 }
             } else if part.kind == "fact" {
-                ReaderNativeConversationMarkdown(text: readable(firstText(part.string("answer"), part.text)))
+                richContent(firstText(part.string("answer"), part.text))
                 let detail = part.string("detail")
                 if !detail.isEmpty, detail != part.string("answer") {
-                    ReaderNativeConversationMarkdown(text: readable(detail))
+                    richContent(detail)
                 }
             } else if part.kind == "general" || part.kind == "knowledge" {
-                ReaderNativeConversationMarkdown(text: readable(firstText(part.string("text"), part.text)))
+                richContent(firstText(part.string("text"), part.text))
             } else if part.kind == "weather" {
                 weatherContent
             } else if part.kind == "news" {
@@ -228,11 +235,11 @@ private struct ReaderNativeConversationArtifactCard: View {
                 if !part.text.isEmpty {
                     ReaderNativeConversationMarkdown(text: readable(part.text))
                 }
-                Text("打开原件可查看完整内容和全部操作。")
+                Text("原件已保留，此类型的原生交互尚未迁移。")
                     .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
             }
             if let sources = part.data["sources"] as? [Any], !sources.isEmpty {
-                Text("含 \(sources.count) 项来源，详见原件")
+                Text("含 \(sources.count) 项来源，详见内容资料")
                     .font(.caption2).foregroundStyle(ReaderNativeTheme.muted)
             }
             ReaderNativeConversationAction(part: part, model: model)
@@ -261,6 +268,20 @@ private struct ReaderNativeConversationArtifactCard: View {
     }
 
     private func firstText(_ choices: String...) -> String { choices.first { !$0.isEmpty } ?? "" }
+
+    @ViewBuilder
+    private func richContent(_ text: String, format: String? = nil) -> some View {
+        let resolved = format ?? (text.range(of: "<[a-z][^>]*>", options: [.regularExpression, .caseInsensitive]) != nil ? "html" : "markdown")
+        ReaderNativeRichText(content: text, format: resolved, onSelection: { selection in
+            let id = part.string("selectId")
+            guard !id.isEmpty else { return }
+            Task { await model.perform("liveAction", parameters: ["actionId": id, "text": selection]) }
+        })
+        if resolved == "html", text.range(of: "<(script|iframe|button|input|canvas|svg|img|video|audio)\\b", options: [.regularExpression, .caseInsensitive]) != nil {
+            Text("内嵌媒体或交互部分尚未迁移，原件已保留。")
+                .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
+        }
+    }
 
     private func field(_ key: String) -> String {
         if let text = part.data[key] as? String { return text }
@@ -309,7 +330,7 @@ private struct ReaderNativeConversationArtifactCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if items.isEmpty {
-                Text(part.text.isEmpty ? "暂无新闻条目，请打开原件查看。" : readable(part.text))
+                Text(part.text.isEmpty ? "暂无新闻条目。" : readable(part.text))
                     .font(.subheadline).foregroundStyle(ReaderNativeTheme.muted)
             }
         }
@@ -333,29 +354,17 @@ private struct ReaderNativeConversationAction: View {
     let part: ReaderNativeConversationPart
     @ObservedObject var model: ReaderNativeConversationModel
 
-    private var command: String { model.supports("openArtifact") ? "openArtifact" : "action" }
-
     var body: some View {
-        if let actionId = part.actionId, model.supports(command) {
+        if part.actionId != nil, model.supports("inspectArtifact") {
             Button {
-                Task { await model.perform(command, parameters: ["actionId": actionId]) }
+                Task { await model.inspect(part) }
             } label: {
-                Label(part.isTool ? "查看完整流程" : "在完整界面中操作",
-                      systemImage: "arrow.up.forward.square")
+                Label(part.isTool ? "查看调用详情" : "内容资料",
+                      systemImage: "info.circle")
                     .font(.caption.weight(.medium))
             }
             .buttonStyle(.bordered)
-            .disabled(!model.ready || model.isPerforming(command))
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("原件定位暂不可用；完整操作仍保留在阅读界面中。")
-                    .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
-                if model.supports("showLegacy") {
-                    Button("打开完整界面") { Task { await model.perform("showLegacy") } }
-                        .font(.caption.weight(.medium)).buttonStyle(.bordered)
-                        .disabled(model.isPerforming("showLegacy"))
-                }
-            }
+            .disabled(!model.ready)
         }
     }
 }

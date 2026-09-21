@@ -75,6 +75,15 @@ struct ReaderNativeConversationVoice {
     }
 }
 
+struct ReaderNativeArtifactInspection: Identifiable {
+    let id: UUID
+    let title: String
+    var loading = true
+    var kind = ""
+    var content: [String: Any] = [:]
+    var error: String?
+}
+
 /// A projection of the existing Reader conversation. The JavaScript bridge owns
 /// history, streaming reconciliation, artifact identities and all write actions.
 @MainActor
@@ -94,6 +103,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var voice = ReaderNativeConversationVoice()
     @Published private(set) var pendingActions = Set<String>()
     @Published private(set) var error: String?
+    @Published var inspection: ReaderNativeArtifactInspection?
     // Presentation survives closing/repositioning the SwiftUI sidebar, but is
     // scoped to this conversation and never persisted as a second history.
     @Published var draft = ""
@@ -101,6 +111,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published var visibleMessageID: String?
 
     var commandHandler: (([String: Any]) async -> String?)?
+    var inspectionHandler: (([String: Any]) async -> [String: Any])?
     private var generation = UUID()
     private var retiredNavigationScopes = Set<String>()
 
@@ -115,6 +126,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         guard !retiredNavigationScopes.contains(nextScope) else { return }
         if nextScope == scope, nextRevision <= revision { return }
         if nextScope != scope {
+            inspection = nil
             generation = UUID()
             pendingActions = []
             error = nil
@@ -144,6 +156,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     }
 
     func resetForNavigation() {
+        inspection = nil
         if !scope.isEmpty { retiredNavigationScopes.insert(scope) }
         generation = UUID()
         scope = ""
@@ -168,6 +181,29 @@ final class ReaderNativeConversationModel: ObservableObject {
 
     func supports(_ action: String) -> Bool { capabilities.contains(action) }
     func isPerforming(_ action: String) -> Bool { pendingActions.contains(action) }
+
+    func inspect(_ part: ReaderNativeConversationPart) async {
+        guard supports("inspectArtifact"), let actionID = part.actionId,
+              messages.contains(where: { $0.parts.contains(where: { $0.actionId == actionID }) }),
+              let inspectionHandler else {
+            error = "此项内容暂不可读取，请刷新后重试。"
+            return
+        }
+        let ticket = generation
+        let id = UUID()
+        inspection = ReaderNativeArtifactInspection(id: id, title: part.title)
+        let receipt = await inspectionHandler(["action": "inspectArtifact", "scope": scope, "actionId": actionID])
+        guard generation == ticket, !Task.isCancelled, inspection?.id == id else { return }
+        var result = ReaderNativeArtifactInspection(id: id, title: part.title)
+        result.loading = false
+        if receipt["ok"] as? Bool == true, let detail = receipt["detail"] as? [String: Any] {
+            result.kind = detail["kind"] as? String ?? ""
+            result.content = detail["content"] as? [String: Any] ?? [:]
+        } else {
+            result.error = receipt["error"] as? String ?? "读取失败，请重试。"
+        }
+        inspection = result
+    }
     func clearError() { error = nil }
 
     @discardableResult

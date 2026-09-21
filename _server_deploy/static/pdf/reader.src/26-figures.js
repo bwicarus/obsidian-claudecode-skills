@@ -391,6 +391,10 @@
     return !!a && !!b && (a === b || a.indexOf(b) === 0 || b.indexOf(a) === 0);
   }
   function _fsSelectionStillHeld(text) {
+    // Native TextKit selection does not exist in window.getSelection(). Keep
+    // the same hold/release TTL contract for the native card surface.
+    if (window.__bwNativeSelection && window.__bwNativeSelection.active &&
+        _fsSame(window.__bwNativeSelection.text, text)) return true;
     // ⚠ 信源必须与"上报给桥的那个选区"是同一个（2026-09-15 实测）：
     // 这类书的选区是阅读器自己画的字符层，DOM 里的 window.getSelection() 可能一直
     // 留着旧值 —— 拿它判就永远是"还按着"，40 秒永不触发，而快照那边早说没选了。

@@ -98,6 +98,13 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertNotIn('private tool body', json.dumps(rich))
             tool = next(part for part in rich['parts'] if part['kind'] == 'tool')
             self.assertEqual([tool['data'][key] for key in ['stepCount','successCount','failureCount','runningCount']], [4,1,1,1])
+            inspected = page.evaluate('(command)=>__bwNativeConversation.perform(command)', {
+                'action':'inspectArtifact','scope':snapshot()['scope'],'actionId':tool['actionId']})
+            self.assertTrue(inspected['ok'])
+            self.assertEqual(inspected['detail']['content']['result'], 'private tool body')
+            self.assertFalse(snapshot()['legacyVisible'])
+            self.assertFalse(page.evaluate('(command)=>__bwNativeConversation.perform(command)', {
+                'action':'inspectArtifact','scope':'stale','actionId':tool['actionId']})['ok'])
             self.assertEqual(next(part for part in rich['parts'] if part['kind']=='fact')['data']['detail'], '详细说明')
             page.evaluate('''() => {
               let quote=document.createElement('div');quote.className='asst-ctx-card';quote.textContent='选择引用不应混入用户发言';
@@ -219,7 +226,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.wait_for_timeout(100)
 
             # The actual original focus chip remains above the actual composer.
-            page.add_script_tag(content='(() => {' + focus + '})();')
+            page.add_script_tag(content='(() => {' + focus + ';window.testNativeSelectionHeld=_fsSelectionStillHeld;})();')
             page.evaluate("__setFocusSel('刚才选择的段落', 'text')")
             self.assertTrue(page.locator('#asst-sel-chip').is_visible())
             self.assertIn('刚才选择的段落', page.locator('#asst-sel-chip').inner_text())
@@ -260,6 +267,15 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertTrue(first['data']['live'])
             self.assertEqual(first['data']['state'], 'draft')
             self.assertIn('保存到 Reader 卡库', [c['title'] for c in first['data']['controls']])
+            selected = page.evaluate('(command)=>__bwNativeConversation.perform(command)', {
+                'action':'liveAction','scope':native['scope'],'actionId':first['data']['selectId'],'text':'問題'})
+            self.assertTrue(selected['ok'])
+            self.assertEqual(page.evaluate('__focusSel.text'), '問題')
+            self.assertTrue(page.evaluate("testNativeSelectionHeld('問題')"))
+            page.evaluate('(command)=>__bwNativeConversation.perform(command)', {
+                'action':'liveAction','scope':native['scope'],'actionId':first['data']['selectId'],'text':''})
+            self.assertFalse(page.evaluate("testNativeSelectionHeld('問題')"))
+            self.assertEqual(page.evaluate('__focusSel.text'), '問題', 'release starts the original TTL rather than clearing the context')
             # Neither a hidden textarea nor an original button owns the action.
             page.evaluate("entity.bd.querySelectorAll('textarea,button').forEach(node=>node.remove())")
             field = first['data']['fields'][0]
@@ -286,14 +302,14 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             state = page.evaluate('receipts[receipts.length-1]')
             learning = next(part for message in state['messages'] for part in message['parts'] if part['kind']=='anki')
             reveal = next(c for c in learning['data']['controls'] if c['title']=='显示答案')
-            self.assertNotIn('答案', learning['data']['body'])
+            self.assertEqual([f['content'] for f in learning['data']['faces']], ['学習'])
             page.evaluate("entity.bd.querySelectorAll('button,[data-fc]').forEach(node=>node.remove())")
             self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
                 'action':'liveAction','scope':state['scope'],'actionId':reveal['id']})['ok'])
             page.wait_for_timeout(100)
             state = page.evaluate('receipts[receipts.length-1]')
             learning = next(part for message in state['messages'] for part in message['parts'] if part['kind']=='anki')
-            self.assertIn('答案', learning['data']['body'])
+            self.assertEqual([f['content'] for f in learning['data']['faces']], ['学習','答案'])
             self.assertEqual(len(learning['data']['controls']), 4)
             # A controlled review keeps its existing callback and refuses a
             # second rating while the original submission is pending.
