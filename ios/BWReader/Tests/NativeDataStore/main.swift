@@ -172,4 +172,79 @@ check(try! reopened.cursor() == 1, "重开之后游标没了 —— 会导致 jo
 reopened.close()
 try? FileManager.default.removeItem(at: file)
 
+// ── 桥：网页递过来的那层字典 ──
+//
+// 桥上有一个**默认值**，错了的表现极安静：`journal` 缺字段时必须当成 true。
+// 默认成 false 的话，本地写入不再入队，用户看到的是「改了能看见、就是同步
+// 不出去」—— 本机一切正常，只有另一台设备永远收不到。
+
+let bridgeStore = try! ReaderNativeDataStore(path: ":memory:")
+let bridge = ReaderNativeDataStoreBridge(store: bridgeStore, now: { 4242 })
+
+func bridgeEntry(_ id: String, rev: Int, journal: Bool?, expected: Int?) -> [String: Any] {
+    var entry: [String: Any] = [
+        "collection": "hl", "id": id,
+        "record": ["schema": 1, "collection": "hl", "id": id, "rev": rev,
+                   "updatedAt": 1000 + rev, "updatedBy": "dev",
+                   "deleted": false, "value": ["id": id]] as [String: Any],
+        "change": ["operation": "put", "collection": "hl"] as [String: Any]
+    ]
+    if let journal { entry["journal"] = journal }
+    if let expected { entry["expectedRev"] = expected }
+    return entry
+}
+
+// 缺 journal 字段 → 照旧入队（本地写入的默认形状）。
+let defaultReply = try! bridge.handle([
+    "store": "s", "action": "commit",
+    "entries": [bridgeEntry("a", rev: 1, journal: nil, expected: 0)]
+])
+check((defaultReply["cursors"] as? [Int64])?.first == 1,
+      "缺 journal 字段时没入队 —— 同步会永远发不出去")
+check(try! bridgeStore.journalCount() == 1, "默认没写 journal")
+
+// journal:false → 只写记录，不入队、不动游标。
+let silentReply = try! bridge.handle([
+    "store": "s", "action": "commit",
+    "entries": [bridgeEntry("b", rev: 1, journal: false, expected: 0)]
+])
+check((silentReply["cursors"] as? [Int64])?.first == 0, "不入队时该报 0")
+check(try! bridgeStore.journalCount() == 1, "journal:false 还是入队了")
+check(try! bridgeStore.record(collection: "hl", id: "b")?.rev == 1, "记录本身没写进去")
+
+// 要入队却没给 change → 必须报错，不能悄悄写个空信封进 journal。
+var missingChange = bridgeEntry("c", rev: 1, journal: true, expected: 0)
+missingChange.removeValue(forKey: "change")
+var refusedMissingChange = false
+do {
+    _ = try bridge.handle(["store": "s", "action": "commit", "entries": [missingChange]])
+} catch { refusedMissingChange = true }
+check(refusedMissingChange, "要入队却缺 change，居然放行了")
+
+// 一批里有一条 rev 对不上 → 整批不落（半批落地是最不该出现的结果）。
+var halfBatchRefused = false
+do {
+    _ = try bridge.handle([
+        "store": "s", "action": "commit",
+        "entries": [bridgeEntry("d", rev: 1, journal: false, expected: 0),
+                    bridgeEntry("e", rev: 1, journal: false, expected: 99)]
+    ])
+} catch { halfBatchRefused = true }
+check(halfBatchRefused, "整批该被拒")
+check(try! bridgeStore.record(collection: "hl", id: "d") == nil, "半批落地了")
+bridgeStore.close()
+
+// 库名走白名单：名字来自网页，直接拿去拼路径的话一个 ../../ 就写到沙盒里别处了。
+let hostRoot = FileManager.default.temporaryDirectory
+    .appendingPathComponent("bw-store-host-\(UUID().uuidString)", isDirectory: true)
+let host = ReaderNativeDataStoreHost(root: hostRoot)
+var rejectedStore = false
+do { _ = try host.handle(["store": "../../etc/passwd", "action": "info"]) }
+catch { rejectedStore = true }
+check(rejectedStore, "没登记的库名居然放行了")
+check((try? host.handle(["store": "bw-reader-native-v1-global", "action": "info"])) != nil,
+      "登记过的库名反而被拒")
+host.closeAll()
+try? FileManager.default.removeItem(at: hostRoot)
+
 print("ReaderNativeDataStore: 全部用例通过")

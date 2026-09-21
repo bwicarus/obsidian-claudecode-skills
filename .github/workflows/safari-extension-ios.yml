@@ -258,12 +258,14 @@ jobs:
 
       # 本机数据库（2026-09-22）。存储层不能靠「契约测试看文本」验 —— 那只能证明
       # 代码里写了某个词，而存储写错的表现是数据丢、或者读回来是旧的。
-      # ⚠ 它能被单文件编译是**刻意**的约束：ReaderNativeDataStore 只依赖
+      # ⚠ 它能被单文件编译是**刻意**的约束：ReaderNativeDataStore 与它的桥只依赖
       #   Foundation + SQLite3，不 import UIKit/WebKit。哪天有人往里加了 UI 依赖，
       #   这一步会先红。
+      # 桥也一起编：`journal` 默认成 true 这种事，错了的表现是「改了能看见、就是
+      # 同步不出去」，看文本看不出来，只能真跑一遍 commit 才知道。
       - name: Verify native data store
         run: |
-          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/Tests/NativeDataStore/main.swift -o "$RUNNER_TEMP/native-data-store-test"
+          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeDataStoreBridge.swift ios/BWReader/Tests/NativeDataStore/main.swift -o "$RUNNER_TEMP/native-data-store-test"
           "$RUNNER_TEMP/native-data-store-test"
 
       - name: Build unsigned simulator candidate
