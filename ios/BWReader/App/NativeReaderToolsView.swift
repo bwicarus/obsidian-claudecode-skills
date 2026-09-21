@@ -174,6 +174,7 @@ struct NativeReaderToolsView: View {
     @State private var presentsTranslation = false
     @State private var presentsLocalLibrary = false
     @State private var presentsPiLogin = false
+    @StateObject private var account: ReaderAppleSignInModel
     @State private var presentsLocalNotesFolderPicker = false
     @State private var selectedLocalNote: ReaderLocalNoteProjection?
     @State private var translationText = ""
@@ -192,6 +193,7 @@ struct NativeReaderToolsView: View {
     ) {
         self.reader = reader
         self.initialAction = initialAction
+        _account = StateObject(wrappedValue: ReaderAppleSignInModel(dataStore: reader.webView.configuration.websiteDataStore))
     }
 
     var body: some View {
@@ -265,6 +267,10 @@ struct NativeReaderToolsView: View {
                 await loadTouchDoubleTapAction()
                 offlineDictionary.refresh()
                 await performInitialActionIfNeeded()
+            }
+            .task { await account.refreshStatus() }
+            .onChange(of: presentsPiLogin) { _, presented in
+                if !presented { Task { await account.refreshStatus() } }
             }
             .confirmationDialog(
                 "删除 App 内已下载的离线词典？",
@@ -493,19 +499,13 @@ struct NativeReaderToolsView: View {
     private var dataHubSection: some View {
         ReaderDataHubSection(
             localBookCount: ReaderLocalLibraryManager.shared.books.count,
-            isSignedIn: piSyncLooksSignedIn,
+            isSignedIn: account.accountSignedIn,
+            accountName: account.username,
+            accountError: account.error,
             isSyncing: piSync.isRunning,
             lastSyncSummary: piSync.report.map { "上次：" + $0.state.title },
             onSignIn: { presentsPiLogin = true },
             onSync: { Task { await piSync.syncToPi(using: reader) } })
-    }
-
-    /// ⚠ 登录状态目前只能**推断**:没有一个"我登录了吗"的接口。
-    /// 所以这里如实按"上次同步有没有报未登录"来判断,而不是编一个布尔。
-    /// 补一个真正的状态查询是下一步,不是现在悄悄糊过去。
-    private var piSyncLooksSignedIn: Bool {
-        guard let report = piSync.report else { return true }   // 没试过就别说没登录
-        return !report.state.title.contains("登录")
     }
 
     @ViewBuilder
@@ -514,7 +514,7 @@ struct NativeReaderToolsView: View {
             Button {
                 presentsPiLogin = true
             } label: {
-                Label("登录或重新登录服务器", systemImage: "person.crop.circle.badge.checkmark")
+                Label("Apple 登录与账户", systemImage: "person.crop.circle.badge.checkmark")
             }
             .disabled(piSync.isRunning)
 

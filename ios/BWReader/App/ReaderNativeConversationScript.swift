@@ -15,6 +15,7 @@ enum ReaderNativeConversationScript {
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
       let controls = null, controlsObserver = null, suspended = false;
       let settingsModels = null, settingsVoice = null;
+      let nativePageSelectionSequence = 0;
       let searchController = null, searchResults = new Map(), searchQuery = '', searchSequence = 0;
       let tocController = null, tocEntries = new Map(), tocSequence = 0, tocOwner = null;
       let placementScopeKey = '', previousPlacementNodes = [], excludedPlacementNodes = new WeakSet();
@@ -447,6 +448,7 @@ enum ReaderNativeConversationScript {
           if (scopeKey) previousNodes.forEach(node => excludedNodes.add(node));
           scopeKey = nextKey; scope = 'reader-' + hash(nextKey); actions.clear(); nodeIDs = new WeakMap(); lastSignature = '';
           window.__bwNativeSelection = null;
+          nativePageSelectionSequence = 0;
           settingsModels = null; settingsVoice = null;
           searchController?.abort(); searchResults.clear(); searchQuery = ''; searchSequence++;
           tocController?.abort(); tocEntries.clear(); tocOwner = null; tocSequence++;
@@ -571,6 +573,7 @@ enum ReaderNativeConversationScript {
         if (command.scope && command.scope !== scope) return { ok: false, error: '会话已切换，请重新操作' };
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
+        if (command.action === 'nativePageSelection') parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -621,6 +624,23 @@ enum ReaderNativeConversationScript {
             setLegacy(action === 'showLegacy');
           } else if (action === 'refresh') {
             rc().assistant?.reloadHistory?.();
+          } else if (action === 'nativePageSelection') {
+            const value = command.value;
+            if (!value || !Number.isSafeInteger(value.sequence) || value.sequence <= nativePageSelectionSequence ||
+                !Array.isArray(value.pages) || value.pages.length > 32 || typeof window.__setFocusSel !== 'function') return { ok: false, error: '选区已更新，请重新选择' };
+            if (value.pages.some(page => !Number.isSafeInteger(page.page) || page.page < 1 || typeof page.text !== 'string' ||
+                !Array.isArray(page.indexes) || page.indexes.length > 32000 || page.indexes.some(i => !Number.isSafeInteger(i) || i < 0) ||
+                typeof page.geometryDigest !== 'string' || !/^[a-f0-9]{64}$/i.test(page.contentSHA256))) return { ok: false, error: '选区数据无效' };
+            const selection = value.pages.map(page => page.text).join('\n').trim();
+            if (selection.length > 16000) return { ok: false, error: '选区过长，请缩小范围' };
+            nativePageSelectionSequence = value.sequence;
+            if (!selection) {
+              if (window.__bwNativeSelection?.owner === 'native-pdf') window.__bwNativeSelection.active = false;
+            } else {
+              window.__bwNativeSelection = { text: selection, active: true, owner: 'native-pdf', scope, pages: value.pages };
+              window.__setFocusSel(selection, 'text');
+              if (window.__focusSel?.text !== selection) return { ok: false, error: '选区暂未进入对话，请重试' };
+            }
           } else if (action === 'readingSettingsRead' || action === 'readingSettingsWrite') {
             const owner = rc().readerPreferences, captured = scope;
             if (!owner?.state || !owner?.perform || command.scope !== scope) return { ok: false, error: '阅读设置尚未就绪' };

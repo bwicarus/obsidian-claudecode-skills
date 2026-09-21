@@ -16,6 +16,7 @@ final class ReaderAppleSignInModel: ObservableObject {
     @Published private(set) var linking = false
     @Published private(set) var needsLink = false
     @Published private(set) var signedIn = false
+    @Published private(set) var accountSignedIn: Bool?
     @Published private(set) var username = ""
     @Published private(set) var error: String?
     private let dataStore: WKWebsiteDataStore
@@ -44,6 +45,18 @@ final class ReaderAppleSignInModel: ObservableObject {
             signedIn = linking && result["apple_linked"] as? Bool == true
             ready = true
         } catch { self.error = error.localizedDescription }
+    }
+
+    func refreshStatus() async {
+        guard !busy else { return }
+        busy = true; error = nil
+        defer { busy = false }
+        do {
+            let receipt = try await send("status", body: [:], method: "GET")
+            guard let authenticated = receipt["authenticated"] as? Bool else { throw failure("账户状态不完整。") }
+            accountSignedIn = authenticated
+            username = receipt["username"] as? String ?? ""
+        } catch { accountSignedIn = nil; self.error = error.localizedDescription }
     }
 
     func configure(_ request: ASAuthorizationAppleIDRequest) {
@@ -87,6 +100,7 @@ final class ReaderAppleSignInModel: ObservableObject {
         do {
             _ = try await send("logout", body: [:])
             signedIn = false; linking = false; needsLink = false; ready = false
+            accountSignedIn = false
             username = ""; ticket = ""; nonce = ""; state = ""
             try ReaderAccountTokenStore.shared.clear()
             busy = false
@@ -97,16 +111,18 @@ final class ReaderAppleSignInModel: ObservableObject {
     private func finish(_ receipt: [String: Any]) async throws {
         guard let username = receipt["username"] as? String, !username.isEmpty else { throw failure("登录结果不完整，请重试。") }
         self.username = username; signedIn = true; needsLink = false; ticket = ""
+        accountSignedIn = true
         await ReaderAccountTokenProvisioner.shared.ensureToken(dataStore: dataStore, reason: "apple-login", forceRefresh: true)
     }
 
-    private func send(_ action: String, body: [String: Any]) async throws -> [String: Any] {
+    private func send(_ action: String, body: [String: Any], method: String = "POST") async throws -> [String: Any] {
         let url = ReaderAccountTokenProvisioner.origin.appendingPathComponent("login/apple/" + action)
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = method
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        if method == "POST" { request.httpBody = try JSONSerialization.data(withJSONObject: body) }
         let cookies: [HTTPCookie] = await withCheckedContinuation { continuation in
             dataStore.httpCookieStore.getAllCookies { continuation.resume(returning: $0) }
         }

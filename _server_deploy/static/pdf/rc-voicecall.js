@@ -11159,6 +11159,7 @@
       return new Promise(function (resolve, reject) {
         _setCutoff(Math.floor(seconds), function (ok) { if (ok) resolve(true); else reject(new Error('记忆起点未保存')); });
       });
+    },
     acceptRealtimeOutput: _acceptReaderRealtimeOutput,
     canCaptureComputerVoiceGesture: function () { return !_assistantInReview(); },
     isOpen: function () {

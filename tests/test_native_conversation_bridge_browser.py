@@ -757,6 +757,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.add_script_tag(path=str(ROOT / '_server_deploy/static/reader-runtime/context-selection-registry.js'))
             for name in ['rc-ui.js', 'rc-sidedrawer.js', 'rc-flashcard.js', 'rc-voicecall.js', 'rc-turncard.js']:
                 page.add_script_tag(path=str(ROOT / '_server_deploy/static/pdf' / name))
+            self.assertEqual(errors, [], 'Shared Reader modules must load without initialization errors')
             page.evaluate('''() => {
               RC.sidedrawer.init({tabs:[{name:'asst',label:'助手'}],defaultTab:'asst'});
               RC.stickynote={createHtmlAt:(x,y,payload)=>{drops.push({x,y,payload});return true;},
@@ -912,6 +913,22 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.evaluate("RC.flashcard.mountState(entity.bd,[{front:'修改过的問題',back:'解答',_st:'draft'},{front:'二問',back:'二答',_st:'draft'}],{gid:'card_abc12345',authoritative:true})")
             page.evaluate('__bwNativeConversation.perform({action:"clearSelection"})')
             self.assertIsNone(page.evaluate('window.__focusSel'))
+            # Native PDF text follows the original held-selection/40s release
+            # semantics, rather than the 5-minute artifact selection registry.
+            self.assertIn('nativePageSelection', self.transport_actions)
+            page_selection = {'action':'nativePageSelection','scope':native['scope'],
+                'value': {'sequence':1, 'pages':[{'page':4,'text':'原生书页选区', 'indexes':[3,4,8],
+                    'geometryDigest':'b'*64,'contentSHA256':'a'*64}]}}
+            self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', page_selection)['ok'])
+            self.assertEqual(page.evaluate('__focusSel.text'), '原生书页选区')
+            self.assertTrue(page.evaluate("testNativeSelectionHeld('原生书页选区')"))
+            self.assertEqual(page.evaluate('__bwNativeSelection.pages[0].indexes'), [3,4,8])
+            self.assertFalse(page.evaluate('(c)=>__bwNativeConversation.perform(c)', page_selection)['ok'])
+            page_selection['value'] = {'sequence':2,'pages':[]}
+            self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', page_selection)['ok'])
+            self.assertFalse(page.evaluate("testNativeSelectionHeld('原生书页选区')"))
+            self.assertEqual(page.evaluate('__focusSel.text'), '原生书页选区')
+            page.evaluate('__bwNativeConversation.perform({action:"clearSelection"})')
             page.evaluate('__bwNativeConversation.perform({action:"showLegacy"})')
             page.wait_for_timeout(100)
             handle = page.locator('[data-learning-card-id="card_abc12345"] .vc-card-hd')

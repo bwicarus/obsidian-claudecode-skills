@@ -1130,7 +1130,9 @@ test("Swift sync bridge keeps namespace and capabilities private and exposes log
   assert.match(APPLE_LOGIN, /credential\.state == state/);
   assert.match(APPLE_LOGIN, /SHA256\.hash\(data: Data\(nonce\.utf8\)\)/);
   assert.match(read("ios/BWReader/App/ReaderAccountTokenProvisioner.swift"), /bwicarus-2\.taile44d0c\.ts\.net/);
-  assert.match(TOOLS_VIEW, /登录或重新登录服务器/);
+  assert.match(TOOLS_VIEW, /Apple 登录与账户/);
+  assert.match(TOOLS_VIEW, /isSignedIn: account\.accountSignedIn/);
+  assert.match(APPLE_LOGIN, /send\("status", body: \[:\], method: "GET"\)/);
 });
 
 test("Pi sync summaries interpolate runtime counts instead of showing variable names", () => {

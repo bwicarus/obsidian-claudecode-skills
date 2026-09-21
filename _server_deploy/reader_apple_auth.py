@@ -74,6 +74,15 @@ def register_reader_apple_auth(app, get_db, user_dir):
         user_dir(row["username"]).mkdir(parents=True, exist_ok=True)
         return jsonify(ok=True, username=row["username"])
 
+    @app.get("/login/apple/status")
+    def reader_apple_status():
+        db = get_db()
+        account = db.execute("SELECT id,username FROM users WHERE id=?", (session.get("user_id"),)).fetchone()
+        result = jsonify(ok=True, authenticated=bool(account), username=account["username"] if account else "",
+                         apple_linked=bool(account and db.execute("SELECT 1 FROM reader_apple_identities WHERE user_id=?", (account["id"],)).fetchone()))
+        result.headers["Cache-Control"] = "no-store, private"
+        return result
+
     @app.post("/login/apple/challenge")
     def reader_apple_challenge():
         if request_body() is None:

@@ -51,6 +51,21 @@ class ReaderAppleAuthTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.json
 
+    def test_account_status_is_read_only_and_never_guesses_from_previous_sync(self):
+        before = self.db.total_changes
+        response = self.client.get('/login/apple/status')
+        self.assertEqual(response.json, dict(ok=True, authenticated=False, username='', apple_linked=False))
+        self.assertIn('no-store', response.headers['Cache-Control'])
+        with self.client.session_transaction() as session:
+            session['user_id'] = 1
+        response = self.client.get('/login/apple/status')
+        self.assertEqual(response.json, dict(ok=True, authenticated=True, username='original', apple_linked=False))
+        with self.client.session_transaction() as session:
+            session['user_id'] = 999
+        self.assertFalse(self.client.get('/login/apple/status').json['authenticated'])
+        self.assertEqual(self.db.total_changes, before)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM reader_apple_challenges').fetchone()[0], 0)
+
     def token(self, challenge, subject='apple-original', **overrides):
         claims = dict(iss=auth.APPLE_ISSUER, aud=auth.APPLE_AUDIENCE, exp=int(time.time())+300,
                       iat=int(time.time()), sub=subject, nonce=hashlib.sha256(challenge['nonce'].encode()).hexdigest())

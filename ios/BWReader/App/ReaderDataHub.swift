@@ -104,7 +104,9 @@ enum ReaderDataHub {
 struct ReaderDataHubSection: View {
     @State private var serverHost = ReaderServer.host
     let localBookCount: Int?
-    let isSignedIn: Bool
+    let isSignedIn: Bool?
+    var accountName: String = ""
+    var accountError: String? = nil
     let isSyncing: Bool
     let lastSyncSummary: String?
     let onSignIn: () -> Void
@@ -114,7 +116,8 @@ struct ReaderDataHubSection: View {
         Section("数据与同步") {
             // 账号。⚠ 刻意**不叫「Pi」**：Pi 是中继不是数据权威,
             // 把实现细节放在界面第一层,是这次混乱的来源之一。
-            LabeledContent("账号", value: isSignedIn ? "已登录" : "未登录")
+            LabeledContent("账号", value: isSignedIn == true ? (accountName.isEmpty ? "已登录" : accountName)
+                           : (isSignedIn == false ? "未登录" : (accountError == nil ? "正在确认账户状态" : "暂未确认账户状态")))
             // ⚠ 服务器地址可改 —— 用户 2026-08-28 说了将来可能换 Mac mini。
             // 界面上只说「我的服务器」,不出现具体是哪台机器:那是实现细节,
             // 而且它会变。把机器名当一等公民正是这次混乱的来源。
@@ -127,12 +130,11 @@ struct ReaderDataHubSection: View {
             // 所有卡片图全裂，Swift 端返回着十几种具体错误码，而 <img>
             // 只画一个问号 —— 没有这行，排查只能整层整层地猜。
             LabeledContent("图片代理", value: ReaderImageProxyHealth.line)
-            if !isSignedIn {
-                Button("登录", action: onSignIn)
-            }
+            Button(isSignedIn == true ? "管理 Apple 登录与账户" : "使用 Apple 账户登录", action: onSignIn)
+            if let accountError { Text(accountError).font(.caption).foregroundStyle(.secondary) }
 
             Button(isSyncing ? "同步中…" : "立即同步", action: onSync)
-                .disabled(isSyncing || !isSignedIn)
+                .disabled(isSyncing || isSignedIn == false)
             if let summary = lastSyncSummary {
                 Text(summary)
                     .font(.footnote)

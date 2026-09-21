@@ -345,6 +345,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var bookUserStateContextGeneration: UInt64 = 0
     private var currentLocalBook: ReaderLocalBookRecord?
     private var currentLocalBookAccess: ReaderLocalBookAccess?
+    private var nativePDFSelectionSequence = 0
     private weak var currentLocalLibrary: ReaderLocalLibraryManager?
     private var currentLocalBookContentSHA256: String?
     private var pendingLocalBookNavigation: PendingLocalBookNavigation?
@@ -443,11 +444,25 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return receipt["ok"] as? Bool == true ? nil : (receipt["error"] as? String ?? "操作未完成，请重试")
     }
 
+    func updateNativePDFSelection(_ values: [ReaderNativePDFDocument.CharacterSelection],
+                                  bookID: String, contentSHA256: String, scope: String) async -> Bool {
+        guard currentLocalBook?.id == bookID, currentLocalBookContentSHA256?.lowercased() == contentSHA256.lowercased(),
+              scope == nativeConversation.scope, values.allSatisfy({ $0.bookID == bookID && $0.contentSHA256.lowercased() == contentSHA256.lowercased() }) else { return false }
+        nativePDFSelectionSequence += 1
+        let pages: [[String: Any]] = values.map { value in
+            ["page": value.page, "text": value.text, "indexes": value.indexes,
+             "geometryDigest": value.geometryDigest, "contentSHA256": value.contentSHA256]
+        }
+        let receipt = await requestNativeConversationCommand(["action": "nativePageSelection", "scope": scope,
+            "value": ["sequence": nativePDFSelectionSequence, "pages": pages]])
+        return receipt["ok"] as? Bool == true
+    }
+
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             "showLegacy", "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
-            "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite"]
+            "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {

@@ -1,4 +1,5 @@
 import PDFKit
+import Combine
 import SwiftUI
 import UIKit
 
@@ -6,7 +7,7 @@ import UIKit
 /// character indexes, book identity and persisted overlays remain authoritative.
 /// Wiring its ports replaces the document renderer, not the data repositories.
 @MainActor
-final class ReaderNativePDFDocument: NSObject, ObservableObject {
+final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayViewProvider {
     struct Position: Equatable {
         let page: Int
         let scale: CGFloat
@@ -48,6 +49,13 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject {
     private var domainHeaders: [ReaderBookUserStateDomainName: (revision: Int64, digest: String)] = [:]
     private var lastPageFrames: [Int: CGRect] = [:]
     private var lastViewBounds = CGRect.null
+    private var characterPages: [Int: NativeBookOCRPageCharacters] = [:]
+    private var characterReads: [Int: Task<Void, Never>] = [:]
+    private var characterReadTickets: [Int: UUID] = [:]
+    private var unavailableCharacterPages = Set<Int>()
+    private var textOverlays: [Int: ReaderNativePDFTextOverlay] = [:]
+    private var ocrUpdates: AnyCancellable?
+    private var customSelection = false
 
     override init() {
         super.init()
@@ -56,6 +64,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject {
         view.displayDirection = .vertical
         view.displayBox = .cropBox
         view.autoScales = true
+        view.pageOverlayViewProvider = self
         view.onLayout = { [weak self] in
             Task { @MainActor in self?.layoutChanged() }
         }
@@ -67,11 +76,30 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject {
         observations.append(NotificationCenter.default.addObserver(forName: .PDFViewSelectionChanged, object: view, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.selectionChanged() }
         })
+        ocrUpdates = NativeBookOCRManager.shared.$lastUpdate.compactMap { $0 }.sink { [weak self] update in
+            Task { @MainActor in
+                guard let self, update.bookID == self.access?.record.id else { return }
+                self.selectionTask?.cancel(); self.customSelection = false; self.onSelection?([])
+                if let page = update.page {
+                    self.characterPages[page] = nil; self.unavailableCharacterPages.remove(page)
+                    self.characterReads[page]?.cancel(); self.characterReads[page] = nil
+                    self.characterReadTickets[page] = nil
+                    self.textOverlays[page]?.characters = nil
+                } else {
+                    self.characterPages = [:]; self.unavailableCharacterPages = []
+                    self.characterReads.values.forEach { $0.cancel() }; self.characterReads = [:]
+                    self.characterReadTickets = [:]
+                    self.textOverlays.values.forEach { $0.characters = nil }
+                }
+                self.loadVisibleCharacterPages()
+            }
+        }
     }
 
     deinit {
         observations.forEach(NotificationCenter.default.removeObserver)
         selectionTask?.cancel()
+        characterReads.values.forEach { $0.cancel() }
     }
 
     func open(_ access: ReaderLocalBookAccess, contentSHA256: String, page: Int) throws {
@@ -100,6 +128,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject {
         ready = false; error = nil
         domainHeaders = [:]; ink = [:]; highlights = [:]
         lastPageFrames = [:]; lastViewBounds = .null
+        characterReads.values.forEach { $0.cancel() }; characterReads = [:]
+        characterReadTickets = [:]
+        characterPages = [:]; textOverlays = [:]; unavailableCharacterPages = []; customSelection = false
         onSelection?([])
     }
 
@@ -244,9 +275,12 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject {
         guard frames != lastPageFrames || view.bounds != lastViewBounds else { return }
         lastPageFrames = frames; lastViewBounds = view.bounds
         geometryRevision &+= 1; onGeometry?()
+        loadVisibleCharacterPages()
     }
 
     private func selectionChanged() {
+        if customSelection && view.currentSelection == nil { return }
+        if customSelection { textOverlays.values.forEach { $0.clearSelection() }; customSelection = false }
         selectionTask?.cancel()
         guard let selection = view.currentSelection, let document = view.document, let access else {
             onSelection?([]); return
@@ -309,6 +343,148 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject {
         let box = page.bounds(for: .cropBox)
         let rotation = (page.rotation % 360 + 360) % 360
         return rotation == 90 || rotation == 270 ? CGSize(width: box.height, height: box.width) : box.size
+    }
+
+    func clearSelection() {
+        selectionTask?.cancel(); customSelection = false
+        textOverlays.values.forEach { $0.clearSelection() }
+        view.clearSelection(); onSelection?([])
+    }
+
+    func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> UIView? {
+        guard let document = view.document, page.document === document else { return nil }
+        let number = document.index(for: page) + 1
+        if let current = textOverlays[number] { return current }
+        let overlay = ReaderNativePDFTextOverlay()
+        overlay.characters = characterPages[number]
+        overlay.canonicalPoint = { [weak self, weak overlay] point in
+            guard let self, let overlay, let resolved = self.canonicalPoint(point, from: overlay), resolved.page == number else { return nil }
+            return resolved.point
+        }
+        overlay.project = { [weak self, weak overlay] rect in
+            guard let self, let overlay else { return nil }
+            return self.viewRect(normalized: rect, page: number, in: overlay)
+        }
+        overlay.onSelect = { [weak self] indexes in self?.acceptOCRSelection(indexes, page: number) }
+        // PDFKit owns embedded text selection. The overlay supplies native
+        // interaction only for scanned pages or a user-selected OCR override.
+        overlay.embeddedText = !(page.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        textOverlays[number] = overlay
+        return overlay
+    }
+
+    func pdfView(_ view: PDFView, willEndDisplayingOverlayView overlayView: UIView, for page: PDFPage) {
+        guard let document = view.document, page.document === document else { return }
+        let number = document.index(for: page) + 1
+        textOverlays[number] = nil
+    }
+
+    private func loadVisibleCharacterPages() {
+        guard let access, let document = view.document else { return }
+        let ticket = generation, digest = digest
+        let visible = Set(view.visiblePages.map { document.index(for: $0) + 1 })
+        // Keep a small local working set. Cache eviction never deletes sidecars.
+        if characterPages.count > 12 { characterPages = characterPages.filter { visible.contains($0.key) } }
+        for number in visible where characterPages[number] == nil && characterReads[number] == nil && !unavailableCharacterPages.contains(number) {
+            let readTicket = UUID()
+            characterReadTickets[number] = readTicket
+            characterReads[number] = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer {
+                    if generation == ticket && characterReadTickets[number] == readTicket {
+                        characterReads[number] = nil; characterReadTickets[number] = nil
+                    }
+                }
+                do {
+                    let value = try await NativeBookOCRManager.shared.readerPageCharacters(book: access, expectedContentSHA256: digest, page: number)
+                    guard generation == ticket, self.access === access, characterReadTickets[number] == readTicket, !Task.isCancelled else { return }
+                    guard let value, value.contentSHA256.lowercased() == digest, value.status == .ready else {
+                        unavailableCharacterPages.insert(number); return
+                    }
+                    characterPages[number] = value
+                    textOverlays[number]?.characters = value
+                } catch {
+                    guard generation == ticket, !Task.isCancelled else { return }
+                    unavailableCharacterPages.insert(number)
+                    self.error = "本页文字层读取失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func acceptOCRSelection(_ indexes: [Int], page: Int) {
+        guard let access, let chars = characterPages[page], !indexes.isEmpty,
+              indexes.allSatisfy({ chars.chars.indices.contains($0) }), chars.contentSHA256.lowercased() == digest else { return }
+        customSelection = true; selectionTask?.cancel(); view.clearSelection()
+        for (number, overlay) in textOverlays where number != page { overlay.clearSelection() }
+        let rects = indexes.map { index -> CGRect in
+            let c = chars.chars[index]
+            return CGRect(x: c.x0 / chars.pageWidth, y: c.y0 / chars.pageHeight,
+                          width: (c.x1-c.x0) / chars.pageWidth, height: (c.y1-c.y0) / chars.pageHeight)
+        }
+        onSelection?([CharacterSelection(bookID: access.record.id, contentSHA256: digest, page: page,
+            geometryDigest: chars.geometryDigest, indexes: indexes,
+            text: indexes.map { chars.chars[$0].c }.joined(), rects: rects)])
+    }
+}
+
+@MainActor
+private final class ReaderNativePDFTextOverlay: UIView {
+    var characters: NativeBookOCRPageCharacters? { didSet { clearSelection() } }
+    var embeddedText = false
+    var canonicalPoint: ((CGPoint) -> CGPoint?)?
+    var project: ((CGRect) -> CGRect?)?
+    var onSelect: (([Int]) -> Void)?
+    private var start: Int?
+    private var selected: [Int] = []
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = false; backgroundColor = .clear
+        let gesture = UILongPressGestureRecognizer(target: self, action: #selector(selectText(_:)))
+        gesture.minimumPressDuration = 0.3
+        gesture.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        addGestureRecognizer(gesture)
+    }
+    required init?(coder: NSCoder) { return nil }
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard let characters, !embeddedText || characters.textAuthority == .localOverride else { return false }
+        return hit(point) != nil
+    }
+    private func hit(_ point: CGPoint) -> Int? {
+        guard let chars = characters, chars.pageWidth > 0, chars.pageHeight > 0,
+              let p = canonicalPoint?(point) else { return nil }
+        let x = Double(p.x) * chars.pageWidth, y = Double(p.y) * chars.pageHeight
+        return chars.chars.indices.first { index in
+            let c = chars.chars[index]
+            return c.sp == 0 && x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1
+        }
+    }
+    @objc private func selectText(_ gesture: UILongPressGestureRecognizer) {
+        guard let chars = characters else { return }
+        switch gesture.state {
+        case .began:
+            start = hit(gesture.location(in: self))
+            if let start { selected = [start]; setNeedsDisplay(); onSelect?(selected) }
+        case .changed, .ended:
+            guard let start, let end = hit(gesture.location(in: self)) else { return }
+            let next = (min(start,end)...max(start,end)).filter { chars.chars[$0].sp == 0 }
+            if next != selected { selected = next; setNeedsDisplay(); onSelect?(selected) }
+            if gesture.state == .ended { self.start = nil }
+        case .cancelled, .failed: start = nil
+        default: break
+        }
+    }
+    func clearSelection() { start = nil; selected = []; setNeedsDisplay() }
+    override func draw(_ rect: CGRect) {
+        guard let chars = characters, let context = UIGraphicsGetCurrentContext() else { return }
+        context.setFillColor(UIColor.systemTeal.withAlphaComponent(0.22).cgColor)
+        for index in selected where chars.chars.indices.contains(index) {
+            let c = chars.chars[index]
+            let normalized = CGRect(x: c.x0 / chars.pageWidth, y: c.y0 / chars.pageHeight,
+                                    width: (c.x1-c.x0) / chars.pageWidth, height: (c.y1-c.y0) / chars.pageHeight)
+            if let box = project?(normalized) { context.fill(box) }
+        }
     }
 }
 
