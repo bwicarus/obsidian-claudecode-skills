@@ -175,6 +175,24 @@ final class ReaderNativeDataStore {
         return json
     }
 
+    func journalCount() throws -> Int {
+        var count = 0
+        try query("SELECT COUNT(*) FROM journal") { statement in
+            count = Int(sqlite3_column_int64(statement, 0))
+        }
+        return count
+    }
+
+    /// 库里出现过的 collection。⚠ 排序在这里做完：调用方（status）不该为了
+    /// 一个稳定顺序再排一遍，两处各排一次早晚会排出两种结果。
+    func collections() throws -> [String] {
+        var names: [String] = []
+        try query("SELECT DISTINCT collection FROM records ORDER BY collection") { statement in
+            if let name = Self.text(statement, 0) { names.append(name) }
+        }
+        return names
+    }
+
     func cursor() throws -> Int64 {
         guard let raw = try meta("cursor"), let value = Int64(raw) else { return 0 }
         return value
@@ -194,46 +212,66 @@ final class ReaderNativeDataStore {
                 expectedRev: Int64?, now: Int64,
                 maxJournal: Int = 10_000, maxMutations: Int = 20_000) throws -> Int64 {
         try inTransaction {
-            if let expectedRev {
-                let current = try self.record(collection: record.collection, id: record.id)
-                let actual = current?.rev ?? 0
-                guard actual == expectedRev else {
-                    throw StoreError.revisionConflict(collection: record.collection,
-                                                      id: record.id, actual: actual)
-                }
-            }
-            try self.execute("""
-                INSERT INTO records (collection, id, rev, updatedAt, deleted, json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(collection, id) DO UPDATE SET
-                    rev = excluded.rev, updatedAt = excluded.updatedAt,
-                    deleted = excluded.deleted, json = excluded.json
-                """, bind: [
-                    .text(record.collection), .text(record.id), .int(record.rev),
-                    .int(record.updatedAt), .int(record.deleted ? 1 : 0), .text(record.json)
-                ])
-
-            let next = try self.cursor() + 1
-            try self.execute("INSERT INTO journal (cursor, json) VALUES (?, ?)",
-                             bind: [.int(next), .text(journalJSON(next))])
-            try self.execute("INSERT INTO meta (key, json) VALUES ('cursor', ?) "
-                             + "ON CONFLICT(key) DO UPDATE SET json = excluded.json",
-                             bind: [.text(String(next))])
-
-            if let mutationId, !mutationId.isEmpty {
-                try self.execute("""
-                    INSERT INTO mutations (mutationId, rememberedAt, json) VALUES (?, ?, ?)
-                    ON CONFLICT(mutationId) DO UPDATE SET
-                        rememberedAt = excluded.rememberedAt, json = excluded.json
-                    """, bind: [.text(mutationId), .int(now), .text(record.json)])
-            }
-
-            // 裁剪放在同一个事务里：分开做的话崩在中间会留下一个比上限大的库，
-            // 而下一次启动没人会再去收拾它。
-            try self.trim(table: "journal", orderBy: "cursor", keep: maxJournal)
-            try self.trim(table: "mutations", orderBy: "rememberedAt", keep: maxMutations)
-            return next
+            try self.commitWithinTransaction(
+                record: record, mutationId: mutationId, journalJSON: journalJSON,
+                expectedRev: expectedRev, now: now,
+                maxJournal: maxJournal, maxMutations: maxMutations)
         }
+    }
+
+    /// 同上，但**在调用方已经开着的事务里**跑。
+    ///
+    /// ⚠ 批量提交必须走这个：每条各自开一次事务的话，中途失败会留下半批 ——
+    /// 调用方拿到"失败"，库里却留下了一半，下次它会在一个自己没预期的状态上
+    /// 继续写。
+    ///
+    /// ⚠ `journalJSON` 是个**闭包**而不是现成的串：游标要到提交那一刻才分配，
+    /// 而 journal 条目里必须带着它（调用方按 cursor 对齐增量）。
+    @discardableResult
+    func commitWithinTransaction(record: Record, mutationId: String?,
+                                 journalJSON: (Int64) -> String,
+                                 expectedRev: Int64?, now: Int64,
+                                 maxJournal: Int = 10_000,
+                                 maxMutations: Int = 20_000) throws -> Int64 {
+        if let expectedRev {
+            let current = try self.record(collection: record.collection, id: record.id)
+            let actual = current?.rev ?? 0
+            guard actual == expectedRev else {
+                throw StoreError.revisionConflict(collection: record.collection,
+                                                  id: record.id, actual: actual)
+            }
+        }
+        try self.execute("""
+            INSERT INTO records (collection, id, rev, updatedAt, deleted, json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(collection, id) DO UPDATE SET
+                rev = excluded.rev, updatedAt = excluded.updatedAt,
+                deleted = excluded.deleted, json = excluded.json
+            """, bind: [
+                .text(record.collection), .text(record.id), .int(record.rev),
+                .int(record.updatedAt), .int(record.deleted ? 1 : 0), .text(record.json)
+            ])
+
+        let next = try self.cursor() + 1
+        try self.execute("INSERT INTO journal (cursor, json) VALUES (?, ?)",
+                         bind: [.int(next), .text(journalJSON(next))])
+        try self.execute("INSERT INTO meta (key, json) VALUES ('cursor', ?) "
+                         + "ON CONFLICT(key) DO UPDATE SET json = excluded.json",
+                         bind: [.text(String(next))])
+
+        if let mutationId, !mutationId.isEmpty {
+            try self.execute("""
+                INSERT INTO mutations (mutationId, rememberedAt, json) VALUES (?, ?, ?)
+                ON CONFLICT(mutationId) DO UPDATE SET
+                    rememberedAt = excluded.rememberedAt, json = excluded.json
+                """, bind: [.text(mutationId), .int(now), .text(record.json)])
+        }
+
+        // 裁剪放在同一个事务里：分开做的话崩在中间会留下一个比上限大的库，
+        // 而下一次启动没人会再去收拾它。
+        try self.trim(table: "journal", orderBy: "cursor", keep: maxJournal)
+        try self.trim(table: "mutations", orderBy: "rememberedAt", keep: maxMutations)
+        return next
     }
 
     func putMeta(_ key: String, json: String) throws {

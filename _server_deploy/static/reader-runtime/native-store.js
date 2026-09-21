@@ -251,7 +251,16 @@
               collection: entry.collection, id: entry.id,
               record: entry.record, mutationId: entry.mutationId,
               operation: entry.operation, expectedRev: entry.expectedRev,
-              now: timestamp()
+              now: timestamp(),
+              // journal 存的是**完整的变更信封** —— 只存记录本体的话，
+              // changes() 拿不到 operation/mutationId，增量同步就无从判断这一条
+              // 是写还是删、是不是自己刚发出去的。
+              // ⚠ 这里**不带 cursor**：它要到提交那一刻才分配，由原生侧填。
+              change: {
+                mutationId: entry.mutationId, operation: entry.operation,
+                collection: entry.collection,
+                record: D.cloneJSON(entry.record, 'change.record')
+              }
             };
           }))).then(function (receipt) {
             var cursors = (receipt && receipt.cursors) || [];
