@@ -610,7 +610,7 @@ enum ReaderNativeConversationScript {
         if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup',
              'nativeCardMove', 'nativeCardResize', 'nativeVocabMark',
              'nativeFigureAttach', 'nativeGrammar',
-             'nativeHighlightEdit'].includes(command.action)) parameterKeys.push('value');
+             'nativeHighlightEdit', 'nativePhraseFav'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -761,6 +761,22 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
             if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
             return { ok: true, value: { id: value.id } };
+          } else if (action === 'nativePhraseFav') {
+            // 原生词组面板的「收藏为词组」。本地先翻、真分词重算、长下划线即时画、
+            // outbox 兜底，四件事都挂在底座 _phraseFav 那一条路上，这里只转交。
+            const value = command.value;
+            if (!value || typeof value.text !== 'string' || !value.text.trim() ||
+                value.text.length > 200) return { ok: false, error: '词组无效' };
+            if (typeof window.__bwReaderPhraseFav !== 'function') return { ok: false, error: '词组尚未就绪' };
+            const captured = scope;
+            let done;
+            try {
+              done = await window.__bwReaderPhraseFav({ text: value.text });
+            } catch (error) {
+              return { ok: false, error: String(error && error.message || error).slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            return { ok: true, value: done };
           } else if (action === 'nativeHighlightEdit') {
             // 原生划线编辑面板：改色 / 备注 / 删除。落库全走底座 _hlUpdate / _hlDelete
             // （同一条 PATCH/DELETE、同一套「点当前色＝取消颜色」语义），这里只转交。
@@ -855,7 +871,7 @@ enum ReaderNativeConversationScript {
             const value = command.value;
             if (!value || typeof value.text !== 'string' || !value.text.trim() ||
                 value.text.length > 2000 ||
-                !['dict', 'dict-full', 'translate'].includes(value.mode)) return { ok: false, error: '查询参数无效' };
+                !['dict', 'dict-full', 'translate', 'explain', 'phrase'].includes(value.mode)) return { ok: false, error: '查询参数无效' };
             if (typeof window.__bwReaderLookupData !== 'function') return { ok: false, error: '词典尚未就绪' };
             const captured = scope;
             let data;

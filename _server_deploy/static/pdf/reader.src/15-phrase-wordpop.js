@@ -1075,13 +1075,24 @@ window.__bwReaderLookupData = async function (request) {
   const context = String(request.context || '').slice(0, 320);
   const page = Number(request.page) || (typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0;
   const file = encodeURIComponent(FILE_REL || '');
-  if (request.mode === 'translate') {
+  if (request.mode === 'translate' || (phrase && !isJa)) {
     const r = await (await fetch('/pdf/api/translate-sentence', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({text}),
     })).json();
     if (!r || r.ok !== true) throw new Error('BW_READER_TRANSLATE_FAILED');
-    return {mode: 'translate', text, zh: r.zh || ''};
+    return Object.assign({mode: phrase ? 'phrase' : 'translate', text, zh: r.zh || ''},
+                        phrase ? _phraseStateOf(text) : {});
+  }
+  if (request.mode === 'explain') {
+    // 选区菜单的「解释」。复用底座 _aiStream（同一条 /pdf/api/explain、同一套 rid
+    // 重连），只是不往结果框里渲染 —— 接管后那个框不在屏幕上。
+    // ⚠ 这里**等它流完**再返回：原生面板只要最终文本，不需要边到边。
+    const res = await _aiStream('/pdf/api/explain', {
+      method: 'POST', body: {text, context}
+    });
+    if (!res || !res.ok) throw new Error('BW_READER_EXPLAIN_FAILED');
+    return {mode: 'explain', text, body: String(res.text || '').slice(0, 20000)};
   }
   if (request.mode === 'dict-full') {
     // 「展开」：三源融合的完整词条（例句/同反义/音标两版）。网页小框那边点
@@ -1109,6 +1120,10 @@ window.__bwReaderLookupData = async function (request) {
             synonyms: (full.synonyms || []).slice(0, 8),
             antonyms: (full.antonyms || []).slice(0, 8)};
   }
+  // 「词组」= 把选中当成一个词：日语走中日词典（读音/音调/汉字拆解都有），
+  // 其它语言走整句翻译。**两条都是现成分支**，这里只是把路由改一下并带上
+  // 收藏/掌握状态 —— 词组不该多出一条自己的端点。
+  const phrase = request.mode === 'phrase';
   const isJa = _isJaWord(text);
   if (isJa) {
     // @interaction dictionary.jp.read
@@ -1117,9 +1132,13 @@ window.__bwReaderLookupData = async function (request) {
       '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')) +
       '&context=' + encodeURIComponent(context))).json();
     if (!d || d.ok !== true) throw new Error('BW_READER_LOOKUP_MISS');
-    return {mode: 'dict', jp: true, word: text, zh: d.zh || '',
+    return Object.assign({mode: phrase ? 'phrase' : 'dict', jp: true, word: text, zh: d.zh || '',
             reading: d.reading || '', accent: (d.accent != null ? d.accent : null),
-            kanji: Array.isArray(d.kanji) ? d.kanji.slice(0, 12) : []};
+            kanji: Array.isArray(d.kanji) ? d.kanji.slice(0, 12) : [],
+            // ⚠ 掌握态必须带上：不带的话面板永远显示「未掌握」，点一下反而把
+            // 已经掌握的词取消掉了。
+            mastered: !!d.mastered},
+            phrase ? _phraseStateOf(text) : {});
   }
   // 英文路径**一次新请求都不加**：直接用网页小框那条现成的 _lookupWordFetch
   // （同一个端点、同样带 langs 和句境）。少一处 fetch 就少一处会漂移的写法。
@@ -1127,5 +1146,27 @@ window.__bwReaderLookupData = async function (request) {
   if (!d || d.ok !== true) throw new Error('BW_READER_LOOKUP_MISS');
   return {mode: 'dict', jp: false, word: d.word || text, lemma: d.lemma || '',
           phonetic: d.phonetic || '', translation: d.translation || '',
-          definition: String(d.definition || '').slice(0, 4000)};
+          definition: String(d.definition || '').slice(0, 4000),
+          mastered: !!d.mastered};
+};
+
+// 词组的收藏/掌握状态。⚠ 归一化（去空白）与 _phraseFav 保持同一条规则 ——
+// 跨行选中带换行，不归一化会存成另一个词组，表现是「收藏了却没生效」。
+function _phraseStateOf(text) {
+  const key = String(text || '').replace(/[\s\u3000]+/g, '');
+  return { phrase: true, fav: _phraseFavSet.has(key),
+           mastered: _phraseMarkSet.has(_phraseNorm(key)) };
+}
+// 原生词组面板的「收藏为词组」。本地先翻 + 后台同步 + outbox 兜底都在 _phraseFav 里，
+// 这里复用它（btn 传 null：它只用来画按钮，原生那侧自己画）。
+window.__bwReaderPhraseFav = async function (request) {
+  request = request || {};
+  const text = String(request.text || '').trim();
+  if (!text) throw new Error('BW_READER_PHRASE_EMPTY');
+  // _phraseFav 读的是 _wordPopState.word —— 原生没有那个小框，所以先把它摆好。
+  // ⚠ 别在原生那侧另写一套收藏：本地先翻、真分词重算、长下划线即时画、outbox
+  // 兜底，四件事都挂在这一条路上。
+  _wordPopState = Object.assign({}, _wordPopState, {word: text, phrase: true});
+  _phraseFav(null);
+  return _phraseStateOf(text);
 };

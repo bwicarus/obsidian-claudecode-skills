@@ -30,7 +30,28 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
     private let page: Int
     private let context: String
 
-    var title: String { mode == "translate" ? "翻译" : "词典" }
+    var title: String {
+        switch mode {
+        case "phrase": return "词组"
+        case "translate": return "翻译"
+        case "explain": return "解释"
+        default: return "词典"
+        }
+    }
+
+    /// 解释的正文（Markdown 原文；这里按段显示，不引渲染器）。
+    var explanation: [String] {
+        string("body").split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                var text = line.trimmingCharacters(in: .whitespaces)
+                while let first = text.first, "#-*>".contains(first) {
+                    text.removeFirst()
+                    text = text.trimmingCharacters(in: .whitespaces)
+                }
+                return text
+            }
+            .filter { !$0.isEmpty }
+    }
 
     func load() async {
         loading = true
@@ -46,6 +67,8 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
             return
         }
         value = body
+        favorited = body["fav"] as? Bool == true
+        mastered = body["mastered"] as? Bool == true
     }
 
     /// 标记掌握 —— 判据（日/英分流）和副作用（重画下划线）都在阅读器那侧，
@@ -109,6 +132,29 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
         expanded = true
     }
 
+    /// 词组：收藏起来当一个分词单元。⚠ 本地先翻、真分词重算、长下划线即时画、
+    /// outbox 兜底，四件事都挂在底座 `_phraseFav` 上 —— 这里只发起，状态以回执为准。
+    @Published private(set) var favorited = false
+    @Published private(set) var favoriting = false
+
+    func toggleFavorite() async {
+        guard !favoriting else { return }
+        favoriting = true
+        defer { favoriting = false }
+        let receipt = await request([
+            "action": "nativePhraseFav",
+            "value": ["text": headword],
+        ])
+        guard receipt["ok"] as? Bool == true else {
+            error = receipt["error"] as? String ?? "收藏失败，请重试。"
+            return
+        }
+        favorited = (receipt["value"] as? [String: Any])?["fav"] as? Bool ?? !favorited
+        onMarked?()
+    }
+
+    var isPhrase: Bool { mode == "phrase" }
+
     private func string(_ key: String) -> String { value[key] as? String ?? "" }
 
     var isJapanese: Bool { value["jp"] as? Bool == true }
@@ -148,6 +194,51 @@ struct ReaderNativeLookupView: View {
                     } else if let error = model.error {
                         Label(error, systemImage: "exclamationmark.triangle")
                             .foregroundStyle(.orange)
+                    } else if model.isPhrase {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(model.headword).font(.title3.weight(.semibold))
+                            if !model.reading.isEmpty {
+                                Text(model.reading).font(.callout)
+                                    .foregroundStyle(ReaderNativeTheme.muted)
+                            }
+                            Button { model.speak() } label: { Image(systemName: "speaker.wave.2") }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("发音")
+                        }
+                        Text(model.chinese.isEmpty ? "（无翻译）" : model.chinese)
+                            .font(.body).textSelection(.enabled)
+                        if !model.kanji.isEmpty {
+                            Text(model.kanji.joined(separator: "　")).font(.callout)
+                                .foregroundStyle(ReaderNativeTheme.muted)
+                        }
+                        Divider()
+                        Button {
+                            Task { await model.toggleFavorite() }
+                        } label: {
+                            Label(model.favorited ? "已收藏（点此取消）" : "收藏为词组",
+                                  systemImage: model.favorited ? "star.fill" : "star")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(model.favoriting)
+                        .accessibilityHint("收藏后这几个字之后会当作一个词来分词")
+                        Button {
+                            Task { await model.markMastered() }
+                        } label: {
+                            Label(model.mastered ? "已掌握（点此取消）" : "标记掌握",
+                                  systemImage: model.mastered ? "checkmark.circle.fill" : "star")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(model.marking)
+                    } else if model.mode == "explain" {
+                        Text(model.text).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
+                        Divider()
+                        if model.explanation.isEmpty {
+                            Text("没有返回解释。").foregroundStyle(ReaderNativeTheme.muted)
+                        } else {
+                            ForEach(Array(model.explanation.enumerated()), id: \.offset) { _, line in
+                                Text(line).font(.callout).textSelection(.enabled)
+                            }
+                        }
                     } else if model.mode == "translate" {
                         Text(model.text).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
                         Divider()

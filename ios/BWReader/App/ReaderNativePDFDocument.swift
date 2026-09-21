@@ -1058,6 +1058,14 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
                 guard let self, self.selected?.indexes == value.indexes else { return }
                 self.onLookup?(value, "translate")
             },
+            UIAction(title: "词组", image: UIImage(systemName: "text.badge.star")) { [weak self] _ in
+                guard let self, self.selected?.indexes == value.indexes else { return }
+                self.onLookup?(value, "phrase")
+            },
+            UIAction(title: "解释", image: UIImage(systemName: "lightbulb")) { [weak self] _ in
+                guard let self, self.selected?.indexes == value.indexes else { return }
+                self.onLookup?(value, "explain")
+            },
             UIAction(title: "语法", image: UIImage(systemName: "chart.bar.doc.horizontal")) { [weak self] _ in
                 guard let self, self.selected?.indexes == value.indexes else { return }
                 // 分析对象是**整句**，焦点是选中的那一段 —— 与网页那侧同一口径

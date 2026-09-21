@@ -873,7 +873,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 原生选区菜单里点了查词/翻译：开一个原生面板，取数仍在阅读器那侧。
     private func openNativeLookup(page: Int, text: String, mode: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 2000, ["dict", "translate"].contains(mode) else { return }
+        guard !trimmed.isEmpty, trimmed.count <= 2000, ["dict", "translate", "explain", "phrase"].contains(mode) else { return }
         let panel = ReaderNativeLookupModel(
             text: trimmed, mode: mode, page: max(0, page),
             // 句境交给词典：同一个词在不同句子里释义不同，网页那侧也是带着它查的。
@@ -1015,7 +1015,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
             "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach",
-            "nativeGrammar", "nativeHighlightEdit"]
+            "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {
