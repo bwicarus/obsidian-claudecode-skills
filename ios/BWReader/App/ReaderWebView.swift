@@ -473,15 +473,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func refreshNativePageOverlays() {
         guard let document = nativePDFDocument else { return }
         for page in document.position.visiblePages.prefix(8) {
-            webView.callAsyncJavaScript(
-                "return await window.__bwReaderPageOverlay?.(page);",
-                arguments: ["page": page], in: nil, contentWorld: .page
-            ) { [weak self, weak document] result in
-                Task { @MainActor in
-                    guard let document, self?.nativePDFDocument === document,
-                          case .success(let value) = result,
-                          let payload = value as? [String: Any],
-                          let size = document.characterPageSize(page) else { return }
+            Task { @MainActor [weak self, weak document] in
+                guard let self, let document else { return }
+                let value = try? await self.webView.callAsyncJavaScript(
+                    "return await window.__bwReaderPageOverlay?.(page);",
+                    arguments: ["page": page], in: nil, contentWorld: .page)
+                // 跨过 await 后文档可能已经换了：身份要重新确认一次。
+                guard self.nativePDFDocument === document,
+                      let payload = value as? [String: Any],
+                      let size = document.characterPageSize(page) else { return }
+                do {
                     let rows = payload["vocabMarks"] as? [[String: Any]] ?? []
                     let marks: [ReaderNativePDFDocument.VocabMark] = rows.compactMap { row in
                         guard let slug = row["label_slug"] as? String,
@@ -499,9 +500,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     document.setVocabMarks(marks, page: page)
                     // masteredFuri 为 null 表示振假名整体关着 —— 那时一个都不画，
                     // 跟"这一页没有已掌握的词"不是一回事。
-                    document.setFuriganaMastered(payload["masteredFuri"] as? [String],
-                                                 enabled: payload["masteredFuri"] is [String],
-                                                 page: page)
+                    let mastered = payload["masteredFuri"] as? [String]
+                    document.setFuriganaMastered(mastered, enabled: mastered != nil, page: page)
                 }
             }
         }
@@ -546,10 +546,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         guard let data = try? JSONSerialization.data(withJSONObject: surfaces),
               let json = String(data: data, encoding: .utf8) else { return }
-        webView.callAsyncJavaScript(
-            "window.__bwNativeInkSurfaces = JSON.parse(value);"
-            + "window.__bwNativeInkSurfacesChanged?.();",
-            arguments: ["value": json], in: nil, contentWorld: .page) { _ in }
+        Task { @MainActor [weak self] in
+            _ = try? await self?.webView.callAsyncJavaScript(
+                "window.__bwNativeInkSurfaces = JSON.parse(value);"
+                + "window.__bwNativeInkSurfacesChanged?.();",
+                arguments: ["value": json], in: nil, contentWorld: .page)
+        }
     }
 
     /// 原生正文接管时拖动页卡：把落点换成 **PDF 页内归一化坐标**再写锚点。
