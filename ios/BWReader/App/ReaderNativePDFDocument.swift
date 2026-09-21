@@ -48,13 +48,35 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     @Published private(set) var geometryRevision = 0
     @Published private(set) var ink: [Int: [ReaderNativeCardStroke]] = [:]
     @Published private(set) var highlights: [Int: [Highlight]] = [:]
+    /// 生词下划线。rects 是点坐标（与高亮同一空间），由网页那侧算好该画哪些 ——
+    /// 「已掌握的不画」牵涉共享仓库、本地覆盖和服务端 label 的收敛顺序，
+    /// 判据留在 `_vocabMarksForDisplay` 一处，这里只负责画。
+    @Published private(set) var vocabMarks: [Int: [VocabMark]] = [:]
+
+    struct VocabMark {
+        let slug: String
+        let rects: [CGRect]        // 归一化，便于 viewRect 直接换算
+    }
+
+    /// 由壳按可见页填。传 nil 表示这一页还没取到，保留旧的别闪。
+    func setVocabMarks(_ marks: [VocabMark]?, page: Int) {
+        guard let marks else { return }
+        vocabMarks[page] = marks
+    }
+
+    func clearVocabMarks() { vocabMarks = [:] }
+
+    /// 这一页的点坐标尺寸（来自原生字符层）。拿它把点坐标换成归一化。
+    func characterPageSize(_ page: Int) -> (width: Double, height: Double)? {
+        guard let chars = characterPages[page], chars.pageWidth > 0, chars.pageHeight > 0 else { return nil }
+        return (chars.pageWidth, chars.pageHeight)
+    }
     /// Original records, including IDs, card state, media payload and private ink.
     /// This is a read-only projection; editing still uses the original repository.
     @Published private(set) var notes: [[String: Any]] = []
     var onPosition: ((Position) -> Void)?
     var onSelection: (([CharacterSelection]) -> Void)?
     var onGeometry: (() -> Void)?
-    /// 选区菜单里点了划线：(页码, 原文, 颜色键)。交给壳走阅读器自己的划线路径。
     /// 选区菜单里点了划线。带上**点坐标的矩形和页面尺寸** —— 原生这侧自己就能拼出
     /// 完整的高亮记录，不必再让网页层把那一页渲出来取 `__charBoxes`
     /// （`_pdfExactTextPage` 要求 `dataset.loaded === '1'`，那正是双份渲染的来源）。
@@ -907,6 +929,16 @@ struct ReaderNativePDFViewport: View {
                             pageContext.fill(Path(rect), with: .color(highlight.color.opacity(0.3)))
                         }
                     }
+                    // 生词下划线画在字底（与网页那侧一致：y1 再下移 1pt）。
+                    for mark in document.vocabMarks[number] ?? [] {
+                        for normalized in mark.rects {
+                            guard let rect = document.viewRect(normalized: normalized, page: number) else { continue }
+                            let thickness = ReaderNativeVocabPalette.thickness(mark.slug)
+                            guard thickness > 0 else { continue }
+                            let line = CGRect(x: rect.minX, y: rect.maxY, width: rect.width, height: thickness)
+                            pageContext.fill(Path(line), with: .color(ReaderNativeVocabPalette.color(mark.slug)))
+                        }
+                    }
                     for stroke in document.ink[number] ?? [] {
                         ReaderNativeInkDrawing.draw(stroke, in: frame, context: &pageContext)
                     }
@@ -918,4 +950,30 @@ struct ReaderNativePDFViewport: View {
 
 private extension CGRect {
     var isFiniteRect: Bool { [minX, minY, width, height].allSatisfy(\.isFinite) && !isNull && !isInfinite }
+}
+
+/// 生词下划线的四档颜色与粗细。
+///
+/// ⚠ 取值与 `pdf-styles.css` 的 `.vocab-underline.m-*` 一一对应 —— 那是唯一来源。
+/// 掌握档在网页那侧是 `display:none`，这里对应不画（高度 0）。
+enum ReaderNativeVocabPalette {
+    static func color(_ slug: String) -> Color {
+        switch slug {
+        case "new": return Color(red: 0.96, green: 0.62, blue: 0.04)          // #f59e0b
+        case "learning": return Color(red: 0.98, green: 0.57, blue: 0.24).opacity(0.92)  // #fb923c
+        case "seen": return Color(red: 0.98, green: 0.80, blue: 0.08).opacity(0.85)      // #facc15
+        case "known": return Color(red: 0.64, green: 0.90, blue: 0.21).opacity(0.65)     // #a3e635
+        default: return .clear                                                 // 掌握/未知：不画
+        }
+    }
+
+    static func thickness(_ slug: String) -> CGFloat {
+        switch slug {
+        case "new": return 2.5
+        case "learning": return 2.3
+        case "seen": return 2
+        case "known": return 1.5
+        default: return 0
+        }
+    }
 }

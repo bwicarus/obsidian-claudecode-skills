@@ -464,6 +464,42 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
+    /// 取可见页的生词下划线，交给原生正文画。
+    ///
+    /// ⚠ **只取数据**：「哪些词该画」牵涉共享仓库的掌握事实、本地覆盖和服务端
+    /// label 的收敛顺序，判据留在网页那侧的 `_vocabMarksForDisplay` 一处。
+    /// 复制过来必然漂移，表现是「同一个词网页上不画、原生上画」。
+    private func refreshNativeVocabMarks() {
+        guard let document = nativePDFDocument else { return }
+        for page in document.position.visiblePages.prefix(8) {
+            webView.callAsyncJavaScript(
+                "return await window.__bwReaderPageVocabMarks?.(page);",
+                arguments: ["page": page], in: nil, contentWorld: .page
+            ) { [weak self, weak document] result in
+                Task { @MainActor in
+                    guard let document, self?.nativePDFDocument === document,
+                          case .success(let value) = result,
+                          let rows = value as? [[String: Any]] else { return }
+                    guard let chars = document.characterPageSize(page) else { return }
+                    let marks: [ReaderNativePDFDocument.VocabMark] = rows.compactMap { row in
+                        guard let slug = row["slug"] as? String ?? row["label_slug"] as? String,
+                              let rects = row["rects"] as? [[Double]] else { return nil }
+                        // 点坐标 → 归一化，viewRect 才能换算。与高亮同一口径。
+                        let boxes = rects.compactMap { r -> CGRect? in
+                            guard r.count == 4, chars.width > 0, chars.height > 0 else { return nil }
+                            return CGRect(x: r[0] / chars.width, y: r[1] / chars.height,
+                                          width: (r[2] - r[0]) / chars.width,
+                                          height: (r[3] - r[1]) / chars.height)
+                        }
+                        guard !boxes.isEmpty else { return nil }
+                        return .init(slug: slug, rects: boxes)
+                    }
+                    document.setVocabMarks(marks, page: page)
+                }
+            }
+        }
+    }
+
     /// 把可见页的屏幕矩形推给墨迹层。
     ///
     /// ⚠ 原生接管后网页不再渲页：`__inkCanvas` 不存在、`getBoundingClientRect`
@@ -479,6 +515,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             try? await Task.sleep(for: .milliseconds(180))
             guard let self, !Task.isCancelled else { return }
             self.publishNativeInkSurfaces()
+            // 翻页后可见页变了，生词下划线也要跟着取 —— 同一个节流窗口里做完。
+            self.refreshNativeVocabMarks()
         }
     }
 
@@ -650,6 +688,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             Task { @MainActor [weak self] in self?.scheduleNativeInkSurfacePublish() }
         }
         publishNativeInkSurfaces()
+        refreshNativeVocabMarks()
         document.onSelection = { [weak self] values in
             Task { @MainActor [weak self] in
                 _ = await self?.updateNativePDFSelection(values, bookID: bookID, contentSHA256: digest, scope: scope)

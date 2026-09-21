@@ -572,29 +572,53 @@ function _attachPageLayout(wrap) {
   } catch (_) {}
 }
 
-function renderVocabUnderlines(pw, marks) {
-  if (!_vocabUnderlineEnabled()) return;
-  // §18.5 local-first:服务端回**全候选**(含已掌握,label_slug='mastered'),渲染时本地过滤。
-  // 共享仓库优先补充已掌握事实；旧 __masteredLocal/__vocabOverride 与服务端 label
-  // 继续兜底，且 dirty 标记只能在真正收到服务器 mastery snapshot 时收敛。
+/// 哪些生词标记该显示出来（已掌握的不画）。
+///
+/// ⚠ 从 renderVocabUnderlines 里抽出来，是为了让原生正文那侧**复用同一套判据**：
+/// 它牵涉共享仓库的掌握事实、__vocabOverride、__masteredLocal 兜底、以及服务端
+/// label_slug 的收敛顺序 —— 复制过去必然漂移，表现是"同一个词网页上不画、原生上画"。
+function _vocabMarksForDisplay(marks) {
   try {
     const _ovr = window.__vocabOverride;
-    marks = (marks || []).filter((m) => {
+    return (marks || []).filter((m) => {
       const keys = _vocabMarkKeys(m);
       if (_vocabularyStateMarkMastered(m)) return false;
       if (_ovr) {
         const overrideKey = keys.find((key) => _ovr.has(key));
         if (overrideKey != null) return !_ovr.get(overrideKey);
       }
-      // __masteredLocal is a positive-set compatibility mirror. Absence is not
-      // an explicit "unknown" decision, so it must not override a fresh server
-      // label_slug='mastered'. Explicit local false lives in __vocabOverride.
       if (window.__masteredLocal && keys.some((key) => window.__masteredLocal.has(key))) {
         return false;
       }
       return m.label_slug !== 'mastered';
     });
-  } catch (_) {}
+  } catch (_) { return marks || []; }
+}
+
+/// 原生正文用的**数据入口**：只取这一页该画的生词标记，不碰 DOM。
+/// rects 是点坐标 [x0,y0,x1,y1]，与高亮同一空间，原生可以直接画。
+window.__bwReaderPageVocabMarks = async function (page) {
+  page = Number(page) || 0;
+  if (!page || !_vocabUnderlineEnabled()) return [];
+  // @interaction document.page-overlay.read
+  const r = await fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL || '') +
+    '&page=' + page, { cache: 'no-store' });
+  if (!r || !r.ok) return [];
+  const d = await r.json();
+  if (!d || d.ok !== true) return [];
+  return _vocabMarksForDisplay(d.vocab_marks || []).map((m) => ({
+    label_slug: String(m.label_slug || ''),
+    rects: (m.rects || []).slice(0, 64)
+  })).filter((m) => m.rects.length);
+};
+
+function renderVocabUnderlines(pw, marks) {
+  if (!_vocabUnderlineEnabled()) return;
+  // §18.5 local-first:服务端回**全候选**(含已掌握,label_slug='mastered'),渲染时本地过滤。
+  // 共享仓库优先补充已掌握事实；旧 __masteredLocal/__vocabOverride 与服务端 label
+  // 继续兜底，且 dirty 标记只能在真正收到服务器 mastery snapshot 时收敛。
+  // 判据抽到 _vocabMarksForDisplay 里共用（原生正文那侧调同一个函数）。
+  marks = _vocabMarksForDisplay(marks);
   // 确保有 layer（即使 marks 空也要清旧残留）
   let layer = pw.querySelector('.vocab-layer');
   if (!layer && marks && marks.length) {
