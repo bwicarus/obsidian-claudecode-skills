@@ -12,6 +12,10 @@ import SwiftUI
 /// `bw-native-navigation` 判断），否则同一个选区上下各一排按钮。
 struct ReaderNativeEPUBSelectionBar: View {
     let text: String
+    /// 色板由网页那侧给（RC.settings.hlColors）—— 用户改过色板两边才一致。
+    /// 空数组＝还没取到，那时不画划线按钮：宁可少一个按钮，也不要让他划出一个
+    /// 自己没设过的颜色。
+    let colors: [String]
     let onAction: (String) -> Void
 
     /// 与 PDF 选区菜单同一组动作、同样的顺序 —— 两个阅读器上手势记忆一致。
@@ -47,6 +51,21 @@ struct ReaderNativeEPUBSelectionBar: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    if !colors.isEmpty {
+                        Divider().frame(height: 22)
+                        ForEach(colors, id: \.self) { hex in
+                            Button {
+                                onAction("highlight:" + hex)
+                            } label: {
+                                Circle()
+                                    .fill(Color(hex: hex) ?? ReaderNativeTheme.accent)
+                                    .frame(width: 26, height: 26)
+                                    .overlay(Circle().strokeBorder(ReaderNativeTheme.separator, lineWidth: 0.5))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("用这个颜色划线")
+                        }
+                    }
                 }
                 .padding(.horizontal, 2)
             }
@@ -57,5 +76,19 @@ struct ReaderNativeEPUBSelectionBar: View {
         .padding(.horizontal, 12)
         .padding(.bottom, 10)
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+extension Color {
+    /// `#rrggbb` → Color。色板来自网页设置，那边存的就是这个形状。
+    /// ⚠ 解析不出来返回 nil，让调用方自己决定 —— 悄悄给个默认色的话，
+    /// 用户会划出一个他没选的颜色，而且每次都一样，看起来像"选色不生效"。
+    init?(hex: String) {
+        var value = hex.trimmingCharacters(in: .whitespaces)
+        if value.hasPrefix("#") { value.removeFirst() }
+        guard value.count == 6, let number = UInt32(value, radix: 16) else { return nil }
+        self.init(red: Double((number >> 16) & 0xff) / 255,
+                  green: Double((number >> 8) & 0xff) / 255,
+                  blue: Double(number & 0xff) / 255)
     }
 }

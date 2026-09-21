@@ -129,6 +129,11 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var legacyVisible = false
     @Published private(set) var sidebarOpen = false
     @Published private(set) var selectionText = ""
+    /// 阅读器当前选中的文字。
+    /// ⚠ 与 `selectionText` 不是一回事：那个来自 `__focusSel`，而
+    /// `__setFocusSel` 第一行就是「助手侧栏没开就 return」—— 侧栏关着时它恒空。
+    /// 选区操作条读的是这一份。
+    @Published private(set) var readerSelectionText = ""
     @Published private(set) var attachments: [ReaderNativeContextAttachment] = []
     @Published private(set) var readingTools: [ReaderNativeControl] = []
     @Published private(set) var messages: [ReaderNativeConversationMessage] = []
@@ -237,6 +242,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         placements = (payload["placements"] as? [[String: Any]] ?? []).compactMap(ReaderNativePagePlacement.init)
         sidebarOpen = payload["sidebarOpen"] as? Bool ?? false
         selectionText = (payload["selection"] as? [String: Any])?["text"] as? String ?? ""
+        readerSelectionText = (payload["readerSelection"] as? [String: Any])?["text"] as? String ?? ""
         attachments = (payload["attachments"] as? [[String: Any]] ?? []).compactMap(ReaderNativeContextAttachment.init)
         readingTools = (payload["readingTools"] as? [[String: Any]] ?? []).compactMap(ReaderNativeControl.init)
         if let navigation = payload["navigation"] as? [String: Any] { navigationPanel?.receive(navigation) }
@@ -268,6 +274,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         placements = []
         sidebarOpen = false
         selectionText = ""
+        readerSelectionText = ""
         attachments = []
         readingTools = []
         messages = []

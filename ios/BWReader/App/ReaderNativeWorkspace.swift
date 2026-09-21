@@ -45,13 +45,14 @@ struct ReaderNativeWorkspace<Document: View>: View {
                             .overlay(alignment: .bottom) {
                                 // EPUB 的选区操作条。PDF 不出 —— 它有自己的选区菜单，
                                 // 两套都出就是同一个选区上下各一排按钮。
-                                if enabled, reader.isEPUBBook, !conversation.selectionText.isEmpty {
-                                    ReaderNativeEPUBSelectionBar(text: conversation.selectionText) {
-                                        reader.performEPUBSelectionAction($0)
-                                    }
+                                if enabled, reader.isEPUBBook, !conversation.readerSelectionText.isEmpty {
+                                    ReaderNativeEPUBSelectionBar(
+                                        text: conversation.readerSelectionText,
+                                        colors: reader.epubHighlightColors
+                                    ) { reader.performEPUBSelectionAction($0) }
                                 }
                             }
-                            .animation(.easeOut(duration: 0.18), value: conversation.selectionText)
+                            .animation(.easeOut(duration: 0.18), value: conversation.readerSelectionText)
                             .overlay {
                                 if dropTarget {
                                     RoundedRectangle(cornerRadius: 8)
@@ -89,6 +90,8 @@ struct ReaderNativeWorkspace<Document: View>: View {
         .foregroundStyle(ReaderNativeTheme.ink)
         .tint(ReaderNativeTheme.accent)
         .task(id: enabled) { await reader.setNativeConversationMode(enabled) }
+        // 色板跟着书走：换书可能换了语言/设置，取一次就够（它只在有选中时才用得上）。
+        .task(id: conversation.scope) { reader.refreshEPUBHighlightColors() }
         .sheet(item: $conversation.settingsPanel) { panel in
             ReaderNativeSettingsView(model: panel)
         }

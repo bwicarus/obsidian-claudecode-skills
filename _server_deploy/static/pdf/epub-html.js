@@ -5938,6 +5938,24 @@
              context: String(cur.ctx || '').slice(0, 1200) };
   };
 
+  // 原生选区条的「划线」。走底座 saveHl —— 锚点解析、落库、就地上色、记住上次
+  // 用的颜色全在那条路上；另写一套的表现会是"存下来了但这一屏不上色"。
+  //
+  // ⚠ 用 `cur.anchor` 而不是重新算：那是 captureSel 里按词边界对齐过的锚，
+  //   与网页工具栏划出来的完全一样。重算一次就会和用户看见的选中范围差几个字。
+  window.__bwReaderEpubHighlight = async function (request) {
+    request = request || {};
+    if (!cur || !cur.text || !cur.anchor) throw new Error('BW_READER_EPUB_NO_SELECTION');
+    var palette = hlColors();
+    var color = request.color && palette.indexOf(request.color) >= 0
+      ? request.color : (localStorage.getItem('eph-hl-color') || palette[0]);
+    var saved = await saveHl(cur.text, cur.anchor, color);
+    if (!saved) throw new Error('BW_READER_EPUB_HL_FAILED');
+    return { id: String(saved.id || ''), color: color };
+  };
+  // 色板交给原生画（与网页工具栏同一份来源：RC.settings.hlColors）。
+  window.__bwReaderEpubHighlightColors = function () { return hlColors(); };
+
   // ── 原生面板的取数口（与 PDF 那侧**同名同形状**）──
   //
   // App 的原生选区菜单调的是 window.__bwReaderLookupData，它不关心自己站在哪个

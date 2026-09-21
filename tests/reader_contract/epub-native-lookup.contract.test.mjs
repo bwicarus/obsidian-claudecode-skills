@@ -107,7 +107,14 @@ test("⑪ EPUB 选区操作条：只在 EPUB 上出，且网页那条要收起",
   const BAR = read("ios/BWReader/App/ReaderNativeEPUBSelectionBar.swift");
   const WORKSPACE = read("ios/BWReader/App/ReaderNativeWorkspace.swift");
   // PDF 有自己的选区菜单；两套都出就是同一个选区上下各一排按钮。
-  assert.match(WORKSPACE, /reader\.isEPUBBook, !conversation\.selectionText\.isEmpty/);
+  assert.match(WORKSPACE, /reader\.isEPUBBook, !conversation\.readerSelectionText\.isEmpty/);
+  // ⚠ **不能**读 conversation.selectionText：那个来自 __focusSel，而
+  // __setFocusSel 第一行就是「助手侧栏没开就 return」—— 侧栏关着时操作条
+  // 永远不出现，而且看不出为什么。
+  const SCRIPT2 = read("ios/BWReader/App/ReaderNativeConversationScript.swift");
+  assert.match(SCRIPT2, /readerSelection: \(typeof window\.__bwReaderEpubSelection === 'function'/);
+  // 选区变化不改 DOM，observer 不会醒 —— 要显式听一下，否则条要等别的事才出现。
+  assert.match(SCRIPT2, /addEventListener\('selectionchange', schedule, \{ passive: true \}\)/);
   // 与 PDF 选区菜单同一组动作、同样顺序 —— 两个阅读器上手势记忆一致。
   for (const mode of ["dict", "phrase", "translate", "explain", "grammar"]) {
     assert.ok(BAR.includes(`"${mode}")`), mode + " 不在操作条里");
@@ -125,4 +132,27 @@ test("⑫ 收起网页工具栏时不能顺手 return 掉", () => {
   assert.match(native, /else showSel\(\);/);
   assert.match(native, /window\.__setFocusSel/, "焦点还要照常上报");
   assert.doesNotMatch(native.split("\n").slice(0, 3).join("\n"), /return;/);
+});
+
+test("⑬ EPUB 划线走底座 saveHl，锚点用对齐过的那个", () => {
+  const fn = EPUB.slice(EPUB.indexOf("window.__bwReaderEpubHighlight = async function"),
+                        EPUB.indexOf("window.__bwReaderEpubHighlightColors"));
+  assert.match(fn, /saveHl\(cur\.text, cur\.anchor, color\)/);
+  // ⚠ 用 cur.anchor 而不是重新算：那是 captureSel 里按词边界对齐过的锚，
+  // 重算一次就会和用户看见的选中范围差几个字。
+  assert.doesNotMatch(code(fn), /getSelection\(\)|offsetOf\(/);
+  // 另写一套落库的表现会是"存下来了但这一屏不上色"。
+  assert.doesNotMatch(code(fn), /fetch\(|reqJson\(/);
+});
+
+test("⑭ 色板与网页同一份来源，取不到就不画划线按钮", () => {
+  const BAR = read("ios/BWReader/App/ReaderNativeEPUBSelectionBar.swift");
+  const WEBVIEW = read("ios/BWReader/App/ReaderWebView.swift");
+  assert.match(EPUB, /window\.__bwReaderEpubHighlightColors = function \(\) \{ return hlColors\(\); \}/);
+  // ⚠ 宁可少一个按钮，也不要让他划出一个自己没设过的颜色。
+  assert.match(BAR, /if !colors\.isEmpty \{/);
+  assert.match(BAR, /Color\(hex: hex\) \?\? ReaderNativeTheme\.accent/);
+  assert.match(WEBVIEW, /\$0\.hasPrefix\("#"\) && \$0\.count == 7/, "只收 #rrggbb");
+  // 解析不出来返回 nil 而不是悄悄给默认色 —— 那看起来像"选色不生效"。
+  assert.match(BAR, /guard value\.count == 6, let number = UInt32\(value, radix: 16\) else \{ return nil \}/);
 });

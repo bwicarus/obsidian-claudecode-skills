@@ -509,7 +509,14 @@ enum ReaderNativeConversationScript {
         const review = conversationMode() === 'review' ? rc().review?.presentationState?.() || null : null;
         if (review) review.contextKey = hash(review.contextKey);
         const payload = { version: 1, scope, revision: 0, title: text(document.title, 160) || '阅读助手', ready: isReady(), busy: isBusy(),
-          legacyVisible, selection: selectedContext(), attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          // ⚠ `selection`（来自 __focusSel）**只在助手侧栏开着时才有值** ——
+          //   __setFocusSel 第一行就是 `if (!window.__asstOpen()) return;`。
+          //   所以选区操作条不能读它：侧栏关着的时候条永远不出现。
+          //   readerSelection 是独立的一份，直接问阅读器当前选中了什么。
+          legacyVisible, selection: selectedContext(),
+          readerSelection: (typeof window.__bwReaderEpubSelection === 'function'
+            ? (window.__bwReaderEpubSelection() || { text: '' }) : { text: '' }),
+          attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -519,6 +526,9 @@ enum ReaderNativeConversationScript {
       function schedule() {
         if (!suspended && timer == null) timer = setTimeout(snapshot, 60);
       }
+      // 选区变化不改 DOM，所以不会触发那些 observer —— 不显式听一下的话，
+      // 选区操作条要等到别的什么事发生才出现。
+      document.addEventListener('selectionchange', schedule, { passive: true });
       function wrapNotifications(owner, names) {
         if (!owner) return;
         let installed = hooked.get(owner);
@@ -611,7 +621,8 @@ enum ReaderNativeConversationScript {
              'nativeCardMove', 'nativeCardResize', 'nativeVocabMark',
              'nativeFigureAttach', 'nativeGrammar',
              'nativeHighlightEdit', 'nativePhraseFav',
-             'nativeCreateNote', 'nativeOcrSelection'].includes(command.action)) parameterKeys.push('value');
+             'nativeCreateNote', 'nativeOcrSelection',
+             'nativeEpubHighlight'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -762,6 +773,28 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
             if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
             return { ok: true, value: { id: value.id } };
+          } else if (action === 'nativeEpubHighlight') {
+            // EPUB 选区条的「划线」。落库、锚点解析、就地上色、记住上次用的颜色
+            // 都在底座 saveHl 那条路上，这里只转交。
+            const value = command.value || {};
+            if (typeof window.__bwReaderEpubHighlight !== 'function') return { ok: false, error: '划线尚未就绪' };
+            const captured = scope;
+            let saved;
+            try {
+              saved = await window.__bwReaderEpubHighlight({
+                color: typeof value.color === 'string' ? value.color : ''
+              });
+            } catch (error) {
+              const code = String(error && error.message || error);
+              const said = { BW_READER_EPUB_NO_SELECTION: '没有选中内容',
+                             BW_READER_EPUB_HL_FAILED: '划线没有保存成功' }[code];
+              return { ok: false, error: said || code.slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            return { ok: true, value: saved };
+          } else if (action === 'nativeEpubHighlightColors') {
+            if (typeof window.__bwReaderEpubHighlightColors !== 'function') return { ok: false, error: '色板尚未就绪' };
+            return { ok: true, value: { colors: window.__bwReaderEpubHighlightColors() } };
           } else if (action === 'nativeOcrSelection') {
             // 文字层坏掉时对这块重新识别。⚠ App 里这条端点由本地 runtime 接管，
             // 跑的是 App 自己的 OCR、写回 App 自己的字符层，**不出网**。

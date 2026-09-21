@@ -1190,7 +1190,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "nativeSelectionHighlight", "nativeSelectionLookup",
             "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach",
             "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav", "nativeCreateNote",
-            "nativeOcrSelection"]
+            "nativeOcrSelection", "nativeEpubHighlight", "nativeEpubHighlightColors"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {
@@ -5490,12 +5490,45 @@ extension ReaderWebViewModel: WKUIDelegate {
     /// 当前这本是 EPUB 吗 —— 选区操作条只在 EPUB 上出（PDF 有自己的选区菜单）。
     var isEPUBBook: Bool { currentLocalBook?.format == .epub }
 
+    /// EPUB 选区操作条上的色板。与网页工具栏同一份来源（RC.settings.hlColors），
+    /// 所以用户改过色板之后两边一致。取不到就空着 —— 不猜一组默认色，
+    /// 那会让他划出一个自己没设过的颜色。
+    @Published private(set) var epubHighlightColors: [String] = []
+
+    func refreshEPUBHighlightColors() {
+        guard isEPUBBook else { epubHighlightColors = []; return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let receipt = await self.requestNativeConversationCommand([
+                "action": "nativeEpubHighlightColors", "scope": self.nativeConversation.scope,
+            ])
+            guard receipt["ok"] as? Bool == true,
+                  let colors = (receipt["value"] as? [String: Any])?["colors"] as? [String] else { return }
+            self.epubHighlightColors = colors.filter { $0.hasPrefix("#") && $0.count == 7 }
+        }
+    }
+
     /// EPUB 选区操作条点了某一项。
     func performEPUBSelectionAction(_ mode: String) {
         Task { @MainActor [weak self] in
             guard let self else { return }
             if mode == "grammar" { await self.openEPUBGrammar() }
+            else if mode.hasPrefix("highlight:") {
+                await self.highlightEPUBSelection(color: String(mode.dropFirst("highlight:".count)))
+            }
             else { await self.openEPUBLookup(mode: mode) }
+        }
+    }
+
+    @MainActor
+    private func highlightEPUBSelection(color: String) async {
+        let receipt = await requestNativeConversationCommand([
+            "action": "nativeEpubHighlight", "scope": nativeConversation.scope,
+            "value": ["color": color],
+        ])
+        guard receipt["ok"] as? Bool == true else {
+            nativeConversation.report(receipt["error"] as? String ?? "划线没有保存成功。")
+            return
         }
     }
 
