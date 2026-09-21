@@ -490,29 +490,21 @@ jobs:
                   % (wanted, [b["attributes"]["identifier"] for b in bundles],
                      [b["attributes"]["identifier"] for b in found]))
           bundle_id = bundles[0]["id"]
-          capabilities = request("GET", "/v1/bundleIds/" + bundle_id + "/bundleIdCapabilities?limit=200")["data"]
+          # ⚠ 这条关系接口**不接受 limit**（苹果原话：The parameter 'limit' can not be
+          #   used with this request）。带上它整个签名步骤 400，而此前日志里只有一句
+          #   "HTTP Error 400"，看不出是哪一次调用 —— 2026-09-21 为此白跑了两轮构建。
+          capabilities = request("GET", "/v1/bundleIds/" + bundle_id + "/bundleIdCapabilities")["data"]
           if not any(c["attributes"]["capabilityType"] == "SIGN_IN_WITH_APPLE" for c in capabilities):
-              relationship = {"bundleId": {"data": {"type": "bundleIds", "id": bundle_id}}}
-              # ⚠ 带 settings 的写法被苹果回了 400（2026-09-21 实录）。主 App 开
-              #   Sign in with Apple 本来就不需要 APPLE_ID_AUTH_APP_CONSENT ——
-              #   那一项是给"分组到另一个主 App"的场景用的。先按带 settings 试，
-              #   被拒就退回不带 settings 的最小写法；两次都失败才真的失败。
-              attempts = [
-                  {"capabilityType": "SIGN_IN_WITH_APPLE",
-                   "settings": [{"key": "APPLE_ID_AUTH_APP_CONSENT",
-                                 "options": [{"key": "PRIMARY_APP_CONSENT", "enabled": True}]}]},
-                  {"capabilityType": "SIGN_IN_WITH_APPLE"},
-              ]
-              for index, attributes in enumerate(attempts):
-                  try:
-                      request("POST", "/v1/bundleIdCapabilities", {"data": {
-                          "type": "bundleIdCapabilities", "attributes": attributes,
-                          "relationships": relationship}})
-                      break
-                  except urllib.error.HTTPError as error:
-                      if index + 1 == len(attempts) or error.code not in (400, 409, 422):
-                          raise
-                      print("retrying Sign in with Apple without capability settings")
+              # ⚠ 这里**不要**加"失败就换个写法重试"：上一轮 400 其实出在上面那次
+              #   GET 上，我却照着 POST 猜了一个回退 —— 猜错方向不说，回退成功
+              #   还会悄悄写出一份没有 consent 设置的配置。失败就让它带着苹果的
+              #   原话抛出来（request 里已经打了响应体），一轮就能看清原因。
+              request("POST", "/v1/bundleIdCapabilities", {"data": {
+                  "type": "bundleIdCapabilities", "attributes": {
+                      "capabilityType": "SIGN_IN_WITH_APPLE",
+                      "settings": [{"key": "APPLE_ID_AUTH_APP_CONSENT",
+                                    "options": [{"key": "PRIMARY_APP_CONSENT", "enabled": True}]}]},
+                  "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle_id}}}}})
               print("Enabled Sign in with Apple for Reader")
           else:
               print("Reader Sign in with Apple already enabled")
