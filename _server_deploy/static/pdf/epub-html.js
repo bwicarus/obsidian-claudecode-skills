@@ -5919,6 +5919,17 @@
     }
   } catch (e) {}
 
+  // 当前选区（给 App 的原生选区菜单用）。
+  //
+  // ⚠ 返回 `context` 而不只是选中串：一词多义时释义要看所在句，解释更要靠它把
+  // 短选区换成整句。EPUB 这边 ctx 就是所在**块**的正文（captureSel 里算好的），
+  // 比句子宽一点但绝不会更窄 —— 宁可多给上下文，也不要给 AI 一个碎词。
+  window.__bwReaderEpubSelection = function () {
+    if (!cur || !cur.text) return null;
+    return { text: String(cur.text).slice(0, 2000),
+             context: String(cur.ctx || '').slice(0, 1200) };
+  };
+
   // ── 原生面板的取数口（与 PDF 那侧**同名同形状**）──
   //
   // App 的原生选区菜单调的是 window.__bwReaderLookupData，它不关心自己站在哪个

@@ -67,3 +67,29 @@ test("⑥ 返回的形状与 PDF 那侧对得上", () => {
     assert.match(fn, new RegExp(`\\b${key}:`), "少了 " + key);
   }
 });
+
+test("⑦ EPUB 的原生选区菜单只挂在 EPUB 上", () => {
+  const WEBVIEW = readFileSync(new URL("ios/BWReader/App/ReaderWebView.swift", ROOT), "utf8")
+    .replace(/\r\n/g, "\n");
+  assert.match(WEBVIEW, /func webView\(_ webView: WKWebView, willPresentEditMenuWithAnimator/);
+  // ⚠ PDF 走的是原生正文自己的 UIEditMenuInteraction；两套都挂会在同一个选区上
+  // 出现两份「查词」。
+  assert.match(WEBVIEW, /currentLocalBook\?\.format == \.epub else \{ return \}/);
+  for (const title of ["查词", "词组", "翻译", "解释"]) {
+    assert.ok(WEBVIEW.includes(`("${title}", "`), title + " 不在 EPUB 菜单里");
+  }
+});
+
+test("⑧ 选区此刻去问，不缓存", () => {
+  const WEBVIEW = readFileSync(new URL("ios/BWReader/App/ReaderWebView.swift", ROOT), "utf8")
+    .replace(/\r\n/g, "\n");
+  const open = WEBVIEW.slice(WEBVIEW.indexOf("private func openEPUBLookup(mode: String) async"));
+  // ⚠ 菜单从弹出到点下去之间，用户可能已经改了选择（拖把手、或点别处又重选）。
+  // 拿旧的就会解释一段他没选的文字。
+  assert.match(open, /window\.__bwReaderEpubSelection\?\.\(\) \?\? null/);
+  assert.match(open, /nativeConversation\.report\("没有选中内容。"\)/, "没选中要出声");
+  // context 要一起带走：一词多义看所在句，解释靠它把短选区换成整句。
+  assert.match(open, /sentence: payload\["context"\] as\? String \?\? ""/);
+  assert.match(EPUB, /window\.__bwReaderEpubSelection = function/);
+  assert.match(EPUB, /context: String\(cur\.ctx \|\| ''\)/);
+});
