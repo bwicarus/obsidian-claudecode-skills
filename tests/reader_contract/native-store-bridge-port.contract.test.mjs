@@ -177,11 +177,18 @@ test("默认不启用 —— 开关＋通道都在才接管", async () => {
   const { readFileSync } = await import("node:fs");
   const RUNTIME = readFileSync(new URL(
     "../../_server_deploy/static/pdf/native-local-runtime.js", import.meta.url), "utf8");
+  const wanted = RUNTIME.slice(RUNTIME.indexOf("function nativeStoreWanted()"),
+                               RUNTIME.indexOf("function disableNativeStoreAfterFailure"));
   const fn = RUNTIME.slice(RUNTIME.indexOf("function nativeStoreEnabled()"),
                            RUNTIME.indexOf("function createStores()"));
-  // ⚠ 三样都要：开关、通道真的在、两个模块都装上了。任何一样缺席就走
+  // ⚠ 三样都要：用户选了、通道真的在、两个模块都装上了。任何一样缺席就走
   // IndexedDB —— 存储是唯一一类"选错了就把数据弄没"的东西。
-  assert.match(fn, /localStorage\.getItem\('bw-native-data-store'\) !== '1'\) return false/);
+  // 用户那一样来自 App 设置（注入的全局），网页独立跑时才看本地开关；
+  // 它必须是三态（true / false / 没说），否则 App 里关着会被本地开关覆盖。
+  assert.match(wanted, /__BW_NATIVE_DATA_STORE__ === true\) return true/);
+  assert.match(wanted, /__BW_NATIVE_DATA_STORE__ === false\) return false/);
+  assert.match(wanted, /localStorage\.getItem\(NATIVE_STORE_FLAG\) === '1'/);
+  assert.match(fn, /if \(!nativeStoreWanted\(\)\) return false;/);
   assert.match(fn, /bridge\.available\(\)/);
   assert.match(fn, /typeof store\.createNativeDataStore === 'function'/);
   // ⚠ 运行中出错**不许**静默回退到 IndexedDB：那会造成"一半数据在这边、

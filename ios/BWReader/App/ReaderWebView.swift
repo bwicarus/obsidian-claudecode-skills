@@ -1362,6 +1362,24 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             contentWorld: .page,
             name: nativeDataStoreMessageName
         )
+        // 把「用不用本机数据库」这个选择递给页面。
+        //
+        // ⚠ 库是**启动时**选定的（`createStores()` 只跑一次），所以这个值
+        //   必须在 documentStart 就到位，而且翻了要重开阅读器才算数。
+        // ⚠ 这里只是「许可」，不是「生效」：网页那边还要确认通道真在、
+        //   两个模块都装上了。存储是唯一一类"选错了就把数据弄没"的东西，
+        //   宁可不切换，也不要切到一半。
+        let nativeDataStoreWanted =
+            UserDefaults.standard.bool(forKey: "reader.nativeDataStore")
+        contentController.addUserScript(WKUserScript(
+            source: """
+            (() => {
+              window.__BW_NATIVE_DATA_STORE__ = \(nativeDataStoreWanted ? "true" : "false");
+            })();
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         let nativeLocalNotesMessageProxy =
             WeakScriptMessageHandlerWithReply(delegate: self)
         self.nativeLocalNotesMessageProxy = nativeLocalNotesMessageProxy
@@ -5173,6 +5191,15 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 // ⚠ 来源不可信时**不能**回一个"空结果" —— 那会被当成"库里没有
                 //   这条记录"，于是调用方以为数据不存在。必须是错误。
                 replyHandler(nil, "数据库请求来源无效")
+                return
+            }
+            // ⚠ 安全阀：搬家失败时网页那侧会请求把开关关回去。不让它
+            //   关的话，下次启动还会撞同一堵墙（“App 再也打不开了”），而设置里
+            //   还写着“已开启”—— 一个迁移 bug 不该有这种后果。
+            //   它只能把这**一个键置 false**，没有别的权限。
+            if body["action"] as? String == "disableStore" {
+                UserDefaults.standard.set(false, forKey: "reader.nativeDataStore")
+                replyHandler(["ok": true], nil)
                 return
             }
             do {

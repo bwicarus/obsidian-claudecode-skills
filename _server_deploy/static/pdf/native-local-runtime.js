@@ -689,10 +689,38 @@
   //   "选错了就把数据弄没"的东西，宁可不切换，也不要切到一半。
   // ⚠ 这里**不做回退重试**：如果新存储在运行中出错，那是真出了问题，要让它
   //   响；静默回退到 IndexedDB 会造成"一半数据在这边、一半在那边"。
-  function nativeStoreEnabled() {
+  var NATIVE_STORE_FLAG = 'bw-native-data-store';
+
+  /** 用户在 App「阅读设置 → 存储」里的选择；网页独立跑时看本地开关。 */
+  function nativeStoreWanted() {
+    if (root.__BW_NATIVE_DATA_STORE__ === true) return true;
+    if (root.__BW_NATIVE_DATA_STORE__ === false) return false;
+    try { return root.localStorage.getItem(NATIVE_STORE_FLAG) === '1'; }
+    catch (_) { return false; }
+  }
+
+  /** 搬家失败就把开关关回去：此刻**老数据一条没动**，新库里也还没有用户写的
+   *  东西，退回 IndexedDB 是安全的。不关的话下次启动还会撞同一堵墙，
+   *  表现是"App 再也打不开了" —— 一个迁移 bug 不该有这种后果。 */
+  function disableNativeStoreAfterFailure(error) {
+    try { root.localStorage.setItem(NATIVE_STORE_FLAG, '0'); } catch (_) {}
+    try { root.__BW_NATIVE_DATA_STORE__ = false; } catch (_) {}
+    // 同一条通道、一个专用动作：让 App 设置里那个开关也跟着关。
+    // 不同步的话，设置里写着"已开启"而实际跑的是旧存储 ——
+    // 下一个来看的人（包括我自己）会对着一个假状态查半天。
     try {
-      if (root.localStorage.getItem('bw-native-data-store') !== '1') return false;
-    } catch (_) { return false; }
+      var handlers = root.webkit && root.webkit.messageHandlers;
+      if (handlers && handlers.bwNativeDataStore) {
+        handlers.bwNativeDataStore.postMessage({
+          action: 'disableStore',
+          reason: String((error && error.code) || error || '')
+        });
+      }
+    } catch (_) {}
+  }
+
+  function nativeStoreEnabled() {
+    if (!nativeStoreWanted()) return false;
     var bridge = runtimeRoot.nativeStoreBridgePort;
     var store = runtimeRoot.nativeStore;
     return !!(bridge && store && typeof bridge.available === 'function' &&
@@ -15690,7 +15718,14 @@
         // 老数据搜家放**最前**：后面每一步都读库做比对，读到空库就等于对着
         // 一个还没搜完的状态做判断。失败就让启动失败 —— 存储迁移半途而废的
         // 表现是"一半数据在这边、一半在那边"，静默继续比启动不了糟得多。
-        return migrateLegacyStoresOnBoot();
+        return migrateLegacyStoresOnBoot().catch(function (error) {
+          // ⚠ 这里是整个开关里唯一允许"退回 IndexedDB"的地方，因为此刻
+          //   **老数据一条没动**、新库里也还没有用户写的东西 —— 不存在
+          //   "一半在这边、一半在那边"。运行中的错仍然不允许静默回退。
+          //   本次启动还是让它失败（报错看得见），下次启动就回到旧存储上。
+          disableNativeStoreAfterFailure(error);
+          throw error;
+        });
       }).then(function () {
         // device 库回收放前面:它可能整库重建,别让后续迁移读到半途库。
         // ⚠ 新存储接管时**不跑**：这套回收是冲着 WebKit IndexedDB "旧版本页不

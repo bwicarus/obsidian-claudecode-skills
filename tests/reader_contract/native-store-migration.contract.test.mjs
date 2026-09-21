@@ -287,3 +287,18 @@ test("不搬老的 instanceEpoch —— 让同步做一次完整对账", async (
   //   新的 → checkpoint 作废 → 完整对账 → 漏掉的从服务器补回来。
   assert.doesNotMatch(MIGRATION, /instanceEpoch/);
 });
+
+test("搬家失败要把开关关回去，下次启动才不会撞同一堵墙", () => {
+  // ⚠ 这是整个开关里**唯一**允许退回 IndexedDB 的地方：此刻老数据一条
+  //   没动、新库里也还没有用户写的东西，不存在"一半在这边一半在那边"。
+  //   没有它的话，一个迁移 bug 的后果是"App 再也打不开了"。
+  assert.match(BOOT, /disableNativeStoreAfterFailure\(error\);[\s\S]*?throw error;/,
+               "失败没关开关，或者关完就把错吞了");
+  const heal = section("function disableNativeStoreAfterFailure",
+                       "function nativeStoreEnabled()");
+  // 本地标记、当场的全局、App 设置 —— 三处要一起翻。
+  // 少翻哪一处，设置里就写着"已开启"而实际跑的是旧存储。
+  assert.match(heal, /localStorage\.setItem\(NATIVE_STORE_FLAG, '0'\)/);
+  assert.match(heal, /__BW_NATIVE_DATA_STORE__ = false/);
+  assert.match(heal, /action: 'disableStore'/);
+});

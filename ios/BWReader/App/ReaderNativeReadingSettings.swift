@@ -45,6 +45,9 @@ struct ReaderNativeReadingSettingsView: View {
     @AppStorage("reader.nativePDFRenderer") private var nativePDFRenderer = false
     /// iCloud 跨设备同步（默认关）。开关只驱动引擎起停；关掉不删云端也不删基线。
     @AppStorage("reader.iCloudSync") private var iCloudSync = false
+    /// 数据落在 App 自己沙盒的 SQLite 里（默认关，迁移中）。
+    /// ⚠ 翻开要**重开一次阅读器**才生效：库是启动时选定的，中途换不了。
+    @AppStorage("reader.nativeDataStore") private var nativeDataStore = false
     /// 挂载失败时把原因摆在开关旁边 —— 否则只看到「开了但没变化」。
     /// 给默认值是为了不改既有调用点的写法。
     var nativePDFMountFailure: String? = nil
@@ -151,6 +154,18 @@ struct ReaderNativeReadingSettingsView: View {
                              + "按**书的内容**认书：同一个文件在两台设备上才对得上，"
                              + "重新导出或压缩过的版本算另一本。"
                              + "没登录 iCloud 时它安静地不工作，本地照常用。")
+                    }
+                    Section {
+                        Toggle("本机数据库（迁移中）", isOn: $nativeDataStore)
+                    } header: {
+                        Text("存储")
+                    } footer: {
+                        // 把代价和生效时机写清楚 —— 否则用户翻了开关看不到任何变化，
+                        // 会以为坏了又翻回去，来回几次刚好踩在迁移中途。
+                        Text("把阅读数据改存在 App 自己的数据库里（原来在网页那层）。"
+                             + "翻开后**重开一次阅读器**才生效，"
+                             + "首次启动会把老数据搬过去，书多的话会多等几秒。"
+                             + "搬家失败会自动关回去并报错，老数据不会被动。")
                     }
                     Section("诊断") { settingToggle("显示阅读日志", key: "debug") }
                 }
