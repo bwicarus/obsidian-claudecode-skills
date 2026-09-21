@@ -5390,10 +5390,34 @@ extension ReaderWebViewModel: WKNavigationDelegate {
 
     func dismissWebContentRecoveryNotice() { webContentRecoveryNotice = nil }
 
+    /// App 这一侧的内存占用。⚠ 渲染进程是**另一个**进程，这个数字不等于它 ——
+    /// 但两边一起涨是常态，所以它仍然是"是不是内存压力"的第一手线索。
+    /// 取不到就回 0，绝不因为一个诊断数字让上报失败。
+    private static func memoryFootprintMB() -> Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return Int(info.phys_footprint / (1024 * 1024))
+    }
+
     /// 把这次回收记成一句人看得懂的话。**在 `resetForNavigation()` 之前调**
     /// —— 它会把上一条命令连同会话状态一起清掉，那正是我们要的线索。
     private func noteWebContentTermination() {
         webContentTerminationCount += 1
+        // 自动送现场：App 进程还活着，所以这一刻能把面包屑直接发出去。
+        // ⚠ 这是唯一能抓到"渲染进程被回收"的时机 —— 它不会触发下次启动的补报
+        //   （App 没死），不报就永远没有记录。
+        ReaderNativeFaultReporter.shared.report(
+            code: "BW_WEBCONTENT_TERMINATED",
+            message: "阅读页渲染进程被系统回收（第 \(webContentTerminationCount) 次）",
+            detail: "last=" + nativeConversation.lastCommandAction
+                + " scope=" + nativeConversation.scope
+                + " footprintMB=" + String(Self.memoryFootprintMB()))
         var line = "阅读页渲染进程被系统回收，已自动重载"
         if !nativeConversation.lastCommandAction.isEmpty {
             let formatter = DateFormatter()

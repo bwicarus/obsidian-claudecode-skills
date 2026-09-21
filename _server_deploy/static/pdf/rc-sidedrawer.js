@@ -769,7 +769,37 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
     return t || _opts.defaultTab || 'asst';
   }
 
+  // ── 无头模式(App 原生侧栏接管这一面时用)────────────────────────────
+  //
+  // ⚠ 这不是"把抽屉藏起来",是**让它不再有界面行为**:不加 body 类、不挤压正文、
+  //   不做重排、不滑入、不合成毛玻璃。原生那边只需要两样东西 —— 开没开(状态)
+  //   和当前是哪个 tab —— 内容仍挂在同一棵 DOM 上由原生读走。
+  //
+  // ⚠ 为什么不能只用 CSS 盖住(2026-09-22 实锤):盖住的话
+  //   `document.body.classList.add('ep-side-open')` 照样执行,`#ep-viewer` 的
+  //   `margin-right` 照样变一次再被压回去,`_reflow()` 照样 dispatch resize ——
+  //   **整本 EPUB 连续重排两轮**,大书上足以把渲染进程顶掉。
+  //   界面藏没藏是视觉问题,重排发没发生是代价问题,这两件事得分开解决。
+  var _headless = false;
+  var _headlessOpen = false;
+  // 原生接管的是**哪一个 tab**。其余 tab(grammar/kg/vocab…)原生没接，
+  // ⚠ 一并无头就成了"点了什么都不出来"——所以开到它们时照常按界面开。
+  var _headlessOwned = 'asst';
+  function setHeadless(on, ownedTab) {
+    on = !!on;
+    if (ownedTab) _headlessOwned = String(ownedTab);
+    if (on === _headless) return _headless;
+    // 切进无头之前先把界面态收干净,免得留下一个开着的抽屉没人管;
+    // 切回去时按原来的开合还原,用户不会觉得"我明明开着的它自己关了"。
+    var wasOpen = isOpen();
+    if (on) { if (wasOpen) close(); _headless = true; _headlessOpen = wasOpen; }
+    else { _headless = false; if (_headlessOpen) open(); _headlessOpen = false; }
+    return _headless;
+  }
+  function isHeadless() { return _headless; }
+
   function isOpen() {
+    if (_headless) return _headlessOpen;
     var s = document.getElementById('ep-side');
     return !!(s && s.classList.contains('open'));
   }
@@ -785,6 +815,11 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   }
   function open(tab) {
     var s = document.getElementById('ep-side'); if (!s) return;
+    // 无头:只记状态 + 切 tab(内容要按 tab 挂载,原生才读得到),**一律不碰布局**。
+    // 只对原生接管的那个 tab 生效;开到别的 tab 仍按界面开,否则那些面就成了黑洞。
+    if (_headless && (tab || _lastTab()) === _headlessOwned) {
+      _headlessOpen = true; setTab(tab || _lastTab()); return;
+    }
     _layoutKeep(true);
     s.style.transform = '';   // 交还给 CSS(从 translateX(102%) → .open translateX(0) 滑入)
     s.classList.add('open');
@@ -799,7 +834,12 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   }
   function close() {
     var s = document.getElementById('ep-side');
-    if (isOpen()) _layoutKeep(false);
+    // 无头态下如果抽屉其实是按界面开着的(开到了原生没接管的 tab),仍要正常收起。
+    if (_headless) {
+      _headlessOpen = false;
+      if (!(s && s.classList.contains('open'))) return;
+    }
+    if (isOpen() || (s && s.classList.contains('open'))) _layoutKeep(false);
     if (s) {
       clearTimeout(s.__tfT);
       s.style.transform = '';     // 清掉 none → 回到 CSS .open 的 translateX(0)(视觉不变)
@@ -901,6 +941,9 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
     toggle: toggle,
     setTab: setTab,
     isOpen: isOpen,
+    // 原生侧栏接管这一面时调 setHeadless(true):抽屉退成纯状态，不再有任何界面行为。
+    setHeadless: setHeadless,
+    isHeadless: isHeadless,
     afterJump: afterJump,   // 跳转类操作后调:宽屏保持开,抽屉≥90vw 才收起(判定一处共用)
     // 侧栏外观(供 rc-settings 的「侧边栏」两项直接驱动;setter 写 localStorage + 即时应用)
     setFloating: setFloating,

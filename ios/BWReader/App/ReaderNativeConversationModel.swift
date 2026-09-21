@@ -390,11 +390,17 @@ final class ReaderNativeConversationModel: ObservableObject {
         error = nil
         lastCommandAction = action
         lastCommandAt = Date()
+        // 面包屑：页面/App 被杀时这是唯一还活着的"当时在做什么"。
+        ReaderNativeFaultReporter.shared.note("cmd", action)
         defer { if generation == ticket { pendingActions.remove(action) } }
         let failure = await commandHandler(command)
         guard !Task.isCancelled, generation == ticket else { return false }
         if let failure {
             error = failure.isEmpty ? "操作未完成，请重试。" : failure
+            // ⚠ 失败也要留痕：能看见的只有侧栏里一行红字，而侧栏多半没开着 ——
+            //   这正是"点了没反应"一直查不出来的原因。
+            ReaderNativeFaultReporter.shared.report(
+                code: "BW_NATIVE_COMMAND_FAILED", message: action, detail: error ?? "")
             return false
         }
         return true

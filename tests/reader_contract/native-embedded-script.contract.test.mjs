@@ -71,3 +71,46 @@ test("渲染进程被回收要出声，不能只是默默重载", () => {
     new URL("../../ios/BWReader/App/BWReaderNativeApp.swift", import.meta.url), "utf8");
   assert.match(app, /reader\.webContentRecoveryNotice/, "提示没有接到界面上");
 });
+
+test("原生接管时抽屉走无头 —— 不是用 CSS 盖住", () => {
+  // ⚠ 盖住只解决"看不看得见"。`open()` 里的 `body.ep-side-open` 照样执行，
+  //   `#ep-viewer` 的 margin 照样变一次再被压回去，`_reflow()` 照样 dispatch
+  //   resize —— **整本 EPUB 连续重排两轮**，那才是把渲染进程顶掉的东西。
+  const js = embeddedScript("ReaderNativeConversationScript.swift");
+  const fn = js.slice(js.indexOf("function applyVisualMode("), js.indexOf("function setLegacy("));
+  assert.match(fn, /setHeadless\?\.\(nativeMode && !legacyVisible, 'asst'\)/);
+
+  const drawer = readFileSync(new URL(
+    "../../_server_deploy/static/pdf/rc-sidedrawer.js", import.meta.url), "utf8");
+  const open = drawer.slice(drawer.indexOf("function open(tab)"), drawer.indexOf("function close()"));
+  // 无头分支必须排在 _layoutKeep 之前 —— 排在后面就等于白做。
+  assert.ok(open.indexOf("_headless") < open.indexOf("_layoutKeep(true)"),
+            "无头分支要在 _layoutKeep 之前返回");
+  assert.doesNotMatch(open.slice(0, open.indexOf("_layoutKeep(true)")), /ep-side-open/,
+                      "无头路径上不许加 body 类");
+  // ⚠ 只对原生接管的那个 tab 无头：其余 tab（grammar/kg/vocab）原生没接，
+  //   一并无头就成了"点了什么都不出来"。
+  assert.match(open, /_headlessOwned/, "无头不该对所有 tab 一刀切");
+});
+
+test("故障会自己送出去，而不是死在原地", () => {
+  // 用户 2026-09-22：「不能做一个出问题不立刻退出而是自动发送故障信息给你的机制么」
+  const reporter = readFileSync(new URL(
+    "../../ios/BWReader/App/ReaderNativeFaultReporter.swift", import.meta.url), "utf8");
+  // 两条命缺一不可：① 页面死、App 活 → 当场报；② App 也死 → 下次启动补报。
+  assert.match(reporter, /reader-error-log/, "没接到已经通了的那条管子上");
+  assert.match(reporter, /BW_APP_UNCLEAN_EXIT/, "App 自己崩没人补报");
+  assert.match(reporter, /func persist\(clean: Bool\)/, "面包屑没落盘，App 一死就全没了");
+  assert.match(reporter, /guard !began else/, "beginSession 不是一次性的，会覆盖上次的证据");
+
+  const view = readFileSync(new URL(
+    "../../ios/BWReader/App/ReaderWebView.swift", import.meta.url), "utf8");
+  assert.match(view, /BW_WEBCONTENT_TERMINATED/, "渲染进程被回收没自动上报");
+  const model = readFileSync(new URL(
+    "../../ios/BWReader/App/ReaderNativeConversationModel.swift", import.meta.url), "utf8");
+  assert.match(model, /BW_NATIVE_COMMAND_FAILED/, "原生命令失败只写在没人看的地方");
+  const app = readFileSync(new URL(
+    "../../ios/BWReader/App/BWReaderNativeApp.swift", import.meta.url), "utf8");
+  assert.match(app, /beginSession\(origin: ReaderServer\.origin\)/);
+  assert.match(app, /endSession\(\)/, "没有干净退出标记 → 每次启动都误报");
+});

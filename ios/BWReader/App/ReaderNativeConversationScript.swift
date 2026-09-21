@@ -471,6 +471,10 @@ enum ReaderNativeConversationScript {
         root.classList.toggle('bw-native-navigation', nativeMode);
         root.classList.toggle('bw-native-page-cards', nativeMode && !legacyVisible);
         root.classList.toggle('bw-native-conversation-active', owns);
+        // ⚠ 真正的修复在这一行，上面那几个 class 只是第二道。无头＝抽屉退成纯状态：
+        //   不加 body 类、不挤压正文、不重排、不滑入。CSS 盖住只解决"看不看得见"，
+        //   解决不了"开一次抽屉整本书重排两轮"——那才是把渲染进程顶掉的东西。
+        try { drawer()?.setHeadless?.(nativeMode && !legacyVisible, 'asst'); } catch (_) {}
       }
       function setLegacy(visible) {
         legacyVisible = !!visible;
