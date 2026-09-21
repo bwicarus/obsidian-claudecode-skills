@@ -16,6 +16,7 @@ const CONTRACT = read("ios/BWReader/Shared/ReaderNativeBridgeContract.swift");
 const STORE = read("ios/BWReader/Shared/ReaderAccountTokenCore.swift");
 const PROVISIONER = read("ios/BWReader/App/ReaderAccountTokenProvisioner.swift");
 const LOGIN_VIEW = read("ios/BWReader/App/ReaderPiLoginView.swift");
+const APPLE_LOGIN = read("ios/BWReader/App/ReaderAppleSignIn.swift");
 const APP = read("ios/BWReader/App/BWReaderNativeApp.swift");
 const PROJECT = read("ios/BWReader/project.yml");
 
@@ -39,7 +40,8 @@ test("扩展不再打 Pi：账户 ORIGIN、host_permissions、门面重写、旧
 });
 
 test("App 登录后铸令牌：登录成功那一刻与启动时都调 ensureToken，令牌进共享 Keychain", () => {
-  assert.match(LOGIN_VIEW, /ReaderAccountTokenProvisioner\.shared\.ensureToken\(/, "登录成功回调里铸");
+  assert.match(LOGIN_VIEW, /await model\.complete\(result\)/, "Apple 回调交给原生登录模型");
+  assert.match(APPLE_LOGIN, /ReaderAccountTokenProvisioner\.shared\.ensureToken\([^\n]+forceRefresh: true/, "新账户登录后更新共享令牌");
   assert.match(APP, /ReaderAccountTokenProvisioner\.shared\.ensureToken\(/, "启动时补铸（幂等）");
   assert.match(PROVISIONER, /appendingPathComponent\("api\/tokens"\)/, "用服务端现成的 /api/tokens");
   assert.match(PROVISIONER, /request\.httpShouldHandleCookies = false/, "cookie 显式从 App 的网站数据存储取，不靠默认 jar");

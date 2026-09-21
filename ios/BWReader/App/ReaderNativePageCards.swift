@@ -12,6 +12,9 @@ struct ReaderNativePagePlacement: Identifiable {
     let markers: [ReaderNativePageMarker]
     let controls: [String: String]
     let parts: [ReaderNativeConversationPart]
+    let ink: [ReaderNativeCardStroke]
+    let inkAspectRatio: CGFloat
+    let inkGeometry: String
 
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String,
@@ -30,6 +33,10 @@ struct ReaderNativePagePlacement: Identifiable {
         markers = (value["markers"] as? [[String: Any]] ?? []).compactMap(ReaderNativePageMarker.init)
         controls = value["controls"] as? [String: String] ?? [:]
         parts = (value["parts"] as? [[String: Any]] ?? []).compactMap(ReaderNativeConversationPart.init)
+        let drawing = value["ink"] as? [String: Any] ?? [:]
+        ink = (drawing["strokes"] as? [[String: Any]] ?? []).compactMap(ReaderNativeCardStroke.init)
+        inkAspectRatio = (drawing["aspectRatio"] as? NSNumber).map { CGFloat(truncating: $0) } ?? 0
+        inkGeometry = drawing["geometry"] as? String ?? ""
     }
 }
 
@@ -145,6 +152,11 @@ private struct ReaderNativePlacedCard: View {
                     ReaderNativeConversationArtifacts(parts: item.parts, model: model).padding(8)
                 }
                 .frame(maxHeight: max(120, min(460, min(rect.height, available.height - 40))))
+                .overlay {
+                    if let inkID = item.controls["ink"] {
+                        ReaderNativeCardInkLayer(item: item, reader: reader, actionID: inkID)
+                    }
+                }
             }
         }
         .frame(width: width)

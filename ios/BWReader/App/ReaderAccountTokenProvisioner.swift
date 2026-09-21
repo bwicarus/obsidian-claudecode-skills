@@ -28,7 +28,15 @@ final class ReaderAccountTokenProvisioner {
 
     private init() {}
 
-    func ensureToken(dataStore: WKWebsiteDataStore, reason: String) async {
+    func ensureToken(dataStore: WKWebsiteDataStore, reason: String, forceRefresh: Bool = false) async {
+        if forceRefresh {
+            while inFlight {
+                try? await Task.sleep(for: .milliseconds(100))
+                if Task.isCancelled { return }
+            }
+            do { try ReaderAccountTokenStore.shared.clear() }
+            catch { log.error("cannot replace previous account token"); return }
+        }
         guard !inFlight else { return }
         inFlight = true
         defer { inFlight = false }
@@ -52,6 +60,11 @@ final class ReaderAccountTokenProvisioner {
         do {
             let label = "BWReader iPad Safari 扩展 · " + Self.dateLabel()
             let token = try await Self.mint(cookies: cookies, label: label)
+            let currentCookies = await Self.sessionCookies(for: Self.origin, in: dataStore)
+            guard HTTPCookie.requestHeaderFields(with: currentCookies) == HTTPCookie.requestHeaderFields(with: cookies) else {
+                log.info("account changed while minting; discarded old receipt")
+                return
+            }
             try ReaderAccountTokenStore.shared.save(
                 origin: Self.origin.absoluteString,
                 token: token,

@@ -8,6 +8,9 @@ struct NativeInkSurface: Equatable {
     let id: String
     let rect: CGRect
     let exclusions: [CGRect]
+    var aspectRatio: CGFloat? = nil
+    var geometry: String? = nil
+    var occlusionRect: CGRect? = nil
 
     func contains(_ point: CGPoint) -> Bool {
         rect.contains(point) && !exclusions.contains(where: { $0.contains(point) })
@@ -58,6 +61,22 @@ final class NativePencilInkController: ObservableObject {
     @Published private(set) var pencilRecentlyActive = false
     private var pencilPresenceToken: UInt64 = 0
     private var previousDrawingTool: Tool = .pen
+    private var documentLayout = NativeInkLayout.empty
+    private var cardSurfaces: [String: NativeInkSurface] = [:]
+
+    func setCardSurface(_ surface: NativeInkSurface?, id: String) {
+        guard cardSurfaces[id] != surface else { return }
+        cardSurfaces[id] = surface
+        mergeLayouts()
+    }
+
+    private func mergeLayouts() {
+        let cards = cardSurfaces.keys.sorted().compactMap { cardSurfaces[$0] }
+        let pages = documentLayout.surfaces.map { item in
+            NativeInkSurface(id: item.id, rect: item.rect, exclusions: item.exclusions + cards.map { $0.occlusionRect ?? $0.rect })
+        }
+        layout = NativeInkLayout(documentToken: documentLayout.documentToken, surfaces: pages + cards)
+    }
 
     var canDraw: Bool { !layout.surfaces.isEmpty }
     var hasPendingOperations: Bool { pendingOperationCount > 0 }
@@ -145,6 +164,8 @@ final class NativePencilInkController: ObservableObject {
     }
 
     func invalidateDocument() {
+        documentLayout = .empty
+        cardSurfaces = [:]
         layout = .empty
         documentGeneration &+= 1
         lastError = nil
@@ -161,10 +182,11 @@ final class NativePencilInkController: ObservableObject {
         }
         let rawSurfaces = body["surfaces"] as? [[String: Any]] ?? []
         if layout.documentToken != documentToken {
+            if documentLayout.documentToken != nil { cardSurfaces = [:] }
             documentGeneration &+= 1
             lastError = nil
         }
-        layout = NativeInkLayout(
+        documentLayout = NativeInkLayout(
             documentToken: documentToken,
             surfaces: rawSurfaces.compactMap { raw in
             guard
@@ -182,6 +204,7 @@ final class NativePencilInkController: ObservableObject {
                 exclusions: exclusions
             )
         })
+        mergeLayouts()
     }
 
     private static func rect(from value: Any?) -> CGRect? {
@@ -217,6 +240,8 @@ private struct NativeInkSegment {
     /// PencilKit 落笔时的笔锋在提交那一刻就被抹平成等宽线。长度与 points 一一对应；
     /// 橡皮/套索/存量数据为 nil，渲染端回落常数宽。
     let widths: [CGFloat]?
+    var aspectRatio: CGFloat? = nil
+    var geometry: String? = nil
 }
 
 private enum NativeInkOperationKind: String {
@@ -782,7 +807,8 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                     points: currentPoints,
                     // 一一对应才有意义：数量对不上就整条退回常数宽，
                     // 宁可没有笔锋，也不能让宽度错位到别的点上。
-                    widths: currentWidths.count == currentPoints.count ? currentWidths : nil
+                    widths: currentWidths.count == currentPoints.count ? currentWidths : nil,
+                    aspectRatio: surface.aspectRatio, geometry: surface.geometry
                 ))
                 currentPoints = []
                 currentWidths = []
@@ -972,7 +998,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                     color: "#0a84ff",
                     width: 2,
                     points: points,
-                    widths: nil   // 闭合区域是几何图形，没有压感语义
+                    widths: nil, aspectRatio: segment.aspectRatio, geometry: segment.geometry
                 )
             }
         }
@@ -996,7 +1022,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                     color: nil,
                     width: nil,
                     points: currentPoints,
-                    widths: nil   // 橡皮轨迹不描边，宽度无意义
+                    widths: nil, aspectRatio: surface.aspectRatio, geometry: surface.geometry
                 ))
                 currentPoints = []
                 currentSurface = nil
@@ -1305,7 +1331,10 @@ fileprivate extension ReaderWebViewModel {
     func applyNativePencilOperation(
         _ operation: NativeInkOperation
     ) async throws {
-        let segments: [[String: Any]] = operation.segments.map { segment in
+        guard operation.documentToken == nativePencilInk.layout.documentToken else {
+            throw NativePencilHostError.rejected("native_document_stale")
+        }
+        let segments: [[String: Any]] = operation.segments.filter { !$0.surfaceId.hasPrefix("card:") }.map { segment in
             var value: [String: Any] = [
                 "surfaceId": segment.surfaceId,
                 "points": segment.points,
@@ -1315,8 +1344,9 @@ fileprivate extension ReaderWebViewModel {
             if let widths = segment.widths { value["widths"] = widths }
             return value
         }
+        let containsCards = operation.segments.contains { $0.surfaceId.hasPrefix("card:") }
         var payload: [String: Any] = [
-            "opId": operation.id,
+            "opId": containsCards ? operation.id + "-page" : operation.id,
             "documentToken": operation.documentToken,
             "segments": segments,
         ]
@@ -1326,7 +1356,19 @@ fileprivate extension ReaderWebViewModel {
         if let createdAtEpochMs = operation.createdAtEpochMs {
             payload["createdAtEpochMs"] = createdAtEpochMs
         }
-        try await callNativeInkHost(operation.kind.rawValue, payload: payload)
+        if !segments.isEmpty { try await callNativeInkHost(operation.kind.rawValue, payload: payload) }
+        for (index, segment) in operation.segments.enumerated() where segment.surfaceId.hasPrefix("card:") {
+            var stroke: [String: Any] = ["points": segment.points]
+            if let color = segment.color { stroke["color"] = color }
+            if let width = segment.width { stroke["width"] = width }
+            if let widths = segment.widths { stroke["widths"] = widths }
+            try await applyNativeCardInk(actionID: String(segment.surfaceId.dropFirst(5)), value: [
+                "kind": operation.kind.rawValue, "opId": operation.id + "-" + String(index),
+                "eventOpId": operation.id, "segments": [stroke],
+                "aspectRatio": segment.aspectRatio ?? 1, "geometry": segment.geometry ?? ""
+            ])
+        }
+        if containsCards { signalNativePencilOperation(event: "rc:inkchange", operation: operation) }
     }
 
     func callNativeInkHost(

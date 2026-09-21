@@ -173,6 +173,14 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             def act(key, item=None, **extra):
                 item = item or page.evaluate('receipts.at(-1).placements[0]')
                 return page.evaluate('(c)=>__bwNativeConversation.perform(c)', dict(action='liveAction',scope=page.evaluate('receipts.at(-1).scope'),actionId=item['controls'][key],**extra))
+            ink = dict(kind='commit', opId='native-browser-stroke', geometry=projected['ink']['geometry'],
+                       aspectRatio=2, segments=[dict(points=[[.1,.2],[.3,.4]],color='#123456',width=3,widths=[2,4])])
+            self.assertTrue(act('ink', value=ink)['ok'])
+            page.wait_for_function('receipts.at(-1).placements[0]?.ink?.strokes?.length === 1')
+            self.assertEqual(page.evaluate('records[0].strokes[0].ww'), [2,4])
+            self.assertEqual(page.locator('[data-bw-native-placement]').count(), 1, 'drawing must not return the card to web rendering')
+            self.assertTrue(act('ink', value=ink)['ok'])
+            self.assertEqual(page.evaluate('records[0].strokes.length'), 1, 'retry must retain a single stroke')
             self.assertTrue(act('collapse')['ok'])
             page.wait_for_function('receipts.at(-1).placements[0].collapsed')
             self.assertFalse(act('move', item=projected, x=.2, y=.2)['ok'])

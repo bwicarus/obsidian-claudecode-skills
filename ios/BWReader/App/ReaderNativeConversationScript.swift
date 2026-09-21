@@ -292,10 +292,10 @@ enum ReaderNativeConversationScript {
         if (!nativeMode || legacyVisible || !owner?.nativePlacementState) return [];
         return items.flatMap(item => {
           if (excludedPlacementNodes.has(item.root)) return [];
-          // Media/script and ink-bearing placements need their own native renderer.
+          // Media/script placements need their own native renderer. Ink uses PencilKit.
           // Keep their originals intact until that renderer is migrated.
           const rich = item.card ? JSON.stringify(item.card.cards) : item.html?.content || '';
-          const supported = !item.hasInk && !!(item.card || item.html) &&
+          const supported = !!(item.card || item.html) &&
             !/<(?:iframe|video|audio|img|svg|canvas|script|table|button|input|select|textarea)\b/i.test(rich);
           item.root.toggleAttribute('data-bw-native-placement', !!supported);
           for (const marker of item.markers || []) marker.node.toggleAttribute('data-bw-native-placement', !!supported);
@@ -306,6 +306,11 @@ enum ReaderNativeConversationScript {
             id: item.id, generation: item.generation, version: item.version, key, ...extra
           }); if (!ok) throw new Error('卡片操作未确认'); return ok; };
           const controls = {};
+          controls.ink = registerAction(id + '-ink', item.root, command => owner.nativeInkAction({
+            id: item.id, generation: item.generation, geometry: command.value.geometry,
+            key: command.value.kind, opId: command.value.opId, eventOpId: command.value.eventOpId,
+            segments: command.value.segments, aspectRatio: command.value.aspectRatio
+          }));
           for (const key of ['anchor', 'collapse', 'expand', 'remove', 'toggleBound']) {
             controls[key] = registerAction(token + '-' + key, item.root, () => invoke(key, { confirmed: key === 'remove' }));
           }
@@ -326,6 +331,7 @@ enum ReaderNativeConversationScript {
           parts.forEach(part => { part.data.dragId = controls.move; });
           return [{ id, title: item.html?.label || (item.card?.cards.length > 1 ? '学习卡组' : '学习卡'),
             bound: item.bound, collapsed: item.collapsed, visible: item.visible, open: item.open, controls, parts,
+            ink: { strokes: item.strokes, aspectRatio: item.iar, geometry: item.inkGeometry },
             markers: (item.markers || []).map(marker => ({ id: id + '-marker-' + marker.index, kind: marker.kind, number: marker.number,
               rect: { x: marker.rect.x / innerWidth, y: marker.rect.y / innerHeight, width: marker.rect.width / innerWidth, height: marker.rect.height / innerHeight } })),
             rect: { x: item.rect.x / innerWidth, y: item.rect.y / innerHeight,
@@ -558,7 +564,7 @@ enum ReaderNativeConversationScript {
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
-        if (command.action === 'reviewAction' || command.action === 'navigationAction') parameterKeys.push('value');
+        if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction') parameterKeys.push('value');
         if (Object.keys(command).some(key => !parameterKeys.includes(key))) return { ok: false, error: '不支持的操作参数' };
         const action = command.action;
         try {

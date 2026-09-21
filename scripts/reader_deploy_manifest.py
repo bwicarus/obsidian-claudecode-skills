@@ -144,6 +144,7 @@ WEBAPP_SOURCE_FILES = (
     "kg_page_index.py",           # 当前页 → KG 节点(reader_outgoing_context import 它)
     "reader_pwa_retirement.py",   # PWA 页面退役拦截(pdf_reader import 它)
     "reader_sw_auth.py",
+    "reader_apple_auth.py",
     "web_proxy_cap.py",
     "web_cookie_store.py",
     "web_cache_store.py",

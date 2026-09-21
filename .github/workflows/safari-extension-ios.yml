@@ -426,6 +426,66 @@ jobs:
           print("validated Widget distribution profile")
           PY
 
+      - name: Prepare Apple sign-in App Store profile
+        if: ${{ !inputs.compile_only }}
+        env:
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          FASTLANE_HIDE_CHANGELOG: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_JSON="$RUNNER_TEMP/fastlane-api-key.json"
+          API_JSON="$API_JSON" python <<'PY'
+          import json, os, time, urllib.parse, urllib.request
+          from pathlib import Path
+          import jwt
+          config = json.loads(Path(os.environ["API_JSON"]).read_text())
+          token = jwt.encode({"iss": config["issuer_id"], "iat": int(time.time()) - 30,
+                              "exp": int(time.time()) + 600, "aud": "appstoreconnect-v1"},
+                             config["key"], algorithm="ES256", headers={"kid": config["key_id"], "typ": "JWT"})
+          def request(method, path, payload=None):
+              req = urllib.request.Request("https://api.appstoreconnect.apple.com" + path,
+                  data=json.dumps(payload).encode() if payload is not None else None, method=method,
+                  headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+          bundles = request("GET", "/v1/bundleIds?" + urllib.parse.urlencode({"filter[identifier]": os.environ["BUNDLE_ID"]}))["data"]
+          if len(bundles) != 1:
+              raise SystemExit("Reader bundle ID was not uniquely resolved")
+          bundle_id = bundles[0]["id"]
+          capabilities = request("GET", "/v1/bundleIds/" + bundle_id + "/bundleIdCapabilities?limit=200")["data"]
+          if not any(c["attributes"]["capabilityType"] == "SIGN_IN_WITH_APPLE" for c in capabilities):
+              request("POST", "/v1/bundleIdCapabilities", {"data": {
+                  "type": "bundleIdCapabilities", "attributes": {
+                      "capabilityType": "SIGN_IN_WITH_APPLE",
+                      "settings": [{"key": "APPLE_ID_AUTH_APP_CONSENT", "options": [{"key": "PRIMARY_APP_CONSENT", "enabled": True}]}]},
+                  "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle_id}}}}})
+              print("Enabled Sign in with Apple for Reader")
+          else:
+              print("Reader Sign in with Apple already enabled")
+          PY
+          fastlane sigh \
+            --api_key_path "$API_JSON" \
+            --app_identifier "$BUNDLE_ID" \
+            --provisioning_name "BWReader App Store App" \
+            --ignore_profiles_with_different_name true \
+            --force true \
+            --output_path "$RUNNER_TEMP" \
+            --filename "BWReaderAppleLogin.mobileprovision" \
+            --skip_install false
+          security cms -D -i "$RUNNER_TEMP/BWReaderAppleLogin.mobileprovision" > "$RUNNER_TEMP/apple-login-profile.plist"
+          python <<'PY'
+          import os, plistlib
+          from pathlib import Path
+          profile = plistlib.loads((Path(os.environ["RUNNER_TEMP"]) / "apple-login-profile.plist").read_bytes())
+          entitlements = profile["Entitlements"]
+          if not entitlements.get("application-identifier", "").endswith("." + os.environ["BUNDLE_ID"]):
+              raise SystemExit("Reader signing profile identifier mismatch")
+          if "Default" not in entitlements.get("com.apple.developer.applesignin", []):
+              raise SystemExit("Reader signing profile does not enable Sign in with Apple")
+          print("Validated Reader Apple sign-in distribution profile")
+          PY
+
       # All three targets now use deterministic App Store profiles and the one
       # imported distribution certificate; no development certificate is made.
 

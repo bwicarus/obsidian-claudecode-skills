@@ -102,6 +102,7 @@ if (window.__bwPwaProviderOnly) return;
   var _generation = 0;
   var _unsubscribe = null;
   var _writeQueues = Object.create(null);   // noteId -> Promise；同一便签严格串行写
+  var _nativeInkOps = new Map(), _nativeInkQueues = Object.create(null);
   var _seenRevs = Object.create(null);      // CHANGE 先于 LIST/RESULT 时阻止旧快照回灌
   var _boundCardWrites = Object.create(null);   // document+sourceUid+词区间 -> 稳定 create intent；结果未知也复用同一事务
   var _initialLegacyLoad = null;   // {generation,promise,ready,failed}；防初次 GET 与 durable create 竞态
@@ -784,12 +785,12 @@ if (window.__bwPwaProviderOnly) return;
       return data.note;
     });
   }
-  function patchNote(note, fields, cb, expectedState) {
+  function patchNote(note, fields, cb, expectedState, writeIdentity) {
     if (!O || !note || !noteIdOf(note)) return Promise.resolve(null);
     var generation = _generation;
     var id = noteIdOf(note);
     var payload = cloneValue(fields || {});
-    var mid = mutationId('patch', id);   // 入队时生成，重放/重试始终同一个 ID
+    var mid = writeIdentity || mutationId('patch', id);   // 入队时生成，重放/重试始终同一个 ID
     var operation;
     if (repoMode()) {
       operation = enqueueWrite(id, generation, function () {
@@ -3693,6 +3694,7 @@ if (window.__bwPwaProviderOnly) return;
       _unsubscribe = null;
     }
     _writeQueues = Object.create(null);
+    _nativeInkOps.clear(); _nativeInkQueues = Object.create(null);
     _seenRevs = Object.create(null);
     _boundCardWrites = Object.create(null);
     _initialLegacyLoad = null;
@@ -3731,7 +3733,8 @@ if (window.__bwPwaProviderOnly) return;
         }).filter(function (m) { return m.rect.width > 0 && m.rect.height > 0; }) : [];
       return { id: noteIdOf(note), generation: _generation, version: JSON.stringify(note),
         root: ctl.root, card: cloneValue(note.card || null), html: cloneValue(note.html || null),
-        hasInk: !!(note.strokes && note.strokes.length), bound: !!wordBindOf(note),
+        hasInk: !!(note.strokes && note.strokes.length), strokes: cloneValue(note.strokes || []), iar: Number(note.iar) || 0,
+        inkGeometry: JSON.stringify([note.anchor, note.w, note.h, wordBindOf(note)]), bound: !!wordBindOf(note),
         collapsed: !!note.collapsed || note[slot].form === 'dot' || note[slot].form === 'min',
         visible: rect.width > 0 && rect.height > 0, markers: markers, open: !!ctl._bindOpen,
         rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
@@ -3790,6 +3793,71 @@ if (window.__bwPwaProviderOnly) return;
       ensureMounted(saved);
     }
     return true;
+  }
+
+  function nativeInkAction(command) {
+    if (!O || !command || command.generation !== _generation) return Promise.reject(new Error('书籍已切换'));
+    if (!/^[A-Za-z0-9_-]{1,96}$/.test(String(command.opId || '')) || !['commit', 'erase', 'createRegion'].includes(command.key)) return Promise.reject(new Error('无效笔迹操作'));
+    var signature = JSON.stringify(command), old = _nativeInkOps.get(command.opId);
+    if (old && old.signature !== signature) return Promise.reject(new Error('笔迹操作标识冲突'));
+    if (old && old.state !== 'failed') return old.promise;
+    var intent = old || { signature: signature, fields: null, originalVersion: null, writeIdentity: mutationId('native-ink', String(command.id)) };
+    intent.state = 'pending';
+    var generation = _generation, id = String(command.id), previous = _nativeInkQueues[id] || Promise.resolve();
+    var promise = previous.catch(function () {}).then(async function () {
+      if (generation !== _generation) throw new Error('书籍已切换');
+      var note = currentNote(id), ctl = ctls[id];
+      if (!note || !ctl || !cardPayloadSlot(note)) throw new Error('卡片已移除');
+      if (JSON.stringify([note.anchor, note.w, note.h, wordBindOf(note)]) !== command.geometry) throw new Error('卡片位置已改变，请在新位置重画');
+      var raw = Array.isArray(command.segments) ? command.segments : [];
+      if (!raw.length || raw.length > 64) throw new Error('无效笔迹分段');
+      var strokes = cloneValue(note.strokes || []), iar = Number(note.iar) || Number(command.aspectRatio);
+      if (!Number.isFinite(iar) || iar <= 0 || iar > 100) throw new Error('无效画布比例');
+      if (!intent.fields) raw.forEach(function (segment, index) {
+        var points = segment.points;
+        if (!Array.isArray(points) || !points.length || points.length > 4096 || points.some(function (p) {
+          return !Array.isArray(p) || p.length !== 2 || !p.every(function (v) { return Number.isFinite(v) && v >= 0 && v <= 1; });
+        })) throw new Error('无效笔迹坐标');
+        if (command.key === 'erase') {
+          points.forEach(function (point) { RCInk.eraseAt(strokes, point, 0.018); });
+        } else {
+          var region = command.key === 'createRegion';
+          if (points.length < (region ? 3 : 2)) throw new Error('笔迹点数不足');
+          var stroke = { c: /^#[0-9a-f]{6}$/i.test(segment.color) ? segment.color : '#ff3b30',
+            w: Math.max(0.3, Math.min(48, Number(segment.width) || 4)), pts: cloneValue(points), nativeOpId: command.opId + ':' + index };
+          if (Array.isArray(segment.widths) && segment.widths.length === points.length) {
+            stroke.ww = segment.widths.map(function (w) { return Math.max(0.3, Math.min(48, Number(w) || stroke.w)); });
+          }
+          if (region) { stroke.t = 'region'; stroke.id = command.opId + '-' + index; stroke.createdAtEpochMs = Date.now(); }
+          if (!strokes.some(function (s) { return s.nativeOpId === stroke.nativeOpId; })) strokes.push(stroke);
+        }
+      });
+      if (!intent.fields) {
+        if (RCInk.ensureRegionOrdinals) RCInk.ensureRegionOrdinals(strokes);
+        intent.fields = { strokes: strokes, iar: iar }; intent.originalVersion = JSON.stringify(note);
+      }
+      var alreadyApplied = JSON.stringify(note.strokes || []) === JSON.stringify(intent.fields.strokes) && Number(note.iar) === intent.fields.iar;
+      var saved = alreadyApplied ? note : await patchNote(note, intent.fields, null, intent.originalVersion, intent.writeIdentity);
+      if (!saved || generation !== _generation) throw new Error('笔迹保存未确认');
+      if (JSON.stringify(saved.strokes || []) !== JSON.stringify(intent.fields.strokes) || Number(saved.iar) !== intent.fields.iar) throw new Error('笔迹保存响应不完整');
+      if (ctls[id]) redrawInk(ctls[id]);
+      try { window.dispatchEvent(new CustomEvent('rc:inkchange', { detail: {
+        source: 'native-pencil', opId: command.opId, noteId: id,
+        page: Number(note.anchor && note.anchor.page) || undefined
+      } })); } catch (_) {}
+      return true;
+    });
+    _nativeInkQueues[id] = promise;
+    intent.promise = promise; _nativeInkOps.set(command.opId, intent);
+    promise.then(function () {
+      intent.state = 'applied';
+      if (_nativeInkQueues[id] === promise) delete _nativeInkQueues[id];
+      if (_nativeInkOps.size > 512) _nativeInkOps.delete(_nativeInkOps.keys().next().value);
+    }, function () {
+      if (_nativeInkQueues[id] === promise) delete _nativeInkQueues[id];
+      intent.state = 'failed';
+    });
+    return promise;
   }
 
   // ─────────────────────────── 公开 API ───────────────────────────
@@ -3952,6 +4020,7 @@ if (window.__bwPwaProviderOnly) return;
     placeHtmlAt: function (x, y, card) { return Promise.resolve(createHtmlAt(x, y, card, true)); },
     nativePlacementState: nativePlacementState,
     nativePlacementAction: nativePlacementAction,
+    nativeInkAction: nativeInkAction,
     persistBoundCard: persistBoundCard,   // AI page-chars：Promise 只在 create+本地投影成功后 ok:true
     cardContextText: cardContextText,   // 收藏/上下文共用正面+背面可读投影；raw/meta 仍保留完整卡记录
     bindCardSelection: bindCardSelection,   // 固定学习卡整卡长按：PWA/普通网页共用同一语义与完整快照

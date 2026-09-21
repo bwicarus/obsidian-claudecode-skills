@@ -46,6 +46,7 @@ const NATIVE_SYNC_BRIDGE = read(
   "ios/BWReader/App/ReaderNativeServerSyncBridge.swift",
 );
 const PI_LOGIN = read("ios/BWReader/App/ReaderPiLoginView.swift");
+const APPLE_LOGIN = read("ios/BWReader/App/ReaderAppleSignIn.swift");
 
 class MemoryStorage {
   constructor(seed = {}) {
@@ -1121,14 +1122,14 @@ test("Swift sync bridge keeps namespace and capabilities private and exposes log
   assert.match(NATIVE_SYNC_BRIDGE, /secureMatches/);
   assert.match(NATIVE_SYNC_BRIDGE, /current\.path\.count >= cookie\.path\.count/);
   assert.doesNotMatch(NATIVE_SYNC_BRIDGE, /print\(|NSLog\(|os_log/);
-  assert.match(PI_LOGIN, /ReaderNativeServerSyncBridge\.loginURL/);
-  assert.match(PI_LOGIN, /websiteDataStore = dataStore/);
-  // 2026-09-02 Pi 整体退出:登录面固定指向 Windows 上的 Flask(bwicarus-2)。
-  assert.match(PI_LOGIN, /bwicarus-2\.taile44d0c\.ts\.net/);
-  assert.doesNotMatch(PI_LOGIN, /"https:\/\/bwicarus\.taile44d0c\.ts\.net/);
-  // loginFlowPaths 语义修正后只含登录流程本身；dashboard 是登录后的
-  // 落点（跳到列表之外即视为登录成功），不再在列表里。
-  assert.match(PI_LOGIN, /"\/login", "\/logout", "\/register",/);
+  assert.match(PI_LOGIN, /SignInWithAppleButton/);
+  assert.doesNotMatch(PI_LOGIN, /WKWebView\(/, "登录界面本身使用原生控件");
+  assert.match(APPLE_LOGIN, /ReaderAccountTokenProvisioner\.origin\.appendingPathComponent\("login\/apple\/"/);
+  assert.match(APPLE_LOGIN, /dataStore\.httpCookieStore\.setCookie/, "同一 App 会话供同步使用");
+  assert.match(APPLE_LOGIN, /completionHandler\(nil\)/, "拒绝重定向，凭据不离开固定账户服务器");
+  assert.match(APPLE_LOGIN, /credential\.state == state/);
+  assert.match(APPLE_LOGIN, /SHA256\.hash\(data: Data\(nonce\.utf8\)\)/);
+  assert.match(read("ios/BWReader/App/ReaderAccountTokenProvisioner.swift"), /bwicarus-2\.taile44d0c\.ts\.net/);
   assert.match(TOOLS_VIEW, /登录或重新登录服务器/);
 });
 

@@ -24,6 +24,7 @@ from flask import (
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 from reader_sw_auth import READER_SW_AUTH_JS, READER_SW_AUTH_PLACEHOLDER
+from reader_apple_auth import SCHEMA as READER_APPLE_SCHEMA, register_reader_apple_auth
 from web_proxy_cap import verify_web_proxy_cap_details
 
 app = Flask(__name__)
@@ -251,6 +252,7 @@ def init_db():
             last_used_at TEXT
         );
     """)
+    conn.executescript(READER_APPLE_SCHEMA)
     # 引导：第一个用户 bwicarus 作为 admin（从环境变量 PASSWORD_HASH 一次性导入）
     cur = conn.execute("SELECT COUNT(*) AS n FROM users")
     if cur.fetchone()["n"] == 0:
@@ -829,6 +831,9 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+register_reader_apple_auth(app, get_db, user_dir)
 
 
 def _invite_valid(inv):

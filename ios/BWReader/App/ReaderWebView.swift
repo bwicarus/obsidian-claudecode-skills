@@ -395,6 +395,30 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return webView.convert(local, to: nil).offsetBy(dx: -container.minX, dy: -container.minY)
     }
 
+    func registerNativeCardInk(id: String, windowRect: CGRect?, occlusion: CGRect? = nil, aspectRatio: CGFloat, geometry: String) {
+        guard let windowRect, windowRect.width > 0, windowRect.height > 0,
+              webView.bounds.width > 0, webView.bounds.height > 0 else {
+            nativePencilInk.setCardSurface(nil, id: id)
+            return
+        }
+        let local = webView.convert(windowRect, from: nil)
+        let rect = CGRect(x: local.minX / webView.bounds.width, y: local.minY / webView.bounds.height,
+                          width: local.width / webView.bounds.width, height: local.height / webView.bounds.height)
+        let outer = webView.convert(occlusion ?? windowRect, from: nil)
+        let cover = CGRect(x: outer.minX / webView.bounds.width, y: outer.minY / webView.bounds.height,
+                           width: outer.width / webView.bounds.width, height: outer.height / webView.bounds.height)
+        nativePencilInk.setCardSurface(NativeInkSurface(id: "card:" + id, rect: rect, exclusions: [],
+            aspectRatio: aspectRatio, geometry: geometry, occlusionRect: cover), id: id)
+    }
+
+    func applyNativeCardInk(actionID: String, value: [String: Any]) async throws {
+        let receipt = await requestNativeConversationCommand(["action": "liveAction", "scope": nativeConversation.scope,
+            "actionId": actionID, "value": value])
+        guard receipt["ok"] as? Bool == true else {
+            throw NSError(domain: "ReaderCardInk", code: 1, userInfo: [NSLocalizedDescriptionKey: receipt["error"] as? String ?? "卡片笔迹尚未保存"])
+        }
+    }
+
     func placeNativeConversationCard(actionID: String, scope: String, windowPoint: CGPoint) async {
         guard scope == nativeConversation.scope, webView.window != nil,
               webView.bounds.width > 0, webView.bounds.height > 0 else { return }

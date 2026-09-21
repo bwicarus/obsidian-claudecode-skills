@@ -330,6 +330,52 @@ test("native placement controls retain CAS, free placement semantics and explici
   assert.equal(api.notes().length, 0);
 });
 
+test("native card ink serializes durable writes, retries the same intent, and preserves card identity", async () => {
+  const id = `c_${"b".repeat(32)}`;
+  let current = { ...note("web:https://example.test/article", id, 1, ""),
+    card: { gid: "learning-original", cid: "learning-original", cards: [{front: "Q", back: "A"}] } };
+  let fail = false, writes = [], gate = null;
+  const repository = {
+    newId: () => id, list: async () => [current], get: async () => current, create: async () => null,
+    patch: async (key, fields, options) => {
+      writes.push(structuredClone(options));
+      if (gate) await gate.promise;
+      if (fail) throw Error("disk unavailable");
+      assert.equal(options.ifRev, current.rev);
+      return current = {...current, ...structuredClone(fields), rev: current.rev + 1};
+    }, remove: async () => null, subscribe: () => () => {},
+  };
+  const {sandbox} = loadStickynote({repository, anchorFromPoint: (x, y) => ({kind: "point", page: 1, x, y})});
+  await tick();
+  const api = sandbox.RC.stickynote, state = api.nativePlacementState()[0];
+  const input = {id, generation: state.generation, geometry: state.inkGeometry, key: "commit", opId: "pen-1",
+    aspectRatio: 2, segments: [{points:[[.1,.1],[.2,.2]],color:"#ff3b30",width:3,widths:[1,3]}]};
+  gate = deferred();
+  let done = false;
+  const one = api.nativeInkAction(input).then(() => {done = true;});
+  const duplicate = api.nativeInkAction(input);
+  const two = api.nativeInkAction({...input,opId:"pen-2"});
+  await tick();
+  assert.equal(done,false); assert.equal(writes.length,1);
+  gate.resolve(); gate = null;
+  await Promise.all([one,duplicate,two]);
+  assert.equal(writes.length,2); assert.equal(current.strokes.length,2);
+  assert.equal(current.card.gid,"learning-original"); assert.equal(current.iar,2);
+  assert.deepEqual(Array.from(current.strokes[0].ww),[1,3]);
+  fail = true;
+  const retry = {...input,opId:"pen-retry"};
+  await assert.rejects(api.nativeInkAction(retry),/disk unavailable/);
+  const identity = writes.at(-1).mutationId;
+  fail = false;
+  await api.nativeInkAction(retry);
+  assert.equal(writes.at(-1).mutationId,identity);
+  assert.equal(current.strokes.length,3);
+  await assert.rejects(api.nativeInkAction({...input,segments:[{points:[[0,0],[1,1]]}]}),/标识冲突/);
+  const fresh = api.nativePlacementState()[0];
+  await api.nativePlacementAction({id,generation:fresh.generation,version:fresh.version,key:"move",x:40,y:50});
+  await assert.rejects(api.nativeInkAction({...input,opId:"late-stroke"}),/位置已改变/);
+});
+
 test("native Pencil tool/style sync is atomic, updates mounted note UI, and keeps regions on the page", async () => {
   const id = `c_${"a".repeat(32)}`;
   const repository = {
