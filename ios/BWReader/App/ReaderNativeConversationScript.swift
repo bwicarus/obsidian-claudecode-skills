@@ -16,6 +16,7 @@ enum ReaderNativeConversationScript {
       let controls = null, controlsObserver = null, suspended = false;
       let settingsModels = null, settingsVoice = null;
       let searchController = null, searchResults = new Map(), searchQuery = '', searchSequence = 0;
+      let placementScopeKey = '', previousPlacementNodes = [], excludedPlacementNodes = new WeakSet();
       let drawerElement = null, drawerObserver = null, contextObserver = null, contextElement = null, toolbarObserver = null, toolbarElement = null;
       const navigationID = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
       const hooked = new WeakMap();
@@ -288,24 +289,26 @@ enum ReaderNativeConversationScript {
           removeId: registerAction('context-remove:' + item.id, thread, () => registry.deselect(item.id))
         }));
       }
-      function pagePlacements() {
+      function pagePlacements(items) {
         const owner = rc().stickynote;
         if (!nativeMode || legacyVisible || !owner?.nativePlacementState) return [];
-        return owner.nativePlacementState().flatMap(item => {
+        return items.flatMap(item => {
+          if (excludedPlacementNodes.has(item.root)) return [];
           // Media/script and ink-bearing placements need their own native renderer.
           // Keep their originals intact until that renderer is migrated.
           const rich = item.card ? JSON.stringify(item.card.cards) : item.html?.content || '';
           const supported = !item.hasInk && !!(item.card || item.html) &&
             !/<(?:iframe|video|audio|img|svg|canvas|script|table|button|input|select|textarea)\b/i.test(rich);
           item.root.toggleAttribute('data-bw-native-placement', !!supported);
-          if (!supported || !item.visible) return [];
+          for (const marker of item.markers || []) marker.node.toggleAttribute('data-bw-native-placement', !!supported);
+          if (!supported || !item.visible && !item.markers?.length) return [];
           const id = 'placement-' + hash(item.generation + ':' + item.id);
           const token = id + '-' + hash(item.version);
           const invoke = async (key, extra = {}) => { const ok = await owner.nativePlacementAction({
             id: item.id, generation: item.generation, version: item.version, key, ...extra
           }); if (!ok) throw new Error('卡片操作未确认'); return ok; };
           const controls = {};
-          for (const key of ['anchor', 'collapse', 'expand', 'remove']) {
+          for (const key of ['anchor', 'collapse', 'expand', 'remove', 'toggleBound']) {
             controls[key] = registerAction(token + '-' + key, item.root, () => invoke(key, { confirmed: key === 'remove' }));
           }
           controls.move = registerAction(token + '-move', item.root, command => {
@@ -324,15 +327,18 @@ enum ReaderNativeConversationScript {
           liveArtifacts([{ parts }]);
           parts.forEach(part => { part.data.dragId = controls.move; });
           return [{ id, title: item.html?.label || (item.card?.cards.length > 1 ? '学习卡组' : '学习卡'),
-            bound: item.bound, collapsed: item.collapsed, controls, parts,
+            bound: item.bound, collapsed: item.collapsed, visible: item.visible, open: item.open, controls, parts,
+            markers: (item.markers || []).map(marker => ({ id: id + '-marker-' + marker.index, kind: marker.kind, number: marker.number,
+              rect: { x: marker.rect.x / innerWidth, y: marker.rect.y / innerHeight, width: marker.rect.width / innerWidth, height: marker.rect.height / innerHeight } })),
             rect: { x: item.rect.x / innerWidth, y: item.rect.y / innerHeight,
               width: item.rect.width / innerWidth, height: item.rect.height / innerHeight } }];
         });
       }
-      function floatingPlacements() {
+      function floatingPlacements(items) {
         const owner = rc().voiceCard;
         if (!nativeMode || legacyVisible || isOpen() || !owner?.nativeFloatingState) return [];
-        return owner.nativeFloatingState().flatMap((item, index) => {
+        return items.flatMap((item, index) => {
+          if (excludedPlacementNodes.has(item.root)) return [];
           const group = flashGroup(item.root), structured = item.root.__vcCard;
           const supported = !!group || structured && ['fact', 'general', 'weather', 'news', 'images'].includes(structured.kind) ||
             typeof item.raw === 'string' && !/<(?:iframe|video|audio|img|svg|canvas|script|table|button|input|select|textarea)\b/i.test(item.raw);
@@ -370,6 +376,11 @@ enum ReaderNativeConversationScript {
         try { history = String(window.__asstHistUrl?.() || ''); } catch (_) {}
         // Scope is opaque. Never send file paths, account namespaces, routes or credentials.
         return [navigationID, location.pathname, location.search, identity, history, mode].join('|');
+      }
+      function getPlacementScopeKey() {
+        let identity = '';
+        try { const state = account()?.snapshot(); identity = [state?.contextId || '', state?.namespace || '', state?.generation ?? '', state?.active || false].join(':'); } catch (_) {}
+        return [navigationID, location.pathname, location.search, identity].join('|');
       }
       function capabilities() {
         const out = ['refresh', 'showLegacy', 'hideLegacy', 'liveAction'];
@@ -410,6 +421,12 @@ enum ReaderNativeConversationScript {
         timer = null;
         if (suspended) return;
         discover();
+        const nextPlacementKey = getPlacementScopeKey();
+        if (nextPlacementKey !== placementScopeKey) {
+          if (placementScopeKey) previousPlacementNodes.forEach(node => excludedPlacementNodes.add(node));
+          placementScopeKey = nextPlacementKey;
+        }
+        previousPlacementNodes = [];
         const nextKey = getScopeKey();
         if (nextKey !== scopeKey) {
           // An account/book switch can precede asynchronous history replacement.
@@ -433,7 +450,10 @@ enum ReaderNativeConversationScript {
         }).filter(Boolean);
         previousNodes = all;
         liveArtifacts(messages);
-        const placements = [...pagePlacements(), ...floatingPlacements()];
+        const pageStates = rc().stickynote?.nativePlacementState?.() || [];
+        const floatingStates = rc().voiceCard?.nativeFloatingState?.() || [];
+        const placements = [...pagePlacements(pageStates), ...floatingPlacements(floatingStates)];
+        previousPlacementNodes = [...pageStates, ...floatingStates].map(item => item.root);
         const readingTools = toolbarActions();
         const attachments = selectedAttachments();
         const review = conversationMode() === 'review' ? rc().review?.presentationState?.() || null : null;

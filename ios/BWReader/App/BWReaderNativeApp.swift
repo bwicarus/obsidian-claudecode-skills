@@ -146,6 +146,11 @@ private struct ReaderRootView: View {
             ReaderWebView(model: reader)
                 .ignoresSafeArea(edges: .bottom)
 
+            if nativeInterfaceEnabled && !reader.nativeConversation.legacyVisible {
+                ReaderNativePageCards(reader: reader, model: reader.nativeConversation)
+                    .ignoresSafeArea(edges: .bottom)
+            }
+
             NativePencilLiveOverlay(
                 reader: reader,
                 controller: reader.nativePencilInk

@@ -209,6 +209,7 @@ function loadStickynote({
     createElement(tag) {
       return new FakeElement(tag);
     },
+    querySelectorAll() { return []; },
     addEventListener() {},
     removeEventListener() {},
   };

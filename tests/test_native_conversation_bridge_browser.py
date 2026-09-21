@@ -37,7 +37,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.add_script_tag(path=str(ROOT / '_server_deploy/static/pdf/rc-stickynote.js'))
             page.evaluate('''() => RC.stickynote.init({documentId:'book-a',repository:repo,disablePortal:true,
               mount:anchor=>({el:document.getElementById('book'),left:anchor.x,top:anchor.y}),
-              anchorFromPoint:(x,y)=>({kind:'point',x,y}),toast:()=>{}})''')
+              anchorFromPoint:(x,y)=>({kind:'point',page:1,x,y}),toast:()=>{}})''')
             page.add_script_tag(content=bridge)
             page.evaluate('__bwNativeConversation.setNativeMode(true)')
             saved = page.evaluate('RC.stickynote.placeHtmlAt(50,60,{content:"<b>原始卡片</b>",isHtml:true,cid:"original-id",label:"知识卡"})')
@@ -56,13 +56,44 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertFalse(act('move', item=projected, x=.2, y=.2)['ok'])
             self.assertTrue(act('expand')['ok'])
             page.wait_for_function('!receipts.at(-1).placements[0].collapsed')
+            page.evaluate('''() => {
+              window.__bwSelectionController={current:()=>({anchor:{kind:'pdf-char',page:1,startIdx:2,endIdx:4,text:'词语'}})};
+              window.__pageBindCard=(bind,spec)=>{
+                const key='test-'+spec.uid;
+                if(!document.querySelector('[data-bindkey="'+key+'"]')) {
+                  for(const [cls,w] of [['pgmark',60],['pgmark-n',12]]) {
+                    const el=document.createElement('span');el.className=cls;el.dataset.bindkey=key;el.dataset.ordinal='1';
+                    el.style.cssText='position:absolute;left:100px;top:100px;width:'+w+'px;height:20px';
+                    document.getElementById('book').appendChild(el);
+                  }
+                }
+                return {ok:true,key};
+              };
+              window.__pageBindRemove=(bind,id)=>document.querySelectorAll('[data-bindkey="test-'+id+'"]').forEach(x=>x.remove());
+            }''')
+            self.assertTrue(act('anchor')['ok'])
+            page.wait_for_function('receipts.at(-1).placements[0]?.markers?.length === 2 && !receipts.at(-1).placements[0].visible')
+            self.assertEqual(page.evaluate('receipts.at(-1).placements[0].markers[1].number'), '1')
+            self.assertTrue(act('toggleBound')['ok'])
+            page.wait_for_function('receipts.at(-1).placements[0].visible && receipts.at(-1).placements[0].open')
+            self.assertTrue(act('collapse')['ok'])
+            page.wait_for_function('!receipts.at(-1).placements[0].visible')
             self.assertTrue(act('move', x=.2, y=.2)['ok'])
-            page.wait_for_function('records[0].anchor.x > 100')
+            page.wait_for_function('records[0].anchor.x > 100 && receipts.at(-1).placements[0].visible')
+            self.assertIsNone(page.evaluate('records[0].html.bind'))
             self.assertEqual(page.evaluate('records[0].html.cid'), 'original-id')
             page.wait_for_timeout(100)
             self.assertTrue(act('remove')['ok'])
             page.wait_for_function('receipts.at(-1).placements.length === 0')
             self.assertEqual(page.evaluate('records.length'), 0)
+            page.evaluate("repo.newId=()=> 'c_'+'a'.repeat(32)")
+            page.evaluate('RC.stickynote.placeHtmlAt(50,60,{content:"原书卡片",cid:"book-a-card"})')
+            page.wait_for_function('receipts.at(-1).placements.length === 1')
+            page.evaluate("document.getElementById('side-pane-asst').dataset.assistantMode='review';__bwNativeConversation.snapshot()")
+            self.assertEqual(page.evaluate('receipts.at(-1).placements.length'), 1, 'review mode must not hide book placements')
+            page.evaluate('history.replaceState(null,"","/?file=other.pdf");__bwNativeConversation.snapshot()')
+            self.assertEqual(page.evaluate('receipts.at(-1).placements.length'), 0, 'a new book must not inherit the old surface while it loads')
+            self.assertEqual(page.evaluate('records[0].html.cid'), 'book-a-card')
             browser.close()
 
     def test_native_search_preserves_locations_and_rejects_stale_results(self):
@@ -637,6 +668,20 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.evaluate("__vcDispatch('renderInfoCard', [{kind:'fact',cid:'card_closed1234',title:'关栏后的生成物',data:{answer:'阅读区可见',detail:'原卡片状态机'}}])")
             page.wait_for_timeout(150)
             self.assertTrue(page.locator('.vc-card:not(.vc-inflow)').filter(has_text='关栏后的生成物').is_visible())
+            page.wait_for_function('receipts.at(-1).placements?.some(p=>p.floating)')
+            floating = page.evaluate('receipts.at(-1).placements.find(p=>p.floating)')
+            page.evaluate('window.savedPlace=RC.stickynote.placeHtmlAt;RC.stickynote.placeHtmlAt=async()=>null')
+            failed_move = page.evaluate('(command)=>__bwNativeConversation.perform(command)', {
+                'action':'liveAction','scope':page.evaluate('receipts.at(-1).scope'),
+                'actionId':floating['controls']['move'],'x':.3,'y':.3})
+            self.assertFalse(failed_move['ok'])
+            self.assertTrue(page.evaluate('RC.voiceCard.nativeFloatingState().some(x=>x.cid==="card_closed1234")'))
+            page.evaluate('RC.stickynote.placeHtmlAt=savedPlace')
+            moved = page.evaluate('(command)=>__bwNativeConversation.perform(command)', {
+                'action':'liveAction','scope':page.evaluate('receipts.at(-1).scope'),
+                'actionId':floating['controls']['move'],'x':.3,'y':.3})
+            self.assertTrue(moved['ok'])
+            self.assertFalse(page.evaluate('RC.voiceCard.nativeFloatingState().some(x=>x.cid==="card_closed1234")'))
             # Save and delete await the real card repository receipt without
             # clicking web controls. Stable batch indexes and identity survive.
             mutation = page.evaluate('''async () => {

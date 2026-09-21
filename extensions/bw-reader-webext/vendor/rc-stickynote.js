@@ -2338,6 +2338,40 @@ if (window.__bwPwaProviderOnly) return;
   //   词不一致就重解析写回。它两次吃掉用户意图：把拖到新词的手动重绑滚回
   //   原词、把拖到空白的解绑捡回去藏成词锚卡。数据医生分不清"坏数据"和
   //   "用户刚改的"，所以整套删除：绑定只由用户拖放与建卡决定，不静默改。）
+  function toggleBoundCard(ctl, meta) {
+    if (ctl._bindOpen) {
+      ctl._bindOpen = false;
+      ctl.root.classList.remove('rc-note-word-open');
+      ctl.root.style.display = 'none';
+      setWordDeleteUi(ctl, false);
+      if (ctl.portaled) portalOut(ctl);
+      return false;
+    }
+    // 一次只展开一张。别只 portalOut 其它卡：那会保留 _bindOpen=true，
+    // ensureMounted 随即又把它显示回来。
+    for (var id in ctls) {
+      var other = ctls[id];
+      if (!other || other === ctl || !other._bindOpen) continue;
+      other._bindOpen = false; other.root.classList.remove('rc-note-word-open');
+      other.root.style.display = 'none';
+      setWordDeleteUi(other, false);
+      if (other.portaled) portalOut(other);
+    }
+    ctl._bindOpen = true;
+    ctl.root.classList.add('rc-note-word-open');
+    ctl.root.style.display = '';
+    // 卡是在 display:none 里 mount 的 —— 那时 _formW 量到的宽是 0。
+    // 显出来之后补跑一次 syncCtl；__sig 守卫保证不重建卡片状态机。
+    try { syncCtl(ctl); } catch (e) {}
+    // 点标记打开 = 用户要看内容（2026-08-25 拍板）：无论上次收成什么
+    // 形态，这个动作总是直达完全展开。只动这一个入口 —— 渲染层继续
+    // 尊重 form 记忆，收起状态（圆点"锁定"）在其它场景原样保留。
+    forceOpenCardFull(ctl);
+    setWordDeleteUi(ctl, true);
+    wordPortalIn(ctl);   // body-fixed：逃出 #main/page-wrap 的 zoom 与 overflow 裁剪
+    _placeWordCard(ctl, meta && meta.source);
+    return true;
+  }
   function _applyWordBind(ctl) {
     var presentation = wordCardPresentation(ctl.note);
     var b = presentation.bind;
@@ -2359,40 +2393,7 @@ if (window.__bwPwaProviderOnly) return;
         uid: ctl.note.id,
         label: presentation.label, category: presentation.category,
         tone: presentation.tone, icon: presentation.icon,
-        onToggle: function (meta) {
-          if (ctl._bindOpen) {
-            ctl._bindOpen = false;
-            ctl.root.classList.remove('rc-note-word-open');
-            ctl.root.style.display = 'none';
-            setWordDeleteUi(ctl, false);
-            if (ctl.portaled) portalOut(ctl);
-            return false;
-          }
-          // 一次只展开一张。别只 portalOut 其它卡：那会保留 _bindOpen=true，
-          // ensureMounted 随即又把它显示回来。
-          for (var id in ctls) {
-            var other = ctls[id];
-            if (!other || other === ctl || !other._bindOpen) continue;
-            other._bindOpen = false; other.root.classList.remove('rc-note-word-open');
-            other.root.style.display = 'none';
-            setWordDeleteUi(other, false);
-            if (other.portaled) portalOut(other);
-          }
-          ctl._bindOpen = true;
-          ctl.root.classList.add('rc-note-word-open');
-          ctl.root.style.display = '';
-          // 卡是在 display:none 里 mount 的 —— 那时 _formW 量到的宽是 0。
-          // 显出来之后补跑一次 syncCtl；__sig 守卫保证不重建卡片状态机。
-          try { syncCtl(ctl); } catch (e) {}
-          // 点标记打开 = 用户要看内容（2026-08-25 拍板）：无论上次收成什么
-          // 形态，这个动作总是直达完全展开。只动这一个入口 —— 渲染层继续
-          // 尊重 form 记忆，收起状态（圆点"锁定"）在其它场景原样保留。
-          forceOpenCardFull(ctl);
-          setWordDeleteUi(ctl, true);
-          wordPortalIn(ctl);   // body-fixed：逃出 #main/page-wrap 的 zoom 与 overflow 裁剪
-          _placeWordCard(ctl, meta && meta.source);
-          return true;
-        }
+        onToggle: function (meta) { return toggleBoundCard(ctl, meta); }
       });
     } catch (e) {}
     if (res && res.ok) {
@@ -3713,15 +3714,26 @@ if (window.__bwPwaProviderOnly) return;
   // DOM nodes here provide geometry/lifetime only; commands never click web controls.
   function nativePlacementState() {
     if (!O) return [];
+    var markersByKey = Object.create(null);
+    document.querySelectorAll('.pgmark,.pgmark-n,.pgbind-rail-dot').forEach(function (node) {
+      var key = node.dataset.bindkey;
+      if (key) (markersByKey[key] || (markersByKey[key] = [])).push(node);
+    });
     return notes.map(function (note) {
       var ctl = ctls[noteIdOf(note)], slot = cardPayloadSlot(note);
       if (!ctl || !slot || !ctl.root.isConnected) return null;
       var rect = ctl.root.getBoundingClientRect();
+      var markers = ctl._bindKey ? (markersByKey[ctl._bindKey] || [])
+        .map(function (node, index) {
+          var box = node.getBoundingClientRect();
+          return { node: node, index: index, kind: node.classList.contains('pgmark') ? 'outline' : 'number',
+            number: node.dataset.ordinal || '', rect: { x: box.left, y: box.top, width: box.width, height: box.height } };
+        }).filter(function (m) { return m.rect.width > 0 && m.rect.height > 0; }) : [];
       return { id: noteIdOf(note), generation: _generation, version: JSON.stringify(note),
         root: ctl.root, card: cloneValue(note.card || null), html: cloneValue(note.html || null),
         hasInk: !!(note.strokes && note.strokes.length), bound: !!wordBindOf(note),
         collapsed: !!note.collapsed || note[slot].form === 'dot' || note[slot].form === 'min',
-        visible: rect.width > 0 && rect.height > 0,
+        visible: rect.width > 0 && rect.height > 0, markers: markers, open: !!ctl._bindOpen,
         rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
     }).filter(Boolean);
   }
@@ -3731,6 +3743,12 @@ if (window.__bwPwaProviderOnly) return;
     if (!note || !ctl || JSON.stringify(note) !== command.version) throw new Error('卡片已更新，请重新操作');
     var slot = cardPayloadSlot(note), fields = {}, payload;
     if (!slot) throw new Error('此内容尚未迁移');
+    if (command.key === 'toggleBound' || command.key === 'collapse' && wordBindOf(note) && ctl._bindOpen) {
+      if (!wordBindOf(note)) throw new Error('这张卡片没有正文锚点');
+      toggleBoundCard(ctl, { source: _wordSource(ctl) });
+      try { window.dispatchEvent(new Event('rc:placement-changed')); } catch (_) {}
+      return true;
+    }
     if (command.key === 'anchor') {
       if (wordBindOf(note)) return true;
       // Same selection-first/nearby-word rule as the original anchor control.
@@ -3767,6 +3785,7 @@ if (window.__bwPwaProviderOnly) return;
         live._bindMarked = false; live._bindOpen = false;
         live.root.classList.remove('rc-note-word-open');
         if (live.portaled) portalOut(live);
+        if (!wordBindOf(saved)) live.root.style.display = '';
       }
       ensureMounted(saved);
     }

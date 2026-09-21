@@ -7,6 +7,9 @@ struct ReaderNativePagePlacement: Identifiable {
     let bound: Bool
     let collapsed: Bool
     let floating: Bool
+    let visible: Bool
+    let open: Bool
+    let markers: [ReaderNativePageMarker]
     let controls: [String: String]
     let parts: [ReaderNativeConversationPart]
 
@@ -15,15 +18,36 @@ struct ReaderNativePagePlacement: Identifiable {
               let box = value["rect"] as? [String: NSNumber],
               let x = box["x"]?.doubleValue, let y = box["y"]?.doubleValue,
               let w = box["width"]?.doubleValue, let h = box["height"]?.doubleValue,
-              [x, y, w, h].allSatisfy({ $0.isFinite }), w > 0, h > 0 else { return nil }
+              [x, y, w, h].allSatisfy({ $0.isFinite }), w >= 0, h >= 0 else { return nil }
         self.id = id
         title = value["title"] as? String ?? "卡片"
         rect = CGRect(x: x, y: y, width: w, height: h)
         bound = value["bound"] as? Bool ?? false
         collapsed = value["collapsed"] as? Bool ?? false
         floating = value["floating"] as? Bool ?? false
+        visible = value["visible"] as? Bool ?? true
+        open = value["open"] as? Bool ?? false
+        markers = (value["markers"] as? [[String: Any]] ?? []).compactMap(ReaderNativePageMarker.init)
         controls = value["controls"] as? [String: String] ?? [:]
         parts = (value["parts"] as? [[String: Any]] ?? []).compactMap(ReaderNativeConversationPart.init)
+    }
+}
+
+struct ReaderNativePageMarker: Identifiable {
+    let id: String
+    let number: String
+    let outline: Bool
+    let rect: CGRect
+    init?(_ value: [String: Any]) {
+        guard let id = value["id"] as? String,
+              let box = value["rect"] as? [String: NSNumber],
+              let x = box["x"]?.doubleValue, let y = box["y"]?.doubleValue,
+              let w = box["width"]?.doubleValue, let h = box["height"]?.doubleValue,
+              [x, y, w, h].allSatisfy({ $0.isFinite }), w > 0, h > 0 else { return nil }
+        self.id = id
+        number = value["number"] as? String ?? ""
+        outline = value["kind"] as? String == "outline"
+        rect = CGRect(x: x, y: y, width: w, height: h)
     }
 }
 
@@ -36,12 +60,35 @@ struct ReaderNativePageCards: View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
                 ForEach(model.placements) { item in
+                    ForEach(item.markers) { marker in
+                        let box = reader.nativePageCardRect(marker.rect, in: geometry.frame(in: .global))
+                        Button {
+                            if let id = item.controls["toggleBound"] {
+                                Task { await model.perform("liveAction", parameters: ["actionId": id]) }
+                            }
+                        } label: {
+                            ZStack {
+                                if marker.outline {
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .stroke(ReaderNativeTheme.accent.opacity(item.open ? 1 : 0.65), lineWidth: 1.2)
+                                } else {
+                                    Text(marker.number.isEmpty ? "•" : marker.number)
+                                        .font(.system(size: max(9, min(14, box.height)), weight: .semibold))
+                                        .foregroundStyle(ReaderNativeTheme.accent)
+                                }
+                            }.frame(width: box.width, height: box.height).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel((item.open ? "收起" : "展开") + item.title + "，标记 " + marker.number)
+                        .offset(x: box.minX, y: box.minY)
+                    }
                     let rect = reader.nativePageCardRect(item.rect, in: geometry.frame(in: .global))
-                    if rect.maxX > 0 && rect.maxY > 0 && rect.minX < geometry.size.width && rect.minY < geometry.size.height {
+                    if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < geometry.size.width && rect.minY < geometry.size.height {
                         ReaderNativePlacedCard(item: item, reader: reader, model: model,
                                                origin: geometry.frame(in: .global).origin,
                                                rect: rect, available: geometry.size)
                             .offset(x: rect.minX, y: rect.minY)
+                            .zIndex(10)
                     }
                 }
             }

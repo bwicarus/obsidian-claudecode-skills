@@ -672,6 +672,7 @@
     var seen = {};
     for (var i = 0; i < ns.length; i++) {
       ns[i].textContent = String(i + 1);
+      ns[i].dataset.ordinal = String(i + 1);
       ns[i].title = '本页第 ' + (i + 1) + ' 张卡片';
       var sig = ns[i].dataset.bx + ',' + ns[i].dataset.by;
       if (ns[i].dataset.bx == null) continue;
@@ -686,6 +687,7 @@
       ns[i].style.left = ((parseFloat(ns[i].dataset.bx) || 0) - wEst - dup * (wEst + 2)) + 'px';
       var rd = document.querySelector('.pgbind-rail-dot[data-bindkey="' + ns[i].dataset.bindkey + '"]');
       if (rd) {
+        rd.dataset.ordinal = String(i + 1);
         rd.textContent = ns[i].textContent;
         rd.__bwCardLabel = ns[i].title;
         rd.title = ns[i].title;

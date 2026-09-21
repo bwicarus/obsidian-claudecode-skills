@@ -271,7 +271,8 @@ test("自由卡沿用拖到左上角删除，只有词锚卡展开后显示垃�
 
 test("展开时重算尺寸 —— 卡是在 display:none 里 mount 的", () => {
   // 那时 _formW 量到的宽是 0。不补这一下，第一次展开的卡宽度是错的。
-  const toggle = NOTE.slice(NOTE.indexOf("onToggle: function (meta)"), NOTE.indexOf("});", NOTE.indexOf("onToggle: function (meta)")) + 3);
+  assert.match(NOTE, /onToggle: function \(meta\) \{ return toggleBoundCard\(ctl, meta\); \}/);
+  const toggle = NOTE.slice(NOTE.indexOf("function toggleBoundCard(ctl, meta)"), NOTE.indexOf("function _applyWordBind(ctl)"));
   assert.match(toggle, /ctl\._bindOpen = true;/);
   assert.match(toggle, /try \{ syncCtl\(ctl\); \} catch \(e\) \{\}/);
   // 靠 renderNoteCard 的 __sig 守卫避免重建卡片 DOM（重建 = 学习状态丢）。
