@@ -102,3 +102,27 @@ test("⑩ EPUB 语法送的是所在句，不是整段", () => {
   assert.match(grammar, /g\.extractSentence\(sel\.context \|\| sel\.text, sel\.text\)/);
   assert.match(grammar, /openNativeGrammar\(sentence: payload\["sentence"\]/);
 });
+
+test("⑪ EPUB 选区操作条：只在 EPUB 上出，且网页那条要收起", () => {
+  const BAR = read("ios/BWReader/App/ReaderNativeEPUBSelectionBar.swift");
+  const WORKSPACE = read("ios/BWReader/App/ReaderNativeWorkspace.swift");
+  // PDF 有自己的选区菜单；两套都出就是同一个选区上下各一排按钮。
+  assert.match(WORKSPACE, /reader\.isEPUBBook, !conversation\.selectionText\.isEmpty/);
+  // 与 PDF 选区菜单同一组动作、同样顺序 —— 两个阅读器上手势记忆一致。
+  for (const mode of ["dict", "phrase", "translate", "explain", "grammar"]) {
+    assert.ok(BAR.includes(`"${mode}")`), mode + " 不在操作条里");
+  }
+  // ⚠ 网页那条工具栏在原生界面开着时要收起，否则上下各一排。
+  assert.match(EPUB, /classList\.contains\('bw-native-navigation'\)\) hideSel\(\)/);
+});
+
+test("⑫ 收起网页工具栏时不能顺手 return 掉", () => {
+  // ⚠ 上面那个扩展分支是 `hideSel(); return;` —— 照抄的话 cur/anchor 不再更新、
+  // __setFocusSel 也不报，于是原生那几个取数口全拿不到东西，助手也看不见选中。
+  const cap = EPUB.slice(EPUB.indexOf("function captureSel(opts)"),
+                         EPUB.indexOf("function secOf(node)"));
+  const native = cap.slice(cap.indexOf("bw-native-navigation"));
+  assert.match(native, /else showSel\(\);/);
+  assert.match(native, /window\.__setFocusSel/, "焦点还要照常上报");
+  assert.doesNotMatch(native.split("\n").slice(0, 3).join("\n"), /return;/);
+});

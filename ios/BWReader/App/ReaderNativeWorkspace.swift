@@ -42,6 +42,16 @@ struct ReaderNativeWorkspace<Document: View>: View {
                                 }
                                 return true
                             } isTargeted: { dropTarget = $0 }
+                            .overlay(alignment: .bottom) {
+                                // EPUB 的选区操作条。PDF 不出 —— 它有自己的选区菜单，
+                                // 两套都出就是同一个选区上下各一排按钮。
+                                if enabled, reader.isEPUBBook, !conversation.selectionText.isEmpty {
+                                    ReaderNativeEPUBSelectionBar(text: conversation.selectionText) {
+                                        reader.performEPUBSelectionAction($0)
+                                    }
+                                }
+                            }
+                            .animation(.easeOut(duration: 0.18), value: conversation.selectionText)
                             .overlay {
                                 if dropTarget {
                                     RoundedRectangle(cornerRadius: 8)

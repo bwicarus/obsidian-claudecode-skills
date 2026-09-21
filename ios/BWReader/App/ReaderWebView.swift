@@ -5487,6 +5487,18 @@ extension ReaderWebViewModel: WKNavigationDelegate {
 }
 
 extension ReaderWebViewModel: WKUIDelegate {
+    /// 当前这本是 EPUB 吗 —— 选区操作条只在 EPUB 上出（PDF 有自己的选区菜单）。
+    var isEPUBBook: Bool { currentLocalBook?.format == .epub }
+
+    /// EPUB 选区操作条点了某一项。
+    func performEPUBSelectionAction(_ mode: String) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if mode == "grammar" { await self.openEPUBGrammar() }
+            else { await self.openEPUBLookup(mode: mode) }
+        }
+    }
+
     /// 问网页要当前选区，然后开原生面板。
     ///
     /// ⚠ 选区要**此刻**去问，不能缓存：菜单从弹出到点下去之间，用户可能已经改了

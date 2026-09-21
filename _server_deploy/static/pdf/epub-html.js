@@ -553,7 +553,12 @@
         hideSel();
         return;
       }
-      showSel();
+      // 原生界面开着时，选区操作条由原生画（与 PDF 那侧一致），这里收起网页那条 ——
+      // 两条都出就是同一个选区上下各一排按钮。
+      // ⚠ 与上面的扩展分支不同：那条是 return，这里**不 return** —— cur/anchor 要留着
+      //   （原生那几个取数口都读它），焦点也要照常上报，否则助手看不见这段选中。
+      if (document.documentElement.classList.contains('bw-native-navigation')) hideSel();
+      else showSel();
       try { window.__setFocusSel && window.__setFocusSel(txt, /\$/.test(txt) ? 'formula' : 'text'); } catch (e) {}   // 助手开着时钉焦点(照搬 PDF 13-selection.js:586/599/656)→ 输入框上方可视 chip,可 ✕ 取消
     } catch (e) { dbg('cap ERR: ' + (e && e.message)); }
   }
