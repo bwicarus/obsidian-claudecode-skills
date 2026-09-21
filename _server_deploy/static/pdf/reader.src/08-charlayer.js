@@ -618,9 +618,19 @@ window.__bwReaderPageOverlay = async function (page) {
         })).filter((m) => m.rects.length)
       : [],
     // 已掌握的词不注音 —— 与 renderRubyLayer 里的 __masteredFuri 同一份数据。
-    masteredFuri: _rubyEnabled() ? (d.mastered_furi || []).slice(0, 4000) : null
+    masteredFuri: _rubyEnabled() ? (d.mastered_furi || []).slice(0, 4000) : null,
+    // 搜索跳转后要在这一页把命中亮出来。网页那条路要 __charBoxes（接管时不存在），
+    // 所以把待办标记交给原生消费，取走即清 —— 只亮一次，别每次翻页重亮。
+    searchQuery: _takePendingSearchQuery(page)
   };
 };
+
+function _takePendingSearchQuery(page) {
+  const ph = window._pendingSearchHighlight;
+  if (!ph || Number(ph.page) !== Number(page) || !ph.query) return '';
+  window._pendingSearchHighlight = null;
+  return String(ph.query).slice(0, 200);
+}
 
 function renderVocabUnderlines(pw, marks) {
   if (!_vocabUnderlineEnabled()) return;

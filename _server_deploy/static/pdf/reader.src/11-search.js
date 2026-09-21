@@ -91,6 +91,12 @@ function _applyPendingSearchHighlight(tries) {
   tries = tries || 0;
   const ph = window._pendingSearchHighlight;
   if (!ph) return;
+  // ⚠ 原生正文接管时这条路走不通：它等的是 `dataset.loaded === '1'` + __charBoxes，
+  //   而那时网页根本不渲页 —— 轮询 4.8 秒后把标记清掉，命中就永远不会亮。
+  //   把标记留在原地，交给原生那侧消费（见 __bwReaderPageOverlay 的 searchQuery）。
+  try {
+    if (window.RC?.readerNavigation?.nativeViewport) return;
+  } catch (_) {}
   const wrap = document.querySelector('[data-page-num="' + ph.page + '"]');
   if (wrap && wrap.dataset.loaded === '1' && wrap.__charBoxes && wrap.__charBoxes.length) {
     try { _highlightSearchResultsOnPage(wrap, ph.query); } catch (_) {}

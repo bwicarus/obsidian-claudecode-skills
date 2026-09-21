@@ -88,6 +88,69 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
     }
 
+    /// 搜索命中：跳过去之后在那一页把命中处亮出来，几秒后自动淡掉。
+    ///
+    /// ⚠ 网页那条路（`_highlightSearchResultsOnPage`）要 `__charBoxes`，原生接管时
+    /// 那一页根本没渲 —— 它会轮询 4.8 秒然后把待办标记清掉，命中永远不亮。
+    /// 原生这侧有自己的字符层，自己找自己画。
+    @Published private(set) var searchHits: [Int: [CGRect]] = [:]
+    private var searchHitExpiry: Task<Void, Never>?
+
+    func highlightSearchHits(query: String, page: Int) {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty, needle.count <= 200,
+              let chars = characterPages[page], chars.pageWidth > 0, chars.pageHeight > 0 else { return }
+        // 与网页同一口径：整页文字拼起来找子串（大小写不敏感），再把命中区间的
+        // 字符按行合并成矩形。
+        let glyphs = chars.chars
+        let text = glyphs.map { $0.c.lowercased() }.joined()
+        var rects: [CGRect] = []
+        var cursor = text.startIndex
+        while let found = text.range(of: needle, range: cursor..<text.endIndex) {
+            let start = text.distance(from: text.startIndex, to: found.lowerBound)
+            let end = text.distance(from: text.startIndex, to: found.upperBound)
+            if start >= 0, end <= glyphs.count, start < end {
+                rects.append(contentsOf: Self.mergeRowRects(Array(glyphs[start..<end]),
+                                                            width: chars.pageWidth,
+                                                            height: chars.pageHeight))
+            }
+            cursor = found.upperBound
+            if rects.count > 400 { break }
+        }
+        guard !rects.isEmpty else { return }
+        searchHits[page] = rects
+        searchHitExpiry?.cancel()
+        searchHitExpiry = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            guard let self, !Task.isCancelled else { return }
+            self.searchHits = [:]
+        }
+    }
+
+    /// 同一行相邻的字合成一条矩形（与网页 `_buildRectsFromCharRange` 同口径）。
+    private static func mergeRowRects(_ glyphs: [NativeBookOCRCharacter],
+                                      width: Double, height: Double) -> [CGRect] {
+        var out: [CGRect] = []
+        var current: CGRect?
+        for glyph in glyphs where glyph.sp == 0 {
+            let box = CGRect(x: glyph.x0 / width, y: glyph.y0 / height,
+                             width: (glyph.x1 - glyph.x0) / width,
+                             height: (glyph.y1 - glyph.y0) / height)
+            guard box.width > 0, box.height > 0 else { continue }
+            if var cur = current, abs(box.maxY - cur.maxY) <= cur.height * 0.6, box.minX >= cur.minX {
+                cur = CGRect(x: cur.minX, y: min(cur.minY, box.minY),
+                             width: max(cur.maxX, box.maxX) - cur.minX,
+                             height: max(cur.height, box.height))
+                current = cur
+            } else {
+                if let cur = current { out.append(cur) }
+                current = box
+            }
+        }
+        if let cur = current { out.append(cur) }
+        return out
+    }
+
     /// 这一页的点坐标尺寸（来自原生字符层）。拿它把点坐标换成归一化。
     func characterPageSize(_ page: Int) -> (width: Double, height: Double)? {
         guard let chars = characterPages[page], chars.pageWidth > 0, chars.pageHeight > 0 else { return nil }
@@ -949,6 +1012,12 @@ struct ReaderNativePDFViewport: View {
                     for highlight in document.highlights[number] ?? [] {
                         if let rect = document.viewRect(normalized: highlight.rect, page: number) {
                             pageContext.fill(Path(rect), with: .color(highlight.color.opacity(0.3)))
+                        }
+                    }
+                    // 搜索命中：黄底，与网页那侧同一个意思（几秒后自动淡掉）。
+                    for normalized in document.searchHits[number] ?? [] {
+                        if let rect = document.viewRect(normalized: normalized, page: number) {
+                            pageContext.fill(Path(rect), with: .color(.yellow.opacity(0.38)))
                         }
                     }
                     // 生词下划线画在字底（与网页那侧一致：y1 再下移 1pt）。

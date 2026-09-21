@@ -502,6 +502,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     // 跟"这一页没有已掌握的词"不是一回事。
                     let mastered = payload["masteredFuri"] as? [String]
                     document.setFuriganaMastered(mastered, enabled: mastered != nil, page: page)
+                    // 搜索跳转后要亮的那个词。网页那侧取走即清，所以只会亮一次。
+                    if let query = payload["searchQuery"] as? String, !query.isEmpty {
+                        document.highlightSearchHits(query: query, page: page)
+                    }
                 }
             }
         }
