@@ -291,12 +291,13 @@ function _updateCropBtn() {
   const b = document.getElementById('crop-toggle');
   if (b) b.classList.toggle('active', _cropActive());
 }
-window.toggleCrop = () => {
+window.toggleCrop = async () => {
   if (!_cropOn && !(_crop.l || _crop.r || _crop.t || _crop.b)) {
     window.openSettings?.();
     _toast?.('请先设置本书的去边比例');
     return;
   }
+  if (RC.readerNavigation?.nativeViewport) return await RC.readerNavigation.performNativeViewport('crop', {enabled: !_cropOn, crop: {..._crop}});
   _cropOn = !_cropOn;   // 已配百分比时直接切换；未配时上面先引导到设置。
   try { localStorage.setItem(_cropKey(), _cropOn ? '1' : '0'); } catch (_) {}
   _updateCropBtn();
@@ -318,6 +319,10 @@ async function saveCropSettings(crop, autoOn) {
     throw new Error((result && (result.error || result.message)) || ('HTTP ' + response.status));
   }
   _crop = nextCrop;
+  if (RC.readerNavigation?.nativeViewport) {
+    await RC.readerNavigation.performNativeViewport('crop', {enabled: !!(_cropOn || (autoOn && Object.values(_crop).some(v => v > 0))), crop: {..._crop}});
+    return true;
+  }
   if (autoOn && (_crop.l || _crop.r || _crop.t || _crop.b)) {
     _cropOn = true;
     try { localStorage.setItem(_cropKey(), '1'); } catch (_) {}

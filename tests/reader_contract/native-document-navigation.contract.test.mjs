@@ -11,6 +11,7 @@ function host() {
   const context = vm.createContext({
     URL, FILE_REL: 'original/book.pdf', pdfDoc: { numPages: 20 }, currentPage: 2, scale: 1,
     readMode: 'continuous', _spreadOffset: 0, RC: {}, __BW_NATIVE_LOCAL_READER__: true,
+    _crop: {l:0,r:0,t:0,b:0}, _cropOn: false, _updateCropBtn: () => {},
     location: { href: 'http://reader.test/pdf?file=original%2Fbook.pdf' },
     history: { replaceState: () => {} },
     document: { getElementById: id => id === 'main' ? scroll : null },
@@ -141,4 +142,35 @@ test('original spread cycle changes saved mode only after a native layout receip
   assert.equal(saved.at(-1).mode, 'single');
   assert.throws(() => nav.acceptNativePosition('native', { ...position(100, 3), mode: 'unsupported' }), /无效/);
   assert.equal(context.readMode, 'single');
+});
+
+test('crop uses the original save owner, and native display failure never pretends it was enabled', async () => {
+  const { context, nav } = host();
+  const loader = source('03-loader.js');
+  vm.runInContext(loader.slice(loader.indexOf('function _updateCropBtn()')), context);
+  let stored, succeeds = false, sequence = 0, commands = 0;
+  context.fetch = async (_, options) => { stored = JSON.parse(options.body); return {ok:true,json:async () => ({ok:true})}; };
+  nav.attachNativeViewport({ file: context.FILE_REL, token: 'native', goToPage: () => {},
+    perform: async (action, value) => {
+      commands++;
+      assert.equal(action, 'crop');
+      return {ok:succeeds, position: {...position(++sequence, 2), cropEnabled:value.enabled, ...(value.enabled ? {crop:value.crop} : {})}};
+    }
+  });
+  const value = {l:10,r:20,t:30,b:5};
+  await assert.rejects(context.saveCropSettings(value, true), /未完成/);
+  assert.deepEqual(stored, {file:context.FILE_REL,crop:value});
+  assert.equal(context._cropOn, false);
+  assert.deepEqual({...context._crop}, value); // The durable settings did save.
+  succeeds = true;
+  await context.toggleCrop();
+  assert.equal(context._cropOn, true);
+  await context.toggleCrop();
+  assert.equal(context._cropOn, false);
+  assert.deepEqual({...context._crop}, value); // Disabling keeps percentages.
+  context.fetch = async () => ({ok:false,status:503,json:async () => ({error:'offline'})});
+  const before = commands;
+  await assert.rejects(context.saveCropSettings({l:1,r:2,t:3,b:4}, true), /offline/);
+  assert.equal(commands, before);
+  assert.deepEqual({...context._crop}, value);
 });

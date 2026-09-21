@@ -486,6 +486,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                           fraction: CGFloat((position["fraction"] as? NSNumber)?.doubleValue ?? 0))
         document.setLayout(mode: position["mode"] as? String ?? "continuous",
                            firstPageAlone: (position["spreadOffset"] as? NSNumber)?.intValue == 1)
+        if position["cropEnabled"] as? Bool == true {
+            guard let value = position["crop"] as? [String: Any], let crop = ReaderNativePDFCrop(value) else {
+                throw ReaderBookUserStateWebAdapterError.invalidResponse
+            }
+            try document.setCrop(crop)
+        }
         try document.applyOverlays(domains, bookID: access.record.id, contentSHA256: digest)
         try document.applyNotes(notes, bookID: access.record.id, contentSHA256: digest)
         return document

@@ -319,6 +319,10 @@ RC.readerPreferences = {
     } else if (key === 'cropEnabled') {
       if (typeof value !== 'boolean') throw new Error('设置值必须为开关');
       if (value && !Object.values(_crop).some(v => v > 0)) throw new Error('请先设置去边比例');
+      if (RC.readerNavigation?.nativeViewport) {
+        await RC.readerNavigation.performNativeViewport('crop', {enabled: value, crop: {..._crop}});
+        return this.state();
+      }
       localStorage.setItem(_cropKey(), value ? '1' : '0'); _cropOn = value;
       _updateCropBtn(); await _refitToWidth(true); window._rememberOrientLayout?.();
     } else if (key === 'grammar') {

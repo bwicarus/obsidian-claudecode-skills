@@ -15,6 +15,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let fraction: CGFloat
         let mode: String
         let spreadOffset: Int
+        let crop: ReaderNativePDFCrop?
     }
     struct CharacterSelection {
         let bookID: String
@@ -41,7 +42,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     }
 
     let view = ReaderNativePDFView()
-    @Published private(set) var position = Position(page: 1, scale: 1, visiblePages: [], fraction: 0, mode: "continuous", spreadOffset: 0)
+    @Published private(set) var position = Position(page: 1, scale: 1, visiblePages: [], fraction: 0, mode: "continuous", spreadOffset: 0, crop: nil)
     @Published private(set) var error: String?
     @Published private(set) var ready = false
     @Published private(set) var geometryRevision = 0
@@ -73,6 +74,10 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     private var textOverlays: [Int: ReaderNativePDFTextOverlay] = [:]
     private var ocrUpdates: AnyCancellable?
     private var customSelection = false
+    private var displayCrop: ReaderNativePDFCrop?
+    private var followsWidth = true
+    private var lastFittedWidth: CGFloat = 0
+    private var fittedScale: CGFloat = 0
 
     override init() {
         super.init()
@@ -80,7 +85,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
         view.displayBox = .cropBox
-        view.autoScales = true
+        view.autoScales = false
+        view.minScaleFactor = 0.18
+        view.maxScaleFactor = 16
         view.pageOverlayViewProvider = self
         let clearTap = UITapGestureRecognizer(target: self, action: #selector(clearSelectionOnBlankTap(_:)))
         clearTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
@@ -92,7 +99,13 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
         for name in [Notification.Name.PDFViewPageChanged, .PDFViewScaleChanged] {
             observations.append(NotificationCenter.default.addObserver(forName: name, object: view, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.publishPosition() }
+                Task { @MainActor in
+                    if name == .PDFViewScaleChanged, let self, self.fittedScale > 0,
+                       abs(self.view.scaleFactor - self.fittedScale) > 0.005 {
+                        self.followsWidth = false
+                    }
+                    self?.publishPosition()
+                }
             })
         }
         observations.append(NotificationCenter.default.addObserver(forName: .PDFViewSelectionChanged, object: view, queue: .main) { [weak self] _ in
@@ -149,6 +162,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         selectionTask?.cancel(); selectionTask = nil
         scrollObservation = nil; offsetObservation = nil; observedScroll = nil
         view.document = nil
+        view.displayBox = .cropBox; displayCrop = nil
+        followsWidth = true; lastFittedWidth = 0; fittedScale = 0
         access = nil; digest = ""; pendingPage = nil
         ready = false; error = nil
         domainHeaders = [:]; ink = [:]; highlights = [:]; notes = []
@@ -301,16 +316,40 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
 
     func setScale(_ scale: CGFloat) {
         guard scale.isFinite, scale > 0 else { return }
+        followsWidth = false
         view.autoScales = false
         view.scaleFactor = max(view.minScaleFactor, min(view.maxScaleFactor, scale))
         publishPosition()
+    }
+
+    /// Apply the original per-book percentages to a display-only box. The PDF
+    /// file and its crop box stay untouched, so OCR/card/ink coordinates retain
+    /// their original identity. The view's document is never written to disk.
+    func setCrop(_ crop: ReaderNativePDFCrop?) throws {
+        guard let document = view.document else { throw NativeBookOCRError.pageUnavailable }
+        let destination = view.currentDestination
+        if let crop {
+            var boxes: [(PDFPage, CGRect)] = []
+            for index in 0..<document.pageCount {
+                guard let page = document.page(at: index), let box = crop.bounds(for: page) else { throw NativeBookOCRError.pageUnavailable }
+                boxes.append((page, box))
+            }
+            // Validate every page before changing any display box.
+            boxes.forEach { $0.0.setBounds($0.1, for: .artBox) }
+        }
+        displayCrop = crop
+        view.displayBox = crop == nil ? .cropBox : .artBox
+        view.layoutDocumentView()
+        if let destination { view.go(to: destination) }
+        if view.bounds.width > 0 { fitWidth() }
+        geometryChanged()
     }
 
     func setLayout(mode: String, firstPageAlone: Bool) {
         let destination = view.currentDestination
         view.displaysAsBook = firstPageAlone
         view.displayMode = mode == "spread" ? .twoUpContinuous : (mode == "single" ? .singlePage : .singlePageContinuous)
-        view.autoScales = true
+        view.autoScales = false
         if let destination { view.go(to: destination) }
         publishPosition()
     }
@@ -321,7 +360,12 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         guard size.width > 0, view.bounds.width > 0 else { return }
         view.autoScales = false
         let columns: CGFloat = (view.displayMode == .twoUpContinuous || view.displayMode == .twoUp) ? 2 : 1
-        view.scaleFactor = max(view.minScaleFactor, min(view.maxScaleFactor, (view.bounds.width - 16) / (size.width * columns)))
+        let width = size.width * (displayCrop?.width ?? 1)
+        let fitted = (view.bounds.width - 16) / (width * columns)
+        followsWidth = true; lastFittedWidth = view.bounds.width
+        view.maxScaleFactor = max(view.maxScaleFactor, fitted)
+        fittedScale = max(view.minScaleFactor, min(view.maxScaleFactor, fitted))
+        view.scaleFactor = fittedScale
         publishPosition()
     }
 
@@ -341,7 +385,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let local = source.convert(point, to: view)
         guard let document = view.document, let page = view.page(for: local, nearest: false) else { return nil }
         let box = view.convert(page.bounds(for: .cropBox), from: page).standardized
-        guard box.isFiniteRect, box.width > 0, box.height > 0, box.contains(local) else { return nil }
+        let displayed = view.convert(page.bounds(for: view.displayBox), from: page).standardized
+        guard box.isFiniteRect, box.width > 0, box.height > 0, displayed.contains(local) else { return nil }
         return (document.index(for: page) + 1, CGPoint(x: (local.x - box.minX) / box.width, y: (local.y - box.minY) / box.height))
     }
 
@@ -364,6 +409,11 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         if let page = pendingPage, view.bounds.width > 0, view.bounds.height > 0 {
             pendingPage = nil
             try? go(to: page.page, fraction: page.fraction)
+            if followsWidth { fitWidth(); try? go(to: page.page, fraction: page.fraction) }
+        } else if followsWidth, view.bounds.width > 16, abs(view.bounds.width - lastFittedWidth) > 0.5 {
+            let anchor = position
+            fitWidth()
+            try? go(to: anchor.page, fraction: anchor.fraction)
         }
         geometryChanged()
     }
@@ -379,7 +429,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let fraction = box.height > 0 ? min(1, max(0, (view.bounds.minY - box.minY) / box.height)) : 0
         let next = Position(page: document.index(for: page) + 1, scale: view.scaleFactor,
                             visiblePages: view.visiblePages.map { document.index(for: $0) + 1 }.sorted(), fraction: fraction,
-                            mode: layoutMode, spreadOffset: view.displaysAsBook ? 1 : 0)
+                            mode: layoutMode, spreadOffset: view.displaysAsBook ? 1 : 0, crop: displayCrop)
         if next != position { position = next; onPosition?(next) }
     }
 
@@ -761,7 +811,8 @@ struct ReaderNativePDFViewport: View {
                     let number = owner.index(for: page) + 1
                     guard let frame = document.viewRect(normalized: CGRect(x: 0,y: 0,width: 1,height: 1), page: number) else { continue }
                     var pageContext = context
-                    pageContext.clip(to: Path(frame))
+                    let visible = document.view.convert(page.bounds(for: document.view.displayBox), from: page).standardized
+                    pageContext.clip(to: Path(visible))
                     for highlight in document.highlights[number] ?? [] {
                         if let rect = document.viewRect(normalized: highlight.rect, page: number) {
                             pageContext.fill(Path(rect), with: .color(highlight.color.opacity(0.3)))

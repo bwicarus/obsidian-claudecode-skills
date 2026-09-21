@@ -6,6 +6,12 @@ function _updateModeButtons() {
   s.textContent = (readMode === 'spread') ? (_spreadOffset ? '⊞ 双页 2|3' : '⊞ 双页 1|2') : '📄 单页';
 }
 async function _applyModeChange(keepPage) {
+  if (RC.readerNavigation?.nativeViewport) {
+    const crop = {enabled: !!_cropOn, crop: {..._crop}};
+    await RC.readerNavigation.performNativeViewport('layout', {mode: readMode, spreadOffset: _spreadOffset});
+    await RC.readerNavigation.performNativeViewport('crop', crop);
+    return;
+  }
   _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
   currentPage = keepPage;
   window._gpApplyAppearance && _gpApplyAppearance();   // 切排版 → 套用本排版各自记的侧栏外观(悬浮/模糊),在 refit 前置好 grammar-floating
@@ -155,6 +161,7 @@ function _captureSideRefitAnchor(main) {
   } catch (_) { return null; }
 }
 async function _refitToWidth(force, rebuild, refitScope) {
+  if (RC.readerNavigation?.nativeViewport) return; // Native layout owns its actual available width.
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
   const mainW = _mainContentWidth();

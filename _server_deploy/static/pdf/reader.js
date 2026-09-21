@@ -698,12 +698,13 @@ function _updateCropBtn() {
   const b = document.getElementById('crop-toggle');
   if (b) b.classList.toggle('active', _cropActive());
 }
-window.toggleCrop = () => {
+window.toggleCrop = async () => {
   if (!_cropOn && !(_crop.l || _crop.r || _crop.t || _crop.b)) {
     window.openSettings?.();
     _toast?.('请先设置本书的去边比例');
     return;
   }
+  if (RC.readerNavigation?.nativeViewport) return await RC.readerNavigation.performNativeViewport('crop', {enabled: !_cropOn, crop: {..._crop}});
   _cropOn = !_cropOn;   // 已配百分比时直接切换；未配时上面先引导到设置。
   try { localStorage.setItem(_cropKey(), _cropOn ? '1' : '0'); } catch (_) {}
   _updateCropBtn();
@@ -725,6 +726,10 @@ async function saveCropSettings(crop, autoOn) {
     throw new Error((result && (result.error || result.message)) || ('HTTP ' + response.status));
   }
   _crop = nextCrop;
+  if (RC.readerNavigation?.nativeViewport) {
+    await RC.readerNavigation.performNativeViewport('crop', {enabled: !!(_cropOn || (autoOn && Object.values(_crop).some(v => v > 0))), crop: {..._crop}});
+    return true;
+  }
   if (autoOn && (_crop.l || _crop.r || _crop.t || _crop.b)) {
     _cropOn = true;
     try { localStorage.setItem(_cropKey(), '1'); } catch (_) {}
@@ -1253,7 +1258,8 @@ RC.readerNavigation = {
     const saved = _getLastPosition();
     const fraction = saved?.page === currentPage && Number.isFinite(saved.frac) ? Math.max(0, Math.min(1, saved.frac)) : 0;
     return { file: FILE_REL, page: currentPage, total: pdfDoc.numPages, fraction, mode: readMode, scale,
-      spreadOffset: typeof _spreadOffset === 'undefined' ? 0 : _spreadOffset };
+      spreadOffset: typeof _spreadOffset === 'undefined' ? 0 : _spreadOffset,
+      crop: {..._crop}, cropEnabled: !!_cropOn };
   },
   attachNativeViewport: function (viewport) {
     if (window.__BW_NATIVE_LOCAL_READER__ !== true || !viewport || viewport.file !== FILE_REL ||
@@ -1267,7 +1273,7 @@ RC.readerNavigation = {
   },
   performNativeViewport: async function (action, value) {
     const owner = this.nativeViewport;
-    if (!owner || typeof owner.perform !== 'function' || !['layout', 'scale', 'fit'].includes(action)) throw new Error('原生阅读操作不可用');
+    if (!owner || typeof owner.perform !== 'function' || !['layout', 'scale', 'fit', 'crop'].includes(action)) throw new Error('原生阅读操作不可用');
     const receipt = await owner.perform(action, value);
     if (owner !== this.nativeViewport || receipt?.ok !== true || !Number.isSafeInteger(receipt.position?.sequence)) throw new Error('原生阅读操作未完成');
     if (receipt.position.sequence > owner.sequence) this.acceptNativePosition(owner.token, receipt.position);
@@ -1283,7 +1289,9 @@ RC.readerNavigation = {
         !Array.isArray(value.visiblePages) || value.visiblePages.length > 100 ||
         value.visiblePages.some(page => !Number.isInteger(page) || page < 1 || page > total) ||
         (value.mode !== undefined && !['single', 'continuous', 'spread'].includes(value.mode)) ||
-        (value.spreadOffset !== undefined && value.spreadOffset !== 0 && value.spreadOffset !== 1)) {
+        (value.spreadOffset !== undefined && value.spreadOffset !== 0 && value.spreadOffset !== 1) ||
+        (value.cropEnabled !== undefined && typeof value.cropEnabled !== 'boolean') ||
+        (value.cropEnabled === true && (!value.crop || ['l','r','t','b'].some(k => !Number.isFinite(value.crop[k]) || value.crop[k] < 0 || value.crop[k] > 45)))) {
       throw new Error('原生阅读位置已过期或无效');
     }
     const changedPage = value.page !== currentPage;
@@ -1294,8 +1302,14 @@ RC.readerNavigation = {
       try { localStorage.setItem('pdf-read-mode', readMode); localStorage.setItem(_spreadKey(), String(_spreadOffset)); } catch (_) {}
       _updateModeButtons();
     }
+    if (value.cropEnabled !== undefined) {
+      _cropOn = value.cropEnabled;
+      if (value.cropEnabled) _crop = {l:value.crop.l, r:value.crop.r, t:value.crop.t, b:value.crop.b};
+      try { localStorage.setItem(_cropKey(), _cropOn ? '1' : '0'); } catch (_) {}
+      _updateCropBtn();
+    }
     window.__nativeReaderViewport = { kind: 'pdf', file: FILE_REL, page: currentPage,
-      scale, fraction: value.fraction, visiblePages: [...new Set(value.visiblePages)] };
+      scale, fraction: value.fraction, visiblePages: [...new Set(value.visiblePages)], mode: readMode, spreadOffset: _spreadOffset };
     _saveLastPosition({ page: currentPage, frac: value.fraction, scrollY: 0, mode: readMode, scale });
     if (changedPage) {
       const url = new URL(location.href); url.searchParams.set('page', currentPage);
@@ -1536,7 +1550,7 @@ function _setupPageScrub() {
 if (document.readyState !== 'loading') _setupPageScrub();
 else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
-  if (RC.readerNavigation?.nativeViewport) return await RC.readerNavigation.performNativeViewport('scale', Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta)));
+  if (RC.readerNavigation?.nativeViewport) return await RC.readerNavigation.performNativeViewport('scale', Math.max(_ZOOM_MIN, scale + delta));
   scale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta));
   // +/- 缩放跟双指缩放(_applyZoom)一致:先更新全书廉价 CSS 几何，只高清化视口/邻页。
   if (!(await _rescaleContinuousInPlace({ rasterScope: 'visible-near' }))) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
@@ -1856,6 +1870,12 @@ function _updateModeButtons() {
   s.textContent = (readMode === 'spread') ? (_spreadOffset ? '⊞ 双页 2|3' : '⊞ 双页 1|2') : '📄 单页';
 }
 async function _applyModeChange(keepPage) {
+  if (RC.readerNavigation?.nativeViewport) {
+    const crop = {enabled: !!_cropOn, crop: {..._crop}};
+    await RC.readerNavigation.performNativeViewport('layout', {mode: readMode, spreadOffset: _spreadOffset});
+    await RC.readerNavigation.performNativeViewport('crop', crop);
+    return;
+  }
   _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
   currentPage = keepPage;
   window._gpApplyAppearance && _gpApplyAppearance();   // 切排版 → 套用本排版各自记的侧栏外观(悬浮/模糊),在 refit 前置好 grammar-floating
@@ -2005,6 +2025,7 @@ function _captureSideRefitAnchor(main) {
   } catch (_) { return null; }
 }
 async function _refitToWidth(force, rebuild, refitScope) {
+  if (RC.readerNavigation?.nativeViewport) return; // Native layout owns its actual available width.
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
   const mainW = _mainContentWidth();
@@ -10731,6 +10752,10 @@ RC.readerPreferences = {
     } else if (key === 'cropEnabled') {
       if (typeof value !== 'boolean') throw new Error('设置值必须为开关');
       if (value && !Object.values(_crop).some(v => v > 0)) throw new Error('请先设置去边比例');
+      if (RC.readerNavigation?.nativeViewport) {
+        await RC.readerNavigation.performNativeViewport('crop', {enabled: value, crop: {..._crop}});
+        return this.state();
+      }
       localStorage.setItem(_cropKey(), value ? '1' : '0'); _cropOn = value;
       _updateCropBtn(); await _refitToWidth(true); window._rememberOrientLayout?.();
     } else if (key === 'grammar') {

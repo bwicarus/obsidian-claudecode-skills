@@ -120,9 +120,11 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
 
     private func payload(_ position: ReaderNativePDFDocument.Position) -> [String: Any] {
         sequence += 1
-        return ["sequence": sequence, "page": position.page, "scale": Double(position.scale),
+        var value: [String: Any] = ["sequence": sequence, "page": position.page, "scale": Double(position.scale),
                 "fraction": Double(position.fraction), "visiblePages": position.visiblePages,
-                "mode": position.mode, "spreadOffset": position.spreadOffset]
+                "mode": position.mode, "spreadOffset": position.spreadOffset, "cropEnabled": position.crop != nil]
+        if let crop = position.crop { value["crop"] = crop.percentages }
+        return value
     }
 
     private func publish(_ position: ReaderNativePDFDocument.Position, lease: String) async throws {
@@ -145,7 +147,7 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
               let webView, message.webView === webView, trusted(message.frameInfo.request.url),
               let body = message.body as? [String: Any],
               Set(body.keys) == Set(["action", "token", "file", "bookID", "digest", "value"]),
-              let action = body["action"] as? String, ["page", "layout", "scale", "fit"].contains(action),
+              let action = body["action"] as? String, ["page", "layout", "scale", "fit", "crop"].contains(action),
               let lease = body["token"] as? String,
               valid(lease), body["file"] as? String == file, body["bookID"] as? String == bookID,
               body["digest"] as? String == digest,
@@ -175,6 +177,11 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
                       [0.0, 1.0].contains(offset.doubleValue) else { throw unavailable() }
                 document.setLayout(mode: mode, firstPageAlone: offset.intValue == 1)
                 document.fitWidth()
+            case "crop":
+                guard let value = body["value"] as? [String: Any], Set(value.keys) == Set(["enabled", "crop"]),
+                      let enabled = value["enabled"] as? NSNumber, CFGetTypeID(enabled) == CFBooleanGetTypeID(),
+                      let data = value["crop"] as? [String: Any], let crop = ReaderNativePDFCrop(data) else { throw unavailable() }
+                try document.setCrop(enabled.boolValue ? crop : nil)
             default:
                 guard body["value"] is NSNull else { throw unavailable() }
                 document.fitWidth()

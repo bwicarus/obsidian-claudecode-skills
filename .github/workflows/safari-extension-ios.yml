@@ -243,6 +243,11 @@ jobs:
           xcodebuild -project "$PROJECT_FILE" -list
 
 
+      - name: Verify native PDF crop coordinates
+        run: |
+          xcrun swiftc ios/BWReader/App/ReaderNativePDFCrop.swift ios/BWReader/Tests/NativePDFCrop/main.swift -o "$RUNNER_TEMP/native-pdf-crop-test"
+          "$RUNNER_TEMP/native-pdf-crop-test"
+
       - name: Build unsigned simulator candidate
         shell: bash
         run: |
