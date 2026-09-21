@@ -11,6 +11,8 @@ final class ReaderNativePDFSelection {
         let text: String
         let sentence: String
         let rects: [CGRect]
+        let quality: String?
+        let matches: Int
     }
     private let context: JSContext
     private let page: JSValue
@@ -47,6 +49,7 @@ final class ReaderNativePDFSelection {
     func range(from start: Int, to end: Int) throws -> Value? { try invoke("range", arguments: [start, end]) }
     func exact(_ indexes: [Int]) throws -> Value? { try invoke("exact", arguments: [indexes]) }
     func sentence(_ indexes: [Int]) throws -> Value? { try invoke("sentence", arguments: [indexes]) }
+    func binding(_ value: [String: Any]) throws -> Value? { try invoke("binding", arguments: [value]) }
 
     private func invoke(_ method: String, arguments: [Any]) throws -> Value? {
         context.exception = nil
@@ -59,6 +62,6 @@ final class ReaderNativePDFSelection {
               rects.allSatisfy({ $0.count == 4 && $0.allSatisfy(\.isFinite) }) else { throw NativeBookOCRError.pageUnavailable }
         return Value(indexes: indexes, text: text, sentence: sentence, rects: rects.map {
             CGRect(x: $0[0] / width, y: $0[1] / height, width: ($0[2]-$0[0]) / width, height: ($0[3]-$0[1]) / height)
-        })
+        }, quality: value["quality"] as? String, matches: (value["matches"] as? NSNumber)?.intValue ?? 1)
     }
 }

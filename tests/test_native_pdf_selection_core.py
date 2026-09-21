@@ -72,6 +72,25 @@ class NativePDFSelectionCoreTests(unittest.TestCase):
         self.assertEqual(len(selected['rects']), 1)
         self.assertEqual(selected['rects'][0][0], 80)
 
+    def test_card_binding_keeps_exact_raw_indexes_across_table_columns(self):
+        chars = [self.char('環', 0, 0, 1), self.char('別', 100, 0, 1),
+                 self.char('境', 0, 18, 2), self.char('欄', 100, 18, 2)]
+        bind = self.run_core(chars, ['binding({from:0,to:2,ois:[0,2],text:"環境"})'])[0]
+        self.assertEqual(bind['indexes'], [0, 2])
+        self.assertEqual(bind['quality'], 'exact-set')
+        self.assertEqual(len(bind['rects']), 2)
+        self.assertTrue(all(rect[2] < 100 for rect in bind['rects']))
+
+    def test_card_binding_preserves_original_region_disambiguation_and_rejects_wrong_block(self):
+        chars = [self.char('同', 0, 0, 1), self.char('詞', 8, 0, 1),
+                 self.char('同', 100, 0, 2), self.char('詞', 108, 0, 2)]
+        layout = dict(regions=[dict(order=10, ranges=[[2, 3]])])
+        matched, rejected = self.run_core(chars,
+            ['binding({block:11,text:"同詞"})', 'binding({block:15,text:"同詞"})'], layout=layout)
+        self.assertEqual(matched['indexes'], [2, 3])
+        self.assertEqual(matched['quality'], 'by-block')
+        self.assertIsNone(rejected)
+
 
 if __name__ == '__main__':
     unittest.main()

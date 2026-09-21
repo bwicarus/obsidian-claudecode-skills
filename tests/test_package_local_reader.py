@@ -28,6 +28,22 @@ class LocalReaderPackagerTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.packager = load_packager()
 
+    def test_policy_declarations_are_not_surface_consumers_but_requests_still_are(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "static/reader-runtime/interaction-policy.js"
+            policy.parent.mkdir(parents=True)
+            policy.write_text("const routes = ['/pdf/api/epub-ink', '/pdf/api/book-crop'];", encoding="utf-8")
+            consumer = root / "static/actual.js"
+            consumer.write_text("fetch('/pdf/api/epub-ink');", encoding="utf-8")
+            (root / "index.html").write_text('<script src="/static/reader-runtime/interaction-policy.js"></script><script src="/static/actual.js"></script>', encoding="utf-8")
+            sources = self.packager._script_sources_for_surface(root, surface="pdf", shell_relative="index.html")
+            self.assertEqual([entry[1] for entry in sources], ["static/actual.js"])
+            self.assertIn("/pdf/api/epub-ink", sources[0][2])
+            policy.write_text("fetch('/pdf/api/epub-ink');", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "metadata without request calls"):
+                self.packager._script_sources_for_surface(root, surface="pdf", shell_relative="index.html")
+
     def test_third_party_sources_are_pinned_and_licensed(self) -> None:
         packages = {
             package.name: package for package in self.packager.EXTERNAL_PACKAGES

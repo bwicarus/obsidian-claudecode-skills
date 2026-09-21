@@ -866,6 +866,7 @@ def native_pdf_selection_core() -> str:
     source = STATIC / "pdf" / "reader.src"
     mapping = (source / "08-charlayer.js").read_text(encoding="utf-8")
     selection = (source / "13-selection.js").read_text(encoding="utf-8")
+    binding = (source / "34-bindcard.js").read_text(encoding="utf-8")
 
     def section(text: str, start: str, end: str) -> str:
         if text.count(start) != 1 or text.count(end) != 1:
@@ -880,6 +881,7 @@ def native_pdf_selection_core() -> str:
         section(selection, "function _selectionEndpointFilter(", "// 未声明语言的书里"),
         section(selection, "function _findCharAt(", "function _charBlockId("),
         section(selection, "function _charBlockId(", "function _selByCharRange("),
+        section(binding, "function _stripWs(", "function _bindCategory("),
         (HERE / "NativePDFSelectionCore.js").read_text(encoding="utf-8"),
     ]
     return '"use strict";\n(function () {\n' + "\n".join(parts) + '\n})();\n'
@@ -1325,9 +1327,17 @@ def _script_sources_for_surface(
             continue
         path = root / PurePosixPath(resource)
         if path.is_file():
-            sources.append((surface, resource, path.read_text(
-                encoding="utf-8", errors="replace"
-            )))
+            source = path.read_text(encoding="utf-8", errors="replace")
+            if resource == "static/reader-runtime/interaction-policy.js":
+                # A shared registry describes BOTH document types. Its literals
+                # are declarations, never evidence that either surface uses a
+                # route. Keep actual consumers and native dispatch under the
+                # ordinary two-way coverage checks below.
+                executable = _strip_javascript_comments(source)
+                if re.search(r"\b(?:fetch|reqJson|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts|eval)\s*\(", executable):
+                    raise SystemExit("interaction-policy must remain metadata without request calls")
+                continue
+            sources.append((surface, resource, source))
     inline_index = 0
     for match in re.finditer(
         r"<script\b(?P<attrs>[^>]*)>(?P<body>[\s\S]*?)</script\s*>",
@@ -1694,6 +1704,24 @@ def validate_native_interface_coverage(
     runtime_evidence = validate_native_runtime_dispatch(
         manifest, runtime_path=root / "static/pdf/native-local-runtime.js"
     )
+    # The runtime itself is excluded from generic consumer scanning: its router
+    # table must not prove its own coverage. These are actual secondary entry
+    # points, separately checked before counting them as dispatch evidence.
+    runtime_source = (root / "static/pdf/native-local-runtime.js").read_text(encoding="utf-8")
+    batch_target = _javascript_function_body(runtime_source, "nativeSyncBatchTarget")
+    batch_operation = _javascript_function_body(runtime_source, "nativeSyncBatchOperation")
+    table = re.search(r"var NATIVE_SYNC_BATCH_ENDPOINTS = Object\.freeze\(\{([\s\S]*?)\}\);", runtime_source)
+    if not table or "NATIVE_SYNC_BATCH_ENDPOINTS[url.pathname]" not in batch_target or "nativeSyncBatchTarget(op)" not in batch_operation:
+        raise SystemExit("native sync batch dispatch evidence changed")
+    for path, raw_methods in re.findall(r"'([^']+)'\s*:\s*Object\.freeze\(\[([^]]*)\]\)", table.group(1)):
+        methods = set(re.findall(r"'(GET|POST|PATCH|PUT|DELETE)'", raw_methods))
+        declared = next((route for route in routes if route["path"] == path), None)
+        if not declared or not methods or not methods.issubset(set(declared["methods"])):
+            raise SystemExit(f"native sync batch route lacks matching manifest methods: {path}")
+        runtime_evidence.add(path)
+    client_log = _strip_javascript_comments(_javascript_function_body(runtime_source, "clientLogFlush"))
+    if re.search(r"root\.fetch\(\s*['\"]/pdf/api/client-log['\"]", client_log):
+        runtime_evidence.add("/pdf/api/client-log")
     no_entry_evidence = sorted(
         str(route["path"])
         for route in routes

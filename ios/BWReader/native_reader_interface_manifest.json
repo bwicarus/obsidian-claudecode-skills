@@ -653,38 +653,6 @@
       "description": "Read or mutate explicitly identified Anki notes and cards, then report local and AnkiWeb sync outcomes separately."
     },
     {
-      "path": "/pdf/api/anki-draft",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Verify exact source text and register a private source-bound draft without writing Anki."
-    },
-    {
       "path": "/pdf/api/asset/",
       "match": "segment",
       "owner": "pi",
@@ -3166,136 +3134,10 @@
       "reason": "Documentation example inside a comment, not a request."
     },
     {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/book-crop",
-      "reason": "Shared policy declaration for the PDF surface, not a request from the EPUB shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/book-figures",
-      "reason": "Shared policy declaration for the PDF reading settings surface, not a request from the EPUB shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/book-meta",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/build-toc",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/page-chars",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/page-image",
-      "reason": "Shared policy declaration for the PDF surface, not a request from the EPUB shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/page-overlay",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/pdf-insert-page",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/read-dwell",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/reocr-page",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/reocr-page/clear",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/search",
-      "reason": "Shared PDF search policy declaration, not a request from the EPUB shell. Actual search remains in each document's original local handler."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/toc",
-      "reason": "Shared policy declaration for the PDF surface; the query channel opens toc to PDF only."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/web-translate",
-      "reason": "Policy declaration for the excluded web adapter, not a native request."
-    },
-    {
       "surface": "pdf",
       "resource": "static/pdf/rc-toolchip.js",
       "path": "/pdf/api/toolshot/x.png",
       "reason": "Documentation example inside a comment, not a request."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-action",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-assistant",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-manifest",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-search",
-      "reason": "Shared EPUB search policy declaration, not a request from the PDF shell. Actual search remains in each document's original local handler."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-section",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-translate-section",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/web-translate",
-      "reason": "Policy declaration for the excluded web adapter, not a native request."
     }
   ]
 }

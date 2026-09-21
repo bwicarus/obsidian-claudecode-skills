@@ -192,6 +192,17 @@ enum ReaderNativeConversationScript {
       function flashGroup(node) {
         return [node, ...node.querySelectorAll('*')].find(el => el.__fc && Array.isArray(el.__fc.cards));
       }
+      function inlineImageSources(values) {
+        const sources = new Set();
+        for (const value of values) {
+          if (typeof value !== 'string' || !/<img\b/i.test(value)) continue;
+          // Template content stays inert: this parses original markup without
+          // mounting it, executing scripts or fetching its image URLs.
+          const template = document.createElement('template'); template.innerHTML = value;
+          for (const image of template.content.querySelectorAll('img')) sources.add(image.getAttribute('src') || '');
+        }
+        return Array.from(sources);
+      }
       function liveArtifacts(messages) {
         for (const message of messages) {
         for (const part of message.parts) {
@@ -242,6 +253,25 @@ enum ReaderNativeConversationScript {
           }
           const cardElement = node.matches('.vc-card') ? node : node.querySelector('.vc-card');
           const body = cardElement?.querySelector('.vc-card-bd') || node.querySelector('.vc-if-bd');
+          // Inline images retain the same local asset/proxy route as image
+          // cards. Swift receives opaque IDs; it cannot request arbitrary URLs.
+          const inlineImages = {};
+          if (rc().voiceCard?.mediaRoute) {
+            const values = part.kind === 'anki' ?
+              (part.data.state === 'draft' ? (part.data.fields || []).map(f => f.value) : (part.data.faces || []).map(f => f.content)) :
+              [part.data.text, part.data.answer, part.data.detail, part.text];
+            const expected = JSON.stringify(target.inspect?.().content);
+            for (const source of inlineImageSources(values).slice(0, 64)) {
+              if (!source || source.length > 8192 || !rc().voiceCard.mediaRoute(source)) continue;
+              const mediaID = registerAction(part.id + '-inline-' + hash(source), node, () => {});
+              actions.get(mediaID).resource = () => {
+                if (JSON.stringify(target.inspect?.().content) !== expected) throw new Error('图片已更新');
+                return rc().voiceCard.mediaRoute(source);
+              };
+              inlineImages[source] = mediaID;
+            }
+          }
+          part.data.inlineImages = inlineImages;
           if ((group || body) && rc().stickynote) {
             part.data.dragId = registerAction(part.id + '-place', node, async command => {
               if (![command.x, command.y].every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
@@ -296,8 +326,12 @@ enum ReaderNativeConversationScript {
           // Media/script placements need their own native renderer. Ink uses PencilKit.
           // Keep their originals intact until that renderer is migrated.
           const rich = item.card ? JSON.stringify(item.card.cards) : item.html?.content || '';
+          const inline = inlineImageSources(item.card ? item.card.cards.flatMap(card => Object.values(card)) : [item.html?.content]);
+          const imagesReady = !/<img\b/i.test(rich) || inline.length > 0 && inline.length <= 64 && inline.every(source => {
+            return source.length > 0 && source.length <= 8192 && rc().voiceCard?.mediaRoute?.(source);
+          });
           const supported = !!(item.card || item.html) &&
-            !/<(?:iframe|video|audio|img|svg|canvas|script|button|input|select|textarea)\b/i.test(rich);
+            imagesReady && !/<(?:iframe|video|audio|svg|canvas|script|button|input|select|textarea)\b/i.test(rich);
           item.root.toggleAttribute('data-bw-native-placement', !!supported);
           for (const marker of item.markers || []) marker.node.toggleAttribute('data-bw-native-placement', !!supported);
           if (!supported || !item.visible && !item.markers?.length) return [];

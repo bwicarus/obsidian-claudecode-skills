@@ -1029,6 +1029,20 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             }''')
             media = next(p for m in page.evaluate('receipts.at(-1).messages') for p in m['parts'] if p['kind'] == 'images')
             self.assertEqual(media['data']['items'][0]['map'], dict(lat=35.68,lon=139.76,zoom=13,marks=[[35.69,139.77],[35.70,139.78]]))
+            page.evaluate('''() => {
+              RC.turnCard.addPart('inline-native', {kind:'card',card:{kind:'general',cid:'inline_native',title:'正文配图',
+                data:{text:'<p>图片前面的说明</p><img src="/pdf/api/asset/example.png" alt="示意图"><p>图片后面的说明</p>'}}});
+              __bwNativeConversation.snapshot();
+            }''')
+            inline = next(p for m in page.evaluate('receipts.at(-1).messages') for p in m['parts'] if p['title'] == '正文配图')
+            inline_id = inline['data']['inlineImages']['/pdf/api/asset/example.png']
+            inline_command = {'action':'mediaResource','scope':state['scope'],'actionId':inline_id}
+            self.assertEqual(page.evaluate('(c)=>__bwNativeConversation.perform(c)', inline_command)['resource'], '/pdf/api/asset/example.png')
+            changed = page.evaluate('''async c => {
+              document.querySelector('[data-vc-cid="inline_native"]').__vcCard.data.text = '<img src="/pdf/api/asset/changed.png">';
+              return await __bwNativeConversation.perform(c);
+            }''', inline_command)
+            self.assertFalse(changed['ok'])
             self.assertEqual(errors, [])
             browser.close()
 

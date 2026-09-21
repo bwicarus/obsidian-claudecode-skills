@@ -55,5 +55,21 @@ globalThis.BWNativePDFSelection = function (page) {
       const range = _expandSentenceFromRange(chars, values[0], values[values.length - 1]);
       return selected(range.start, range.end);
     },
+    binding(want) {
+      if (!want || typeof want !== 'object' ||
+          (want.text != null && (typeof want.text !== 'string' || want.text.length > 16000)) ||
+          (want.ois != null && (!Array.isArray(want.ois) || want.ois.length > chars.length ||
+            want.ois.some(i => !Number.isSafeInteger(i) || i < 0)))) throw new Error('Invalid binding');
+      const range = _resolveRange(chars, want);
+      if (!range) return null;
+      const rects = _rangeRects(range);
+      if (!rects?.length) return null;
+      return {
+        indexes: range.boxes.filter(c => !c.sp).map(c => c._oi),
+        text: want.text || range.boxes.filter(c => !c.sp).map(c => c.c || '').join(''),
+        sentence: '', quality: range.how, matches: range.count || 1,
+        rects: rects.map(r => [r.x0, r.y0, r.x1, r.y1]),
+      };
+    },
   });
 };

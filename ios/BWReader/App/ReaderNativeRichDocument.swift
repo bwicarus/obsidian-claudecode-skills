@@ -8,9 +8,11 @@ struct ReaderNativeRichDocument: View {
     let content: String
     var format = "markdown"
     var onSelection: ((String) -> Void)?
+    var inlineImages: [String: String] = [:]
+    var imageModel: ReaderNativeConversationModel?
 
     var body: some View {
-        if format == "html", content.range(of: "<table\\b", options: [.regularExpression, .caseInsensitive]) != nil,
+        if format == "html", content.range(of: "<(table|img)\\b", options: [.regularExpression, .caseInsensitive]) != nil,
            let blocks = ReaderNativeDocumentParser.blocks(content) {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
@@ -18,7 +20,15 @@ struct ReaderNativeRichDocument: View {
                     case .text(let html):
                         ReaderNativeRichText(content: html, format: "html", onSelection: onSelection)
                     case .table(let table):
-                        ReaderNativeTable(table: table, onSelection: onSelection)
+                        ReaderNativeTable(table: table, onSelection: onSelection, inlineImages: inlineImages, imageModel: imageModel)
+                    case .image(let source, let title):
+                        if let id = inlineImages[source], let imageModel,
+                           let item = ReaderNativeImageItem(["mediaID": id, "title": title]) {
+                            ReaderNativeImageCard(item: item, model: imageModel)
+                        } else {
+                            Label(title.isEmpty ? "图片尚未就绪" : title, systemImage: "photo")
+                                .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
+                        }
                     }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
@@ -31,6 +41,7 @@ struct ReaderNativeRichDocument: View {
 private enum ReaderNativeDocumentBlock {
     case text(String)
     case table(ReaderNativeTableData)
+    case image(source: String, title: String)
 }
 
 private struct ReaderNativeTableData {
@@ -72,13 +83,18 @@ private enum ReaderNativeDocumentParser {
         func visit(_ node: Node) {
             if let element = node as? Element {
                 if ["script", "style", "iframe"].contains(element.tagName()) { return }
+                if element.tagName() == "img" {
+                    flush()
+                    result.append(.image(source: (try? element.attr("src")) ?? "", title: (try? element.attr("alt")) ?? ""))
+                    return
+                }
                 if element.tagName() == "table" {
                     flush()
                     if let value = table(element) { result.append(.table(value)) }
                     else { result.append(.text((try? element.outerHtml()) ?? "")) }
                     return
                 }
-                if (try? element.select("table").isEmpty()) == false {
+                if (try? element.select("table,img").isEmpty()) == false {
                     flush()
                     for child in element.getChildNodes() { visit(child) }
                     flush()
@@ -189,6 +205,8 @@ private struct ReaderNativeTableLayout: Layout {
 private struct ReaderNativeTable: View {
     let table: ReaderNativeTableData
     let onSelection: ((String) -> Void)?
+    let inlineImages: [String: String]
+    let imageModel: ReaderNativeConversationModel?
     @State private var availableWidth: CGFloat = 0
 
     var body: some View {
@@ -197,7 +215,8 @@ private struct ReaderNativeTable: View {
             ScrollView(.horizontal) {
                 ReaderNativeTableLayout(columns: table.columns, rows: table.rows) {
                     ForEach(table.cells) { cell in
-                        ReaderNativeRichText(content: cell.html, format: "html", onSelection: onSelection)
+                        AnyView(ReaderNativeRichDocument(content: cell.html, format: "html", onSelection: onSelection,
+                                                       inlineImages: inlineImages, imageModel: imageModel))
                             .padding(8).frame(maxHeight: .infinity, alignment: .topLeading)
                             .background(cell.header ? ReaderNativeTheme.accent.opacity(0.09) : Color.clear)
                             .overlay(Rectangle().stroke(ReaderNativeTheme.muted.opacity(0.2), lineWidth: 0.5))

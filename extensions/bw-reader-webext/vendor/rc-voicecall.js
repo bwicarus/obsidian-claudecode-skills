@@ -5549,6 +5549,7 @@ if (window.__bwPwaProviderOnly) return;
       _pinToggle(el, binding.label, function () { return binding.textFn(cardIndex); }, binding.spec);
       return RC.voiceCard.contextControl(el);
     },
+    mediaRoute: _cardMediaURL,
     mediaPresentation: function (card) {
       if (!card || !['images', 'videos'].includes(card.kind)) return [];
       return (card.data.items || []).map(function (item, index) {

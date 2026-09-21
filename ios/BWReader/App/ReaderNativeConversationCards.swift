@@ -309,8 +309,8 @@ private struct ReaderNativeConversationArtifactCard: View {
             let id = part.string("selectId")
             guard !id.isEmpty else { return }
             model.updateTextSelection(id: id, text: selection)
-        })
-        if resolved == "html", text.range(of: "<(script|iframe|button|input|canvas|svg|img|video|audio)\\b", options: [.regularExpression, .caseInsensitive]) != nil {
+        }, inlineImages: part.data["inlineImages"] as? [String: String] ?? [:], imageModel: model)
+        if resolved == "html", text.range(of: "<(script|iframe|button|input|canvas|svg|video|audio)\\b", options: [.regularExpression, .caseInsensitive]) != nil {
             Text("内嵌媒体或交互部分尚未迁移，原件已保留。")
                 .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
         }

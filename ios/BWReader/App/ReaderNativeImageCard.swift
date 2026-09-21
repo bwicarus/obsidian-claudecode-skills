@@ -81,6 +81,7 @@ struct ReaderNativeImageCard: View {
             }.font(.caption).buttonStyle(.borderless)
         }
         .task(id: "\(model.scope):\(item.id):\(attempt)") {
+            image = nil; viewing = false
             guard item.map == nil else { return }
             failed = false
             do {

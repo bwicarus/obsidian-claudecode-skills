@@ -27,6 +27,15 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let rect: CGRect
         let color: Color
     }
+    struct NoteGeometry {
+        let id: String
+        let page: Int
+        let rect: CGRect
+        let bindingRects: [CGRect]
+        let bindingQuality: String?
+        let bindingMatches: Int
+        let bindingUnresolved: Bool
+    }
 
     let view = ReaderNativePDFView()
     @Published private(set) var position = Position(page: 1, scale: 1, visiblePages: [])
@@ -35,6 +44,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     @Published private(set) var geometryRevision = 0
     @Published private(set) var ink: [Int: [ReaderNativeCardStroke]] = [:]
     @Published private(set) var highlights: [Int: [Highlight]] = [:]
+    /// Original records, including IDs, card state, media payload and private ink.
+    /// This is a read-only projection; editing still uses the original repository.
+    @Published private(set) var notes: [[String: Any]] = []
     var onPosition: ((Position) -> Void)?
     var onSelection: (([CharacterSelection]) -> Void)?
     var onGeometry: (() -> Void)?
@@ -136,7 +148,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         view.document = nil
         access = nil; digest = ""; pendingPage = nil
         ready = false; error = nil
-        domainHeaders = [:]; ink = [:]; highlights = [:]
+        domainHeaders = [:]; ink = [:]; highlights = [:]; notes = []
         lastPageFrames = [:]; lastViewBounds = .null
         characterReads.values.forEach { $0.cancel() }; characterReads = [:]
         characterReadTickets = [:]
@@ -203,6 +215,63 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
               let target = document.page(at: page - 1) else { throw NativeBookOCRError.pageUnavailable }
         view.go(to: target)
         publishPosition()
+    }
+
+    func applyNotes(_ domain: ReaderBookUserStateDomainPayload, bookID: String, contentSHA256: String) throws {
+        guard domain.name == .notes, access?.record.id == bookID,
+              digest == contentSHA256.lowercased(), ready else { throw ReaderBookUserStateWebAdapterError.contextChanged }
+        _ = try ReaderBookUserStatePackageCodec.validateDomainPayload(domain)
+        if let previous = domainHeaders[.notes] {
+            guard domain.revision >= previous.revision,
+                  domain.revision != previous.revision || domain.digest == previous.digest else {
+                throw ReaderBookUserStateWebAdapterError.contextChanged
+            }
+        }
+        guard let records = try JSONSerialization.jsonObject(with: Data(domain.payloadJson.utf8)) as? [[String: Any]] else {
+            throw ReaderBookUserStateWebAdapterError.invalidResponse
+        }
+        // Do not silently drop a malformed/duplicate original ID. Unrenderable
+        // payloads remain intact so their type can be migrated independently.
+        let ids = records.compactMap { $0["id"] as? String }
+        guard ids.count == records.count, Set(ids).count == ids.count, ids.allSatisfy({ !$0.isEmpty }) else {
+            throw ReaderBookUserStateWebAdapterError.invalidResponse
+        }
+        notes = records
+        domainHeaders[.notes] = (domain.revision, domain.digest)
+    }
+
+    /// Resolve saved anchors through PDFKit and the original character-binding
+    /// rules. No DOM frame, CSS zoom or newly assigned card identity is involved.
+    func noteGeometry(_ note: [String: Any], presentationSize: CGSize? = nil, in target: UIView? = nil) -> NoteGeometry? {
+        guard let id = note["id"] as? String, let anchor = note["anchor"] as? [String: Any],
+              anchor["kind"] as? String == "pdf", let number = anchor["page"] as? NSNumber,
+              number.doubleValue == Double(number.intValue),
+              let pageRect = viewRect(normalized: CGRect(x: 0, y: 0, width: 1, height: 1), page: number.intValue, in: target) else { return nil }
+        let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any] ?? [:]
+        let x = (anchor["x"] as? NSNumber)?.doubleValue ?? 0
+        let y = (anchor["y"] as? NSNumber)?.doubleValue ?? 0
+        let w = (note["w"] as? NSNumber)?.doubleValue ?? 300
+        let h = (note["h"] as? NSNumber)?.doubleValue ?? 180
+        let base = (payload["base_w"] as? NSNumber)?.doubleValue ?? 0
+        guard [x, y, w, h, base].allSatisfy(\.isFinite), w > 0, h > 0 else { return nil }
+        let collapsed = note["collapsed"] as? Bool == true || ["dot", "min"].contains(payload["form"] as? String ?? "")
+        let ratio = base > 0 ? pageRect.width / base : 1
+        let preferred = presentationSize ?? CGSize(width: max(140, w * ratio), height: h * ratio)
+        guard preferred.width.isFinite, preferred.height.isFinite, preferred.width > 0, preferred.height > 0 else { return nil }
+        let rect = CGRect(x: pageRect.minX + min(1, max(0, x)) * pageRect.width,
+                          y: pageRect.minY + min(1, max(0, y)) * pageRect.height,
+                          width: collapsed ? 44 : preferred.width, height: collapsed ? 44 : preferred.height)
+        let bind = payload["bind"] as? [String: Any]
+        var resolved: ReaderNativePDFSelection.Value?
+        var bindingRects: [CGRect] = []
+        if let bind, bind["kind"] as? String == "page-chars", let boundPage = bind["page"] as? NSNumber,
+           boundPage.doubleValue == Double(boundPage.intValue), let core = selectionCores[boundPage.intValue] {
+            resolved = try? core.binding(bind)
+            bindingRects = resolved?.rects.compactMap { viewRect(normalized: $0, page: boundPage.intValue, in: target) } ?? []
+        }
+        return NoteGeometry(id: id, page: number.intValue, rect: rect, bindingRects: bindingRects,
+                            bindingQuality: resolved?.quality, bindingMatches: resolved?.matches ?? 0,
+                            bindingUnresolved: bind?["kind"] as? String == "page-chars" && bindingRects.isEmpty)
     }
 
     func setSpread(_ enabled: Bool, firstPageAlone: Bool) {
