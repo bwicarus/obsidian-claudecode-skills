@@ -68,18 +68,6 @@ test("⑥ 返回的形状与 PDF 那侧对得上", () => {
   }
 });
 
-test("⑦ EPUB 的原生选区菜单只挂在 EPUB 上", () => {
-  const WEBVIEW = readFileSync(new URL("ios/BWReader/App/ReaderWebView.swift", ROOT), "utf8")
-    .replace(/\r\n/g, "\n");
-  assert.match(WEBVIEW, /func webView\(_ webView: WKWebView, willPresentEditMenuWithAnimator/);
-  // ⚠ PDF 走的是原生正文自己的 UIEditMenuInteraction；两套都挂会在同一个选区上
-  // 出现两份「查词」。
-  assert.match(WEBVIEW, /currentLocalBook\?\.format == \.epub else \{ return \}/);
-  for (const title of ["查词", "词组", "翻译", "解释"]) {
-    assert.ok(WEBVIEW.includes(`("${title}", "`), title + " 不在 EPUB 菜单里");
-  }
-});
-
 test("⑧ 选区此刻去问，不缓存", () => {
   const WEBVIEW = readFileSync(new URL("ios/BWReader/App/ReaderWebView.swift", ROOT), "utf8")
     .replace(/\r\n/g, "\n");
@@ -113,5 +101,4 @@ test("⑩ EPUB 语法送的是所在句，不是整段", () => {
   // 直接送整段的话，AI 会去分析一段而不是一句。
   assert.match(grammar, /g\.extractSentence\(sel\.context \|\| sel\.text, sel\.text\)/);
   assert.match(grammar, /openNativeGrammar\(sentence: payload\["sentence"\]/);
-  assert.ok(WEBVIEW.includes('UIAction(title: "语法"'), "菜单里要有语法");
 });

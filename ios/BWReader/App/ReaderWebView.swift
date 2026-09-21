@@ -5487,36 +5487,6 @@ extension ReaderWebViewModel: WKNavigationDelegate {
 }
 
 extension ReaderWebViewModel: WKUIDelegate {
-    /// EPUB 的选区菜单。
-    ///
-    /// EPUB 正文是 XHTML，Apple 没有对应 PDFKit 的渲染器 —— 业界（Readium）也是
-    /// web view 渲正文、外面包一层原生。所以这里不换渲染器，只把**菜单**换成原生的：
-    /// 选中文字后出现的那几项，点了开的是与 PDF 同一组原生面板。
-    ///
-    /// ⚠ 取数走 `window.__bwReaderLookupData` —— 与 PDF 那侧**同名同形状**，
-    /// 所以下面这段不关心自己站在哪个阅读器上。判据（英/日分流等）在共享层一处。
-    func webView(_ webView: WKWebView, willPresentEditMenuWithAnimator animator: any UIEditMenuInteractionAnimating) {
-        // 只在 EPUB 上加：PDF 走的是原生正文自己的 UIEditMenuInteraction，
-        // 两套都挂会在同一个选区上出现两份「查词」。
-        guard webView === self.webView, currentLocalBook?.format == .epub else { return }
-        let actions: [(String, String, String)] = [
-            ("查词", "character.book.closed", "dict"),
-            ("词组", "text.badge.star", "phrase"),
-            ("翻译", "translate", "translate"),
-            ("解释", "lightbulb", "explain"),
-        ]
-        var items = actions.map { title, icon, mode in
-            UIAction(title: title, image: UIImage(systemName: icon)) { [weak self] _ in
-                Task { @MainActor [weak self] in await self?.openEPUBLookup(mode: mode) }
-            }
-        }
-        items.append(UIAction(title: "语法", image: UIImage(systemName: "chart.bar.doc.horizontal")) {
-            [weak self] _ in
-            Task { @MainActor [weak self] in await self?.openEPUBGrammar() }
-        })
-        animator.addMenuElement(UIMenu(title: "", options: .displayInline, children: items))
-    }
-
     /// 问网页要当前选区，然后开原生面板。
     ///
     /// ⚠ 选区要**此刻**去问，不能缓存：菜单从弹出到点下去之间，用户可能已经改了
