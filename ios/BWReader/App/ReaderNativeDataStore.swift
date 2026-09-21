@@ -15,7 +15,7 @@ import SQLite3
 /// 而存储写错的表现是数据丢、或者读回来是旧的。
 ///
 /// 四张表对应原来的四个对象仓：
-/// | records | `collection\|id` | 单取 / 按 collection 列 / 覆盖 |
+/// | records | (collection, id) 复合键 | 单取 / 按 collection 列 / 覆盖 |
 /// | journal | `cursor` | 从游标起顺序读 / 追加 / 裁剪最旧 |
 /// | mutations | `mutationId` | 单取（重放去重）/ put / 按时间裁剪 |
 /// | meta | `key` | 游标、epoch、迁移标记 |
@@ -87,15 +87,21 @@ final class ReaderNativeDataStore {
     // MARK: - 表结构
 
     private func migrate() throws {
+        // ⚠ 主键是 **(collection, id) 复合键**，不是拼成一个字符串。
+        //   原来用 NUL 字节拼，而 sqlite3_bind_text(..., -1, ...) 按 NUL 结尾读
+        //   —— 拼出来的键被截到只剩 collection，于是同一 collection 的所有
+        //   记录挤进同一行，ON CONFLICT 又没更新 id，三条笔记只剩一条
+        //   还顶着最早那个 id。复合键把这一整类分隔符 bug 消掉
+        //   （2026-09-22 由用例抓到）。
         try execute("""
             CREATE TABLE IF NOT EXISTS records (
-                pk TEXT PRIMARY KEY,
                 collection TEXT NOT NULL,
                 id TEXT NOT NULL,
                 rev INTEGER NOT NULL,
                 updatedAt INTEGER NOT NULL,
                 deleted INTEGER NOT NULL,
-                json TEXT NOT NULL
+                json TEXT NOT NULL,
+                PRIMARY KEY (collection, id)
             )
             """)
         // 列表要按 (updatedAt, id) 排 —— 与 IndexedDB 那个 collectionUpdated
@@ -125,10 +131,9 @@ final class ReaderNativeDataStore {
 
     // MARK: - 读
 
-    static func primaryKey(collection: String, id: String) -> String { collection + "\u{0}" + id }
-
     func record(collection: String, id: String) throws -> Record? {
-        try records(matching: "pk = ?", bind: [.text(Self.primaryKey(collection: collection, id: id))]).first
+        try records(matching: "collection = ? AND id = ?",
+                    bind: [.text(collection), .text(id)]).first
     }
 
     func records(collection: String, limit: Int, offset: Int) throws -> [Record] {
@@ -198,13 +203,12 @@ final class ReaderNativeDataStore {
                 }
             }
             try self.execute("""
-                INSERT INTO records (pk, collection, id, rev, updatedAt, deleted, json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(pk) DO UPDATE SET
+                INSERT INTO records (collection, id, rev, updatedAt, deleted, json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(collection, id) DO UPDATE SET
                     rev = excluded.rev, updatedAt = excluded.updatedAt,
                     deleted = excluded.deleted, json = excluded.json
                 """, bind: [
-                    .text(Self.primaryKey(collection: record.collection, id: record.id)),
                     .text(record.collection), .text(record.id), .int(record.rev),
                     .int(record.updatedAt), .int(record.deleted ? 1 : 0), .text(record.json)
                 ])
