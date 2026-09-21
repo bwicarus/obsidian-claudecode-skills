@@ -84,6 +84,21 @@ struct ReaderNativeArtifactInspection: Identifiable {
     var error: String?
 }
 
+struct ReaderNativeContextAttachment: Identifiable {
+    let id: String
+    let title: String
+    let text: String
+    let removeID: String
+
+    init?(_ value: [String: Any]) {
+        guard let id = value["id"] as? String, let removeID = value["removeId"] as? String else { return nil }
+        self.id = id
+        self.removeID = removeID
+        title = value["title"] as? String ?? "已选内容"
+        text = value["text"] as? String ?? ""
+    }
+}
+
 /// A projection of the existing Reader conversation. The JavaScript bridge owns
 /// history, streaming reconciliation, artifact identities and all write actions.
 @MainActor
@@ -97,6 +112,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var legacyVisible = false
     @Published private(set) var sidebarOpen = false
     @Published private(set) var selectionText = ""
+    @Published private(set) var attachments: [ReaderNativeContextAttachment] = []
     @Published private(set) var readingTools: [ReaderNativeControl] = []
     @Published private(set) var messages: [ReaderNativeConversationMessage] = []
     @Published private(set) var capabilities = Set<String>()
@@ -112,8 +128,42 @@ final class ReaderNativeConversationModel: ObservableObject {
 
     var commandHandler: (([String: Any]) async -> String?)?
     var inspectionHandler: (([String: Any]) async -> [String: Any])?
+    var imageHandler: ((String, String) async throws -> Data)?
+
+    func imageData(_ id: String) async throws -> Data {
+        guard let imageHandler else { throw URLError(.resourceUnavailable) }
+        let ticket = generation
+        let data = try await imageHandler(scope, id)
+        guard ticket == generation, !Task.isCancelled else { throw CancellationError() }
+        return data
+    }
     private var generation = UUID()
     private var retiredNavigationScopes = Set<String>()
+    private var pendingSelections: [(id: String, text: String)] = []
+    private var deliveringSelection = false
+
+    // Text selection can change while a card action is saving. Coalesce each
+    // text view's latest value, including release, instead of dropping it at
+    // the generic button duplicate guard and leaving a permanently held chip.
+    func updateTextSelection(id: String, text: String) {
+        guard !id.isEmpty, supports("liveAction"), let commandHandler else { return }
+        pendingSelections.removeAll { $0.id == id }
+        pendingSelections.append((id, text))
+        guard !deliveringSelection else { return }
+        deliveringSelection = true
+        let ticket = generation
+        let selectionScope = scope
+        Task {
+            defer { if generation == ticket { deliveringSelection = false } }
+            while generation == ticket, !pendingSelections.isEmpty {
+                let value = pendingSelections.removeFirst()
+                let failure = await commandHandler(["action": "liveAction", "scope": selectionScope,
+                                                    "actionId": value.id, "text": value.text])
+                if generation == ticket, !value.text.isEmpty, let failure,
+                   !pendingSelections.contains(where: { $0.id == value.id }) { error = failure }
+            }
+        }
+    }
 
     func receive(_ payload: [String: Any]) {
         guard (payload["version"] as? NSNumber)?.intValue == 1,
@@ -128,6 +178,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         if nextScope != scope {
             inspection = nil
             generation = UUID()
+            pendingSelections = []
+            deliveringSelection = false
             pendingActions = []
             error = nil
             draft = ""
@@ -148,6 +200,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         legacyVisible = payload["legacyVisible"] as? Bool ?? false
         sidebarOpen = payload["sidebarOpen"] as? Bool ?? false
         selectionText = (payload["selection"] as? [String: Any])?["text"] as? String ?? ""
+        attachments = (payload["attachments"] as? [[String: Any]] ?? []).compactMap(ReaderNativeContextAttachment.init)
         readingTools = (payload["readingTools"] as? [[String: Any]] ?? []).compactMap(ReaderNativeControl.init)
         capabilities = Set(payload["capabilities"] as? [String] ?? [])
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
@@ -160,6 +213,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         if !scope.isEmpty { retiredNavigationScopes.insert(scope) }
         generation = UUID()
         scope = ""
+        pendingSelections = []
+        deliveringSelection = false
         revision = -1
         title = "阅读助手"
         conversationMode = "normal"
@@ -168,6 +223,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         legacyVisible = false
         sidebarOpen = false
         selectionText = ""
+        attachments = []
         readingTools = []
         messages = []
         capabilities = []

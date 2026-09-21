@@ -45,6 +45,7 @@ struct ReaderNativeRichText: UIViewRepresentable {
         view.textContainerInset = UIEdgeInsets(top: rendered.hasRuby ? font.pointSize * 0.6 : 0, left: 0, bottom: 0, right: 0)
         if selected.location != NSNotFound, NSMaxRange(selected) <= rendered.length { view.selectedRange = selected }
         coordinator.updating = false
+        coordinator.textViewDidChangeSelection(view)
         view.invalidateIntrinsicContentSize()
         view.setNeedsLayout()
     }

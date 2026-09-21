@@ -3915,8 +3915,10 @@ if (window.__bwPwaProviderOnly) return;
   }
   function _pinToggle(el, label, textFn, spec) {
     spec = spec || {};
-    var on = !el.classList.contains('vc-picked');
     var cid = (el.dataset && el.dataset.vcCid) || '';
+    var registry = _ctxSelectionRegistry();
+    var id = _pinContextId(el, cid, spec);
+    var on = registry ? !registry.isSelected(id) : !el.classList.contains('vc-picked');
     if (on) {
       if (cid && _pins.cids[cid] && _pins.map[_pins.cids[cid]]) {   // 95:同编号的卡已在上下文=同一张卡的另一实例,不重复注入——只把这个实例也点亮
         el.dataset.pinLabel = _pins.cids[cid];
@@ -3949,10 +3951,9 @@ if (window.__bwPwaProviderOnly) return;
       if (_turnHost && _turnHost !== el && !spec.parentId) {
         var _tid0 = _turnHost.getAttribute('data-turn');
         if (_tid0) {
-          var _specCopy = {};
-          Object.keys(spec).forEach(function (key) { _specCopy[key] = spec[key]; });
-          _specCopy.parentId = 'turn:' + _tid0;
-          spec = _specCopy;
+          // Keep the descriptor live: Anki's text provider refreshes source /
+          // meta for the active card immediately before selection.
+          spec.parentId = 'turn:' + _tid0;
         }
       }
     } catch (e) {}
@@ -4066,6 +4067,40 @@ if (window.__bwPwaProviderOnly) return;
     if (!it) return;
     try { RC.voiceCtx && RC.voiceCtx.event('removed_imgs', { aid: it.aid || '', title: it.title || '' }, { mergeMs: 800 }); } catch (e) {}
   }
+  function _mediaItemAction(root, card, index, action) {
+    var item = card && card.data && card.data.items && card.data.items[index];
+    if (!Number.isInteger(index) || !item || item._gone) throw new Error('图片已移除或更新');
+    var cell = root.querySelector('.vc-ig-cell[data-i="' + index + '"]');
+    if (!cell) throw new Error('图片尚未准备好');
+    if (action === 'remove') {
+      if (cell.dataset.pinLabel) _pinForget(cell.dataset.pinLabel, cell.dataset.vcCid, cell);
+      item._gone = 1; cell.remove(); _imgGoneNote(item);
+    } else if (action === 'toggle') {
+      var contextID = 'card:' + (card.cid || '') + '/item:' + index;
+      var registry = _ctxSelectionRegistry();
+      var on = registry ? !registry.isSelected(contextID) : !cell.classList.contains('vc-picked');
+      root.querySelectorAll('.vc-ig-cell.vc-picked').forEach(function (other) {
+        other.classList.remove('vc-picked');
+        if (other.dataset.pinLabel) _pinForget(other.dataset.pinLabel, other.dataset.vcCid, other);
+      });
+      if (on) {
+        var cid = (card.cid || '') + '#' + index;
+        if (!_pins.cids[cid] || !_pins.map[_pins.cids[cid]]) {
+          var label = (item.title || (card.kind === 'videos' ? '视频' : '配图')) +
+            (card.kind === 'videos' ? '·视频' : '·图') + (index + 1);
+          var unique = label, n = 2;
+          while (_pins.map[unique]) unique = label + '·' + (n++);
+          cell.dataset.pinLabel = unique; cell.dataset.vcCid = cid;
+          _pinRemember(cell, unique,
+            ((item.title || '') + (item.channel ? '(' + item.channel + ')' : '') + ' ' + (item.url || '')).slice(0, 500),
+            cid, { id: contextID, kind: card.kind === 'videos' ? 'video-item' : 'image-item',
+              parentId: 'card:' + (card.cid || ''), source: { cid: card.cid || '', item: index } });
+        }
+        cell.classList.add('vc-picked');
+      }
+    } else throw new Error('图片操作无效');
+    _pinSync(); _chipRender();
+  }
   function _igWire(root, card) {   // 88/98:图卡+视频卡交互——✕移除;点封面=只选中这一张(带入上下文,再点取消);视频▶=播放
     if (!card || (card.kind !== 'images' && card.kind !== 'videos')) return;
     // 地图项就地升级成可拖可缩的活地图(用户 2026-08-26:卡片内直接能动,
@@ -4118,10 +4153,7 @@ if (window.__bwPwaProviderOnly) return;
       if (x) {
         ev.stopPropagation();
         var i0 = +x.getAttribute('data-i');
-        var cell = x.closest('.vc-ig-cell');
-        if (cell) cell.remove();
-        try { (card.data.items || [])[i0]._gone = 1; } catch (e) {}
-        try { _imgGoneNote((card.data.items || [])[i0]); } catch (e) {}   // 删除通告(append-only 保缓存)
+        _mediaItemAction(root, card, i0, 'remove');
         return;
       }
       var img = ev.target.closest('.vc-ig-img');
@@ -4129,34 +4161,7 @@ if (window.__bwPwaProviderOnly) return;
       if (img) {
         ev.stopPropagation();
         var i1 = +img.getAttribute('data-i');
-        var it = ((card.data || {}).items || [])[i1] || {};
-        var cell1 = img.closest('.vc-ig-cell');
-        var on = !cell1.classList.contains('vc-picked');
-        root.querySelectorAll('.vc-ig-cell.vc-picked').forEach(function (c2) {   // 单选:先清其它
-          c2.classList.remove('vc-picked');
-          var lb2 = c2.dataset.pinLabel, gc2 = c2.dataset.vcCid;
-          if (lb2) _pinForget(lb2, gc2, c2);
-        });
-        if (on) {
-          var gcid = (card.cid || '') + '#' + i1;   // 95:图编号=卡号#序号(浮层/侧栏两实例互斥)
-          if (_pins.cids[gcid] && _pins.map[_pins.cids[gcid]]) {
-            try { if (typeof _toast === 'function') _toast('这张图已在上下文中'); } catch (e) {}
-            return;
-          }
-          cell1.classList.add('vc-picked');
-          var lb0 = (it.title || (card.kind === 'videos' ? '视频' : '配图')) + (card.kind === 'videos' ? '·视频' : '·图') + (i1 + 1);
-          var lb = lb0, lbn = 2; while (_pins.map[lb]) lb = lb0 + '·' + (lbn++);
-          cell1.dataset.pinLabel = lb; cell1.dataset.vcCid = gcid;
-          _pinRemember(cell1, lb,
-            ((it.title || '') + (it.channel ? '(' + it.channel + ')' : '') + ' ' + (it.url || '')).slice(0, 500),
-            gcid, {
-              id: 'card:' + (card.cid || '') + '/item:' + i1,
-              kind: card.kind === 'videos' ? 'video-item' : 'image-item',
-              parentId: 'card:' + (card.cid || ''),
-              source: { cid: card.cid || '', item: i1 }
-            });
-        }
-        _pinSync(); _chipRender();
+        _mediaItemAction(root, card, i1, 'toggle');
       }
     });
   }
@@ -5500,6 +5505,33 @@ if (window.__bwPwaProviderOnly) return;
     mkCid: _mkCid,
     pinReg: function (el, cid) { try { _pinReg(el, cid); } catch (e) {} },       // 登记实例 → 选中按 cid 处处同步
     pinBind: function (el, label, fn, spec, pressTarget) { try { return _pinBind(el, label, fn, spec, pressTarget); } catch (e) { return null; } },   // 长按=选中/取消；第 5 参数只收窄手势面
+    contextControl: function (el) {
+      var binding = el && el.__bwPinHoldBindings && el.__bwPinHoldBindings[0];
+      if (!binding) return null;
+      var id = _pinContextId(el, el.dataset.vcCid || '', binding.spec);
+      var registry = _ctxSelectionRegistry();
+      return { id: id, selected: registry ? registry.isSelected(id) : el.classList.contains('vc-picked') };
+    },
+    toggleContext: function (el, cardIndex) {
+      var binding = el && el.__bwPinHoldBindings && el.__bwPinHoldBindings[0];
+      if (!binding || !el.isConnected) throw new Error('卡片已更新，请重新选择');
+      _pinToggle(el, binding.label, function () { return binding.textFn(cardIndex); }, binding.spec);
+      return RC.voiceCard.contextControl(el);
+    },
+    mediaPresentation: function (card) {
+      if (!card || !['images', 'videos'].includes(card.kind)) return [];
+      return (card.data.items || []).map(function (item, index) {
+        if (item._gone) return null;
+        var ref = card.kind === 'videos' ? _videoCardRef(item) : null;
+        var id = 'card:' + (card.cid || '') + '/item:' + index;
+        return { index: index, title: item.title || '', source: item.src || '',
+          route: ref ? _videoCardThumb(item, ref) : _cardImageURL(item),
+          sourceURL: _cardHttpsURL(item.page || item.source_url || (ref ? ref.url : item.url)),
+          selected: !!(_ctxSelectionRegistry() && _ctxSelectionRegistry().isSelected(id)),
+          isMap: !!_mapMetaFromUrl(item.url) };
+      }).filter(Boolean);
+    },
+    mediaAction: _mediaItemAction,
     cardSize: {
       get: function (cid) {
         cid = _cardSizeCid(cid);

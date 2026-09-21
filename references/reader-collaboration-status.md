@@ -12,6 +12,12 @@
 
 ## 当前事实
 
+- 2026-09-21 完全原生化开发续接于 `codex/reader-fully-native-20260921`：
+  `69e0fedb` 在 `35547568072` 完成模拟器编译、签名归档和 IPA 导出，未上传 TestFlight。
+  继续接入原生整卡上下文/附件条及图片卡，保留原身份、状态和本地图片缓存路径；
+  后续改动尚待 Apple 编译。详见 `reader-native-migration.md`，线上仍是 1.1.85 (764)。
+  用户纠正无需定时续办，误建的 `reader-2` 已删除；不要再次创建自动任务。
+
 - 0.2.49 Windows 隔离测试已完成；未触碰日常 Chrome profile。
 - 文档便签 repository、background port、facade 和共享便签 UI 已接通，定向合同测试通过。
 - 已修复独立 document-notes Vault、Safari compat 漏包和 SPA 实时 URL 围栏。

@@ -186,6 +186,16 @@ private struct ReaderNativeConversationArtifactCard: View {
             }
             .draggable(dragPayload)
             .accessibilityHint("长按卡片标题，拖到书页正文放置")
+            if !part.string("pinId").isEmpty {
+                Button {
+                    Task { await model.perform("liveAction", parameters: ["actionId": part.string("pinId")]) }
+                } label: {
+                    Label(part.data["pinned"] as? Bool == true ? "已带入对话" : "带入对话",
+                          systemImage: part.data["pinned"] as? Bool == true ? "checkmark.circle.fill" : "plus.bubble")
+                }
+                .font(.caption).buttonStyle(.borderless)
+                .disabled(model.isPerforming("liveAction"))
+            }
             if isAnki {
                 if part.data["live"] as? Bool == true {
                     if isDraft && !fields.isEmpty {
@@ -231,6 +241,10 @@ private struct ReaderNativeConversationArtifactCard: View {
                 weatherContent
             } else if part.kind == "news" {
                 newsContent
+            } else if part.kind == "images" {
+                let items = (part.data["items"] as? [[String: Any]] ?? []).compactMap(ReaderNativeImageItem.init)
+                ForEach(items) { item in ReaderNativeImageCard(item: item, model: model) }
+                if items.isEmpty { Text("此卡片的图片已移除。").font(.caption).foregroundStyle(.secondary) }
             } else {
                 if !part.text.isEmpty {
                     ReaderNativeConversationMarkdown(text: readable(part.text))
@@ -275,7 +289,7 @@ private struct ReaderNativeConversationArtifactCard: View {
         ReaderNativeRichText(content: text, format: resolved, onSelection: { selection in
             let id = part.string("selectId")
             guard !id.isEmpty else { return }
-            Task { await model.perform("liveAction", parameters: ["actionId": id, "text": selection]) }
+            model.updateTextSelection(id: id, text: selection)
         })
         if resolved == "html", text.range(of: "<(script|iframe|button|input|canvas|svg|img|video|audio)\\b", options: [.regularExpression, .caseInsensitive]) != nil {
             Text("内嵌媒体或交互部分尚未迁移，原件已保留。")

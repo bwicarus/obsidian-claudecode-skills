@@ -2021,12 +2021,13 @@
         kind: 'card',
         source: { cid: gid, gid: gid }
       };
-      var selectionText = function () {
+      var selectionText = function (indexOverride) {
         var live = snapshot(result.bd);
         if (!live.length) live = copyCards(cards);
         var state = result.bd && result.bd.__fc;
-        var activeIndex = state && Number.isInteger(state.idx)
-          ? Math.max(0, Math.min(live.length - 1, state.idx))
+        var requestedIndex = Number.isInteger(indexOverride) ? indexOverride : state && state.idx;
+        var activeIndex = Number.isInteger(requestedIndex)
+          ? Math.max(0, Math.min(live.length - 1, requestedIndex))
           : 0;
         var active = live[activeIndex] || {};
         var source = {};

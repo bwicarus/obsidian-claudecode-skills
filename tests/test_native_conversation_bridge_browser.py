@@ -197,6 +197,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
               window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};
               window.__asstSend=()=>{}; window.__asstBusy=()=>false;
             }''')
+            page.add_script_tag(path=str(ROOT / '_server_deploy/static/reader-runtime/context-selection-registry.js'))
             for name in ['rc-ui.js', 'rc-sidedrawer.js', 'rc-flashcard.js', 'rc-voicecall.js', 'rc-turncard.js']:
                 page.add_script_tag(path=str(ROOT / '_server_deploy/static/pdf' / name))
             page.evaluate('''() => {
@@ -267,6 +268,26 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertTrue(first['data']['live'])
             self.assertEqual(first['data']['state'], 'draft')
             self.assertIn('保存到 Reader 卡库', [c['title'] for c in first['data']['controls']])
+            # Native pagination must pick the visible card, even though the
+            # hidden legacy pager is still showing index zero. Use the same
+            # source / pending-state snapshot and selection registry as web.
+            pinned = page.evaluate('(command)=>__bwNativeConversation.perform(command)', {
+                'action':'liveAction','scope':native['scope'],'actionId':cards[1]['data']['pinId']})
+            self.assertTrue(pinned['ok'])
+            selected_card = page.evaluate('BWReaderRuntime.contextSelections.snapshot().items[0]')
+            self.assertEqual(selected_card['id'], 'card:card_abc12345')
+            self.assertEqual(selected_card['source']['index'], 1)
+            self.assertEqual(selected_card['meta']['active_index'], 1)
+            self.assertEqual(selected_card['meta']['cards'][1]['front'], '二問')
+            self.assertEqual(page.evaluate('entity.bd.__fc.idx'), 0)
+            page.wait_for_timeout(100)
+            context = page.evaluate('receipts[receipts.length-1].attachments')
+            self.assertEqual(len(context), 1)
+            self.assertNotIn('meta', context[0])
+            self.assertTrue(page.evaluate('(command)=>__bwNativeConversation.perform(command)', {
+                'action':'liveAction','scope':native['scope'],'actionId':context[0]['removeId']})['ok'])
+            self.assertEqual(page.evaluate('BWReaderRuntime.contextSelections.snapshot().items'), [])
+            self.assertFalse(page.evaluate("entity.el.classList.contains('vc-picked')"))
             selected = page.evaluate('(command)=>__bwNativeConversation.perform(command)', {
                 'action':'liveAction','scope':native['scope'],'actionId':first['data']['selectId'],'text':'問題'})
             self.assertTrue(selected['ok'])
@@ -379,6 +400,29 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertTrue(mutation['removed']['states']['1']['removed'])
             self.assertEqual(mutation['removed']['id'], 'card_cafe1234')
             self.assertEqual(len(mutation['removed']['cards']), 2)
+            page.evaluate('''() => {
+              RC.turnCard.addPart('images-native', {kind:'card',card:{kind:'images',cid:'images_native',title:'配图',data:{items:[
+                {title:'第一张',url:'https://example.org/a.png',src:'来源'},
+                {title:'第二张',url:'https://example.org/b.png',src:'来源'}]}}});
+            }''')
+            page.wait_for_timeout(100)
+            state = page.evaluate('receipts[receipts.length-1]')
+            media = next(p for m in state['messages'] for p in m['parts'] if p['kind'] == 'images')
+            self.assertEqual(len(media['data']['items']), 2)
+            media_item = media['data']['items'][1]
+            image_command = {'action':'mediaResource','scope':state['scope'],'actionId':media_item['mediaID']}
+            resource = page.evaluate('(c)=>__bwNativeConversation.perform(c)', image_command)
+            self.assertEqual(resource['resource'], '/pdf/api/img-proxy?url=https%3A%2F%2Fexample.org%2Fb.png')
+            self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
+                'action':'liveAction','scope':state['scope'],'actionId':media_item['selectID']})['ok'])
+            self.assertEqual(page.evaluate('BWReaderRuntime.contextSelections.snapshot().items[0].source'), {'cid':'images_native','item':1})
+            self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
+                'action':'liveAction','scope':state['scope'],'actionId':media_item['removeID']})['ok'])
+            self.assertEqual(page.evaluate('BWReaderRuntime.contextSelections.snapshot().items'), [])
+            self.assertFalse(page.evaluate('(c)=>__bwNativeConversation.perform(c)', image_command)['ok'])
+            page.wait_for_timeout(100)
+            media = next(p for m in page.evaluate('receipts[receipts.length-1].messages') for p in m['parts'] if p['kind'] == 'images')
+            self.assertEqual([i['title'] for i in media['data']['items']], ['第一张'])
             self.assertEqual(errors, [])
             browser.close()
 

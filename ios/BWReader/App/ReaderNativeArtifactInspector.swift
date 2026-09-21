@@ -23,7 +23,7 @@ struct ReaderNativeArtifactInspector: View {
                                     Text("原件数据完整保留。这里查看的是内容资料，不会重新生成或修改卡片。")
                                         .font(.subheadline).foregroundStyle(.secondary)
                                 }
-                                if !["anki", "fact", "general", "weather", "news"].contains(detail.kind) {
+                                if !["anki", "fact", "general", "weather", "news", "images"].contains(detail.kind) {
                                     Section {
                                         Label("此类型的原生交互尚未迁移", systemImage: "hammer")
                                             .foregroundStyle(.secondary)

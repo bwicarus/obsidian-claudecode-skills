@@ -410,7 +410,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             "showLegacy", "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
-            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact"]
+            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {
@@ -483,6 +483,36 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeConversation.inspectionHandler = { [weak self] command in
             guard let self else { return ["ok": false, "error": "阅读页已关闭"] }
             return await self.requestNativeConversationCommand(command)
+        }
+        nativeConversation.imageHandler = { [weak self] scope, id in
+            guard let self, let base = self.localRuntimeServer?.baseURL,
+                  let referer = self.webView.url, self.isTrustedReaderURL(referer),
+                  scope == self.nativeConversation.scope else { throw URLError(.resourceUnavailable) }
+            let result = await self.requestNativeConversationCommand([
+                "action": "mediaResource", "scope": scope, "actionId": id
+            ])
+            guard result["ok"] as? Bool == true, let route = result["resource"] as? String else {
+                throw URLError(.resourceUnavailable)
+            }
+            if route.hasPrefix("data:image/"), let comma = route.firstIndex(of: ","),
+               route[..<comma].hasSuffix(";base64"), route.utf8.count <= 23 * 1_024 * 1_024,
+               let bytes = Data(base64Encoded: String(route[route.index(after: comma)...])) { return bytes }
+            guard route.hasPrefix("/pdf/api/"), !route.hasPrefix("//"),
+                  let url = URL(string: route, relativeTo: base)?.absoluteURL,
+                  url.host == base.host, url.port == base.port,
+                  ["/pdf/api/card-asset", "/pdf/api/img-proxy", "/pdf/api/page-image"].contains(url.path)
+                    || (url.host == base.host && url.port == base.port && url.path.hasPrefix("/pdf/api/asset/")) else {
+                throw URLError(.unsupportedURL)
+            }
+            var request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 25)
+            request.setValue(referer.absoluteString, forHTTPHeaderField: "Referer")
+            let (bytes, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  (http.mimeType ?? "").hasPrefix("image/"), bytes.count <= 16 * 1_024 * 1_024 else {
+                throw URLError(.cannotDecodeContentData)
+            }
+            guard scope == self.nativeConversation.scope, referer == self.webView.url else { throw CancellationError() }
+            return bytes
         }
         let nativeComputerVoiceMessageProxy =
             WeakScriptMessageHandler(delegate: self)

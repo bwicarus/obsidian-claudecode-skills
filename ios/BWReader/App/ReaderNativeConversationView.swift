@@ -304,6 +304,28 @@ struct ReaderNativeConversationView: View {
                 }
                 .padding(9).background(ReaderNativeTheme.accentWash, in: RoundedRectangle(cornerRadius: 10))
             }
+            if !model.attachments.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(model.attachments) { item in
+                            HStack(spacing: 7) {
+                                Image(systemName: "rectangle.on.rectangle").foregroundStyle(ReaderNativeTheme.accent)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.title).font(.caption.weight(.medium)).lineLimit(1)
+                                    if !item.text.isEmpty {
+                                        Text(item.text).font(.caption2).foregroundStyle(ReaderNativeTheme.muted).lineLimit(1)
+                                    }
+                                }.frame(maxWidth: 160, alignment: .leading)
+                                Button {
+                                    Task { await model.perform("liveAction", parameters: ["actionId": item.removeID]) }
+                                } label: { Image(systemName: "xmark.circle.fill") }
+                                .accessibilityLabel("移除\(item.title)")
+                            }
+                            .padding(9).background(ReaderNativeTheme.accentWash, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }.scrollIndicators(.hidden)
+            }
             if isReview {
                 Label(voiceActive || voiceBusy ? "复习文字使用独立对话，与当前语音分开。" : "复习对话", systemImage: "rectangle.on.rectangle")
                     .font(.caption2).foregroundStyle(ReaderNativeTheme.muted)

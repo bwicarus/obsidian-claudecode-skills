@@ -11,7 +11,7 @@ enum ReaderNativeConversationScript {
       if (!handler || typeof handler.postMessage !== 'function') return;
       let legacyVisible = false, nativeMode = false;
       let thread = null, threadObserver = null, timer = null, revision = 0;
-      let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null;
+      let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null, selectionSubscription = null, selectionRegistry = null;
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
       let controls = null, controlsObserver = null, suspended = false;
       let drawerElement = null, drawerObserver = null, contextObserver = null, contextElement = null, toolbarObserver = null, toolbarElement = null;
@@ -116,10 +116,26 @@ enum ReaderNativeConversationScript {
           });
         }
         if (kind === 'card' && part.card) {
-          const card = part.card, data = card.data || {};
+          const mounted = node.__vcCard || node.querySelector('.vc-card')?.__vcCard;
+          const card = mounted?.cid && mounted.cid === part.card.cid ? mounted : part.card, data = card.data || {};
           const result = artifact(id, node, card.title || '生成物');
           actions.get(result.actionId).inspect = () => ({ kind: card.kind || 'artifact', title: result.title, content: card });
-          if (['fact', 'general', 'weather', 'news'].includes(card.kind)) {
+          if (card.kind === 'images' && rc().voiceCard?.mediaPresentation) {
+            result.kind = 'images';
+            const root = node.matches('.vc-card') ? node : node.querySelector('.vc-card');
+            result.data.items = rc().voiceCard.mediaPresentation(card).map(item => {
+              const mediaID = registerAction(id + '-image-' + item.index, node, () => {});
+              actions.get(mediaID).resource = () => {
+                const current = rc().voiceCard.mediaPresentation(card).find(value => value.index === item.index);
+                if (!current) throw new Error('图片已移除');
+                return current.route;
+              };
+              return { index: item.index, title: text(item.title, 240), source: text(item.source, 120),
+                sourceURL: text(item.sourceURL, 4096), mediaID, selected: item.selected, isMap: item.isMap,
+                selectID: root ? registerAction(id + '-image-select-' + item.index, root, () => rc().voiceCard.mediaAction(root, card, item.index, 'toggle')) : '',
+                removeID: root ? registerAction(id + '-image-remove-' + item.index, root, () => rc().voiceCard.mediaAction(root, card, item.index, 'remove')) : '' };
+            });
+          } else if (['fact', 'general', 'weather', 'news'].includes(card.kind)) {
             result.kind = card.kind;
             result.data = safeFields(data, ['answer', 'detail', 'text', 'summary', 'description', 'loc', 'date', 'lo', 'hi', 'cond', 'precip', 'tip']);
             if (card.kind === 'news' && Array.isArray(data.items)) result.data.items = data.items.map(item => safeFields(item, ['t', 's', 'src']));
@@ -179,6 +195,12 @@ enum ReaderNativeConversationScript {
           if (!node?.isConnected) continue;
           const group = flashGroup(node);
           const cardIndex = Number(part.id.match(/-c-(\d+)$/)?.[1] || 0);
+          const pinOwner = [node, ...node.querySelectorAll('*')].find(el => el.__bwPinHoldBindings?.length);
+          const pin = pinOwner && rc().voiceCard?.contextControl?.(pinOwner);
+          if (pin) {
+            part.data.pinned = pin.selected;
+            part.data.pinId = registerAction(part.id + '-pin', pinOwner, () => rc().voiceCard.toggleContext(pinOwner, cardIndex));
+          }
           if (typeof window.__setFocusSel === 'function') {
             const selectionOwner = part.id;
             part.data.selectId = registerAction(part.id + '-select', node, command => {
@@ -255,6 +277,15 @@ enum ReaderNativeConversationScript {
       function selectedContext() {
         return { text: text(window.__focusSel?.text, 16000), kind: text(window.__focusSel?.kind, 40) };
       }
+      function selectedAttachments() {
+        const registry = window.BWReaderRuntime?.contextSelections;
+        if (!registry?.snapshot || !thread) return [];
+        return (registry.snapshot({ maxText: 180 }).items || []).map(item => ({
+          id: scope + ':context:' + hash(item.id), title: text(item.label, 160) || '已选内容',
+          text: text(item.text, 180), kind: text(item.kind, 80),
+          removeId: registerAction('context-remove:' + item.id, thread, () => registry.deselect(item.id))
+        }));
+      }
       function getScopeKey() {
         let identity = '', history = '', mode = pane()?.dataset.assistantMode || 'normal';
         try { const state = account()?.snapshot(); identity = [state?.contextId || '', state?.namespace || '', state?.generation ?? '', state?.active || false].join(':'); } catch (_) {}
@@ -311,8 +342,9 @@ enum ReaderNativeConversationScript {
         previousNodes = all;
         liveArtifacts(messages);
         const readingTools = toolbarActions();
+        const attachments = selectedAttachments();
         const payload = { version: 1, scope, revision: 0, title: text(document.title, 160) || '阅读助手', ready: isReady(), busy: isBusy(),
-          legacyVisible, selection: selectedContext(), readingTools, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          legacyVisible, selection: selectedContext(), attachments, readingTools, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -383,6 +415,11 @@ enum ReaderNativeConversationScript {
           if (parent) { contextObserver = new MutationObserver(schedule); contextObserver.observe(parent, { childList: true, subtree: true, characterData: true }); }
         }
         wrapNotifications(window, ['__setFocusSel', '__clearFocusSel', '__renderFocusSel']);
+        const registry = window.BWReaderRuntime?.contextSelections;
+        if (registry !== selectionRegistry) {
+          selectionSubscription?.(); selectionRegistry = registry;
+          selectionSubscription = registry?.subscribe?.(schedule) || null;
+        }
         const currentControls = document.getElementById('asst-input');
         if (currentControls !== controls) {
           controlsObserver?.disconnect(); controls = currentControls;
@@ -441,6 +478,12 @@ enum ReaderNativeConversationScript {
             setLegacy(action === 'showLegacy');
           } else if (action === 'refresh') {
             rc().assistant?.reloadHistory?.();
+          } else if (action === 'mediaResource') {
+            const target = actions.get(command.actionId);
+            if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected || !target.resource) {
+              return { ok: false, error: '图片已更新，请重试' };
+            }
+            return { ok: true, resource: target.resource() };
           } else if (action === 'inspectArtifact') {
             const target = actions.get(command.actionId);
             if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected || !target.inspect) {
