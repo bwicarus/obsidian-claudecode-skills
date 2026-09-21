@@ -781,15 +781,17 @@ window._favOpenPicker = function () {
   }
   // 虚拟 .pdf-upage 墨迹落盘:绑真 id 后 POST 到 realPage(/api/ink 按整数页键);未绑(临时)则只留 el.__inkStrokes,绑定时补。
   //   不写 _ink.byPage[realPage](本会话那页号仍是被 stale 的原页,写它会让 stale 页误显本页墨迹);下次开书 _inkLoadAll 从服务端拿。
-  window._upInkPersist = function (el) {
-    var rec = el && el.__upRec; if (!rec || _upIsTempId(rec.id) || !UP_FILE) return;
+  window._upInkPersist = function (el, retainedStrokes) {
+    var rec = el && el.__upRec;
+    if (!rec || _upIsTempId(rec.id) || !UP_FILE) return Promise.resolve({ ok: false, error: 'ink_page_pending' });
     try {
       // 55:记自回声指纹(与 pdf-tail _ink.echo 同一本账)——插入页存墨迹触发的 SSE 广播会被本端收到,
       // 按页号命中"尚未重编号的旧同名页"(=插入页的下一页)把墨迹串过去;3s 抑制窗兜住
       try { var _ik = window._ink || (window._ink = {}); (_ik.echo = _ik.echo || {})[rec.page] = Date.now(); } catch (e) {}
-      fetch('/pdf/api/ink', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-        body: JSON.stringify({ file: UP_FILE, page: rec.page, strokes: el.__inkStrokes || [] }) });
-    } catch (_) {}
+      var strokes = el.__inkStrokes || retainedStrokes;
+      if (!Array.isArray(strokes)) return Promise.resolve({ ok: false, error: 'ink_state_unavailable' });
+      return RCInk.persistPage('/pdf/api/ink', { file: UP_FILE, page: rec.page, strokes: strokes });
+    } catch (_) { return Promise.resolve({ ok: false, error: 'ink_save_failed' }); }
   };
 
   // overlay 页常驻覆盖层:显示态渲 RC.md(空则提示);点击进 textarea 即时编辑

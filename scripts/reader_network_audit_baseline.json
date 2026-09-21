@@ -6,7 +6,7 @@
     "cache-first-unannotated": 3,
     "dynamic-unannotated": 122,
     "local-immediate-unannotated": 6,
-    "unclassified-literal": 73
+    "unclassified-literal": 68
   },
   "allowances": {
     "cache-first-unannotated|_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js|fetch|fetch('/pdf/api/phrase-mark')|phrase.state.read must prove cached/local read before network": 1,
@@ -137,11 +137,7 @@
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/epub-dbg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msg: '[html] ' + m }), keepalive: true })|POST /pdf/api/epub-dbg": 1,
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/note-composite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: FREL, id: entry.id }) })|POST /pdf/api/note-composite": 1,
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/vocab-anki', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ word: lemma }) })|POST /pdf/api/vocab-anki": 1,
-    "unclassified-literal|_server_deploy/static/pdf/epub-html.js|navigator.sendBeacon|navigator.sendBeacon('/pdf/api/epub-ink', new Blob([JSON.stringify({ file: _inkFileOf(k), idx: k, strokes: st })], { type: 'application/json' }))|POST /pdf/api/epub-ink": 1,
-    "unclassified-literal|_server_deploy/static/pdf/epub-html.js|navigator.sendBeacon|navigator.sendBeacon('/pdf/api/ink', new Blob([JSON.stringify({ file: sg2[1], page: parseInt(sg2[2], 10), strokes: st })], { type: 'application/json' }))|POST /pdf/api/ink": 1,
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|new EventSource|new EventSource('/pdf/api/reader-events')|STREAM /pdf/api/reader-events": 1,
-    "unclassified-literal|_server_deploy/static/pdf/pdf-tail.js|fetch|fetch('/pdf/api/ink', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: FILE_REL, page: num, strokes: strokes || [] }), })|POST /pdf/api/ink": 1,
-    "unclassified-literal|_server_deploy/static/pdf/pdf-tail.js|navigator.sendBeacon|navigator.sendBeacon('/pdf/api/ink', new Blob([JSON.stringify({ file: FILE_REL, page: num, strokes: _ink.byPage[num] || [] })], { type: 'application/json' }))|POST /pdf/api/ink": 1,
     "unclassified-literal|_server_deploy/static/pdf/pdf-tail.js|new EventSource|new EventSource('/pdf/api/reader-events')|STREAM /pdf/api/reader-events": 1,
     "unclassified-literal|_server_deploy/static/pdf/pdf-uishared.js|RC.reqJson|RC.reqJson('PATCH', '/pdf/api/html-highlights', Object.assign({ file: _ovHlKey(rec), id: h.id }, f))|PATCH /pdf/api/html-highlights": 1,
     "unclassified-literal|_server_deploy/static/pdf/pdf-uishared.js|RC.reqJson|RC.reqJson('POST', '/pdf/api/html-highlights', { file: _ovHlKey(info.rec), start: info.anchor.start, end: info.anchor.end, text: info.text || '', color: color, sentence: info.ctx || '', note: note || '' })|POST /pdf/api/html-highlights": 1,
@@ -150,7 +146,6 @@
     "unclassified-literal|_server_deploy/static/pdf/pdf-uishared.js|RC.reqJson|RC.reqJson('POST', '/pdf/api/run-event', body)|POST /pdf/api/run-event": 1,
     "unclassified-literal|_server_deploy/static/pdf/pdf-uishared.js|RC.reqJson|RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev, file: UP_FILE, upage: rec.id })|POST /pdf/api/run-event": 1,
     "unclassified-literal|_server_deploy/static/pdf/pdf-uishared.js|RC.reqJson|RC.reqJson('POST', '/pdf/api/run-start', { file: UP_FILE, kind: spec.kind || 'dictation', upage: rec.id, page: rec.page, params: spec.params || {} })|POST /pdf/api/run-start": 1,
-    "unclassified-literal|_server_deploy/static/pdf/pdf-uishared.js|fetch|fetch('/pdf/api/ink', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true, body: JSON.stringify({ file: UP_FILE, page: rec.page, strokes: el.__inkStrokes || [] }) })|POST /pdf/api/ink": 1,
     "unclassified-literal|_server_deploy/static/pdf/rc-assistant.js|fetch|fetch('/api/assistant/action-prefs')|GET /api/assistant/action-prefs": 2,
     "unclassified-literal|_server_deploy/static/pdf/rc-assistant.js|fetch|fetch('/api/assistant/voice-config')|GET /api/assistant/voice-config": 1,
     "unclassified-literal|_server_deploy/static/pdf/rc-assistant.js|fetch|fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })|POST /api/assistant/voice-config": 1,

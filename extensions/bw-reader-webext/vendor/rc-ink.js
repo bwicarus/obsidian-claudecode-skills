@@ -13,7 +13,7 @@ if (window.__bwPwaProviderOnly) return;
  *   - 点数组字段 s.p(阅读器)|| s.pts(便签),读取统一 _pts()
  *   - 笔画类型 s.t 缺省按 'pen'(便签笔画从不写 t)
  *   - 默认色/宽经 defs 覆盖(便签用用户当前 INK 色;阅读器保持 '#e74c3c'/2.5)
- * 指针状态机/保存策略/live canvas 不在此:三方真实分叉(PDF 快照重绘、EPUB 视口叠加
+ * 指针状态机/防抖策略/live canvas 不在此:三方真实分叉(PDF 快照重绘、EPUB 视口叠加
  * live canvas、便签 rAF 小画布),留在各自文件。
  */
 (function () {
@@ -267,8 +267,38 @@ if (window.__bwPwaProviderOnly) return;
     host.__inkRedo = [];
   }
 
+  // Debounced/immediate writers (including inserted/favourite PDF pages) share the same
+  // ordered transport. Freeze at enqueue time: a later erase must not mutate an
+  // in-flight request, and an older save must never overtake its successor.
+  var saveQueues = new Map();
+  function persistPage(url, payload) {
+    var body;
+    try { body = JSON.stringify(payload); } catch (_) {
+      return Promise.resolve({ ok: false, error: 'ink_payload_invalid' });
+    }
+    var key = JSON.stringify([url, payload.file, String(payload.page == null ? payload.idx : payload.page)]);
+    var previous = saveQueues.get(key);
+    var pending = (previous || Promise.resolve()).then(async function () {
+      try {
+        // @interaction drawing.page.save
+        var response = await fetch(url, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: body, keepalive: new TextEncoder().encode(body).byteLength < 60000
+        });
+        if (!response || !response.ok) return { ok: false, error: 'ink_save_failed' };
+        var receipt = await response.json();
+        if (!receipt || receipt.ok !== true) return { ok: false, error: 'ink_save_rejected' };
+        return { ok: true, persisted: true, current: saveQueues.get(key) === pending };
+      } catch (_) { return { ok: false, error: 'ink_save_failed' }; }
+    });
+    saveQueues.set(key, pending);
+    pending.then(function () { if (saveQueues.get(key) === pending) saveQueues.delete(key); });
+    return pending;
+  }
+
   window.RCInk = { drawStroke: drawStroke, ptSeg: ptSeg, hit: hit, norm: norm,
                    redraw: redraw, eraseAt: eraseAt, pushUndo: pushUndo,
+                   persistPage: persistPage,
                    ensureRegionOrdinals: ensureRegionOrdinals,
                    nextRegionOrdinal: nextRegionOrdinal,
                    positionToolbarAbove: positionToolbarAbove,

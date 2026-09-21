@@ -4542,6 +4542,7 @@
         var voicePage = _voicePageOfInkEl(segment.el, segment.idx);
         _epInk.lastEl = segment.el;
         _inkRedraw(segment.el);
+        segment.strokes = _inkStrokesOf(segment.el);
         _inkScheduleSave(segment.el, segment.idx);
         voiceChangesByPage[String(voicePage)] = {
           page: voicePage,
@@ -4550,12 +4551,28 @@
       });
       operation.state = 'applied';
       scheduleReport();
-      // Match PDF: make native PencilKit changes visible to Realtime at pen-up,
-      // without waiting for the periodic adapter poll.
+      operation.voiceChanges = Object.keys(voiceChangesByPage).map(function (key) {
+        return voiceChangesByPage[key];
+      });
+      return operation.kind === 'commit' || operation.kind === 'createRegion'
+        ? { ok: true, written: operation.written, sections: Object.keys(operation.touched) }
+        : { ok: true, removed: operation.removed, sections: Object.keys(operation.touched) };
+    }
+    async function persistOperation(input) {
+      var opId = operationId(input), operation = opId && appliedOps[opId];
+      if (!operation || operation.state !== 'applied') return { ok: false, error: 'native_operation_stale' };
+      if (operation.persisted) return { ok: true, persisted: true, duplicate: true };
+      var receipts = await Promise.all(Object.keys(operation.touched).map(function (key) {
+        var segment = operation.touched[key];
+        return _inkScheduleSave(segment.el, segment.idx, true, segment.strokes);
+      }));
+      if (receipts.some(function (receipt) { return !receipt || receipt.ok !== true; })) {
+        return { ok: false, error: 'native_ink_not_saved' };
+      }
+      operation.persisted = true;
+      // Match PDF: release pending ink only after the original store accepts it.
       try {
-        var voiceChanges = Object.keys(voiceChangesByPage).map(function (key) {
-          return voiceChangesByPage[key];
-        });
+        var voiceChanges = operation.voiceChanges;
         window.dispatchEvent(new CustomEvent('rc:inkchange', {
           detail: {
             source: 'native-pencil',
@@ -4565,9 +4582,7 @@
           }
         }));
       } catch (e) {}
-      return operation.kind === 'commit' || operation.kind === 'createRegion'
-        ? { ok: true, written: operation.written, sections: Object.keys(operation.touched) }
-        : { ok: true, removed: operation.removed, sections: Object.keys(operation.touched) };
+      return { ok: true, persisted: true };
     }
     function resumeCommit(operation) {
       while (operation.nextSegment < operation.segments.length) {
@@ -4612,6 +4627,7 @@
     window.__bwNativeInkHost = {
       describe: describe,
       refresh: report,
+      persist: persistOperation,
       ownsPoint: function (clientX, clientY) {
         var hit = document.elementFromPoint(clientX, clientY);
         if (!hit || (hit.closest && hit.closest(interactiveSelector))) return false;
@@ -4698,31 +4714,34 @@
 
   // ── 保存 / 加载(按 section idx,debounce POST)──
   // ⚠ 900ms 防抖窗口内关页/切后台会丢最后一批笔画 → dirty 集合 + pagehide/切后台 sendBeacon 立即补发。
-  function _inkScheduleSave(el, idx) {
+  function _inkScheduleSave(el, idx, immediate, retainedStrokes) {
     // ⚠ 捕获数组引用快照,不在 setTimeout 里延迟读 el.__inkStrokes:section 重渲染/回收会重置它 →
     //   延迟读会把空值存进服务器覆盖真笔画(同 PDF 侧根因)。快照指向原数组(有笔画),继续画是同数组 push。
-    var strokes = el.__inkStrokes;
+    var strokes = el.__inkStrokes || _epInk.data[idx] || retainedStrokes;
+    if (!Array.isArray(strokes)) return Promise.resolve({ ok: false, error: 'ink_state_unavailable' });
     _epInk.data[idx] = strokes;
     (_epInk.dirty = _epInk.dirty || {})[idx] = true;
     (_epInk.pend = _epInk.pend || {})[idx] = 1;   // 有新一批待存(save 成功清 dirty 前查它:期间又画了 → 保持 dirty)
     clearTimeout(_epInk.saveTimers[idx]);
+    if (immediate) { delete _epInk.pend[idx]; return _inkSave(idx, strokes); }
     _epInk.saveTimers[idx] = setTimeout(function () { if (_epInk.pend) delete _epInk.pend[idx]; _inkSave(idx, strokes); }, 900);
   }
-  function _inkSave(idx, strokes) {
+  async function _inkSave(idx, strokes) {
     // 绘图有改动 → 交给共享层合并(停手约 1s 才去取版本)。这里每笔都调是安全的。
     try { window.RC && RC.outgoing && RC.outgoing.drawingTouched(FREL, idx); } catch (e) {}
-    if (!FREL) return;
+    if (!FREL) return { ok: false, error: 'ink_book_missing' };
     // POST **落地后**才清 dirty(审查:在途窗口清了会被对侧同步用 pre-POST 旧值覆盖本地);期间又画了(pend)→ 保持
-    var done = function () { if (_epInk.dirty && !(_epInk.pend && _epInk.pend[idx])) delete _epInk.dirty[idx]; };
-    var fail = function () { (_epInk.dirty = _epInk.dirty || {})[idx] = true; };   // 失败重标脏,flush 兜底还有机会补
-    var k = String(idx);
+    var k = String(idx), receipt;
     if (k.indexOf('pdf|') === 0) {   // 收藏夹 PDF 页:写回原书 PDF 墨迹(/api/ink 按页号;同一张纸)
       var sg = k.split('|');
-      reqJson('POST', '/pdf/api/ink', { file: sg[1], page: parseInt(sg[2], 10), strokes: strokes || [] }, done, fail);
-      return;
+      receipt = await RCInk.persistPage('/pdf/api/ink', { file: sg[1], page: parseInt(sg[2], 10), strokes: strokes || [] });
+    } else {
+      receipt = await RCInk.persistPage('/pdf/api/epub-ink', { file: _inkFileOf(idx), idx: idx, strokes: strokes || [] });
+      if (receipt.ok && receipt.current) _inkShotSync(_inkFileOf(idx), (strokes || []).length > 0);
     }
-    reqJson('POST', '/pdf/api/epub-ink', { file: _inkFileOf(idx), idx: idx, strokes: strokes || [] }, done, fail);
-    _inkShotSync(_inkFileOf(idx), (strokes || []).length > 0);   // EPUB 笔迹合成图:存笔迹时顺带拍视口截图存服务端,see_ink 全链路回退用(用户诉求:中间层按需产合成图)
+    if (receipt.ok && receipt.current && _epInk.dirty && !(_epInk.pend && _epInk.pend[idx])) delete _epInk.dirty[idx];
+    if (!receipt.ok) (_epInk.dirty = _epInk.dirty || {})[idx] = true;
+    return receipt;
   }
   // 存笔迹时把「正文+笔迹」合成图(视口截图)推服务端 /api/epub-ink-shot,供 see_ink 各链路(文字/语音/WS/WebRTC)
   //   拿不到请求时截图时回退读。有笔迹→拍图存;无笔迹→删图。节流:同一本书 1.2s 内合并一次,避免连续落笔狂拍。
@@ -4776,9 +4795,11 @@
         var st = ((_epInk.elOf && _epInk.elOf[k] && _epInk.elOf[k].__inkStrokes) || _epInk.data[k] || []);   // 读 live el.__inkStrokes 为准(_epInk.data 可能被跨书拉取/实时同步 clobber 成陈旧)
         if (String(k).indexOf('pdf|') === 0) {   // 收藏夹 PDF 页 → /api/ink(按页号)
           var sg2 = String(k).split('|');
+          // @interaction drawing.page.save
           sent = !!(navigator.sendBeacon && navigator.sendBeacon('/pdf/api/ink',
             new Blob([JSON.stringify({ file: sg2[1], page: parseInt(sg2[2], 10), strokes: st })], { type: 'application/json' })));
         } else {
+          // @interaction drawing.page.save
           sent = !!(navigator.sendBeacon && navigator.sendBeacon('/pdf/api/epub-ink',
             new Blob([JSON.stringify({ file: _inkFileOf(k), idx: k, strokes: st })], { type: 'application/json' })));
         }

@@ -491,7 +491,8 @@ document.addEventListener('pointermove', e => {
         ? page : ((typeof currentPage !== 'undefined' && currentPage) || 0);
       _ink.lastPw = segment.pw;
       _inkRedraw(segment.pw);
-      _inkScheduleSave(segment.pw, Number.isFinite(page) ? page : 0);
+      segment.strokes = _inkStrokesOf(segment.pw);
+      segment.scheduledPersistence = _inkScheduleSave(segment.pw, Number.isFinite(page) ? page : 0);
       if (voicePage > 0) {
         voiceChangesByPage[String(voicePage)] = {
           page: voicePage,
@@ -501,13 +502,30 @@ document.addEventListener('pointermove', e => {
     });
     operation.state = 'applied';
     scheduleReport();
-    // Native PencilKit commits arrive asynchronously. Tell Realtime immediately
-    // so a question asked right after pen-up sees the new ink instead of waiting
-    // for the two-second polling fallback.
+    operation.voiceChanges = Object.keys(voiceChangesByPage).map(function (key) {
+      return voiceChangesByPage[key];
+    });
+    return operation.kind === 'commit' || operation.kind === 'createRegion'
+      ? { ok: true, written: operation.written, surfaces: Object.keys(operation.touched) }
+      : { ok: true, removed: operation.removed, surfaces: Object.keys(operation.touched) };
+  }
+  async function persistOperation(input) {
+    var opId = operationId(input), operation = opId && appliedOps[opId];
+    if (!operation || operation.state !== 'applied') return { ok: false, error: 'native_operation_stale' };
+    if (operation.persisted) return { ok: true, persisted: true, duplicate: true };
+    var receipts = await Promise.all(Object.keys(operation.touched).map(function (key) {
+      var segment = operation.touched[key];
+      var pending = segment.scheduledPersistence;
+      segment.scheduledPersistence = null;
+      return pending || _inkScheduleSave(segment.pw, parseInt(segment.pw.dataset && segment.pw.dataset.pageNum, 10) || 0, true, segment.strokes);
+    }));
+    if (receipts.some(function (receipt) { return !receipt || receipt.ok !== true; })) {
+      return { ok: false, error: 'native_ink_not_saved' };
+    }
+    operation.persisted = true;
+    // Only the durable receipt may release Realtime's pending-ink gate.
     try {
-      var voiceChanges = Object.keys(voiceChangesByPage).map(function (key) {
-        return voiceChangesByPage[key];
-      });
+      var voiceChanges = operation.voiceChanges;
       window.dispatchEvent(new CustomEvent('rc:inkchange', {
         detail: {
           source: 'native-pencil',
@@ -517,9 +535,7 @@ document.addEventListener('pointermove', e => {
         }
       }));
     } catch (e) {}
-    return operation.kind === 'commit' || operation.kind === 'createRegion'
-      ? { ok: true, written: operation.written, surfaces: Object.keys(operation.touched) }
-      : { ok: true, removed: operation.removed, surfaces: Object.keys(operation.touched) };
+    return { ok: true, persisted: true };
   }
   function resumeCommit(operation) {
     while (operation.nextSegment < operation.segments.length) {
@@ -571,6 +587,7 @@ document.addEventListener('pointermove', e => {
   window.__bwNativeInkHost = {
     describe: describe,
     refresh: report,
+    persist: persistOperation,
     ownsPoint: function (clientX, clientY) {
       var hit = document.elementFromPoint(clientX, clientY);
       if (!hit || (hit.closest && hit.closest(interactiveSelector))) return false;
@@ -656,7 +673,7 @@ document.addEventListener('pointermove', e => {
 // ── 保存 / 加载 ──
 // ⚠ 900ms 防抖窗口内关页/切后台/整页 reload(插入页 job 完成后)会丢最后一批笔画 →
 //   dirty 集合 + pagehide/切后台 sendBeacon 立即补发(后端 get_json 可读 Blob application/json)。
-function _inkScheduleSave(pw, num) {
+function _inkScheduleSave(pw, num, immediate, retainedStrokes) {
   // 插入页虚拟元素(.pdf-upage,有 __upRec):墨迹走边路径 —— 未绑真 id 只缓冲 el.__inkStrokes(_upInkPersist 内部早退),
   //   绑真 id 后 POST 到 realPage。绝不按 num 走下方 page-num POST(虚拟元素 num=NaN/currentPage 会污染别页墨迹)。
   //   ⚠ 只对有 __upRec 的虚拟元素生效;真 .page-wrap 永不带 __upRec → 全部照旧(legacy/普通页零影响)。
@@ -665,32 +682,32 @@ function _inkScheduleSave(pw, num) {
   //   → 判定放宽:只要 pw 自身或祖先是 .pdf-upage(插入页),一律走边路径,绝不写 byPage。
   var _up = null;
   if (pw) { _up = pw.__upRec ? pw : (pw.closest ? pw.closest('.pdf-upage') : null); }
-  if (_up) { if (window._upInkPersist) window._upInkPersist(_up); return; }
+  if (_up) { return window._upInkPersist ? window._upInkPersist(_up, retainedStrokes) : Promise.resolve({ ok: false }); }
   // ⚠ 捕获数组引用**快照**,绝不能在 setTimeout 里延迟读 pw.__inkStrokes:页面滚出视口/重渲染时
   //   04-render 会把 pw.__inkStrokes 置 null(见 _renderPageInto)→ 延迟读会把 null→[] 存进服务器,
   //   覆盖掉真笔画 = 手写重开消失的真根因。快照指向原数组(有笔画),不受 pw 后续被置 null 影响;
   //   继续画是往同一数组 push(快照同步可见),只有"重新赋值 pw.__inkStrokes"才分离(正是要防的)。
-  const strokes = pw.__inkStrokes;
+  const strokes = pw.__inkStrokes || _ink.byPage[num] || retainedStrokes;
+  if (!Array.isArray(strokes)) return Promise.resolve({ ok: false, error: 'ink_state_unavailable' });
   _ink.byPage[num] = strokes;
   (_ink.dirty = _ink.dirty || {})[num] = true;
   (_ink.pend = _ink.pend || {})[num] = 1;   // 有新一批待存(save 成功清 dirty 前检查它:期间又画了 → 保持 dirty,防同步覆盖)
   clearTimeout(_ink.saveTimers[num]);
+  if (immediate) { delete _ink.pend[num]; return _inkSave(num, strokes); }
   _ink.saveTimers[num] = setTimeout(() => { if (_ink.pend) delete _ink.pend[num]; _inkSave(num, strokes); }, 900);
 }
 async function _inkSave(num, strokes) {
-  if (!FILE_REL) return;
+  if (!FILE_REL) return { ok: false, error: 'ink_book_missing' };
   // 绘图有改动 → 共享层合并(停手约 1s 才去取 drawingRevision)。每笔都调是安全的。
   try { window.RC?.outgoing?.drawingTouched(FILE_REL, num); } catch (_) {}
   try {
-    const r = await fetch('/pdf/api/ink', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: FILE_REL, page: num, strokes: strokes || [] }),
-    });
+    const r = await RCInk.persistPage('/pdf/api/ink', { file: FILE_REL, page: num, strokes: strokes || [] });
     // POST **落地后**才清 dirty(审查:在途窗口清了会被对侧事件用 pre-POST 旧值覆盖本地);期间又画了(pend)→ 保持
     if (r && r.ok) { (_ink.echo = _ink.echo || {})[num] = Date.now(); }   // 55:记自存指纹,SSE 自回声 3s 内忽略
-    if (r && r.ok && _ink.dirty && !(_ink.pend && _ink.pend[num])) delete _ink.dirty[num];
+    if (r && r.ok && r.current && _ink.dirty && !(_ink.pend && _ink.pend[num])) delete _ink.dirty[num];
     if (!(r && r.ok)) (_ink.dirty = _ink.dirty || {})[num] = true;
-  } catch (_) { (_ink.dirty = _ink.dirty || {})[num] = true; }   // 失败重标脏,flush 兜底还有机会补
+    return r;
+  } catch (_) { (_ink.dirty = _ink.dirty || {})[num] = true; return { ok: false, error: 'ink_save_failed' }; }
 }
 function _inkFlushBeacon() {
   if (!FILE_REL || !_ink.dirty) return;
@@ -699,6 +716,7 @@ function _inkFlushBeacon() {
     clearTimeout(_ink.saveTimers[num]);
     let ok = false;
     try {
+      // @interaction drawing.page.save
       ok = !!(navigator.sendBeacon && navigator.sendBeacon('/pdf/api/ink',
         new Blob([JSON.stringify({ file: FILE_REL, page: num, strokes: _ink.byPage[num] || [] })], { type: 'application/json' })));
     } catch (_) {}

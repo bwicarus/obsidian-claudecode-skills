@@ -7,7 +7,7 @@ import UIKit
 /// character indexes, book identity and persisted overlays remain authoritative.
 /// Wiring its ports replaces the document renderer, not the data repositories.
 @MainActor
-final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayViewProvider {
+final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayViewProvider, UIGestureRecognizerDelegate {
     struct Position: Equatable {
         let page: Int
         let scale: CGFloat
@@ -67,6 +67,11 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         view.displayBox = .cropBox
         view.autoScales = true
         view.pageOverlayViewProvider = self
+        let clearTap = UITapGestureRecognizer(target: self, action: #selector(clearSelectionOnBlankTap(_:)))
+        clearTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        clearTap.cancelsTouchesInView = false
+        clearTap.delegate = self
+        view.addGestureRecognizer(clearTap)
         view.onLayout = { [weak self] in
             Task { @MainActor in self?.layoutChanged() }
         }
@@ -357,6 +362,21 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         selectionTask?.cancel(); customSelection = false
         textOverlays.values.forEach { $0.clearSelection() }
         view.clearSelection(); onSelection?([])
+    }
+
+    // A scan has no PDFKit text selection to dismiss. Observe a finger tap on
+    // blank paper without consuming scrolling, Pencil, handles or text taps.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard customSelection else { return false }
+        if let touched = touch.view, touched is UIControl || touched is ReaderNativePDFSelectionHandle { return false }
+        return !textOverlays.values.contains { overlay in
+            overlay.window != nil && overlay.point(inside: touch.location(in: overlay), with: nil)
+        }
+    }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
+    @objc private func clearSelectionOnBlankTap(_ gesture: UITapGestureRecognizer) {
+        if gesture.state == .ended { clearSelection() }
     }
 
     func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> UIView? {

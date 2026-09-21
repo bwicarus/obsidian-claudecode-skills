@@ -1375,36 +1375,24 @@ fileprivate extension ReaderWebViewModel {
         _ action: String,
         payload: [String: Any]
     ) async throws {
-        guard JSONSerialization.isValidJSONObject(payload) else {
-            throw NativeReaderCaptureError.invalidPagePayload
-        }
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        guard let literal = String(data: data, encoding: .utf8) else {
+        guard ["commit", "createRegion", "erase"].contains(action),
+              JSONSerialization.isValidJSONObject(payload) else {
             throw NativeReaderCaptureError.invalidPagePayload
         }
         let script = """
-        (() => {
           const host = window.__bwNativeInkHost;
-          if (!host || typeof host.\(action) !== "function") {
+          if (!host || typeof host[action] !== "function" || typeof host.persist !== "function") {
             return JSON.stringify({ok:false,error:"native_ink_unavailable"});
           }
-          return JSON.stringify(host.\(action)(\(literal)) || {});
-        })()
+          const applied = host[action](payload);
+          if (!applied || applied.ok !== true) return JSON.stringify(applied || {});
+          const saved = await host.persist(payload);
+          return JSON.stringify(saved || {});
         """
-        let raw: Any = try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Any, Error>) in
-            webView.evaluateJavaScript(script) { value, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let value {
-                    continuation.resume(returning: value)
-                } else {
-                    continuation.resume(
-                        throwing: NativeReaderCaptureError.invalidPagePayload
-                    )
-                }
-            }
-        }
+        let raw = try await webView.callAsyncJavaScript(
+            script, arguments: ["action": action, "payload": payload],
+            in: nil, contentWorld: .page
+        )
         guard
             let json = raw as? String,
             let resultData = json.data(using: .utf8),
@@ -1413,7 +1401,7 @@ fileprivate extension ReaderWebViewModel {
         else {
             throw NativeReaderCaptureError.pageUnavailable
         }
-        guard result["ok"] as? Bool == true else {
+        guard result["ok"] as? Bool == true, result["persisted"] as? Bool == true else {
             throw NativePencilHostError.rejected(
                 result["error"] as? String ?? "unknown"
             )

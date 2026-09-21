@@ -160,6 +160,14 @@
   }
 
   var POLICIES = [
+    {
+      id: 'drawing.page.save',
+      matches: [match('/pdf/api/ink', ['POST']), match('/pdf/api/epub-ink', ['POST'])],
+      surfaces: ['pwa', 'app'], kind: 'mutation', ui: 'local-immediate', localEffectMs: 50,
+      local: { owner: 'original-page-ink', pending: 'retain-unconfirmed-strokes' },
+      ack: 'reconcile', offline: 'retain-local', sync: 'direct', transport: transport(),
+      reason: '笔迹先本机显示，按原书原页串行保存；原生 pending 只在持久化回执后完成'
+    },
     networkRead('reader.document.preferences', ['/pdf/api/book-langs', '/pdf/api/book-figures', '/pdf/api/book-crop'], {
       local: { owner: 'native-local-runtime', data: 'active-book-preferences' },
       reason: '打开或刷新本书设置时读取当前保存值；读取失败不以空白默认值覆盖原配置。'
