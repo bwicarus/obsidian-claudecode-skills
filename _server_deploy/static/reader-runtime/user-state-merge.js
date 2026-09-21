@@ -178,8 +178,35 @@
     return { value: value, changed: !same(value, mine), unknown: false };
   }
 
+  /* 域是不是"空"。
+   *
+   * ⚠ 这是 native-local-runtime.js 里 `userStateDomainEmpty` 的**逐字副本**。
+   * 为什么要副本：那份函数关在 15000 行的 IIFE 里，没有导出口，为了它把整个
+   * runtime 塞进 JavaScriptCore 不合算。为什么敢用副本：
+   * `tests/reader_contract/user-state-merge.contract.test.mjs` 里有一条闸门，
+   * 把两边的函数体取出来逐字比 —— 那边一改，这边立刻红。
+   *
+   * 为什么非要它：往回写的事务里每个域都要带 `empty`，而 runtime 会用它自己的
+   * 这份重算一遍来校验，对不上整笔事务就被拒（`BW_USER_STATE_DOMAIN_INVALID`）。
+   */
+  function domainEmpty(name, value) {
+    if (name === 'highlights' || name === 'ink' || name === 'closed-regions') {
+      var pdf = value && value.pdf;
+      var epub = value && value.epub;
+      var pdfEmpty = Array.isArray(pdf) ? !pdf.length :
+        !!(pdf && typeof pdf === 'object' && !Object.keys(pdf).length);
+      var epubEmpty = Array.isArray(epub) ? !epub.length :
+        !!(epub && typeof epub === 'object' && !Object.keys(epub).length);
+      return pdfEmpty && epubEmpty;
+    }
+    if (value == null || value === '') return true;
+    if (Array.isArray(value)) return !value.length;
+    return typeof value === 'object' && !Object.keys(value).length;
+  }
+
   return {
     contract: CONTRACT,
+    domainEmpty: domainEmpty,
     canonical: canonical,
     mergeDomain: mergeDomain,
     mergeCollection: mergeCollection,

@@ -6,7 +6,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { mergeDomain, mergeCollection, mergeStrokeMap, mergePosition } =
+import { readFileSync } from "node:fs";
+
+const { mergeDomain, mergeCollection, mergeStrokeMap, mergePosition, domainEmpty } =
   await import("../../_server_deploy/static/reader-runtime/user-state-merge.js")
     .then((m) => m.default ?? m);
 
@@ -132,4 +134,33 @@ test("一边删、一边没动 → 删得掉", () => {
   const base = [{ id: "n1", rev: 1, text: "x" }];
   const out = mergeCollection(base, [], [{ id: "n1", rev: 1, text: "x" }]);
   assert.equal(out.length, 0);
+});
+
+test("domainEmpty 与 runtime 那份逐字一致", () => {
+  // ⚠ 它是 native-local-runtime.js 里 userStateDomainEmpty 的副本（那份关在
+  // 15000 行的 IIFE 里没有导出口）。往回写的事务里每个域都要带 empty，runtime
+  // 会用它自己那份重算一遍来校验，对不上整笔事务就被拒。
+  const root = new URL("../../", import.meta.url);
+  const grab = (text, head) => {
+    const start = text.indexOf(head);
+    if (start < 0) return null;
+    const end = text.indexOf("\n  }", start);
+    return text.slice(start + head.length, end).replace(/\s+/g, " ").trim();
+  };
+  const runtime = readFileSync(new URL("_server_deploy/static/pdf/native-local-runtime.js", root), "utf8");
+  const mine = readFileSync(new URL("_server_deploy/static/reader-runtime/user-state-merge.js", root), "utf8");
+  const a = grab(runtime, "function userStateDomainEmpty(name, value) {");
+  const b = grab(mine, "function domainEmpty(name, value) {");
+  assert.ok(a && b, "两边的函数都要找得到");
+  assert.equal(b, a, "runtime 那份改了，这份副本要跟着改");
+});
+
+test("domainEmpty 认得每种域的空", () => {
+  assert.equal(domainEmpty("highlights", { pdf: [], epub: [] }), true);
+  assert.equal(domainEmpty("highlights", { pdf: [{ id: "a" }], epub: [] }), false);
+  assert.equal(domainEmpty("ink", { pdf: {}, epub: {} }), true);
+  assert.equal(domainEmpty("notes", []), true);
+  assert.equal(domainEmpty("notes", [{ id: "n" }]), false);
+  assert.equal(domainEmpty("reading-position", null), true);
+  assert.equal(domainEmpty("reading-position", { page: 3 }), false);
 });

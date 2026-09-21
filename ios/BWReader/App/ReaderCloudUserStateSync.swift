@@ -58,6 +58,7 @@ actor ReaderCloudUserStateSync {
     private let store: ReaderCloudSyncStore
     private let source: any ReaderCloudUserStateSource
     private var engine: CKSyncEngine?
+    private var exportCache: [String: (at: Date, domains: [DomainSnapshot])] = [:]
     /// ⚠ 合并器带一个 JSContext，不是线程安全的。它只在这个 actor 里用 ——
     ///   actor 的串行执行就是它的保护。别把它递出去。
     private lazy var merger: ReaderUserStateMerge? = ReaderUserStateMerge()
@@ -203,18 +204,63 @@ extension ReaderCloudUserStateSync {
         return record
     }
 
+    /// 取某本书某个域的当前快照。
+    ///
+    /// ⚠ 带一个**极短命的缓存**：一次发送要问八个域，而导出是整包的
+    /// （每个域都要规范化 JSON + 算一遍 sha256，还要穿过 WebView 那一跳）。
+    /// 不缓存就是一次同步把整本书导出八遍。缓存只活两秒 —— 只为了覆盖同一趟
+    /// 发送，绝不用来当"数据没变"的依据（那是 store.loadBase 的活）。
     private func snapshot(digest: String, domain: String) async -> DomainSnapshot? {
+        if let cached = exportCache[digest], Date().timeIntervalSince(cached.at) < 2 {
+            return cached.domains.first { $0.name == domain }
+        }
         guard let domains = try? await source.exportDomains(contentSHA256: digest) else { return nil }
+        exportCache[digest] = (Date(), domains)
+        if exportCache.count > 8 {
+            // 只留最近的几本：这是趟内缓存，不是仓库。
+            let stale = exportCache.filter { Date().timeIntervalSince($0.value.at) >= 2 }.map(\.key)
+            for key in stale { exportCache.removeValue(forKey: key) }
+        }
         return domains.first { $0.name == domain }
     }
 
+    /// 写回之后缓存立刻作废：否则同一趟里后面的域会拿到写入前那版。
+    private func invalidateExportCache(_ digest: String) {
+        exportCache.removeValue(forKey: digest)
+    }
+
     /// 服务端那条更新了 → 三方合并后写回本地，必要时把合并结果再推上去。
+    ///
+    /// ⚠ 导出/写回只对**当前打开的那本书**有效（它们要穿过该书的本地 runtime）。
+    /// 别的书的远端改动**不能就地丢掉** —— 引擎已经认为这条"取过了"，丢了就是
+    /// 永久少一份。所以先落到待处理区，等那本书被打开时再合（`drainPending`）。
     private func applyRemote(_ record: CKRecord) async {
         guard let parsed = Self.parseRecordName(record.recordID.recordName),
-              let theirs = Self.payloadJSON(of: record),
-              let mine = await snapshot(digest: parsed.digest, domain: parsed.domain),
-              let merger else { return }
+              let theirs = Self.payloadJSON(of: record) else { return }
         store.saveSystemFields(record)
+        let open = await source.syncableContentDigests()
+        guard open.contains(parsed.digest) else {
+            store.savePending(digest: parsed.digest, domain: parsed.domain, json: theirs)
+            return
+        }
+        await merge(digest: parsed.digest, domain: parsed.domain, theirs: theirs,
+                    recordID: record.recordID)
+    }
+
+    /// 某本书打开时把它攒下的远端改动合掉。
+    func drainPending(contentSHA256: String) async {
+        let digest = contentSHA256.lowercased()
+        for (domain, theirs) in store.loadPending(digest: digest) {
+            await merge(digest: digest, domain: domain, theirs: theirs, recordID: nil)
+            store.clearPending(digest: digest, domain: domain)
+        }
+    }
+
+    private func merge(digest: String, domain: String, theirs: String,
+                       recordID: CKRecord.ID?) async {
+        let parsed = (digest: digest, domain: domain)
+        guard let mine = await snapshot(digest: parsed.digest, domain: parsed.domain),
+              let merger else { return }
         let base = store.loadBase(digest: parsed.digest, domain: parsed.domain)
         guard let merged = try? merger.mergeJSON(domain: parsed.domain, baseJSON: base,
                                                  mineJSON: mine.payloadJson, theirsJSON: theirs) else {
@@ -225,11 +271,15 @@ extension ReaderCloudUserStateSync {
             let next = DomainSnapshot(name: parsed.domain, payloadJson: merged.json,
                                       digest: "", revision: mine.revision, empty: false)
             guard (try? await source.applyDomains([next], contentSHA256: parsed.digest)) != nil else { return }
+            invalidateExportCache(parsed.digest)
         }
         store.saveBase(digest: parsed.digest, domain: parsed.domain, json: merged.json)
         if merged.json != theirs {
             // 合并结果与服务端那份不同 → 推回去，别让两台设备各留一半。
-            engine?.state.add(pendingRecordZoneChanges: [.saveRecord(record.recordID)])
+            let id = recordID ?? CKRecord.ID(
+                recordName: Self.recordName(digest: parsed.digest, domain: parsed.domain),
+                zoneID: CKRecordZone.ID(zoneName: Self.zoneName, ownerName: CKCurrentUserDefaultName))
+            engine?.state.add(pendingRecordZoneChanges: [.saveRecord(id)])
         }
     }
 
@@ -261,6 +311,14 @@ extension ReaderCloudUserStateSync {
 ///
 /// ⚠ 全部放在 App 自己的沙盒里，不放 WKWebView 的站点数据：整条链的目的之一
 /// 就是让这些东西不再依赖那个 WebView 活着。
+///
+/// ⚠ **不要把这里的"基线"跟 `ReaderBookUserStateBaselineStore` 合并**，
+/// 看着像重复，其实存的不是一种东西：
+/// · 那个是 Pi 同步用的，每个域只存 **digest**（够判断"谁更新"）；
+/// · 这里存的是**祖先的内容本身** —— 三方合并没有祖先内容就做不了，
+///   只有摘要的话只能退回"整域取一边"，也就是这条链上最贵的那种失败。
+/// 两者的身份键也不同：那边是 (账号域, localBookId, remoteBookId)，
+/// 这边是内容摘要（跨设备对得上的唯一东西）。
 final class ReaderCloudSyncStore: @unchecked Sendable {
     private let root: URL
     private let defaults: UserDefaults
@@ -325,6 +383,29 @@ final class ReaderCloudSyncStore: @unchecked Sendable {
 
     func clearSystemFields(_ id: CKRecord.ID) {
         try? FileManager.default.removeItem(at: systemFieldsURL(id))
+    }
+
+    // MARK: 待处理区（别的书的远端改动）
+
+    private func pendingURL(digest: String, domain: String) -> URL {
+        root.appendingPathComponent("pending-" + digest + "-" + domain + ".json")
+    }
+
+    func savePending(digest: String, domain: String, json: String) {
+        try? json.write(to: pendingURL(digest: digest, domain: domain),
+                        atomically: true, encoding: .utf8)
+    }
+
+    func loadPending(digest: String) -> [(domain: String, json: String)] {
+        ReaderCloudUserStateSync.domainNames.compactMap { domain in
+            guard let json = try? String(contentsOf: pendingURL(digest: digest, domain: domain),
+                                         encoding: .utf8) else { return nil }
+            return (domain, json)
+        }
+    }
+
+    func clearPending(digest: String, domain: String) {
+        try? FileManager.default.removeItem(at: pendingURL(digest: digest, domain: domain))
     }
 
     /// 换账号时清空：基线属于上一个账号，留着会让下一次合并拿错祖先。
