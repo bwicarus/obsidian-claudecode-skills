@@ -498,6 +498,12 @@ function harness({
     },
     confirm() { return true; }
   };
+  // The browser runs review and its registry in one realm. This harness loads
+  // the registry via Node require and review via vm: normalize that artificial
+  // boundary rather than weakening the production plain-object validation.
+  const upsertInHostRealm = window.BWReaderRuntime.contextSelections.upsert;
+  window.BWReaderRuntime.contextSelections.upsert = value =>
+    upsertInHostRealm(JSON.parse(JSON.stringify(value)));
   const calls = [];
   const sandbox = {
     window,
@@ -604,6 +610,64 @@ const candidatePayload = {
     was_due: false
   }]
 };
+
+test("native review keeps the real staged rating owner without depending on web buttons", async () => {
+  const h = harness({ context: { file: 'native.pdf', page: 1 }, fetchImpl: async () => response(candidatePayload) });
+  await h.RC.review.reload();
+  h.RC.review.setMode(true);
+  await settleAsync();
+  const original = h.RC.review.presentationState();
+  h.pane.innerHTML = '';
+  const act = (key, extra = {}) => {
+    const state = h.RC.review.presentationState();
+    return h.RC.review.performNativeInteraction({ key, contextKey: state.contextKey, cardId: state.current?.id || '', ...extra });
+  };
+  await act('reveal');
+  const rated = await act('rate', { ease: 3 });
+  assert.equal(rated.state.canUndo, true);
+  assert.equal(rated.state.ratingStaged.cardId, original.current.id);
+  assert.equal(h.calls.filter(([url]) => url === '/pdf/api/review-answer').length, 0);
+  const undone = await act('undo');
+  assert.equal(undone.state.current.id, original.current.id);
+  assert.equal(undone.state.canUndo, false);
+  assert.equal(h.calls.filter(([url]) => url === '/pdf/api/review-answer').length, 0);
+});
+
+test("native review answer selection shares coverage and explicit draft commit with original registry", async () => {
+  const h = harness({ context: { file: 'native.pdf', page: 1 }, fetchImpl: async (url) => {
+    if (url === '/api/assistant/card-improvement-draft') return response({ ok: true, draft_id: 'native-draft', targets: ['anki'], drafts: { cards: [{ front: '前', back: '后' }] } });
+    if (url === '/api/assistant/card-improvement-commit') return response({ ok: true, summary: '已写入测试后端' });
+    return response({ ...candidatePayload, cards: [{ ...candidatePayload.cards[0], entity_id: 'original-entity' }] });
+  } });
+  await h.RC.review.reload();
+  h.RC.review.setMode(true);
+  await settleAsync();
+  const answer = h.document.createElement('div');
+  h.thread.appendChild(answer);
+  const choices = h.RC.review.presentationSelections(answer, { question: '问题', text: '第一段\n\n第二段' });
+  assert.equal(choices.length, 3);
+  const act = (key, extra = {}) => {
+    const state = h.RC.review.presentationState();
+    return h.RC.review.performNativeInteraction({ key, contextKey: state.contextKey, cardId: state.current?.id || '', ...extra });
+  };
+  await act('selectAnswer', { selectionId: choices[1].id });
+  assert.equal(h.RC.review.selectedPairs()[0].answer, '第一段');
+  await act('selectAnswer', { selectionId: choices[0].id });
+  assert.equal(h.RC.review.selectedPairs()[0].answer, '第一段\n\n第二段');
+  assert.equal(h.registry.isEffective(choices[1].id), false);
+  await act('selectAnswer', { selectionId: choices[0].id });
+  assert.equal(h.RC.review.selectedPairs()[0].answer, '第一段');
+  await act('prepareDraft', { target: 'anki' });
+  assert.equal(h.RC.review.presentationState().draft.draft_id, 'native-draft');
+  assert.equal(h.calls.filter(([url]) => url.endsWith('card-improvement-commit')).length, 0);
+  await assert.rejects(act('commitDraft', { target: 'anki', draftId: 'old', confirmed: true }), /确认/);
+  await act('commitDraft', { target: 'anki', draftId: 'native-draft', confirmed: true });
+  assert.equal(h.calls.filter(([url]) => url.endsWith('card-improvement-commit')).length, 1);
+  assert.equal(h.RC.review.presentationState().commits.anki.ok, true);
+  answer.dataset.reviewCardKey = 'different-original-card';
+  assert.equal(h.RC.review.presentationSelections(answer, { question: '问题', text: '第一段\n\n第二段' }).length, 0,
+    'a still-mounted answer from another card must never be rebound as current');
+});
 
 test("uses private extension storage and sends context only in POST body", async () => {
   const h = harness({

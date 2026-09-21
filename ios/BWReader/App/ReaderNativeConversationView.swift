@@ -40,6 +40,10 @@ struct ReaderNativeConversationView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if isReview && model.supports("reviewAction") {
+                ReaderNativeReviewView(model: model)
+                Divider()
+            }
             if let error = model.error { errorBanner(error) }
             if voiceBridge.state.phase == .failed, let detail = voiceBridge.state.detail {
                 Text(detail).font(.caption).foregroundStyle(.red)
@@ -116,7 +120,7 @@ struct ReaderNativeConversationView: View {
                 if model.supports("showLegacy") {
                     Menu {
                         if model.supports("openReview") {
-                            Button("打开复习", systemImage: "rectangle.on.rectangle") {
+                            Button(isReview ? "结束复习" : "打开复习", systemImage: "rectangle.on.rectangle") {
                                 Task { await model.perform("openReview") }
                             }
                         }

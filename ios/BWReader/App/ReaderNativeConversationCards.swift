@@ -27,6 +27,25 @@ struct ReaderNativeConversationMessageView: View {
             if !message.artifacts.isEmpty {
                 ReaderNativeConversationArtifacts(parts: message.artifacts, model: model)
             }
+            if !message.reviewSelections.isEmpty {
+                DisclosureGroup("选用回答或段落") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(message.reviewSelections) { item in
+                            Button {
+                                Task { await model.performReview("selectAnswer", values: ["selectionId": item.id]) }
+                            } label: {
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: item.selected ? "checkmark.circle.fill" : "circle")
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(item.label).font(.caption.weight(.medium))
+                                        Text(item.text).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                                    }
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                            }.buttonStyle(.plain).disabled(model.isPerforming("reviewAction"))
+                        }
+                    }.padding(.top, 6)
+                }.font(.caption).tint(ReaderNativeTheme.accent)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(message.role == "user" ? 12 : 0)

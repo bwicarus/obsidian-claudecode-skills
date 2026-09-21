@@ -44,6 +44,7 @@ struct ReaderNativeConversationMessage: Identifiable {
     let text: String
     let streaming: Bool
     let parts: [ReaderNativeConversationPart]
+    let reviewSelections: [ReaderNativeReviewSelection]
 
     var tools: [ReaderNativeConversationPart] { parts.filter(\.isTool) }
     var artifacts: [ReaderNativeConversationPart] { parts.filter { !$0.isTool && $0.kind != "text" } }
@@ -54,6 +55,7 @@ struct ReaderNativeConversationMessage: Identifiable {
         role = value["role"] as? String ?? "assistant"
         text = value["text"] as? String ?? ""
         streaming = value["streaming"] as? Bool ?? false
+        reviewSelections = (value["reviewSelections"] as? [[String: Any]] ?? []).compactMap(ReaderNativeReviewSelection.init)
         var seen = Set<String>()
         parts = (value["parts"] as? [[String: Any]] ?? [])
             .compactMap(ReaderNativeConversationPart.init)
@@ -72,6 +74,20 @@ struct ReaderNativeConversationVoice {
         active = value["active"] as? Bool ?? false
         busy = value["busy"] as? Bool ?? false
         label = value["label"] as? String
+    }
+}
+
+struct ReaderNativeReviewSelection: Identifiable {
+    let id: String
+    let label: String
+    let text: String
+    let selected: Bool
+    init?(_ value: [String: Any]) {
+        guard let id = value["id"] as? String else { return nil }
+        self.id = id
+        label = value["label"] as? String ?? "选用回答"
+        text = value["text"] as? String ?? ""
+        selected = value["selected"] as? Bool ?? false
     }
 }
 
@@ -107,6 +123,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var revision: Int64 = -1
     @Published private(set) var title = "阅读助手"
     @Published private(set) var conversationMode = "normal"
+    @Published private(set) var review: [String: Any] = [:]
     @Published private(set) var ready = false
     @Published private(set) var busy = false
     @Published private(set) var legacyVisible = false
@@ -197,6 +214,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         scope = nextScope
         title = (payload["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "阅读助手"
         conversationMode = payload["conversationMode"] as? String == "review" ? "review" : "normal"
+        review = payload["review"] as? [String: Any] ?? [:]
         ready = payload["ready"] as? Bool ?? false
         busy = payload["busy"] as? Bool ?? false
         legacyVisible = payload["legacyVisible"] as? Bool ?? false
@@ -221,6 +239,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         revision = -1
         title = "阅读助手"
         conversationMode = "normal"
+        review = [:]
         ready = false
         busy = false
         legacyVisible = false
@@ -264,6 +283,15 @@ final class ReaderNativeConversationModel: ObservableObject {
         inspection = result
     }
     func clearError() { error = nil }
+
+    @discardableResult
+    func performReview(_ key: String, values: [String: Any] = [:]) async -> Bool {
+        var value = values
+        value["key"] = key
+        if value["contextKey"] == nil { value["contextKey"] = review["contextKey"] as? String ?? "" }
+        if value["cardId"] == nil { value["cardId"] = (review["current"] as? [String: Any])?["id"] as? String ?? "" }
+        return await perform("reviewAction", parameters: ["value": value])
+    }
 
     @discardableResult
     func perform(_ action: String, parameters: [String: Any] = [:]) async -> Bool {

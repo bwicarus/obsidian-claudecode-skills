@@ -17,6 +17,58 @@ from browser_exe import CHROME
 
 
 class NativeConversationBridgeBrowser(unittest.TestCase):
+    def test_native_review_uses_original_queue_and_semantic_answer_selection(self):
+        bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
+            page = browser.new_page()
+            page.route('**/*', lambda r: r.fulfill(status=200, body='<html></html>') if r.request.url == 'http://reader.test/' else r.abort())
+            page.goto('http://reader.test/')
+            page.set_content('<div id="side-pane-asst"><div id="asst-quick"></div><div id="asst-thread"></div></div>')
+            page.evaluate('''() => {
+              window.receipts=[];window.writes=[];window.__asstSend=()=>{};
+              window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};
+              window.RC={adapter:()=>({getContext:()=>({file:'native.pdf',page:1})}),toast:()=>{},
+                turnCard:{presentationOf:id=>({role:'assistant',streaming:false,parts:[{kind:'text',text:'第一段\\n\\n第二段'}]})},
+                assistant:{setMode:mode=>{document.getElementById('side-pane-asst').dataset.assistantMode=mode;window.dispatchEvent(new Event('rc:assistant-mode-changed'));}}};
+              window.__bwExtensionStore={get:async()=>null,set:async()=>true};
+              window.fetch=async(url,opts)=>{
+                writes.push({url,body:opts?.body});
+                return {ok:true,json:async()=>({ok:true,context_key:'server-context',due_total:1,related_total:1,cards:[{id:41,question:'完整问题',answer:'完整答案',entity_id:'original-entity'}]})};
+              };
+            }''')
+            page.add_script_tag(path=str(ROOT / '_server_deploy/static/reader-runtime/context-selection-registry.js'))
+            page.add_script_tag(path=str(ROOT / '_server_deploy/static/pdf/rc-review.js'))
+            page.add_script_tag(content=bridge)
+            page.evaluate('__bwNativeConversation.setNativeMode(true)')
+            page.wait_for_timeout(150)
+            scope = page.evaluate('receipts.at(-1).scope')
+            self.assertTrue(page.evaluate('(scope)=>__bwNativeConversation.perform({action:"openReview",scope})', scope)['ok'])
+            page.wait_for_function('receipts.at(-1)?.review?.current?.id === "anki_card_41"')
+            self.assertFalse(page.evaluate('receipts.at(-1).legacyVisible'))
+            def act(key, **values):
+                return page.evaluate('''({key,values})=>{const latest=receipts.at(-1);return __bwNativeConversation.perform({action:'reviewAction',scope:latest.scope,value:{key,contextKey:latest.review.contextKey,cardId:latest.review.current?.id||'',...values}});}''', dict(key=key, values=values))
+            self.assertTrue(act('reveal')['ok'])
+            page.wait_for_function('receipts.at(-1).review.showingAnswer')
+            self.assertTrue(act('rate', ease=3)['ok'])
+            page.wait_for_function('receipts.at(-1).review.canUndo')
+            self.assertEqual(page.evaluate('writes.filter(x=>x.url.endsWith("review-answer")).length'), 0)
+            self.assertTrue(act('undo')['ok'])
+            page.wait_for_function('receipts.at(-1).review.current?.id === "anki_card_41"')
+            page.evaluate('''() => {
+              const answer=document.createElement('div');answer.className='rc-turn asst-a';answer.dataset.turn='answer-1';
+              document.getElementById('asst-thread').appendChild(answer);
+              __bwNativeConversation.snapshot();
+            }''')
+            page.wait_for_function('receipts.at(-1).messages[0]?.reviewSelections?.length === 3')
+            choice = page.evaluate('receipts.at(-1).messages[0].reviewSelections[1].id')
+            self.assertTrue(act('selectAnswer', selectionId=choice)['ok'])
+            page.wait_for_function('receipts.at(-1).review.selectedPairs[0]?.answer === "第一段"')
+            self.assertFalse(page.evaluate('receipts.at(-1).legacyVisible'))
+            stale = act('source', contextKey='stale-context')
+            self.assertFalse(stale['ok'])
+            browser.close()
+
     def test_native_settings_preserve_catalog_and_confirmed_writes(self):
         bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
         source = (ROOT / '_server_deploy/static/pdf/rc-assistant.js').read_text(encoding='utf-8')

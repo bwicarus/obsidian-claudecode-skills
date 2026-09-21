@@ -303,7 +303,8 @@ enum ReaderNativeConversationScript {
         if (typeof rc().assistant?.openModelSettings === 'function') out.push('openModels');
         if (rc().assistant?.settingsService) out.push('nativeSettings');
         if (typeof window.openSettings === 'function' || document.getElementById('ep-set-btn')) out.push('openSettings');
-        if (document.getElementById('asst-review-toggle')) out.push('openReview');
+        if (rc().review?.performNativeInteraction) out.push('openReview', 'reviewAction');
+        else if (document.getElementById('asst-review-toggle')) out.push('openReview');
         if (typeof window.openSearch === 'function' || document.getElementById('ep-search-btn')) out.push('openSearch');
         if (document.querySelector('#ep-side-tabs .ep-side-tab[data-pane="toc"],#ep-side .side-tab[data-pane="toc"]')) out.push('openTOC');
         if (document.getElementById('asst-call')) out.push('toggleVoice');
@@ -341,13 +342,23 @@ enum ReaderNativeConversationScript {
         }
         actions = new Map();
         const all = thread ? Array.from(thread.children).filter(el => el.matches('.asst-msg,.vc-card,.vc-if,.rc-turn')) : [];
-        const messages = all.filter(node => !excludedNodes.has(node)).map(projectMessage).filter(Boolean);
+        let reviewQuestion = '';
+        const messages = all.filter(node => !excludedNodes.has(node)).map((node, index) => {
+          const message = projectMessage(node, index);
+          if (message?.role === 'user') reviewQuestion = message.text;
+          if (nativeMode && conversationMode() === 'review' && message?.role === 'assistant' && !message.streaming && rc().review?.presentationSelections) {
+            message.reviewSelections = rc().review.presentationSelections(node, { question: reviewQuestion, text: message.text });
+          }
+          return message;
+        }).filter(Boolean);
         previousNodes = all;
         liveArtifacts(messages);
         const readingTools = toolbarActions();
         const attachments = selectedAttachments();
+        const review = conversationMode() === 'review' ? rc().review?.presentationState?.() || null : null;
+        if (review) review.contextKey = hash(review.contextKey);
         const payload = { version: 1, scope, revision: 0, title: text(document.title, 160) || '阅读助手', ready: isReady(), busy: isBusy(),
-          legacyVisible, selection: selectedContext(), attachments, readingTools, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          legacyVisible, selection: selectedContext(), attachments, readingTools, review, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -441,6 +452,7 @@ enum ReaderNativeConversationScript {
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
+        if (command.action === 'reviewAction') parameterKeys.push('value');
         if (Object.keys(command).some(key => !parameterKeys.includes(key))) return { ok: false, error: '不支持的操作参数' };
         const action = command.action;
         try {
@@ -524,6 +536,11 @@ enum ReaderNativeConversationScript {
           } else if (action === 'openSettings' && (typeof window.openSettings === 'function' || document.getElementById('ep-set-btn'))) {
             setLegacy(true);
             if (typeof window.openSettings === 'function') window.openSettings(); else document.getElementById('ep-set-btn').click();
+          } else if ((action === 'openReview' || action === 'reviewAction') && rc().review?.performNativeInteraction) {
+            const owner = rc().review, state = owner.presentationState();
+            const value = action === 'openReview' ? { key: 'mode', enabled: !state.active } : command.value;
+            if (!value || (action === 'reviewAction' && value.contextKey !== hash(state.contextKey))) return { ok: false, error: '复习内容已更新，请重试' };
+            await owner.performNativeInteraction({ ...value, contextKey: state.contextKey });
           } else if (action === 'openReview' && document.getElementById('asst-review-toggle')) {
             setLegacy(true); document.getElementById('asst-review-toggle').click();
           } else if (action === 'openSearch' && (typeof window.openSearch === 'function' || document.getElementById('ep-search-btn'))) {
@@ -552,7 +569,7 @@ enum ReaderNativeConversationScript {
         if (!thread || !thread.isConnected || records.some(record => Array.from(record.addedNodes).some(node => node.nodeType === 1 && (['asst-thread', 'asst-input', 'asst-computer', 'asst-call'].includes(node.id) || node.querySelector?.('#asst-thread,#asst-input,#asst-computer,#asst-call'))))) schedule();
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
-      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
+      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'rc:review-presentation-changed', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
       window.addEventListener('pageshow', () => { suspended = false; mountObserver.observe(document.documentElement, { childList: true, subtree: true }); thread = null; controls = null; drawerElement = null; contextElement = null; toolbarElement = null; schedule(); });
       window.addEventListener('pagehide', () => { suspended = true; threadObserver?.disconnect(); controlsObserver?.disconnect(); drawerObserver?.disconnect(); contextObserver?.disconnect(); toolbarObserver?.disconnect(); mountObserver.disconnect(); if (timer != null) clearTimeout(timer); timer = null; });
       window.__bwNativeConversation = Object.freeze({ perform, setNativeMode, snapshot: () => { lastSignature = ''; snapshot(); } });

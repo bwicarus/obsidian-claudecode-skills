@@ -58,12 +58,19 @@ if (window.__bwPwaProviderOnly) return;
   // external scheduler yet, so undo is exact and scoped to this card.
   var _stagedRating = null;
   var _ratingCommitBusy = 0;
+  var _presentationNotice = '';
+
+  function _publishPresentation() {
+    try { window.dispatchEvent(new CustomEvent('rc:review-presentation-changed')); } catch (_) {}
+  }
 
   function _esc(value) {
     return RC.esc ? RC.esc(value) : String(value == null ? '' : value);
   }
 
   function _toast(message) {
+    _presentationNotice = String(message || '');
+    _publishPresentation();
     try {
       if (RC.toast) RC.toast(message);
     } catch (_) {}
@@ -1218,6 +1225,7 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function _notifyAssistant(reason) {
+    _publishPresentation();
     var card = _mode ? _cardForAssistant(_current()) : null;
     var options = { card: card, reason: reason || 'mode' };
     try {
@@ -1883,6 +1891,7 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function render() {
+    _publishPresentation();
     var body = _body();
     if (!body) return;
     var workspace = _workspace();
@@ -2481,6 +2490,7 @@ if (window.__bwPwaProviderOnly) return;
       return result;
     }).finally(function () {
       _ratingCommitBusy = Math.max(0, _ratingCommitBusy - 1);
+      _publishPresentation();
     });
   }
 
@@ -3020,6 +3030,7 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function _refreshSelectionUi() {
+    _publishPresentation();
     var registry = _registry();
     Object.keys(_selectionRecords).forEach(function (id) {
       var record = _selectionRecords[id];
@@ -3153,7 +3164,7 @@ if (window.__bwPwaProviderOnly) return;
     render();
   }
 
-  async function _commitDraft(target) {
+  async function _commitDraft(target, confirmation) {
     if (!_draftState || !_draftState.ok || !_draftState.draft_id) return;
     if (_anyCommitBusy() ||
         (_commitState[target] && _commitState[target].ok)) return;
@@ -3162,7 +3173,9 @@ if (window.__bwPwaProviderOnly) return;
     var cardKey = String(draft._card_key || _cardKey(_current()));
     if (cardKey !== _cardKey(_current())) return;
     var label = target === 'anki' ? 'Anki 新卡' : '原笔记';
-    if (!window.confirm('确认把当前预览写入' + label + '？')) return;
+    var nativeConfirmed = confirmation && confirmation.target === target &&
+      confirmation.draftId === draftId && confirmation.cardKey === cardKey;
+    if (!nativeConfirmed && !window.confirm('确认把当前预览写入' + label + '？')) return;
     var requestEpoch = ++_commitRequestEpoch;
     _commitState[target] = { busy: true, ok: false, message: '' };
     render();
@@ -3365,12 +3378,12 @@ if (window.__bwPwaProviderOnly) return;
     return !!detail.handled;
   }
 
-  function _deleteCurrentCard() {
+  function _deleteCurrentCard(confirmation) {
     var card = _current();
     var local = card && card._localReview;
     var repository = _cardRepository();
     if (card && !local && _legacyReviewNoteId(card)) {
-      return _deleteLegacyReviewCard(card);
+      return _deleteLegacyReviewCard(card, confirmation);
     }
     if (!card || !local || !repository ||
         typeof repository.removeCard !== 'function') {
@@ -3379,9 +3392,11 @@ if (window.__bwPwaProviderOnly) return;
     }
     var confirmed = true;
     try {
+      if (!(confirmation && confirmation.cardKey === _cardKey(card) && confirmation.kind === 'reader-card')) {
       confirmed = window.confirm(
         '删除当前这一张卡？同批其他卡不会受影响。'
       );
+      }
     } catch (_) {}
     if (!confirmed) return Promise.resolve(false);
     _commitStagedRating('delete-card');
@@ -3441,14 +3456,16 @@ if (window.__bwPwaProviderOnly) return;
     return Number.isSafeInteger(value) && value > 0 ? value : null;
   }
 
-  function _deleteLegacyReviewCard(card) {
+  function _deleteLegacyReviewCard(card, confirmation) {
     var noteId = _legacyReviewNoteId(card);
     if (!noteId) return Promise.resolve(false);
     var confirmed = true;
     try {
+      if (!(confirmation && confirmation.cardKey === _cardKey(card) && confirmation.kind === 'anki-note')) {
       confirmed = window.confirm(
         '删除当前 Anki note？同一 note 生成的全部 Anki 卡都会删除。'
       );
+      }
     } catch (_) {}
     if (!confirmed) return Promise.resolve(false);
     _commitStagedRating('delete-legacy-card');
@@ -3796,7 +3813,137 @@ if (window.__bwPwaProviderOnly) return;
     return true;
   }
 
+  // Full presentation for native UI, separate from the intentionally truncated
+  // AI snapshotState. Original cards, scheduling and staged writes stay here.
+  function _presentationState() {
+    var card = _current();
+    var current = card ? Object.assign({ id: _stableCardId(card) }, _cardForAssistant(card)) : null;
+    return JSON.parse(JSON.stringify({
+      active: _mode, contextKey: _contextCacheKey, scope: _scopeMode,
+      loading: _queueBusy, index: _idx, count: _queue.length,
+      dueTotal: _dueTotal, relatedTotal: _relatedTotal,
+      queueIds: _queue.map(_stableCardId), current: current,
+      deleteKind: card && card._localReview ? 'reader-card' : _legacyReviewNoteId(card) ? 'anki-note' : '',
+      showingAnswer: _showingAnswer, expanded: _cardExpanded,
+      canUndo: !!_stagedRating, ratingSaving: _ratingCommitBusy > 0,
+      ratingStaged: _stagedRating ? { cardId: _stableCardId(_stagedRating.card), ease: _stagedRating.ease } : null,
+      improveExpanded: _improveExpanded, improveMode: _improveMode,
+      selectedPairs: selectedPairs(), draft: _draftState, commits: _commitState,
+      notice: _presentationNotice,
+    }));
+  }
+
+  function _presentationSelections(node, answer) {
+    var registry = _registry(), card = _current();
+    if (!_mode || !registry || !node || !node.isConnected || !card || !answer || !String(answer.text || '').trim()) return [];
+    var cardKey = _cardKey(card);
+    if (node.dataset.reviewCardKey && node.dataset.reviewCardKey !== cardKey) return [];
+    function belongs(id) {
+      var record = _selectionRecords[id];
+      return record.cardKey === cardKey && (record.element === node || node.contains(record.element));
+    }
+    var ids = Object.keys(_selectionRecords).filter(belongs);
+    if (!ids.length) {
+      var question = String(answer.question || ''), text = String(answer.text || '');
+      var answerId = 'review-answer:' + _hash(cardKey + '\n' + question + '\n' + text);
+      var identity = _cardIdentity(card);
+      var segments = text.split(/\n\s*\n/).filter(function (part) { return part.trim(); });
+      var childIds = segments.map(function (part, index) { return answerId + ':part:' + index + ':' + _hash('native\n' + part); });
+      function register(id, body, index) {
+        _recordSelection(node, {
+          id: id, kind: index < 0 ? 'review-answer' : 'review-answer-segment',
+          label: index < 0 ? '复习整条回答' : '复习回答段落 ' + (index + 1), text: body,
+          parentId: index < 0 ? undefined : answerId, covers: index < 0 ? childIds : [],
+          source: { surface: 'assistant-review', card_id: identity.card_id, entity_id: identity.entity_id },
+          meta: { review_mode: true, answer_id: answerId, segment_index: index, question: question, card_key: cardKey, card: identity }
+        });
+      }
+      register(answerId, text, -1);
+      segments.forEach(function (part, index) { register(childIds[index], part, index); });
+      node.dataset.reviewPickReady = '1';
+      node.dataset.reviewAnswerId = answerId;
+      node.dataset.reviewCardKey = cardKey;
+      ids = [answerId].concat(childIds);
+    }
+    return ids.map(function (id) {
+      var record = registry.get(id);
+      return record ? { id: id, label: record.label, text: record.text, selected: registry.isSelected(id) } : null;
+    }).filter(Boolean);
+  }
+
+  async function _performNativeInteraction(command) {
+    command = command || {};
+    var key = command.key;
+    if (command.contextKey !== _contextCacheKey) throw new Error('复习内容已切换，请重试');
+    if (key === 'mode') {
+      if (typeof command.enabled !== 'boolean') throw new Error('复习模式无效');
+      setMode(command.enabled);
+      return { ok: true, state: _presentationState() };
+    }
+    if (!_mode) throw new Error('请先进入复习模式');
+    if (_queueBusy && !['reload', 'scope'].includes(key)) throw new Error('复习队列正在更新，请稍候');
+    if (command.cardId !== (_current() ? _stableCardId(_current()) : '')) throw new Error('当前复习卡已变化，请重试');
+    _presentationNotice = '';
+    if (key === 'reveal') _showAnswer();
+    else if (key === 'rate') {
+      if (!_current() || !_showingAnswer || _ratingCommitBusy || !Number.isInteger(command.ease) || command.ease < 1 || command.ease > 4) {
+        throw new Error('当前不能评分');
+      }
+      _answerCurrent(command.ease);
+    } else if (key === 'undo') {
+      if (!_undoStagedRating()) throw new Error('当前没有可撤回的暂存评分');
+    } else if (key === 'select') {
+      var index = _queue.findIndex(function (card) { return _stableCardId(card) === command.targetId; });
+      if (index < 0) throw new Error('目标复习卡已不在队列中');
+      _selectCard(index, 'native');
+    } else if (key === 'reload' || key === 'scope') {
+      if (key === 'scope') {
+        if (!['all', 'current'].includes(command.value)) throw new Error('复习范围无效');
+        _scopeMode = command.value;
+        _contextCacheKey = '';
+      }
+      _commitStagedRating(key);
+      await loadQueue(true);
+    } else if (key === 'source') _openSource();
+    else if (key === 'delete') {
+      var kind = _presentationState().deleteKind;
+      if (!kind || command.confirmed !== true || command.kind !== kind) throw new Error('请确认要删除的当前卡片');
+      var removed = await _deleteCurrentCard({ cardKey: _cardKey(_current()), kind: kind });
+      if (!removed) throw new Error(_presentationNotice || '删除未完成');
+    }
+    else if (key === 'selectAnswer') {
+      var record = _selectionRecords[command.selectionId];
+      if (!record || record.cardKey !== _cardKey(_current()) || !record.element || !record.element.isConnected) throw new Error('回答已更新，请重新选择');
+      _toggleSelection(command.selectionId);
+    }
+    else if (key === 'expanded') {
+      if (typeof command.enabled !== 'boolean') throw new Error('展开状态无效');
+      _cardExpanded = command.enabled;
+      render();
+    } else if (key === 'improveMode') {
+      if (!['concise', 'verbose'].includes(command.value)) throw new Error('草稿模式无效');
+      if (_improveMode !== command.value) _invalidateCardRequests(true);
+      _improveMode = command.value;
+      render();
+    } else if (key === 'prepareDraft') {
+      if (!['anki', 'note', 'all'].includes(command.target)) throw new Error('草稿目标无效');
+      _commitStagedRating('prepare-draft');
+      await _prepareDraft(command.target);
+    } else if (key === 'commitDraft') {
+      if (!['anki', 'note'].includes(command.target) || command.confirmed !== true ||
+          !_draftState || command.draftId !== String(_draftState.draft_id || '') ||
+          !_draftState.targets || !_draftState.targets.includes(command.target)) throw new Error('请确认当前草稿和写入目标');
+      _commitStagedRating('commit-draft');
+      await _commitDraft(command.target, { target: command.target, draftId: command.draftId, cardKey: _cardKey(_current()) });
+    } else throw new Error('不支持的复习操作');
+    _publishPresentation();
+    return { ok: true, state: _presentationState() };
+  }
+
   RC.review = {
+    presentationState: _presentationState,
+    presentationSelections: _presentationSelections,
+    performNativeInteraction: _performNativeInteraction,
     mode: function () {
       return _mode ? 'review' : 'normal';
     },
