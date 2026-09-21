@@ -3393,21 +3393,31 @@ function _vocabMarksForDisplay(marks) {
   } catch (_) { return marks || []; }
 }
 
-/// 原生正文用的**数据入口**：只取这一页该画的生词标记，不碰 DOM。
+/// 原生正文用的**数据入口**：这一页该画的生词标记 + 已掌握词面集，不碰 DOM。
+///
+/// 一次 fetch 同时服务下划线和振假名：两者的过滤依据都在同一个 page-overlay 响应里
+/// （vocab_marks / mastered_furi），分两次取只会多打一次请求还可能拿到不一致的快照。
 /// rects 是点坐标 [x0,y0,x1,y1]，与高亮同一空间，原生可以直接画。
-window.__bwReaderPageVocabMarks = async function (page) {
+window.__bwReaderPageOverlay = async function (page) {
   page = Number(page) || 0;
-  if (!page || !_vocabUnderlineEnabled()) return [];
+  const empty = { vocabMarks: [], masteredFuri: [] };
+  if (!page) return empty;
   // @interaction document.page-overlay.read
   const r = await fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL || '') +
     '&page=' + page, { cache: 'no-store' });
-  if (!r || !r.ok) return [];
+  if (!r || !r.ok) return empty;
   const d = await r.json();
-  if (!d || d.ok !== true) return [];
-  return _vocabMarksForDisplay(d.vocab_marks || []).map((m) => ({
-    label_slug: String(m.label_slug || ''),
-    rects: (m.rects || []).slice(0, 64)
-  })).filter((m) => m.rects.length);
+  if (!d || d.ok !== true) return empty;
+  return {
+    vocabMarks: _vocabUnderlineEnabled()
+      ? _vocabMarksForDisplay(d.vocab_marks || []).map((m) => ({
+          label_slug: String(m.label_slug || ''),
+          rects: (m.rects || []).slice(0, 64)
+        })).filter((m) => m.rects.length)
+      : [],
+    // 已掌握的词不注音 —— 与 renderRubyLayer 里的 __masteredFuri 同一份数据。
+    masteredFuri: _rubyEnabled() ? (d.mastered_furi || []).slice(0, 4000) : null
+  };
 };
 
 function renderVocabUnderlines(pw, marks) {

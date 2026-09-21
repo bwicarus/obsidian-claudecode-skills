@@ -66,6 +66,28 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
 
     func clearVocabMarks() { vocabMarks = [:] }
 
+    /// 振假名：已掌握的词不注音（与网页那侧 `__masteredFuri` 同一份数据）。
+    /// `enabled == false` 表示振假名整体关着 —— 那时一个都不画，跟"这一页没有
+    /// 已掌握的词"不是一回事。
+    @Published private(set) var furiganaEnabled: [Int: Bool] = [:]
+    @Published private(set) var furiganaMastered: [Int: Set<String>] = [:]
+
+    func setFuriganaMastered(_ words: [String]?, enabled: Bool, page: Int) {
+        furiganaEnabled[page] = enabled
+        furiganaMastered[page] = Set(words ?? [])
+    }
+
+    /// 这一页要画的振假名条目（点坐标，来自原生字符层自带的 furigana）。
+    func furigana(page: Int) -> [NativeBookOCRFurigana] {
+        guard furiganaEnabled[page] == true, let chars = characterPages[page] else { return [] }
+        let mastered = furiganaMastered[page] ?? []
+        return chars.furigana.filter { item in
+            guard let rt = item.rt, !rt.isEmpty else { return false }
+            if let word = item.wd, mastered.contains(word) { return false }
+            return true
+        }
+    }
+
     /// 这一页的点坐标尺寸（来自原生字符层）。拿它把点坐标换成归一化。
     func characterPageSize(_ page: Int) -> (width: Double, height: Double)? {
         guard let chars = characterPages[page], chars.pageWidth > 0, chars.pageHeight > 0 else { return nil }
@@ -938,6 +960,26 @@ struct ReaderNativePDFViewport: View {
                             let line = CGRect(x: rect.minX, y: rect.maxY, width: rect.width, height: thickness)
                             pageContext.fill(Path(line), with: .color(ReaderNativeVocabPalette.color(mark.slug)))
                         }
+                    }
+                    // 振假名：字号与位置沿用网页那侧 _makeRubySpan 的同一套算法
+                    // （fs = max(7, min(词高*0.36, 词宽/读音字数))，top = y0 - fs*0.34），
+                    // 否则同一本书在两个表面上注音大小不一样。
+                    let pagePoints = document.characterPageSize(number)
+                    for item in document.furigana(page: number) {
+                        guard let size = pagePoints, let rt = item.rt,
+                              let x0 = item.x0, let y0 = item.y0,
+                              let x1 = item.x1, let y1 = item.y1,
+                              let box = document.viewRect(
+                                normalized: CGRect(x: x0 / size.width, y: y0 / size.height,
+                                                   width: (x1 - x0) / size.width,
+                                                   height: (y1 - y0) / size.height),
+                                page: number) else { continue }
+                        let w = max(6, box.width), h = max(6, box.height)
+                        let fontSize = max(7, min(h * 0.36, w / CGFloat(max(1, rt.count))))
+                        pageContext.draw(
+                            Text(rt).font(.system(size: fontSize)).foregroundStyle(ReaderNativeTheme.ink),
+                            in: CGRect(x: box.minX, y: max(0, box.minY - fontSize * 0.34),
+                                       width: w, height: fontSize * 1.2))
                     }
                     for stroke in document.ink[number] ?? [] {
                         ReaderNativeInkDrawing.draw(stroke, in: frame, context: &pageContext)

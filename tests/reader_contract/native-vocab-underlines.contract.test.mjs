@@ -26,7 +26,7 @@ const code = (source) =>
 test("① 判据抽出来共用，网页那侧也改调它", () => {
   assert.match(CHARLAYER, /function _vocabMarksForDisplay\(marks\)/);
   const filter = body(CHARLAYER, "function _vocabMarksForDisplay(marks)",
-                      "window.__bwReaderPageVocabMarks");
+                      "window.__bwReaderPageOverlay");
   for (const rule of ["_vocabularyStateMarkMastered", "__vocabOverride",
                       "__masteredLocal", "label_slug !== 'mastered'"]) {
     assert.ok(filter.includes(rule), `判据里少了 ${rule}`);
@@ -40,14 +40,14 @@ test("① 判据抽出来共用，网页那侧也改调它", () => {
 });
 
 test("② 数据入口只取数，不碰 DOM", () => {
-  const entry = body(CHARLAYER, "window.__bwReaderPageVocabMarks",
+  const entry = body(CHARLAYER, "window.__bwReaderPageOverlay",
                      "function renderVocabUnderlines");
   assert.match(entry, /_vocabMarksForDisplay\(d\.vocab_marks/);
   assert.doesNotMatch(code(entry), /document\.|querySelector|createElement/,
     "取数入口不该碰 DOM：原生接管时页面根本没渲");
   assert.match(entry, /@interaction document\.page-overlay\.read/,
     "动态 fetch 要带交互标注，否则网络依赖门禁会拦");
-  assert.match(READER, /window\.__bwReaderPageVocabMarks/, "改完 reader.src 要拼合");
+  assert.match(READER, /window\.__bwReaderPageOverlay/, "改完 reader.src 要拼合");
 });
 
 test("③ 原生只画，颜色与粗细跟 CSS 同源", () => {
@@ -67,13 +67,16 @@ test("③ 原生只画，颜色与粗细跟 CSS 同源", () => {
 });
 
 test("④ 壳只搬运，不在这侧判该不该画", () => {
-  const refresh = body(WEBVIEW, "private func refreshNativeVocabMarks()",
+  const refresh = body(WEBVIEW, "private func refreshNativePageOverlays()",
                        "/// 把可见页的屏幕矩形推给墨迹层");
-  assert.match(refresh, /__bwReaderPageVocabMarks/);
-  assert.doesNotMatch(code(refresh), /mastered|vocabOverride|label_slug ==/,
+  assert.match(refresh, /__bwReaderPageOverlay/);
+  // ⚠ 判据 = 决定"该不该画"的那几个表达式。壳**搬运** masteredFuri 是对的
+  //   （原生要用它跳过已掌握的词），所以不能把这个词本身算成违规 ——
+  //   第一版就是这么误伤的。禁的是判断本身。
+  assert.doesNotMatch(code(refresh), /__vocabOverride|__masteredLocal|label_slug ===?/,
     "判据不该出现在壳这侧");
   assert.match(refresh, /position\.visiblePages/, "只取可见页");
-  assert.match(refresh, /r\[0\] \/ chars\.width/, "点坐标要换成归一化，viewRect 才能算");
+  assert.match(refresh, /r\[0\] \/ size\.width/, "点坐标要换成归一化，viewRect 才能算");
   // 翻页后要重取，否则新页没有下划线。
-  assert.match(WEBVIEW, /self\.refreshNativeVocabMarks\(\)/);
+  assert.match(WEBVIEW, /self\.refreshNativePageOverlays\(\)/);
 });

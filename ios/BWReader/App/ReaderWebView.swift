@@ -464,37 +464,44 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
-    /// 取可见页的生词下划线，交给原生正文画。
+    /// 取可见页的**页面叠加数据**（生词下划线 + 已掌握词面集），交给原生正文画。
     ///
-    /// ⚠ **只取数据**：「哪些词该画」牵涉共享仓库的掌握事实、本地覆盖和服务端
-    /// label 的收敛顺序，判据留在网页那侧的 `_vocabMarksForDisplay` 一处。
-    /// 复制过来必然漂移，表现是「同一个词网页上不画、原生上画」。
-    private func refreshNativeVocabMarks() {
+    /// ⚠ **只取数据**：「哪些词该画下划线」「哪些词不注音」牵涉共享仓库的掌握事实、
+    /// 本地覆盖和服务端 label 的收敛顺序，判据留在网页那侧一处
+    /// （`_vocabMarksForDisplay` / `mastered_furi`）。复制过来必然漂移。
+    /// 一次取数同时服务两者：分两次会多打一次请求，还可能拿到不一致的快照。
+    private func refreshNativePageOverlays() {
         guard let document = nativePDFDocument else { return }
         for page in document.position.visiblePages.prefix(8) {
             webView.callAsyncJavaScript(
-                "return await window.__bwReaderPageVocabMarks?.(page);",
+                "return await window.__bwReaderPageOverlay?.(page);",
                 arguments: ["page": page], in: nil, contentWorld: .page
             ) { [weak self, weak document] result in
                 Task { @MainActor in
                     guard let document, self?.nativePDFDocument === document,
                           case .success(let value) = result,
-                          let rows = value as? [[String: Any]] else { return }
-                    guard let chars = document.characterPageSize(page) else { return }
+                          let payload = value as? [String: Any],
+                          let size = document.characterPageSize(page) else { return }
+                    let rows = payload["vocabMarks"] as? [[String: Any]] ?? []
                     let marks: [ReaderNativePDFDocument.VocabMark] = rows.compactMap { row in
-                        guard let slug = row["slug"] as? String ?? row["label_slug"] as? String,
+                        guard let slug = row["label_slug"] as? String,
                               let rects = row["rects"] as? [[Double]] else { return nil }
                         // 点坐标 → 归一化，viewRect 才能换算。与高亮同一口径。
                         let boxes = rects.compactMap { r -> CGRect? in
-                            guard r.count == 4, chars.width > 0, chars.height > 0 else { return nil }
-                            return CGRect(x: r[0] / chars.width, y: r[1] / chars.height,
-                                          width: (r[2] - r[0]) / chars.width,
-                                          height: (r[3] - r[1]) / chars.height)
+                            guard r.count == 4, size.width > 0, size.height > 0 else { return nil }
+                            return CGRect(x: r[0] / size.width, y: r[1] / size.height,
+                                          width: (r[2] - r[0]) / size.width,
+                                          height: (r[3] - r[1]) / size.height)
                         }
                         guard !boxes.isEmpty else { return nil }
                         return .init(slug: slug, rects: boxes)
                     }
                     document.setVocabMarks(marks, page: page)
+                    // masteredFuri 为 null 表示振假名整体关着 —— 那时一个都不画，
+                    // 跟"这一页没有已掌握的词"不是一回事。
+                    document.setFuriganaMastered(payload["masteredFuri"] as? [String],
+                                                 enabled: payload["masteredFuri"] is [String],
+                                                 page: page)
                 }
             }
         }
@@ -516,7 +523,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard let self, !Task.isCancelled else { return }
             self.publishNativeInkSurfaces()
             // 翻页后可见页变了，生词下划线也要跟着取 —— 同一个节流窗口里做完。
-            self.refreshNativeVocabMarks()
+            self.refreshNativePageOverlays()
         }
     }
 
@@ -688,7 +695,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             Task { @MainActor [weak self] in self?.scheduleNativeInkSurfacePublish() }
         }
         publishNativeInkSurfaces()
-        refreshNativeVocabMarks()
+        refreshNativePageOverlays()
         document.onSelection = { [weak self] values in
             Task { @MainActor [weak self] in
                 _ = await self?.updateNativePDFSelection(values, bookID: bookID, contentSHA256: digest, scope: scope)
