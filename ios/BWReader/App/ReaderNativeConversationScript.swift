@@ -630,6 +630,7 @@ enum ReaderNativeConversationScript {
                 !Array.isArray(value.pages) || value.pages.length > 32 || typeof window.__setFocusSel !== 'function') return { ok: false, error: '选区已更新，请重新选择' };
             if (value.pages.some(page => !Number.isSafeInteger(page.page) || page.page < 1 || typeof page.text !== 'string' ||
                 !Array.isArray(page.indexes) || page.indexes.length > 32000 || page.indexes.some(i => !Number.isSafeInteger(i) || i < 0) ||
+                (page.sentence != null && (typeof page.sentence !== 'string' || page.sentence.length > 600)) ||
                 typeof page.geometryDigest !== 'string' || !/^[a-f0-9]{64}$/i.test(page.contentSHA256))) return { ok: false, error: '选区数据无效' };
             const selection = value.pages.map(page => page.text).join('\n').trim();
             if (selection.length > 16000) return { ok: false, error: '选区过长，请缩小范围' };
@@ -638,6 +639,8 @@ enum ReaderNativeConversationScript {
               if (window.__bwNativeSelection?.owner === 'native-pdf') window.__bwNativeSelection.active = false;
             } else {
               window.__bwNativeSelection = { text: selection, active: true, owner: 'native-pdf', scope, pages: value.pages };
+              window.__lastSelMeta = { page: value.pages[0].page, t: Date.now() };
+              window.__lastSelSentence = value.pages.length === 1 ? (value.pages[0].sentence || '') : '';
               window.__setFocusSel(selection, 'text');
               if (window.__focusSel?.text !== selection) return { ok: false, error: '选区暂未进入对话，请重试' };
             }

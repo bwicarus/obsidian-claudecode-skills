@@ -450,7 +450,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               scope == nativeConversation.scope, values.allSatisfy({ $0.bookID == bookID && $0.contentSHA256.lowercased() == contentSHA256.lowercased() }) else { return false }
         nativePDFSelectionSequence += 1
         let pages: [[String: Any]] = values.map { value in
-            ["page": value.page, "text": value.text, "indexes": value.indexes,
+            ["page": value.page, "text": value.text, "sentence": value.sentence, "indexes": value.indexes,
              "geometryDigest": value.geometryDigest, "contentSHA256": value.contentSHA256]
         }
         let receipt = await requestNativeConversationCommand(["action": "nativePageSelection", "scope": scope,

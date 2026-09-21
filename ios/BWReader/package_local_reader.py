@@ -853,6 +853,36 @@ def copy_raw_static(root: Path) -> None:
         raise SystemExit("reader.src contains no renderer parts")
     reader = b"".join(part.read_bytes() for part in parts)
     write_bytes(root, "static/pdf/reader.js", reader)
+    write_bytes(root, "native/pdf-selection-core.js", native_pdf_selection_core().encode("utf-8"))
+
+
+def native_pdf_selection_core() -> str:
+    """Reuse the original pure selection algorithms in JavaScriptCore, without
+    loading a document, DOM, network bridge or any user-authored script.
+
+    These boundaries are named functions already exercised by the web contracts.
+    Packaging fails if a source boundary changes instead of shipping a stale copy.
+    """
+    source = STATIC / "pdf" / "reader.src"
+    mapping = (source / "08-charlayer.js").read_text(encoding="utf-8")
+    selection = (source / "13-selection.js").read_text(encoding="utf-8")
+
+    def section(text: str, start: str, end: str) -> str:
+        if text.count(start) != 1 or text.count(end) != 1:
+            raise SystemExit(f"native PDF selection source boundary changed: {start}")
+        a, b = text.index(start), text.index(end)
+        if b <= a:
+            raise SystemExit(f"native PDF selection source order changed: {start}")
+        return text[a:b]
+
+    parts = [
+        section(mapping, "function _selectionUsesBlockFilter(", "const _nativePageOverlayEnrichment ="),
+        section(selection, "function _selectionEndpointFilter(", "// 未声明语言的书里"),
+        section(selection, "function _findCharAt(", "function _charBlockId("),
+        section(selection, "function _charBlockId(", "function _selByCharRange("),
+        (HERE / "NativePDFSelectionCore.js").read_text(encoding="utf-8"),
+    ]
+    return '"use strict";\n(function () {\n' + "\n".join(parts) + '\n})();\n'
 
 
 def require_raw_sources() -> None:
@@ -865,6 +895,7 @@ def require_raw_sources() -> None:
         STATIC / "pdf" / "epub-html.js",
         STATIC / "pdf" / "vendor" / "jszip.min.js",
         NATIVE_INTERFACE_SOURCE,
+        HERE / "NativePDFSelectionCore.js",
     )
     missing = [path.relative_to(ROOT).as_posix() for path in required if not path.is_file()]
     if missing:
@@ -1811,6 +1842,9 @@ def validate_bundle(root: Path, *, require_manifest: bool = True) -> dict[str, o
         raise SystemExit("ReaderBundle DOMPurify differs from pinned dompurify@3.4.7")
     if not (root / "static/pdf/reader.js").is_file():
         raise SystemExit("ReaderBundle is missing the generated PDF renderer")
+    selection_core = root / "native/pdf-selection-core.js"
+    if not selection_core.is_file() or selection_core.read_text(encoding="utf-8") != native_pdf_selection_core():
+        raise SystemExit("ReaderBundle native PDF selection core differs from original algorithms")
     if sha256_file(root / "static/qa/marked.js") != EXPECTED_MARKED_SHA256:
         raise SystemExit("ReaderBundle marked.js differs from pinned marked@9.1.6")
     for relative, expected in EXPECTED_PDFJS_FILES.items():
