@@ -1,0 +1,199 @@
+import Foundation
+import PDFKit
+import WebKit
+
+/// Carries original navigation commands to PDFKit, and sends actual native
+/// positions back through the original position/context owner. No second store.
+@MainActor
+final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWithReply {
+    static let messageName = "bwNativePDFNavigation"
+    private weak var webView: WKWebView?
+    private weak var document: ReaderNativePDFDocument?
+    private let trustedBaseURL: URL
+    private var token: String?
+    private var file = ""
+    private var bookID = ""
+    private var digest = ""
+    private var isCurrent: (() -> Bool)?
+    private var sequence = 0
+    private var pending: ReaderNativePDFDocument.Position?
+    private var delivery: Task<Void, Never>?
+    private var jumping = false
+    private(set) var lastError: String?
+
+    init(webView: WKWebView, trustedBaseURL: URL) {
+        self.webView = webView
+        self.trustedBaseURL = trustedBaseURL
+        super.init()
+    }
+
+    func initialPosition() async throws -> [String: Any] {
+        guard let webView, trusted(webView.url) else { throw unavailable() }
+        let value = try await webView.callAsyncJavaScript(
+            "return window.RC?.readerNavigation?.nativeState();",
+            arguments: [:], in: nil, contentWorld: .page)
+        guard let result = value as? [String: Any], let file = result["file"] as? String,
+              !file.isEmpty, (result["total"] as? NSNumber)?.intValue ?? 0 > 0 else { throw unavailable() }
+        return result
+    }
+
+    /// Called once the native viewport has a real layout. Open/restore and
+    /// original overlay import happen before this ownership transfer.
+    func attach(_ document: ReaderNativePDFDocument, bookID: String, contentSHA256: String,
+                isCurrent: @escaping () -> Bool) async throws {
+        guard token == nil, let webView, trusted(webView.url), isCurrent(),
+              document.matches(bookID: bookID, contentSHA256: contentSHA256),
+              document.view.bounds.width > 0, document.view.bounds.height > 0 else { throw unavailable() }
+        let initial = try await initialPosition()
+        guard token == nil, isCurrent(), document.matches(bookID: bookID, contentSHA256: contentSHA256),
+              let file = initial["file"] as? String else { throw unavailable() }
+        let lease = UUID().uuidString
+        self.document = document; self.bookID = bookID; digest = contentSHA256.lowercased()
+        self.file = file; self.isCurrent = isCurrent; token = lease; sequence = 0; lastError = nil
+        do {
+            let result = try await webView.callAsyncJavaScript("""
+                const owner = window.RC?.readerNavigation;
+                if (!owner || owner.nativeState().file !== file || owner.nativeViewport) throw new Error('阅读视口已切换');
+                owner.attachNativeViewport({ file, token,
+                  goToPage: page => window.webkit.messageHandlers.bwNativePDFNavigation.postMessage({
+                    action: 'page', token, file, bookID, digest, value: page
+                  }),
+                  perform: (action, value) => window.webkit.messageHandlers.bwNativePDFNavigation.postMessage({
+                    action, token, file, bookID, digest, value
+                  })
+                });
+                return true;
+                """, arguments: ["file": file, "token": lease, "bookID": bookID, "digest": digest],
+                in: nil, contentWorld: .page)
+            guard result as? Bool == true, valid(lease) else { throw unavailable() }
+            document.onPosition = { [weak self] position in self?.enqueue(position) }
+            try await publish(document.position, lease: lease)
+        } catch {
+            if token == lease { invalidate() }
+            throw error
+        }
+    }
+
+    /// Revoke synchronously before any asynchronous navigation/identity change.
+    /// The token check prevents cleanup from detaching a newer book's viewport.
+    func invalidate() {
+        let previous = token
+        token = nil; delivery?.cancel(); delivery = nil; pending = nil
+        document?.onPosition = nil; document = nil; isCurrent = nil
+        file = ""; bookID = ""; digest = ""; jumping = false
+        guard let previous, let webView else { return }
+        Task { @MainActor [weak webView] in
+            _ = try? await webView?.callAsyncJavaScript(
+                "return window.RC?.readerNavigation?.detachNativeViewport(token);",
+                arguments: ["token": previous], in: nil, contentWorld: .page)
+        }
+    }
+
+    private func valid(_ lease: String) -> Bool {
+        token == lease && isCurrent?() == true && trusted(webView?.url)
+            && document?.matches(bookID: bookID, contentSHA256: digest) == true
+    }
+
+    private func enqueue(_ value: ReaderNativePDFDocument.Position) {
+        guard !jumping, let lease = token, valid(lease) else { return }
+        pending = value
+        guard delivery == nil else { return }
+        // One event-driven trailing delivery, with a single latest value while
+        // crossing WebKit. No per-frame persistence and no background polling.
+        delivery = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if self.token == lease { self.delivery = nil } }
+            while self.valid(lease), !Task.isCancelled, self.pending != nil {
+                do {
+                    try await Task.sleep(for: .milliseconds(180))
+                    guard self.valid(lease), !Task.isCancelled, let value = self.pending else { return }
+                    self.pending = nil
+                    try await self.publish(value, lease: lease)
+                    self.lastError = nil
+                } catch {
+                    if !Task.isCancelled, self.valid(lease) { self.lastError = error.localizedDescription }
+                    return
+                }
+            }
+        }
+    }
+
+    private func payload(_ position: ReaderNativePDFDocument.Position) -> [String: Any] {
+        sequence += 1
+        return ["sequence": sequence, "page": position.page, "scale": Double(position.scale),
+                "fraction": Double(position.fraction), "visiblePages": position.visiblePages,
+                "mode": position.mode, "spreadOffset": position.spreadOffset]
+    }
+
+    private func publish(_ position: ReaderNativePDFDocument.Position, lease: String) async throws {
+        guard valid(lease), let webView else { throw unavailable() }
+        let value = payload(position)
+        let response = try await webView.callAsyncJavaScript("""
+            const owner = window.RC?.readerNavigation;
+            if (!owner || owner.nativeViewport?.token !== token) return false;
+            if (position.sequence <= owner.nativeViewport.sequence) return true;
+            owner.acceptNativePosition(token, position);
+            return true;
+            """, arguments: ["token": lease, "position": value], in: nil, contentWorld: .page)
+        guard valid(lease), response as? Bool == true else { throw unavailable() }
+    }
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage,
+                               replyHandler: @escaping (Any?, String?) -> Void) {
+        guard message.name == Self.messageName, message.frameInfo.isMainFrame,
+              let webView, message.webView === webView, trusted(message.frameInfo.request.url),
+              let body = message.body as? [String: Any],
+              Set(body.keys) == Set(["action", "token", "file", "bookID", "digest", "value"]),
+              let action = body["action"] as? String, ["page", "layout", "scale", "fit"].contains(action),
+              let lease = body["token"] as? String,
+              valid(lease), body["file"] as? String == file, body["bookID"] as? String == bookID,
+              body["digest"] as? String == digest,
+              let document else {
+            replyHandler(nil, "翻页请求已过期或无效")
+            return
+        }
+        do {
+            // Discard an older queued scroll position before applying a command.
+            // In-flight replies carry sequence numbers and cannot rewind it.
+            pending = nil; jumping = true
+            defer { jumping = false }
+            switch action {
+            case "page":
+                guard let number = body["value"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                      number.doubleValue >= 1, number.doubleValue <= Double(document.view.document?.pageCount ?? 0) else { throw unavailable() }
+                try document.go(to: number.intValue)
+            case "scale":
+                guard let number = body["value"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      number.doubleValue.isFinite, number.doubleValue > 0, number.doubleValue <= 100 else { throw unavailable() }
+                document.setScale(CGFloat(number.doubleValue))
+            case "layout":
+                guard let value = body["value"] as? [String: Any], Set(value.keys) == Set(["mode", "spreadOffset"]),
+                      let mode = value["mode"] as? String, ["single", "continuous", "spread"].contains(mode),
+                      let offset = value["spreadOffset"] as? NSNumber, CFGetTypeID(offset) != CFBooleanGetTypeID(),
+                      [0.0, 1.0].contains(offset.doubleValue) else { throw unavailable() }
+                document.setLayout(mode: mode, firstPageAlone: offset.intValue == 1)
+                document.fitWidth()
+            default:
+                guard body["value"] is NSNull else { throw unavailable() }
+                document.fitWidth()
+            }
+            guard valid(lease) else { throw unavailable() }
+            replyHandler(["ok": true, "position": payload(document.position)], nil)
+        } catch { replyHandler(nil, error.localizedDescription) }
+    }
+
+    private func trusted(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url.scheme?.lowercased() == trustedBaseURL.scheme?.lowercased()
+            && url.host?.lowercased() == trustedBaseURL.host?.lowercased()
+            && url.port == trustedBaseURL.port && url.path.hasPrefix(trustedBaseURL.path)
+            && url.path.hasSuffix("/shells/pdf.html")
+    }
+
+    private func unavailable() -> NSError {
+        NSError(domain: "ReaderNativeNavigation", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "原生阅读视口尚未准备好或书籍已切换"])
+    }
+}

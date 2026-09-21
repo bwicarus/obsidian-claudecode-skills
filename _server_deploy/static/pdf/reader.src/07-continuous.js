@@ -268,9 +268,11 @@ function _unloadFarPages(wraps) {
 
 let _scrollTimer = null;
 function _onContinuousScroll() {
+  if (window.RC?.readerNavigation?.nativeViewport) return;
   if (_scrollTimer) return;
   _scrollTimer = setTimeout(() => {
     _scrollTimer = null;
+    if (window.RC?.readerNavigation?.nativeViewport) return;
     const mainEl = document.getElementById('main');
     const mainTop = mainEl.getBoundingClientRect().top;
     const viewportH = mainEl.clientHeight;

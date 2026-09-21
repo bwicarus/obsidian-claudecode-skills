@@ -29,6 +29,7 @@ async function _applyModeChange(keepPage) {
   window._auditScales && setTimeout(() => window._auditScales('mode+1.2s'), 1200);
 }
 window.toggleReadMode = async () => {
+  if (RC.readerNavigation?.nativeViewport) return await RC.readerNavigation.performNativeViewport('layout', {mode: readMode === 'single' ? 'continuous' : 'single', spreadOffset: _spreadOffset});
   const keepPage = currentPage;
   // 单页↔连续;若当前在双页,切回单页(双页用 ⊞ 按钮单独控制)
   readMode = readMode === 'single' ? 'continuous' : 'single';
@@ -41,6 +42,10 @@ window.toggleReadMode = async () => {
 // 双页(spread)按钮：单页/连续切换已删,双页按钮兼任「进入/错开/退出」三态循环——
 // 连续 → 双页(offset0) → 双页(offset1,facing 错开) → 连续。
 window.toggleSpread = async () => {
+  if (RC.readerNavigation?.nativeViewport) return await RC.readerNavigation.performNativeViewport('layout', {
+    mode: readMode !== 'spread' ? 'spread' : (_spreadOffset === 0 ? 'spread' : 'continuous'),
+    spreadOffset: readMode === 'spread' && _spreadOffset === 0 ? 1 : 0
+  });
   const keepPage = currentPage;
   _spreadBeforePanel = null;   // 手动切模式 → 取消"关栏还原双页"(以用户手动选择为准)
   if (readMode !== 'spread') { readMode = 'spread'; _spreadOffset = 0; }

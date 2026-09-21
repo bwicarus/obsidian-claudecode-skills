@@ -87,6 +87,66 @@ window.goToPage = async (n) => {
 
 window.RC = window.RC || {};
 RC.readerNavigation = {
+  nativeViewport: null,
+  nativeState: function () {
+    if (window.__BW_NATIVE_LOCAL_READER__ !== true || !pdfDoc?.numPages) throw new Error('本机 PDF 尚未准备好');
+    const saved = _getLastPosition();
+    const fraction = saved?.page === currentPage && Number.isFinite(saved.frac) ? Math.max(0, Math.min(1, saved.frac)) : 0;
+    return { file: FILE_REL, page: currentPage, total: pdfDoc.numPages, fraction, mode: readMode, scale,
+      spreadOffset: typeof _spreadOffset === 'undefined' ? 0 : _spreadOffset };
+  },
+  attachNativeViewport: function (viewport) {
+    if (window.__BW_NATIVE_LOCAL_READER__ !== true || !viewport || viewport.file !== FILE_REL ||
+        typeof viewport.token !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(viewport.token) ||
+        typeof viewport.goToPage !== 'function') throw new Error('原生阅读视口无效');
+    this.nativeViewport = { file: FILE_REL, token: viewport.token, goToPage: viewport.goToPage, perform: viewport.perform, sequence: 0 };
+  },
+  detachNativeViewport: function (token) {
+    if (this.nativeViewport?.token !== token) return false;
+    this.nativeViewport = null; window.__nativeReaderViewport = null; return true;
+  },
+  performNativeViewport: async function (action, value) {
+    const owner = this.nativeViewport;
+    if (!owner || typeof owner.perform !== 'function' || !['layout', 'scale', 'fit'].includes(action)) throw new Error('原生阅读操作不可用');
+    const receipt = await owner.perform(action, value);
+    if (owner !== this.nativeViewport || receipt?.ok !== true || !Number.isSafeInteger(receipt.position?.sequence)) throw new Error('原生阅读操作未完成');
+    if (receipt.position.sequence > owner.sequence) this.acceptNativePosition(owner.token, receipt.position);
+    return this.state();
+  },
+  acceptNativePosition: function (token, value) {
+    const owner = this.nativeViewport, total = pdfDoc?.numPages || 0;
+    if (!owner || owner.token !== token || owner.file !== FILE_REL || !value ||
+        !Number.isSafeInteger(value.sequence) || value.sequence <= owner.sequence ||
+        !Number.isInteger(value.page) || value.page < 1 || value.page > total ||
+        !Number.isFinite(value.scale) || value.scale <= 0 || value.scale > 100 ||
+        !Number.isFinite(value.fraction) || value.fraction < 0 || value.fraction > 1 ||
+        !Array.isArray(value.visiblePages) || value.visiblePages.length > 100 ||
+        value.visiblePages.some(page => !Number.isInteger(page) || page < 1 || page > total) ||
+        (value.mode !== undefined && !['single', 'continuous', 'spread'].includes(value.mode)) ||
+        (value.spreadOffset !== undefined && value.spreadOffset !== 0 && value.spreadOffset !== 1)) {
+      throw new Error('原生阅读位置已过期或无效');
+    }
+    const changedPage = value.page !== currentPage;
+    owner.sequence = value.sequence;
+    currentPage = value.page; scale = value.scale;
+    if (value.mode !== undefined && (readMode !== value.mode || _spreadOffset !== value.spreadOffset)) {
+      readMode = value.mode; _spreadOffset = value.spreadOffset || 0;
+      try { localStorage.setItem('pdf-read-mode', readMode); localStorage.setItem(_spreadKey(), String(_spreadOffset)); } catch (_) {}
+      _updateModeButtons();
+    }
+    window.__nativeReaderViewport = { kind: 'pdf', file: FILE_REL, page: currentPage,
+      scale, fraction: value.fraction, visiblePages: [...new Set(value.visiblePages)] };
+    _saveLastPosition({ page: currentPage, frac: value.fraction, scrollY: 0, mode: readMode, scale });
+    if (changedPage) {
+      const url = new URL(location.href); url.searchParams.set('page', currentPage);
+      history.replaceState(null, '', url);
+      window.__lastPageNodes = []; // Never carry the preceding page's nodes forward.
+      window._refreshVocabIfPage?.();
+    }
+    if (window._refreshPageCur) window._refreshPageCur();
+    window.dispatchEvent(new CustomEvent('rc:native-document-position', { detail: window.__nativeReaderViewport }));
+    return this.state();
+  },
   state: () => {
     const total = pdfDoc?.numPages || 0;
     return { ready: total > 0, unit: '页', position: currentPage || 1, total,
@@ -316,12 +376,16 @@ function _setupPageScrub() {
 if (document.readyState !== 'loading') _setupPageScrub();
 else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
+  if (RC.readerNavigation?.nativeViewport) return await RC.readerNavigation.performNativeViewport('scale', Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta)));
   scale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta));
   // +/- 缩放跟双指缩放(_applyZoom)一致:先更新全书廉价 CSS 几何，只高清化视口/邻页。
   if (!(await _rescaleContinuousInPlace({ rasterScope: 'visible-near' }))) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）
-window.fitWidth = async () => { window._atFitWidth = true; await _refitToWidth(true); window._rememberOrientLayout?.(); };   // 点「适应」= 回到宽度适应态(旋转保持适应);也记进当前方向
+window.fitWidth = async () => {
+  if (RC.readerNavigation?.nativeViewport) return await RC.readerNavigation.performNativeViewport('fit', null);
+  window._atFitWidth = true; await _refitToWidth(true); window._rememberOrientLayout?.();
+};   // 点「适应」= 回到宽度适应态(旋转保持适应);也记进当前方向
 // 「📋 知识点」按钮：打开统一面板并切到知识点 tab（再点同 tab 则关闭）
 window.toggleSidebar = () => {
   const p = document.getElementById('grammar-panel');
@@ -593,6 +657,10 @@ window.__voiceContext = function () {
       page: (typeof currentPage !== 'undefined' ? currentPage : 0),
       pages: (function () {   // 双页模式报当前可见的两页(offset0:1|2,3|4…; offset1:1,2|3,4|5…),否则单页
         try {
+          const native = window.__nativeReaderViewport;
+          if (RC.readerNavigation?.nativeViewport && native?.file === FILE_REL) {
+            return native.visiblePages.length ? native.visiblePages.slice() : [native.page];
+          }
           var cp = currentPage;
           if (typeof readMode === 'undefined' || readMode !== 'spread') return [cp];
           var off = (typeof _spreadOffset !== 'undefined') ? _spreadOffset : 0, a;

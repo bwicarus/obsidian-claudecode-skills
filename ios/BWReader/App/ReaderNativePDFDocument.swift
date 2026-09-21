@@ -12,6 +12,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let page: Int
         let scale: CGFloat
         let visiblePages: [Int]
+        let fraction: CGFloat
+        let mode: String
+        let spreadOffset: Int
     }
     struct CharacterSelection {
         let bookID: String
@@ -38,7 +41,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     }
 
     let view = ReaderNativePDFView()
-    @Published private(set) var position = Position(page: 1, scale: 1, visiblePages: [])
+    @Published private(set) var position = Position(page: 1, scale: 1, visiblePages: [], fraction: 0, mode: "continuous", spreadOffset: 0)
     @Published private(set) var error: String?
     @Published private(set) var ready = false
     @Published private(set) var geometryRevision = 0
@@ -58,7 +61,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     private var scrollObservation: NSKeyValueObservation?
     private var offsetObservation: NSKeyValueObservation?
     private weak var observedScroll: UIScrollView?
-    private var pendingPage: Int?
+    private var pendingPage: (page: Int, fraction: CGFloat)?
     private var domainHeaders: [ReaderBookUserStateDomainName: (revision: Int64, digest: String)] = [:]
     private var lastPageFrames: [Int: CGRect] = [:]
     private var lastViewBounds = CGRect.null
@@ -124,7 +127,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         characterReads.values.forEach { $0.cancel() }
     }
 
-    func open(_ access: ReaderLocalBookAccess, contentSHA256: String, page: Int) throws {
+    func open(_ access: ReaderLocalBookAccess, contentSHA256: String, page: Int, fraction: CGFloat = 0) throws {
         guard access.record.format == .pdf,
               contentSHA256.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) != nil else {
             throw ReaderLocalLibraryError.bookUnavailable
@@ -135,7 +138,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         close()
         self.access = access // Retain the original security-scoped lease.
         digest = contentSHA256.lowercased()
-        pendingPage = min(document.pageCount, max(1, page))
+        pendingPage = (min(document.pageCount, max(1, page)), fraction.isFinite ? min(1, max(0, fraction)) : 0)
         view.document = document
         ready = true
         view.setNeedsLayout()
@@ -154,6 +157,10 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         characterReadTickets = [:]
         characterPages = [:]; selectionCores = [:]; textOverlays = [:]; unavailableCharacterPages = []; customSelection = false
         onSelection?([])
+    }
+
+    func matches(bookID: String, contentSHA256: String) -> Bool {
+        ready && access?.record.id == bookID && digest == contentSHA256.lowercased()
     }
 
     /// Read-only projection of the original atomic export. It neither imports
@@ -210,10 +217,16 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         ink = nextInk; highlights = nextHighlights
     }
 
-    func go(to page: Int) throws {
+    func go(to page: Int, fraction: CGFloat = 0) throws {
         guard let document = view.document, page >= 1, page <= document.pageCount,
+              fraction.isFinite, fraction >= 0, fraction <= 1,
               let target = document.page(at: page - 1) else { throw NativeBookOCRError.pageUnavailable }
         view.go(to: target)
+        if fraction > 0 {
+            let box = view.convert(target.bounds(for: .cropBox), from: target).standardized
+            let point = view.convert(CGPoint(x: box.minX, y: box.minY + fraction * box.height), to: target)
+            view.go(to: PDFDestination(page: target, at: point))
+        }
         publishPosition()
     }
 
@@ -275,9 +288,28 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     }
 
     func setSpread(_ enabled: Bool, firstPageAlone: Bool) {
+        setLayout(mode: enabled ? "spread" : "continuous", firstPageAlone: firstPageAlone)
+    }
+
+    var layoutMode: String {
+        switch view.displayMode {
+        case .singlePage: return "single"
+        case .twoUp, .twoUpContinuous: return "spread"
+        default: return "continuous"
+        }
+    }
+
+    func setScale(_ scale: CGFloat) {
+        guard scale.isFinite, scale > 0 else { return }
+        view.autoScales = false
+        view.scaleFactor = max(view.minScaleFactor, min(view.maxScaleFactor, scale))
+        publishPosition()
+    }
+
+    func setLayout(mode: String, firstPageAlone: Bool) {
         let destination = view.currentDestination
         view.displaysAsBook = firstPageAlone
-        view.displayMode = enabled ? .twoUpContinuous : .singlePageContinuous
+        view.displayMode = mode == "spread" ? .twoUpContinuous : (mode == "single" ? .singlePage : .singlePageContinuous)
         view.autoScales = true
         if let destination { view.go(to: destination) }
         publishPosition()
@@ -288,7 +320,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let size = displayedSize(page)
         guard size.width > 0, view.bounds.width > 0 else { return }
         view.autoScales = false
-        let columns: CGFloat = view.displayMode == .twoUpContinuous ? 2 : 1
+        let columns: CGFloat = (view.displayMode == .twoUpContinuous || view.displayMode == .twoUp) ? 2 : 1
         view.scaleFactor = max(view.minScaleFactor, min(view.maxScaleFactor, (view.bounds.width - 16) / (size.width * columns)))
         publishPosition()
     }
@@ -331,17 +363,24 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
         if let page = pendingPage, view.bounds.width > 0, view.bounds.height > 0 {
             pendingPage = nil
-            try? go(to: page)
+            try? go(to: page.page, fraction: page.fraction)
         }
         geometryChanged()
     }
 
     private func publishPosition() {
-        guard let document = view.document, let page = view.currentPage else { return }
-        let next = Position(page: document.index(for: page) + 1, scale: view.scaleFactor,
-                            visiblePages: view.visiblePages.map { document.index(for: $0) + 1 })
-        if next != position { position = next; onPosition?(next) }
+        updatePosition()
         geometryChanged()
+    }
+
+    private func updatePosition() {
+        guard let document = view.document, let page = view.currentPage else { return }
+        let box = view.convert(page.bounds(for: .cropBox), from: page).standardized
+        let fraction = box.height > 0 ? min(1, max(0, (view.bounds.minY - box.minY) / box.height)) : 0
+        let next = Position(page: document.index(for: page) + 1, scale: view.scaleFactor,
+                            visiblePages: view.visiblePages.map { document.index(for: $0) + 1 }.sorted(), fraction: fraction,
+                            mode: layoutMode, spreadOffset: view.displaysAsBook ? 1 : 0)
+        if next != position { position = next; onPosition?(next) }
     }
 
     private func geometryChanged() {
@@ -355,6 +394,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         lastPageFrames = frames; lastViewBounds = view.bounds
         geometryRevision &+= 1; onGeometry?()
         loadVisibleCharacterPages()
+        // Content offset can change within the same PDF page without a page
+        // notification. Publish the page-relative reading anchor as well.
+        updatePosition()
     }
 
     private func selectionChanged() {

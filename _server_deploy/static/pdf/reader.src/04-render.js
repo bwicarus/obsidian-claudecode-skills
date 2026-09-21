@@ -20,6 +20,16 @@ function _singleWrap() {
 async function renderPage(num) {
   if (!pdfDoc) return;
   num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
+  const nativeOwner = window.RC?.readerNavigation?.nativeViewport;
+  if (nativeOwner) {
+    const receipt = await nativeOwner.goToPage(num);
+    if (nativeOwner !== RC.readerNavigation.nativeViewport || !receipt || receipt.ok !== true) throw new Error('原生翻页未完成');
+    // A finger scroll may already have published a newer native position while
+    // the command reply was crossing the bridge. Never rewind that newer state.
+    if (!Number.isSafeInteger(receipt.position?.sequence)) throw new Error('原生翻页回执无效');
+    if (receipt.position.sequence > nativeOwner.sequence) RC.readerNavigation.acceptNativePosition(nativeOwner.token, receipt.position);
+    return;
+  }
   currentPage = num;
   { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(num) : num); }
   window._refreshVocabIfPage?.();   // 离散翻页(◀▶/滑块/跳页)也刷新「本页」单词本(连续模式下 loadPageNodes 只靠滚动触发,会漏)

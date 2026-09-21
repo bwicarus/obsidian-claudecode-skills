@@ -332,6 +332,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeRealtimeBridge: ReaderNativeRealtimeBridge?
     private var nativeBookOCRBridge: NativeBookOCRBridge?
     private var nativePDFMutationBridge: ReaderNativePDFMutationBridge?
+    private var nativePDFNavigationBridge: ReaderNativePDFNavigationBridge?
+    private weak var activeNativePDFDocument: ReaderNativePDFDocument?
     var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
     private var nativeBookOCRUpdateCancellable: AnyCancellable?
@@ -460,6 +462,62 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     func setNativeDocumentCaptureViewport(_ view: UIView?) {
         localRuntimeServer?.visualCaptureBroker.setNativeDocumentViewport(view)
+    }
+
+    /// Prepare against the original identity and atomic user-state export. The
+    /// caller retains this viewport; rendering ownership transfers after layout.
+    func prepareNativePDFDocument() async throws -> ReaderNativePDFDocument {
+        guard !isLoading, let access = currentLocalBookAccess, access.record.format == .pdf,
+              isFinishedLocalBookURL(webView.url, bookID: access.record.id),
+              let bridge = nativePDFNavigationBridge, let adapter = bookUserStateWebAdapter else {
+            throw ReaderBookUserStateWebAdapterError.contextChanged
+        }
+        let generation = bookUserStateContextGeneration
+        let digest = try await currentLocalContentDigest(localBookId: access.record.id, generation: generation)
+        let position = try await bridge.initialPosition()
+        let domains = try await adapter.exportPackage(localBookId: access.record.id)
+        guard generation == bookUserStateContextGeneration, currentLocalBookAccess === access,
+              let page = (position["page"] as? NSNumber)?.intValue,
+              let notes = domains.first(where: { $0.name == .notes }) else {
+            throw ReaderBookUserStateWebAdapterError.contextChanged
+        }
+        let document = ReaderNativePDFDocument()
+        try document.open(access, contentSHA256: digest, page: page,
+                          fraction: CGFloat((position["fraction"] as? NSNumber)?.doubleValue ?? 0))
+        document.setLayout(mode: position["mode"] as? String ?? "continuous",
+                           firstPageAlone: (position["spreadOffset"] as? NSNumber)?.intValue == 1)
+        try document.applyOverlays(domains, bookID: access.record.id, contentSHA256: digest)
+        try document.applyNotes(notes, bookID: access.record.id, contentSHA256: digest)
+        return document
+    }
+
+    func activateNativePDFDocument(_ document: ReaderNativePDFDocument) async throws {
+        guard !isLoading, let bookID = currentLocalBook?.id, let digest = currentLocalBookContentSHA256,
+              let bridge = nativePDFNavigationBridge, document.matches(bookID: bookID, contentSHA256: digest) else {
+            throw ReaderBookUserStateWebAdapterError.contextChanged
+        }
+        let generation = bookUserStateContextGeneration, scope = nativeConversation.scope
+        try await bridge.attach(document, bookID: bookID, contentSHA256: digest) { [weak self] in
+            guard let self else { return false }
+            return !self.isLoading && self.bookUserStateContextGeneration == generation
+                && self.currentLocalBook?.id == bookID && self.currentLocalBookContentSHA256 == digest
+                && self.nativeConversation.scope == scope
+        }
+        activeNativePDFDocument = document
+        document.onSelection = { [weak self] values in
+            Task { @MainActor [weak self] in
+                _ = await self?.updateNativePDFSelection(values, bookID: bookID, contentSHA256: digest, scope: scope)
+            }
+        }
+        setNativeDocumentCaptureViewport(document.view)
+    }
+
+    private func invalidateNativePDFDocument() {
+        nativePDFNavigationBridge?.invalidate()
+        activeNativePDFDocument?.onSelection = nil
+        activeNativePDFDocument?.close()
+        activeNativePDFDocument = nil
+        setNativeDocumentCaptureViewport(nil)
     }
 
     func captureNativeReadingHierarchyImage() throws -> UIImage {
@@ -622,6 +680,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             name: nativeAnkiMobileMessageName
         )
         if let localRuntimeServer {
+            let navigationBridge = ReaderNativePDFNavigationBridge(webView: webView, trustedBaseURL: localRuntimeServer.baseURL)
+            nativePDFNavigationBridge = navigationBridge
+            contentController.addScriptMessageHandler(navigationBridge, contentWorld: .page,
+                                                     name: ReaderNativePDFNavigationBridge.messageName)
             let nativeServerGateway = ReaderNativeServerGateway(
                 webView: webView,
                 trustedBaseURL: localRuntimeServer.baseURL,
@@ -4500,6 +4562,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
 
 extension ReaderWebViewModel: WKNavigationDelegate {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        invalidateNativePDFDocument()
         nativeConversation.resetForNavigation()
         webContentProcessNeedsReload = true
         isLoading = false
@@ -4512,6 +4575,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
         isLoading = true
+        invalidateNativePDFDocument()
         loadError = nil
         nativeConversation.resetForNavigation()
         nativePencilInk.invalidateDocument()

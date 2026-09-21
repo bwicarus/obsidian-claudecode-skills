@@ -799,7 +799,7 @@ enum ReaderNativeConversationScript {
         if (!thread || !thread.isConnected || records.some(record => Array.from(record.addedNodes).some(node => node.nodeType === 1 && (['asst-thread', 'asst-input', 'asst-computer', 'asst-call'].includes(node.id) || node.querySelector?.('#asst-thread,#asst-input,#asst-computer,#asst-call'))))) schedule();
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
-      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'rc:review-presentation-changed', 'rc:placement-changed', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
+      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'rc:review-presentation-changed', 'rc:placement-changed', 'rc:native-document-position', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
       window.addEventListener('scroll', schedule, { capture: true, passive: true });
       window.addEventListener('resize', schedule, { passive: true });
       window.addEventListener('pointerup', schedule, { capture: true, passive: true });

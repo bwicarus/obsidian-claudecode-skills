@@ -81,6 +81,7 @@ function _restoreScrollAfterRender() {
   // 页内比例优先(布局无关:scale/旋转/占位高度变化都不跑偏);老记录无 frac 才退回绝对 scrollY
   const tgtPage = _pendingPage || currentPage;   // 捕获目标页(BUG#3:活的 currentPage 会被滚动处理器按视口中线改掉,三连 apply 逐次后爬)
   const apply = () => {
+    if (window.RC?.readerNavigation?.nativeViewport) return;
     if (_pendingFrac > 0) {
       const pw = document.querySelector(`.page-wrap[data-page-num="${tgtPage}"]`);
       if (pw && pw.offsetHeight) { main.scrollTop = pw.offsetTop + _pendingFrac * pw.offsetHeight; return; }
@@ -98,8 +99,10 @@ function _attachScrollSaver() {
   if (!main || main.__savedAttached) return;
   main.__savedAttached = true;
   main.addEventListener('scroll', () => {
+    if (window.RC?.readerNavigation?.nativeViewport) return;
     if (_scrollSaveTimer) clearTimeout(_scrollSaveTimer);
     _scrollSaveTimer = setTimeout(() => {
+      if (window.RC?.readerNavigation?.nativeViewport) return;
       let frac = 0;   // 页内比例(布局无关);算不出(页未渲)存 0,恢复时退回 scrollY
       try {
         const pw = document.querySelector(`.page-wrap[data-page-num="${currentPage}"]`);
@@ -109,5 +112,3 @@ function _attachScrollSaver() {
     }, 600);
   }, {passive: true});
 }
-
-
