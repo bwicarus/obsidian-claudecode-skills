@@ -557,7 +557,20 @@ async function _pdfExactTextPage(targetPage) {
   if (current) return current;
   let navigationError = null;
   try {
-    Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
+    // ⚠ 原生正文接管时 goToPage 会被 renderPage 直接转给原生并 return，
+    //   网页这一页**永远不会渲**，于是下面轮询 9.6 秒后必然抛
+    //   BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE（AI 精确划线因此是坏的）。
+    //   这种情况下绕开导航，直接把这一页渲进隐藏的 DOM —— 只渲这一页，
+    //   不恢复批量渲染。
+    if (window.RC?.readerNavigation?.nativeViewport) {
+      const ph = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
+      if (!ph) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
+      if (ph.dataset.loaded !== '1') {
+        Promise.resolve(_renderPageInto(page, ph)).catch((error) => { navigationError = error; });
+      }
+    } else {
+      Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
+    }
   } catch (error) {
     navigationError = error;
   }

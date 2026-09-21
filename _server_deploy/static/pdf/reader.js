@@ -2406,6 +2406,11 @@ async function setupContinuousMode() {
   const mainEl = document.getElementById('main');
   // IntersectionObserver 先建好,占位**边建边 observe**(把 O(N) 的 observe 也分摊掉,不再一次性 observe 几千个)。
   _contIO = new IntersectionObserver((entries) => {
+    // ⚠ 原生正文接管时**不批量渲染**：那时网页层不可见，渲出来的页只是在跟
+    //   PDFKit 抢内存（同一本书渲两遍 + PDF 数据两份）。用户 2026-09-21 报的
+    //   崩溃就指着这个。按需渲单页的路仍在（见 17-highlight.js 的
+    //   _pdfExactTextPage），需要文字层时只渲那一页。
+    if (window.RC?.readerNavigation?.nativeViewport) return;
     entries.forEach(e => {
       if (e.isIntersecting && e.target.dataset.loaded === '0' && !e.target.__sideRefitPending) {
         _renderPageInto(parseInt(e.target.dataset.pageNum), e.target);
@@ -2420,7 +2425,10 @@ async function setupContinuousMode() {
     if (!targetPh) return;
     _targetReady = true;
     targetPh.scrollIntoView({block: 'start', behavior: 'auto'});  // _pendingScrollY 时 _restoreScrollAfterRender 会再精修
-    _renderPageInto(currentPage, targetPh).catch(() => {});        // 目标页图像后台渲染、随后弹出
+    // 同上：原生接管时首屏也不渲 —— 遮罩照撤，正文由 PDFKit 画。
+    if (!window.RC?.readerNavigation?.nativeViewport) {
+      _renderPageInto(currentPage, targetPh).catch(() => {});      // 目标页图像后台渲染、随后弹出
+    }
     pdfLoadHide();   // 目标页就位即撤遮罩 → 余下占位继续后台分批建,用户已可读/可返回
   };
   // ⚡ 根治「打开新文件时点不动返回」:**分批建占位,每批 setTimeout(0) 让出事件循环**。
@@ -8246,7 +8254,20 @@ async function _pdfExactTextPage(targetPage) {
   if (current) return current;
   let navigationError = null;
   try {
-    Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
+    // ⚠ 原生正文接管时 goToPage 会被 renderPage 直接转给原生并 return，
+    //   网页这一页**永远不会渲**，于是下面轮询 9.6 秒后必然抛
+    //   BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE（AI 精确划线因此是坏的）。
+    //   这种情况下绕开导航，直接把这一页渲进隐藏的 DOM —— 只渲这一页，
+    //   不恢复批量渲染。
+    if (window.RC?.readerNavigation?.nativeViewport) {
+      const ph = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
+      if (!ph) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
+      if (ph.dataset.loaded !== '1') {
+        Promise.resolve(_renderPageInto(page, ph)).catch((error) => { navigationError = error; });
+      }
+    } else {
+      Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
+    }
   } catch (error) {
     navigationError = error;
   }
