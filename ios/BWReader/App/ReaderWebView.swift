@@ -521,6 +521,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 && self.nativeConversation.scope == scope
         }
         activeNativePDFDocument = document
+        document.onHighlight = { [weak self] page, text, color in
+            Task { @MainActor [weak self] in
+                await self?.highlightFromNativeSelection(
+                    page: page, text: text, color: color, bookID: bookID, contentSHA256: digest)
+            }
+        }
         document.onSelection = { [weak self] values in
             Task { @MainActor [weak self] in
                 _ = await self?.updateNativePDFSelection(values, bookID: bookID, contentSHA256: digest, scope: scope)
@@ -588,6 +594,29 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     static let nativePDFRendererDefaultsKey = "reader.nativePDFRenderer"
 
+    /// 原生选区菜单里点了划线。
+    ///
+    /// ⚠ **不在原生这边另写一套保存**：走的是阅读器自己的
+    /// `__bwReaderHighlightExactText` —— AI 划线用的同一条路径、同一套存储、
+    /// 同一份色板。原生这边只负责把「哪一页的哪段文字、什么颜色」递过去。
+    /// 写入成功后本地 runtime 会 ping 回来，投影把它画到原生正文上（见
+    /// scheduleNativePDFProjectionRefresh），所以这里不必自己重画。
+    private func highlightFromNativeSelection(
+        page: Int, text: String, color: String, bookID: String, contentSHA256: String
+    ) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 2000, page > 0,
+              ["yellow", "green", "blue", "pink"].contains(color),
+              nativePDFDocument?.matches(bookID: bookID, contentSHA256: contentSHA256) == true else { return }
+        let receipt = await requestNativeConversationCommand([
+            "action": "nativeSelectionHighlight",
+            "value": ["page": page, "text": trimmed, "color": color],
+        ])
+        if receipt["ok"] as? Bool != true {
+            nativePDFMountFailure = "划线失败：" + ((receipt["error"] as? String) ?? "未知原因")
+        }
+    }
+
     /// 本地 runtime 落了一笔用户状态 → 把高亮/墨迹/便签重新投影到原生正文。
     ///
     /// ⚠ 在此之前这三样是**开书那一刻的只读快照**：划完线、AI 改完、同步回来，
@@ -638,7 +667,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             "showLegacy", "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
-            "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection"]
+            "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
+            // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
+            "nativeSelectionHighlight"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {

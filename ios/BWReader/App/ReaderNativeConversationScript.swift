@@ -607,7 +607,7 @@ enum ReaderNativeConversationScript {
         if (command.scope && command.scope !== scope) return { ok: false, error: '会话已切换，请重新操作' };
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
-        if (command.action === 'nativePageSelection') parameterKeys.push('value');
+        if (command.action === 'nativePageSelection' || command.action === 'nativeSelectionHighlight') parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -678,6 +678,32 @@ enum ReaderNativeConversationScript {
               window.__setFocusSel(selection, 'text');
               if (window.__focusSel?.text !== selection) return { ok: false, error: '选区暂未进入对话，请重试' };
             }
+          } else if (action === 'nativeSelectionHighlight') {
+            // 原生选区菜单的划线。**不另写保存逻辑**：转交阅读器自己的
+            // __bwReaderHighlightExactText —— AI 划线走的同一条路径、同一套存储、
+            // 同一份色板。这里只做形状校验和 mutationId 生成。
+            const value = command.value;
+            const colors = ['yellow', 'green', 'blue', 'pink'];
+            if (!value || typeof value.text !== 'string' || !value.text.trim() ||
+                value.text.length > 2000 || !Number.isSafeInteger(value.page) || value.page < 1 ||
+                !colors.includes(value.color)) return { ok: false, error: '划线参数无效' };
+            // 书身份取阅读器自己的那一份（reader.src/01-boot.js：FILE_REL = __PDF_CFG.file_rel），
+            // 不另存一份 —— 两份书身份对不上时划线会静默落到别处。
+            const fileRel = window.__PDF_CFG && window.__PDF_CFG.file_rel;
+            if (typeof window.__bwReaderHighlightExactText !== 'function' ||
+                typeof fileRel !== 'string' || !fileRel) return { ok: false, error: '划线尚未就绪' };
+            // mutationId 形状由阅读器那侧校验：^c_[a-f0-9]{8,32}$
+            const bytes = new Uint8Array(12);
+            (window.crypto || {}).getRandomValues?.(bytes);
+            const mutationId = 'c_' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+            const captured = scope;
+            const saved = await window.__bwReaderHighlightExactText({
+              file: fileRel,
+              target: { kind: 'pdf', page: value.page },
+              text: value.text, color: value.color, mutationId: mutationId
+            });
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换，请在原书核对结果' };
+            return { ok: true, value: { id: saved?.id || '', page: value.page } };
           } else if (action === 'readingSettingsRead' || action === 'readingSettingsWrite') {
             const owner = rc().readerPreferences, captured = scope;
             if (!owner?.state || !owner?.perform || command.scope !== scope) return { ok: false, error: '阅读设置尚未就绪' };

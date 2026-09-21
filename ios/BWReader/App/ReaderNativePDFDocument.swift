@@ -54,6 +54,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     var onPosition: ((Position) -> Void)?
     var onSelection: (([CharacterSelection]) -> Void)?
     var onGeometry: (() -> Void)?
+    /// 选区菜单里点了划线：(页码, 原文, 颜色键)。交给壳走阅读器自己的划线路径。
+    var onHighlight: ((Int, String, String) -> Void)?
     private var access: ReaderLocalBookAccess?
     private var digest = ""
     private var generation = UUID()
@@ -557,6 +559,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
         overlay.onSelect = { [weak self] value in self?.acceptOCRSelection(value, page: number) }
         overlay.onError = { [weak self] in self?.error = "当前文字层无法确认这段选区的位置。" }
+        overlay.onHighlight = { [weak self] value, color in
+            self?.onHighlight?(number, value.text, color)
+        }
         // PDFKit owns embedded text selection. The overlay supplies native
         // interaction only for scanned pages or a user-selected OCR override.
         overlay.embeddedText = !(page.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
@@ -628,6 +633,10 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     var project: ((CGRect) -> CGRect?)?
     var onSelect: ((ReaderNativePDFSelection.Value) -> Void)?
     var onError: (() -> Void)?
+    /// 选区菜单里的「划线」。颜色是四支笔的键名（yellow/green/blue/pink）。
+    /// ⚠ 这四个键必须与阅读器色板一致：那是**用户自己的墨水**，存在他的笔记里，
+    /// 改名或改值等于改写既有数据。
+    var onHighlight: ((ReaderNativePDFSelection.Value, String) -> Void)?
     private var start: Int?
     private var selected: ReaderNativePDFSelection.Value?
     private let leadingHandle = ReaderNativePDFSelectionHandle()
@@ -759,7 +768,26 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
                 do { if let sentence = try selectionCore?.sentence(value.indexes) { display(sentence) } }
                 catch { onError?() }
             },
+            // 划线走阅读器自己的 __bwReaderHighlightExactText —— 与 AI 划线同一条
+            // 路径、同一套存储。不在原生这边另写一套保存逻辑。
+            UIMenu(title: "划线", image: UIImage(systemName: "highlighter"), children: [
+                highlightAction("黄", key: "yellow", value: value),
+                highlightAction("绿", key: "green", value: value),
+                highlightAction("蓝", key: "blue", value: value),
+                highlightAction("粉", key: "pink", value: value),
+            ]),
         ])
+    }
+
+    private func highlightAction(
+        _ title: String, key: String, value: ReaderNativePDFSelection.Value
+    ) -> UIAction {
+        UIAction(title: title) { [weak self] _ in
+            // 菜单弹出到点下去之间选区可能已经变了；只对当时那一段生效。
+            guard let self, self.selected?.indexes == value.indexes else { return }
+            self.onHighlight?(value, key)
+            self.clearSelection()
+        }
     }
     func clearSelection() {
         start = nil; handleAnchor = nil; selected = nil
