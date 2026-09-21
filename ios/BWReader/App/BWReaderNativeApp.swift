@@ -129,6 +129,9 @@ private struct ReaderRootView: View {
     /// 原生 PDF 主阅读区。**默认关**：交接文件第 5 条 —— 未接齐的 PDFKit 主阅读区
     /// 不默认启用。打开后 ReaderWebView 退到后面当数据层，正文由 PDFKit 画。
     @AppStorage("reader.nativePDFRenderer") private var nativePDFRendererEnabled = false
+    /// iCloud 跨设备同步（默认关）。⚠ 这里要在**启动时**也跟一次 ——
+    /// 只在设置里翻转时接的话，重开 App 后同步就静静地不工作了。
+    @AppStorage("reader.iCloudSync") private var iCloudSyncEnabled = false
 
     /// 原生正文**真的盖上去了**才算接管。只看开关会在文档还没挂上来的那一段
     /// 把网页层也藏掉，屏幕上就是一片空白。
@@ -154,6 +157,7 @@ private struct ReaderRootView: View {
         ) {
         ZStack {
             ReaderNativeTheme.canvas.ignoresSafeArea()
+                .task(id: iCloudSyncEnabled) { reader.setCloudSyncEnabled(iCloudSyncEnabled) }
 
             // ⚠ 原生主阅读区启用时，ReaderWebView **仍然留在层级里**，只是不可见、
             //   不接触摸。它是本地 runtime 服务、导航桥、对话上下文、user-state

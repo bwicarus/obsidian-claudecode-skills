@@ -85,7 +85,8 @@ struct ReaderNativeWorkspace<Document: View>: View {
         .sheet(item: $conversation.readingSettingsPanel) { panel in
             ReaderNativeReadingSettingsView(
                 model: panel,
-                nativePDFMountFailure: reader.nativePDFMountFailure
+                nativePDFMountFailure: reader.nativePDFMountFailure,
+                onCloudSyncChanged: { reader.setCloudSyncEnabled($0) }
             )
         }
         .sheet(item: $reader.nativeLookup) { panel in

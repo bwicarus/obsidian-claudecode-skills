@@ -31,6 +31,7 @@ final class ReaderUserStateMerge {
     }
 
     private let context: JSContext
+    private let api: JSValue
     private let mergeDomain: JSValue
 
     init?() {
@@ -47,6 +48,7 @@ final class ReaderUserStateMerge {
               let function = api.objectForKeyedSubscript("mergeDomain"),
               !function.isUndefined, !function.isNull else { return nil }
         self.context = context
+        self.api = api
         self.mergeDomain = function
     }
 
@@ -66,6 +68,24 @@ final class ReaderUserStateMerge {
         let unknown = output.objectForKeyedSubscript("unknown")?.toBool() ?? false
         let value = output.objectForKeyedSubscript("value")?.toObject() ?? NSNull()
         return Result(value: value, changed: changed, unknown: unknown)
+    }
+
+    /// 域是不是"空"。
+    ///
+    /// ⚠ 往回写的事务里每个域都要带 `empty`，而 runtime 会用它**自己那份**
+    /// `userStateDomainEmpty` 重算一遍来核对；对不上整笔事务被拒，而表面上
+    /// 只是"同步没生效"。所以这里也不自己算 —— 调的是合并模块里那个逐字副本
+    /// （有闸门盯着它和 runtime 那份逐字一致）。
+    func domainEmpty(domain: String, value: Any) throws -> Bool {
+        context.exception = nil
+        guard let function = api.objectForKeyedSubscript("domainEmpty"),
+              !function.isUndefined, !function.isNull else { throw MergeError.invalidPayload }
+        let output = function.call(withArguments: [domain, value])
+        if let exception = context.exception {
+            throw MergeError.failed(exception.toString() ?? "domainEmpty 抛出异常")
+        }
+        guard let output, output.isBoolean else { throw MergeError.invalidPayload }
+        return output.toBool()
     }
 
     /// 便利入口：三边都给规范化 JSON 字符串（`payloadJson` 就是这个形状），

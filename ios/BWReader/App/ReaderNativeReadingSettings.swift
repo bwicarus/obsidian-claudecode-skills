@@ -43,9 +43,13 @@ struct ReaderNativeReadingSettingsView: View {
     @State private var newColor = Color.yellow
     /// 原生 PDF 主阅读区的开关（迁移中，默认关）。与 BWReaderNativeApp 同一个键。
     @AppStorage("reader.nativePDFRenderer") private var nativePDFRenderer = false
+    /// iCloud 跨设备同步（默认关）。开关只驱动引擎起停；关掉不删云端也不删基线。
+    @AppStorage("reader.iCloudSync") private var iCloudSync = false
     /// 挂载失败时把原因摆在开关旁边 —— 否则只看到「开了但没变化」。
     /// 给默认值是为了不改既有调用点的写法。
     var nativePDFMountFailure: String? = nil
+    /// 开关翻转时把它告诉阅读器（引擎的持有方在那边）。
+    var onCloudSyncChanged: ((Bool) -> Void)? = nil
 
     var body: some View {
         NavigationStack {
@@ -125,10 +129,28 @@ struct ReaderNativeReadingSettingsView: View {
                     } header: {
                         Text("原生阅读区（迁移中）")
                     } footer: {
+                        // ⚠ 这段话是给人做决定用的，不是装饰：接齐一项就删一项。
+                        //   写着"尚未接"而其实已经接了的话，用户会为了一个不存在的
+                        //   限制一直关着它。
                         Text("开启后正文由 PDFKit 画，网页层退到后面继续管数据。"
-                             + "目前已接：位置/翻页/布局/缩放/去边、选字、高亮与墨迹显示。"
-                             + "尚未接：卡片拖放与锁定、Pencil 书写、插入页、页内生成物、"
-                             + "查词与翻译菜单 —— 要用这些先关掉它。")
+                             + "已接：位置/翻页/布局/缩放/去边、选字、高亮与墨迹、"
+                             + "查词/翻译/解释/词组/语法、划线与编辑、页卡、便签、"
+                             + "整页翻译、图徽标、Pencil。"
+                             + "尚未接：EPUB 仍整个用网页界面。")
+                    }
+                    Section {
+                        Toggle("用 iCloud 在我的设备之间同步", isOn: $iCloudSync)
+                            .onChange(of: iCloudSync) { _, on in onCloudSyncChanged?(on) }
+                    } header: {
+                        Text("同步")
+                    } footer: {
+                        // 说清楚"同步什么"和"按什么认书"，否则用户会拿两个不同版本的
+                        // PDF 互相对照，然后以为同步坏了。
+                        Text("同步高亮、便签、笔迹、插入页与阅读位置，走你自己的 iCloud"
+                             + "（同一个 Apple 账号的设备之间）。"
+                             + "按**书的内容**认书：同一个文件在两台设备上才对得上，"
+                             + "重新导出或压缩过的版本算另一本。"
+                             + "没登录 iCloud 时它安静地不工作，本地照常用。")
                     }
                     Section("诊断") { settingToggle("显示阅读日志", key: "debug") }
                 }

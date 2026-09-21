@@ -743,6 +743,100 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         localRuntimeServer?.visualCaptureBroker.setNativeDocumentViewport(view)
     }
 
+    // MARK: - iCloud 同步用的两个出入口
+
+    private var cloudSync: ReaderCloudUserStateSync?
+    private var cloudSyncBridge: ReaderCloudUserStateBridge?
+
+    /// 开关由阅读设置里的 `@AppStorage("reader.iCloudSync")` 驱动，**默认关**。
+    ///
+    /// ⚠ 关掉只是停掉引擎，**不删云端也不删基线** —— 用户多半是"先别同步"而不是
+    /// "把这些都扔了"。真要清（换账号）由 `accountChange` 那条路负责。
+    func setCloudSyncEnabled(_ enabled: Bool) {
+        guard enabled else { cloudSync = nil; cloudSyncBridge = nil; return }
+        guard cloudSync == nil else { return }
+        let bridge = ReaderCloudUserStateBridge(reader: self)
+        let sync = ReaderCloudUserStateSync(source: bridge, store: ReaderCloudSyncStore())
+        cloudSyncBridge = bridge
+        cloudSync = sync
+        Task { await sync.start() }
+    }
+
+    /// 本地写入后告诉同步器「这本书脏了」。
+    /// ⚠ 只登记，不在这里导出：墨迹是一笔一次写入，导出整包会把主线程压住。
+    private func markCloudSyncDirty() {
+        guard let cloudSync, let digest = cloudSyncContentDigest else { return }
+        Task { await cloudSync.markDirty(contentSHA256: digest) }
+    }
+
+    /// 当前这本书的内容摘要。⚠ 同步桥只看得到这一个 —— 别把
+    /// `currentLocalBook` / adapter 这些也放出去：导出/写回必须留在这一侧，
+    /// 它们要穿过该书的本地 runtime，在别处调就是对着错的书说话。
+    var cloudSyncContentDigest: String? { currentLocalBookContentSHA256?.lowercased() }
+
+    /// 导出当前这本书的各域快照给同步引擎。
+    ///
+    /// ⚠ 只对**当前打开的那本书**有效：导出要穿过该书的本地 runtime。摘要对不上
+    /// 就返回空 —— 返回别的书的内容比返回空糟得多（会被当成"这本书是空的"推上云端）。
+    func exportUserStateForCloudSync(contentSHA256: String)
+        async throws -> [ReaderCloudUserStateSync.DomainSnapshot] {
+        guard let adapter = bookUserStateWebAdapter, let book = currentLocalBook,
+              currentLocalBookContentSHA256?.lowercased() == contentSHA256.lowercased() else { return [] }
+        let generation = bookUserStateContextGeneration
+        let domains = try await adapter.exportPackage(localBookId: book.id)
+        guard generation == bookUserStateContextGeneration,
+              currentLocalBookContentSHA256?.lowercased() == contentSHA256.lowercased() else { return [] }
+        return domains.map {
+            .init(name: $0.name.rawValue, payloadJson: $0.payloadJson,
+                  digest: $0.digest, revision: Int($0.revision), empty: $0.empty)
+        }
+    }
+
+    /// 把合并结果整域写回本地。
+    ///
+    /// ⚠ `expectedLocalHeaders` 必须取**此刻**的本地头：从"读快照"到"写回"之间
+    /// 用户可能又划了一道。取旧的会把那一道盖掉，而 runtime 那道乐观并发闸
+    /// （`BW_USER_STATE_LOCAL_CHANGED`）正是为此存在 —— 让它拒，下一轮重新合。
+    func applyUserStateFromCloudSync(_ domains: [ReaderCloudUserStateSync.DomainSnapshot],
+                                     contentSHA256: String) async throws {
+        guard let adapter = bookUserStateWebAdapter, let book = currentLocalBook,
+              currentLocalBookContentSHA256?.lowercased() == contentSHA256.lowercased(),
+              !domains.isEmpty else { return }
+        let generation = bookUserStateContextGeneration
+        let headers = try await adapter.snapshotHeaders(localBookId: book.id)
+        guard generation == bookUserStateContextGeneration else { return }
+
+        var payloads: [ReaderBookUserStateDomainPayload] = []
+        var expected: [String: ReaderBookUserStateDomainHeader] = [:]
+        guard let merger = ReaderUserStateMerge() else { return }
+        for domain in domains {
+            guard let name = ReaderBookUserStateDomainName(rawValue: domain.name),
+                  let header = headers[name] else { continue }
+            // empty 用合并模块里那份逐字副本算 —— runtime 会拿它自己那份复核，
+            // 对不上整笔事务被拒，而表面上只是"同步没生效"。
+            guard let value = try? JSONSerialization.jsonObject(
+                    with: Data(domain.payloadJson.utf8), options: [.fragmentsAllowed]),
+                  let empty = try? merger.domainEmpty(domain: domain.name, value: value) else { continue }
+            payloads.append(ReaderCloudUserStateEncoding.payload(
+                name: name, json: domain.payloadJson,
+                revision: Int64(max(1, domain.revision)), empty: empty))
+            expected[name.rawValue] = header
+        }
+        guard !payloads.isEmpty else { return }
+
+        let transaction = ReaderBookUserStateImportTransaction(
+            contract: ReaderBookUserStateImportTransaction.currentContract,
+            transactionId: "us_" + UUID().uuidString
+                .replacingOccurrences(of: "-", with: "").lowercased(),
+            localBookId: book.id,
+            remoteBookId: ReaderCloudUserStateEncoding.remoteBookId(contentSHA256: contentSHA256),
+            contentSha256: contentSHA256.lowercased(),
+            packageRevision: 1,
+            expectedLocalHeaders: expected,
+            domains: payloads)
+        _ = try await adapter.applyAtomically(transaction)
+    }
+
     /// Prepare against the original identity and atomic user-state export. The
     /// caller retains this viewport; rendering ownership transfers after layout.
     func prepareNativePDFDocument() async throws -> ReaderNativePDFDocument {
@@ -2581,6 +2675,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         //   摘要一变它们会**静默全停**：屏幕上还是旧的那一份，却再也不更新。
         //   所以摘要变了就重挂一次。
         remountNativePDFIfContentChanged(digest)
+        // 这本书不在前台时，别的设备的改动被引擎存进了待处理区 —— 现在它打开了，
+        // 合掉它们。⚠ 不做这一步的话那些改动会一直躺着，表现是"另一台设备上做的
+        // 批注过很久才出现，或者根本不出现"。
+        if let cloudSync {
+            Task { await cloudSync.drainPending(contentSHA256: digest) }
+        }
         if let baseURL = localRuntimeServer?.baseURL {
             nativeBookOCRBridge?.updateTrustedContext(
                 baseURL: baseURL,
@@ -5016,6 +5116,9 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 return
             }
             scheduleNativePDFProjectionRefresh()
+            // 同一条信号也是「这本书的用户状态变了」—— 它钩在 withNativePDFWriter
+            // 的成功分支上，是 App 所有 PDF 用户状态写入的唯一咽喉。
+            markCloudSyncDirty()
         }
     }
 }
