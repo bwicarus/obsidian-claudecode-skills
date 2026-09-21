@@ -16,6 +16,22 @@
          不是后台模式。加了反而会被审核问"你要后台干什么"。 -->
     <key>com.apple.developer.healthkit.background-delivery</key>
     <true/>
+    <!-- iCloud 跨设备同步（2026-09-22 用户拍板：iCloud 管 Apple↔Apple，
+         Windows 只收单向留底）。用的是 CKSyncEngine，所以后台那一项必须选
+         **Include CloudKit support**；「Compatible with Xcode 5」只给
+         iCloud Documents / key-value store，不带 CloudKit，选了就完全用不了。
+         ⚠ 容器名要与 ReaderCloudUserStateSync.containerIdentifier 逐字一致
+         （区分大小写）。改名会让已经同步上去的数据变成孤儿。
+         ⚠ aps-environment 下面已经有了 —— CKSyncEngine 要 remote notifications
+         才能被服务端推醒，少了它只能等下次前台轮询。 -->
+    <key>com.apple.developer.icloud-container-identifiers</key>
+    <array>
+        <string>iCloud.BWICARUS</string>
+    </array>
+    <key>com.apple.developer.icloud-services</key>
+    <array>
+        <string>CloudKit</string>
+    </array>
     <key>com.apple.security.application-groups</key>
     <array>
         <string>group.space.bwicarus.bwreader2</string>

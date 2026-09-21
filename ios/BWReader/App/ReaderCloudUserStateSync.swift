@@ -47,9 +47,12 @@ actor ReaderCloudUserStateSync {
 
     static let recordType = "ReaderUserStateDomain"
     static let zoneName = "ReaderUserState"
-    /// ⚠ 必须与 entitlements 里那条一致；容器本身要在开发者后台建好，否则签名会
-    ///   带着一个不存在的容器，运行时所有 CloudKit 调用都失败。
-    static let containerIdentifier = "iCloud.space.bwicarus.bwreader2"
+    /// ⚠ 必须与 `BWReader.entitlements` 里那条**逐字**一致（含大小写：容器标识符
+    ///   是区分大小写的）。容器本身要在开发者后台建好并在 App ID 上勾选，否则签名
+    ///   会带着一个不存在的容器，运行时所有 CloudKit 调用都失败。
+    ///   这个名字是 2026-09-22 用户在后台建的那个（描述 "READER"）——
+    ///   **代码对齐容器，不是反过来**：容器改名会让已经同步上去的数据变成孤儿。
+    static let containerIdentifier = "iCloud.BWICARUS"
 
     static let domainNames = ["reading-position", "highlights", "ink", "closed-regions",
                               "notes", "user-pages", "card-placements", "entity-references"]

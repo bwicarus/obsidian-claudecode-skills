@@ -109,3 +109,20 @@ test("⑫ 别的书的远端改动不能就地丢掉", () => {
   const drain = body(SYNC, "func drainPending(contentSHA256: String)", "private func merge(digest:");
   assert.ok(drain.indexOf("await merge(") < drain.indexOf("store.clearPending("));
 });
+
+test("⑬ 容器标识符两处必须逐字一致", () => {
+  // ⚠ 容器标识符**区分大小写**，而它有两份副本：entitlements 和 Swift 常量。
+  // 对不上的表现分两种，都很难看出原因：签名时带着一个 App ID 上没有的容器
+  // （构建红），或者签名过了但运行时所有 CloudKit 调用静静地失败。
+  const ENTITLEMENTS = read("ios/BWReader/App/BWReader.entitlements");
+  const declared = ENTITLEMENTS.match(
+    /<key>com\.apple\.developer\.icloud-container-identifiers<\/key>\s*<array>\s*<string>([^<]+)<\/string>/);
+  assert.ok(declared, "entitlements 里要声明容器");
+  const inCode = SYNC.match(/static let containerIdentifier = "([^"]+)"/);
+  assert.ok(inCode, "Swift 里要有那个常量");
+  assert.equal(inCode[1], declared[1]);
+  // 用 CKSyncEngine 就必须是 CloudKit 那一档（不是 iCloud Documents/KV）。
+  assert.match(ENTITLEMENTS, /<key>com\.apple\.developer\.icloud-services<\/key>\s*<array>\s*<string>CloudKit<\/string>/);
+  // 服务端要能推醒它，否则只能等下次前台轮询。
+  assert.match(ENTITLEMENTS, /<key>aps-environment<\/key>/);
+});
