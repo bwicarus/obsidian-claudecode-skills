@@ -682,11 +682,43 @@
     }).catch(function () {});
   }
 
+  // 新存储（数据落在 App 自己沙盒的 SQLite 里）的开关。
+  //
+  // ⚠ **默认关**，而且条件是「三样东西都在」：开关打开、原生那条消息通道真的
+  //   存在、两个模块都装上了。任何一样缺席就走 IndexedDB —— 存储是唯一一类
+  //   "选错了就把数据弄没"的东西，宁可不切换，也不要切到一半。
+  // ⚠ 这里**不做回退重试**：如果新存储在运行中出错，那是真出了问题，要让它
+  //   响；静默回退到 IndexedDB 会造成"一半数据在这边、一半在那边"。
+  function nativeStoreEnabled() {
+    try {
+      if (root.localStorage.getItem('bw-native-data-store') !== '1') return false;
+    } catch (_) { return false; }
+    var bridge = runtimeRoot.nativeStoreBridgePort;
+    var store = runtimeRoot.nativeStore;
+    return !!(bridge && store && typeof bridge.available === 'function' &&
+              bridge.available() && typeof store.createNativeDataStore === 'function');
+  }
+
   function createStores() {
-    var indexed = required('indexedDBStore', 'createIndexedDBDataStore');
     var registry = required('dataRegistry', 'syncCollections');
     var causal = registry.syncCollections();
     var prefix = 'bw-reader-native-v1';
+    if (nativeStoreEnabled()) {
+      var nativeStore = runtimeRoot.nativeStore;
+      var bridgePort = runtimeRoot.nativeStoreBridgePort;
+      var makeNative = function (suffix, causalCollections) {
+        return nativeStore.createNativeDataStore({
+          port: bridgePort.createBridgePort({ store: prefix + suffix }),
+          deviceId: deviceId, causalCollections: causalCollections
+        });
+      };
+      return {
+        global: makeNative('-global', causal),
+        document: makeNative('-document', []),
+        device: makeNative('-device', [])
+      };
+    }
+    var indexed = required('indexedDBStore', 'createIndexedDBDataStore');
     return {
       global: indexed.createIndexedDBDataStore({
         dbName: prefix + '-global', deviceId: deviceId,

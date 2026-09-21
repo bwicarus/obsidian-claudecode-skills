@@ -172,3 +172,25 @@ test("和 native-store 接得上（端到端跑一遍）", async () => {
   assert.equal(page.changes[0].cursor, 1);
   uninstall();
 });
+
+test("默认不启用 —— 开关＋通道都在才接管", async () => {
+  const { readFileSync } = await import("node:fs");
+  const RUNTIME = readFileSync(new URL(
+    "../../_server_deploy/static/pdf/native-local-runtime.js", import.meta.url), "utf8");
+  const fn = RUNTIME.slice(RUNTIME.indexOf("function nativeStoreEnabled()"),
+                           RUNTIME.indexOf("function createStores()"));
+  // ⚠ 三样都要：开关、通道真的在、两个模块都装上了。任何一样缺席就走
+  // IndexedDB —— 存储是唯一一类"选错了就把数据弄没"的东西。
+  assert.match(fn, /localStorage\.getItem\('bw-native-data-store'\) !== '1'\) return false/);
+  assert.match(fn, /bridge\.available\(\)/);
+  assert.match(fn, /typeof store\.createNativeDataStore === 'function'/);
+  // ⚠ 运行中出错**不许**静默回退到 IndexedDB：那会造成"一半数据在这边、
+  // 一半在那边"，而且没人会发现。
+  const create = RUNTIME.slice(RUNTIME.indexOf("function createStores()"),
+                               RUNTIME.indexOf("function createRouter("));
+  assert.doesNotMatch(create, /catch\s*\([^)]*\)\s*\{[^}]*createIndexedDBDataStore/);
+  // 三个库都要换，不能只换一个（书的隔离靠 documentId，不是靠分库）。
+  for (const suffix of ["-global", "-document", "-device"]) {
+    assert.ok(create.includes(`makeNative('${suffix}'`), suffix + " 没走新存储");
+  }
+});

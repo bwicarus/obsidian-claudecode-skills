@@ -561,6 +561,10 @@ window.toggleGrammarPanel = function () {
 <script src="/static/reader-runtime/context-selection-registry.js?v={{ shared_js_v }}"></script>
 <script src="/static/reader-runtime/data-store.js?v={{ shared_js_v }}"></script>
 <script src="/static/reader-runtime/indexeddb-store.js?v={{ shared_js_v }}"></script>
+<!-- 本机数据库（数据落在 App 自己沙盒的 SQLite 里）。⚠ 默认不启用：
+     要开关打开 + 原生消息通道在场，两者缺一就继续走上面那份 IndexedDB。 -->
+<script src="/static/reader-runtime/native-store.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/native-store-bridge-port.js?v={{ shared_js_v }}"></script>
 <script src="/static/reader-runtime/data-registry.js?v={{ shared_js_v }}"></script>
 <script src="/static/reader-runtime/card-repository.js?v={{ shared_js_v }}"></script>
 <script src="/static/reader-runtime/anki-mobile-export.js?v={{ shared_js_v }}"></script>

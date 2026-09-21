@@ -272,6 +272,9 @@ _HTML_CACHE_ASSETS = (
     "reader-runtime/context-selection-registry.js",
     "reader-runtime/data-store.js",
     "reader-runtime/indexeddb-store.js",
+    # 本机数据库（默认不启用；开关＋原生通道都在才接管）。
+    "reader-runtime/native-store.js",
+    "reader-runtime/native-store-bridge-port.js",
     "reader-runtime/data-registry.js",
     "reader-runtime/card-repository.js",
     "reader-runtime/anki-mobile-export.js",
