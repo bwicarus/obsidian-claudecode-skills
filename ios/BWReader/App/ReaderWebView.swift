@@ -8,6 +8,7 @@ private let nativeComputerVoiceMessageName = "bwNativeComputerVoice"
 private let nativeComputerContextMessageName = "bwNativeComputerContext"
 private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
 private let nativePencilInkMessageName = "bwNativePencilInk"
+private let nativeReadingProjectionMessageName = "bwNativeReadingProjection"
 private let nativeLocalNotesMessageName = "bwNativeLocalNotes"
 private let nativeAnkiMobileMessageName = "bwNativeAnkiMobile"
 private let nativeConversationMessageName = "bwNativeConversation"
@@ -322,6 +323,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
+    private var nativeReadingProjectionMessageProxy: WeakScriptMessageHandler?
+    private var nativeProjectionRefreshTask: Task<Void, Never>?
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
     private var nativeAnkiMobileMessageProxy:
         WeakScriptMessageHandlerWithReply?
@@ -585,6 +588,47 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     static let nativePDFRendererDefaultsKey = "reader.nativePDFRenderer"
 
+    /// 本地 runtime 落了一笔用户状态 → 把高亮/墨迹/便签重新投影到原生正文。
+    ///
+    /// ⚠ 在此之前这三样是**开书那一刻的只读快照**：划完线、AI 改完、同步回来，
+    /// 原生正文上什么都不会变，要关掉再开才看得见。
+    ///
+    /// 合并成一次：一次划线会连着落好几笔（高亮本体 + 关联记录），逐笔重投
+    /// 等于把整包 user-state 导出好几遍。180ms 与导航桥的节流同口径。
+    private func scheduleNativePDFProjectionRefresh() {
+        guard nativePDFDocument != nil else { return }
+        guard nativeProjectionRefreshTask == nil else { return }
+        nativeProjectionRefreshTask = Task { @MainActor [weak self] in
+            defer { self?.nativeProjectionRefreshTask = nil }
+            try? await Task.sleep(for: .milliseconds(180))
+            guard let self, !Task.isCancelled else { return }
+            await self.refreshNativePDFProjection()
+        }
+    }
+
+    /// 重新导出 user-state 并投影。身份校验与 prepare 同口径：书、内容摘要、
+    /// 上下文代际任一对不上就放弃 —— 把甲书的高亮画到乙书上比不更新糟得多。
+    private func refreshNativePDFProjection() async {
+        guard let document = nativePDFDocument, !isLoading,
+              let access = currentLocalBookAccess, access.record.format == .pdf,
+              let digest = currentLocalBookContentSHA256,
+              let adapter = bookUserStateWebAdapter,
+              document.matches(bookID: access.record.id, contentSHA256: digest) else { return }
+        let generation = bookUserStateContextGeneration
+        do {
+            let domains = try await adapter.exportPackage(localBookId: access.record.id)
+            guard generation == bookUserStateContextGeneration,
+                  self.nativePDFDocument === document,
+                  document.matches(bookID: access.record.id, contentSHA256: digest),
+                  let notes = domains.first(where: { $0.name == .notes }) else { return }
+            try document.applyOverlays(domains, bookID: access.record.id, contentSHA256: digest)
+            try document.applyNotes(notes, bookID: access.record.id, contentSHA256: digest)
+        } catch {
+            // 出声但不打断阅读：投影失败不该让正文消失。
+            nativePDFMountFailure = "投影更新失败：" + String(describing: error).prefix(160)
+        }
+    }
+
     func captureNativeReadingHierarchyImage() throws -> UIImage {
         guard let localRuntimeServer else { throw NativeReaderCaptureError.pageUnavailable }
         return try localRuntimeServer.visualCaptureBroker.captureImage(region: nil)
@@ -727,6 +771,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         contentController.add(
             nativePencilInkMessageProxy,
             name: nativePencilInkMessageName
+        )
+        // 原生正文的实时投影：本地 runtime 每落一笔用户状态就 ping 一下，
+        // 原生 PDFKit 视图据此把高亮/墨迹/便签重新投影上去。
+        let nativeReadingProjectionMessageProxy =
+            WeakScriptMessageHandler(delegate: self)
+        self.nativeReadingProjectionMessageProxy = nativeReadingProjectionMessageProxy
+        contentController.add(
+            nativeReadingProjectionMessageProxy,
+            name: nativeReadingProjectionMessageName
         )
         let nativeLocalNotesMessageProxy =
             WeakScriptMessageHandlerWithReply(delegate: self)
@@ -4478,6 +4531,18 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 return
             }
             nativePencilInk.updateLayout(from: body)
+        } else if message.name == nativeReadingProjectionMessageName {
+            guard
+                message.frameInfo.isMainFrame,
+                message.webView === webView,
+                isTrustedReaderURL(webView.url),
+                isTrustedReaderURL(message.frameInfo.request.url),
+                let body = message.body as? [String: Any],
+                body["type"] as? String == "user-state-written"
+            else {
+                return
+            }
+            scheduleNativePDFProjectionRefresh()
         }
     }
 }

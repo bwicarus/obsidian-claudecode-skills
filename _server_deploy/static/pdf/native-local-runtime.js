@@ -514,6 +514,27 @@
     }
   }
 
+  // 原生正文的实时投影信号。
+  //
+  // ⚠ 原生 PDFKit 视图上的高亮/墨迹/便签本来是**开书那一刻的只读快照** —— 划完线、
+  //   AI 改完、同步回来，正文上都不会变，要关掉再开才看得见。这里在写入真正落地
+  //   之后 ping 一下，壳收到就重新投影。
+  //   挂在 withNativePDFWriter 上，是因为它是**所有** PDF 用户状态写入的唯一咽喉
+  //   （高亮 / 便签 / 页卡 / 助手撤销 / 语音 / sync-batch 都经过它）—— 一个钩子
+  //   覆盖全部，不必每加一种写入就补一处（CLAUDE.md：先数清楚有几份副本）。
+  //   没有这个 handler 的表面（桌面 / 扩展）静默跳过：那里不存在原生正文。
+  function announceNativeReadingStateWrite(label) {
+    try {
+      var handlers = root.webkit && root.webkit.messageHandlers;
+      var sink = handlers && handlers.bwNativeReadingProjection;
+      if (!sink || typeof sink.postMessage !== 'function') return;
+      sink.postMessage({
+        type: 'user-state-written',
+        label: String(label || '').slice(0, 64)
+      });
+    } catch (_) {}
+  }
+
   function withNativePDFWriter(label, task) {
     var lease;
     return Promise.resolve().then(function () {
@@ -528,6 +549,8 @@
     }).then(function (value) {
       assertNativePDFWriterLease(lease);
       releaseNativePDFWriterLease(lease);
+      // 只在成功分支报：失败时什么都没落库，投影没有理由动。
+      announceNativeReadingStateWrite(label);
       return value;
     }, function (error) {
       releaseNativePDFWriterLease(lease);

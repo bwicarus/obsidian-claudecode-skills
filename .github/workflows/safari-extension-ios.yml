@@ -494,14 +494,16 @@ jobs:
           #   used with this request）。带上它整个签名步骤 400，而此前日志里只有一句
           #   "HTTP Error 400"，看不出是哪一次调用 —— 2026-09-21 为此白跑了两轮构建。
           capabilities = request("GET", "/v1/bundleIds/" + bundle_id + "/bundleIdCapabilities")["data"]
-          if not any(c["attributes"]["capabilityType"] == "SIGN_IN_WITH_APPLE" for c in capabilities):
+          # ⚠ 苹果这个枚举里**没有** SIGN_IN_WITH_APPLE，登录能力的值叫 APPLE_ID_AUTH
+          #   （原话：Expected one of: … 'APPLE_ID_AUTH'）。写错会在 POST 时 409。
+          if not any(c["attributes"]["capabilityType"] == "APPLE_ID_AUTH" for c in capabilities):
               # ⚠ 这里**不要**加"失败就换个写法重试"：上一轮 400 其实出在上面那次
               #   GET 上，我却照着 POST 猜了一个回退 —— 猜错方向不说，回退成功
               #   还会悄悄写出一份没有 consent 设置的配置。失败就让它带着苹果的
               #   原话抛出来（request 里已经打了响应体），一轮就能看清原因。
               request("POST", "/v1/bundleIdCapabilities", {"data": {
                   "type": "bundleIdCapabilities", "attributes": {
-                      "capabilityType": "SIGN_IN_WITH_APPLE",
+                      "capabilityType": "APPLE_ID_AUTH",
                       "settings": [{"key": "APPLE_ID_AUTH_APP_CONSENT",
                                     "options": [{"key": "PRIMARY_APP_CONSENT", "enabled": True}]}]},
                   "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle_id}}}}})
