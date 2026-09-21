@@ -103,7 +103,7 @@ struct ReaderNativeDataStoreBridge {
         guard entries.count <= 512 else { throw BridgeError.invalidRequest("一次提交太多了") }
 
         var parsed: [(record: ReaderNativeDataStore.Record, mutationId: String?,
-                      change: [String: Any], expectedRev: Int64?)] = []
+                      change: [String: Any]?, expectedRev: Int64?)] = []
         for entry in entries {
             let collection = try string(entry, "collection")
             let id = try string(entry, "id")
@@ -123,10 +123,22 @@ struct ReaderNativeDataStoreBridge {
             // 要到提交那一刻才分配 —— 所以这里留着字典，提交时再把 cursor 放进去。
             // ⚠ 只存记录本体是不够的：那样 changes() 拿不到 operation/mutationId，
             //   增量同步就无从判断这一条是写还是删、是不是自己刚发出去的。
-            guard var change = entry["change"] as? [String: Any] else {
-                throw BridgeError.invalidRequest("commit 条目缺 change")
+            //
+            // ⚠ `journal: false` = 只写记录、不进 journal（入站同步走这条）。
+            //   journal 是"待发出"的队列；把同步拉回来的记录也塞进去就成了回环，
+            //   A 推给 B、B 原样再推回 A，两台设备来回顶而谁都没改过东西。
+            //   ⚠ 默认是 **true**：缺字段的老调用方（本地写入）必须照旧进 journal，
+            //     默认成 false 的表现是"改了能看见、就是同步不出去"。
+            let wantsJournal = entry["journal"] as? Bool ?? true
+            var change = entry["change"] as? [String: Any]
+            if wantsJournal {
+                guard change != nil else {
+                    throw BridgeError.invalidRequest("commit 条目要进 journal 却缺 change")
+                }
+                change?["record"] = recordValue
+            } else {
+                change = nil
             }
-            change["record"] = recordValue
             parsed.append((record, entry["mutationId"] as? String, change,
                            (entry["expectedRev"] as? NSNumber)?.int64Value))
         }
@@ -135,10 +147,11 @@ struct ReaderNativeDataStoreBridge {
         var cursors: [Int64] = []
         try store.inTransaction {
             for item in parsed {
+                let envelope = item.change
                 let cursor = try store.commitWithinTransaction(
                     record: item.record, mutationId: item.mutationId,
-                    journalJSON: { assigned in
-                        var change = item.change
+                    journalJSON: envelope == nil ? nil : { assigned in
+                        var change = envelope ?? [:]
                         change["cursor"] = assigned
                         // 序列化失败不该悄悄写个空串进 journal —— 那条增量以后
                         // 谁也解释不了。退回记录本体，至少还认得出是哪条。

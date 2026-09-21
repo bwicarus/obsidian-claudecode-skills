@@ -208,7 +208,7 @@ final class ReaderNativeDataStore {
     ///
     /// 返回分配到的 journal 游标。
     @discardableResult
-    func commit(record: Record, mutationId: String?, journalJSON: (Int64) -> String,
+    func commit(record: Record, mutationId: String?, journalJSON: ((Int64) -> String)?,
                 expectedRev: Int64?, now: Int64,
                 maxJournal: Int = 10_000, maxMutations: Int = 20_000) throws -> Int64 {
         try inTransaction {
@@ -227,9 +227,14 @@ final class ReaderNativeDataStore {
     ///
     /// ⚠ `journalJSON` 是个**闭包**而不是现成的串：游标要到提交那一刻才分配，
     /// 而 journal 条目里必须带着它（调用方按 cursor 对齐增量）。
+    ///
+    /// ⚠ `journalJSON` 传 **nil** = 只写记录、不进 journal、不动游标（返回 0）。
+    /// 这是**入站同步**要的形状：journal 是"发出去"的队列，把同步拉回来的记录也
+    /// 塞进去就成了回环 —— A 推给 B，B 原样再推回 A，两台设备来回顶而谁都没改过
+    /// 东西。所以"写记录"和"记一笔待发"必须能分开。
     @discardableResult
     func commitWithinTransaction(record: Record, mutationId: String?,
-                                 journalJSON: (Int64) -> String,
+                                 journalJSON: ((Int64) -> String)?,
                                  expectedRev: Int64?, now: Int64,
                                  maxJournal: Int = 10_000,
                                  maxMutations: Int = 20_000) throws -> Int64 {
@@ -252,12 +257,15 @@ final class ReaderNativeDataStore {
                 .int(record.updatedAt), .int(record.deleted ? 1 : 0), .text(record.json)
             ])
 
-        let next = try self.cursor() + 1
-        try self.execute("INSERT INTO journal (cursor, json) VALUES (?, ?)",
-                         bind: [.int(next), .text(journalJSON(next))])
-        try self.execute("INSERT INTO meta (key, json) VALUES ('cursor', ?) "
-                         + "ON CONFLICT(key) DO UPDATE SET json = excluded.json",
-                         bind: [.text(String(next))])
+        var next: Int64 = 0
+        if let journalJSON {
+            next = try self.cursor() + 1
+            try self.execute("INSERT INTO journal (cursor, json) VALUES (?, ?)",
+                             bind: [.int(next), .text(journalJSON(next))])
+            try self.execute("INSERT INTO meta (key, json) VALUES ('cursor', ?) "
+                             + "ON CONFLICT(key) DO UPDATE SET json = excluded.json",
+                             bind: [.text(String(next))])
+        }
 
         if let mutationId, !mutationId.isEmpty {
             try self.execute("""

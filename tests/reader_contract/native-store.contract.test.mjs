@@ -48,27 +48,50 @@ function makePort() {
     },
     async commit(entries) {
       port.commits += 1;
-      // 乐观并发：先整批核对，**任何一条不过就整批不落** —— 半批落地是
-      // batch 最不该出现的结果。
-      for (const entry of entries) {
-        const current = records.get(key(entry.collection, entry.id));
-        const actual = current ? current.rev : 0;
-        if (entry.expectedRev != null && actual !== entry.expectedRev) {
-          const error = new Error("rev 对不上");
-          error.code = "BW_DATA_CONFLICT";
-          throw error;
-        }
-      }
+      // ⚠ 逐条「核对 → 写」，整批包一层回滚 —— 照抄
+      //   `commitWithinTransaction` 在 SQLite 事务里的做法：
+      //   · 改成"先整批核对、再整批写"会把**同一批里两条改同一条 id**
+      //     判成冲突（第二条的 expectedRev 是第一条将要写出的 rev，
+      //     核对的那一刻还没写）；
+      //   · 而回滚才是"任何一条不过就整批不落"的来源 —— 半批落地是 batch
+      //     最不该出现的结果：调用方拿到"失败"，库里却留下了一半。
+      const undo = {
+        records: new Map(records), mutations: new Map(mutations),
+        journal: journal.length, cursor
+      };
       const cursors = [];
-      for (const entry of entries) {
-        records.set(key(entry.collection, entry.id), entry.record);
-        cursor += 1;
-        cursors.push(cursor);
-        // 与原生桥同样的做法：调用方给的信封不带 cursor，提交时才填。
-        journal.push({ ...(entry.change ?? {}), cursor });
-        if (entry.mutationId) mutations.set(entry.mutationId, entry.record);
+      try {
+        for (const entry of entries) {
+          const slot = key(entry.collection, entry.id);
+          const current = records.get(slot);
+          if (entry.expectedRev != null &&
+              (current ? current.rev : 0) !== entry.expectedRev) {
+            const error = new Error("rev 对不上");
+            error.code = "BW_DATA_CONFLICT";
+            throw error;
+          }
+          records.set(slot, entry.record);
+          // ⚠ `journal: false` → 只写记录，不进 journal、不动游标，游标回 0。
+          //   桥那边是同一条规矩（默认 true，缺字段的调用方照旧入队）。
+          if (entry.journal === false) {
+            cursors.push(0);
+          } else {
+            cursor += 1;
+            cursors.push(cursor);
+            // 与原生桥同样的做法：调用方给的信封不带 cursor，提交时才填。
+            journal.push({ ...(entry.change ?? {}), cursor });
+            meta.set("cursor", String(cursor));
+          }
+          if (entry.mutationId) mutations.set(entry.mutationId, entry.record);
+        }
+      } catch (error) {
+        records.clear(); undo.records.forEach((value, slot) => records.set(slot, value));
+        mutations.clear(); undo.mutations.forEach((value, id) => mutations.set(id, value));
+        journal.length = undo.journal;
+        cursor = undo.cursor;
+        meta.set("cursor", String(cursor));
+        throw error;
       }
-      meta.set("cursor", String(cursor));
       return { cursors };
     },
     async journal({ after = 0, limit = 500 } = {}) {
@@ -372,4 +395,217 @@ test("remove 的信封带的是 remove", async () => {
   const page = await db.changes({ after: 0 });
   assert.deepEqual(page.changes.map((c) => c.operation), ["put", "remove"]);
   assert.equal(page.changes[1].record.deleted, true);
+});
+
+// ── applyChanges（入站：同步把别处的记录写进来）──
+//
+// 这一组防的是同步里最贵的两类错：
+//   · 入站记录被当成本地新改动 → 两台设备来回推同一条，谁都没改过东西；
+//   · 入站记录覆盖掉更新的本地版本 → 用户刚写的东西被一次拉取吞掉。
+
+/** 造一条入站变更信封（同步那侧递过来的形状）。 */
+function incoming(collection, record, extra = {}) {
+  return {
+    collection,
+    record: { schema: 1, collection, id: record.id, rev: record.rev,
+              updatedAt: record.updatedAt ?? 1000, updatedBy: record.updatedBy ?? "peer",
+              deleted: record.deleted === true,
+              value: record.value ?? { id: record.id } },
+    ...extra
+  };
+}
+
+test("入站记录原样落库：rev / updatedAt 都不许改", async () => {
+  // ⚠ 这条是这一组里最要紧的。走 put 的话 rev 会被推高、updatedAt 换成现在，
+  //   于是下一轮同步把它当成"本机刚改的"又推回去 —— 两台设备来回顶。
+  const port = makePort();
+  const db = store(port);
+  const report = await db.applyChanges([
+    incoming("n", { id: "a", rev: 7, updatedAt: 1234, value: { id: "a", t: "远端" } })
+  ]);
+  assert.deepEqual(report.conflicts, []);
+  assert.equal(report.applied.length, 1);
+  const got = await db.get("n", "a");
+  assert.equal(got.rev, 7, "rev 被改过了");
+  assert.equal(got.updatedAt, 1234, "updatedAt 被改过了");
+  assert.equal(got.value.t, "远端");
+});
+
+test("默认不写 journal —— 否则就是一个同步回环", async () => {
+  // ⚠ journal 是"待发出"的队列。入站记录进了 journal，下一轮就原样推回去，
+  //   A 推给 B、B 再推回 A，永远停不下来。
+  const port = makePort();
+  const db = store(port);
+  await db.applyChanges([incoming("n", { id: "a", rev: 3 })]);
+  const page = await db.changes({ after: 0 });
+  assert.deepEqual(page.changes, [], "入站记录进了 journal");
+  assert.equal(page.cursor, 0, "入站记录动了游标");
+});
+
+test("journal:true 才入队（导入历史用），游标跟着走", async () => {
+  const port = makePort();
+  const db = store(port);
+  const report = await db.applyChanges([incoming("n", { id: "a", rev: 3 })], { journal: true });
+  const page = await db.changes({ after: 0 });
+  assert.equal(page.changes.length, 1);
+  assert.equal(page.changes[0].operation, "put");
+  assert.equal(page.changes[0].imported, true);
+  assert.equal(report.applied[0].cursor, 1, "入队了却没报游标");
+});
+
+test("本地更新 → 入站的旧版本被判冲突，不许覆盖", async () => {
+  // ⚠ 覆盖的表现是"我刚写的东西被一次同步吞了"，而且没有任何提示。
+  const port = makePort();
+  const db = store(port);
+  await db.put("n", { id: "a", t: "本地" });   // rev 1
+  await db.put("n", { id: "a", t: "本地2" });  // rev 2
+  const report = await db.applyChanges([
+    incoming("n", { id: "a", rev: 1, value: { id: "a", t: "远端" } })
+  ]);
+  assert.equal(report.applied.length, 0);
+  assert.equal(report.conflicts.length, 1);
+  assert.equal(report.conflicts[0].reason, "stale-incoming");
+  assert.equal((await db.get("n", "a")).value.t, "本地2", "本地版本被覆盖了");
+});
+
+test("同 rev 不同内容 → 报 same-rev-different-value，交给上层裁决", async () => {
+  const port = makePort();
+  const db = store(port);
+  await db.put("n", { id: "a", t: "本地" });
+  const report = await db.applyChanges([
+    incoming("n", { id: "a", rev: 1, value: { id: "a", t: "远端" } })
+  ]);
+  assert.equal(report.conflicts[0].reason, "same-rev-different-value");
+  assert.equal(report.conflicts[0].currentRev, 1);
+  assert.equal(report.conflicts[0].incomingRev, 1);
+});
+
+test("内容一样且不更新 → 算 skipped，不白写一遍", async () => {
+  const port = makePort();
+  const db = store(port);
+  await db.put("n", { id: "a", t: "同" });
+  const before = port.commits;
+  const report = await db.applyChanges([
+    incoming("n", { id: "a", rev: 1, value: { id: "a", t: "同" } })
+  ]);
+  assert.equal(report.applied.length, 0);
+  assert.deepEqual(report.conflicts, []);
+  assert.equal(report.skipped.length, 1);
+  assert.equal(port.commits, before, "没东西可写却还是过了一次桥");
+});
+
+test("同一个 mutationId 重放 → 直接 skip", async () => {
+  const port = makePort();
+  const db = store(port);
+  await db.applyChanges([incoming("n", { id: "a", rev: 2 }, { mutationId: "r1" })]);
+  const report = await db.applyChanges([
+    incoming("n", { id: "a", rev: 5, value: { id: "a", t: "又来" } }, { mutationId: "r1" })
+  ]);
+  assert.deepEqual(report.skipped, ["r1"]);
+  assert.equal((await db.get("n", "a")).rev, 2, "重放被当成新变更写进去了");
+});
+
+test("墓碑优先：tombstoneDominates 下不许把删掉的复活", async () => {
+  // ⚠ 没有这条的表现最诡异：删掉的划线过一会儿自己回来了。
+  const port = makePort();
+  const db = store(port);
+  await db.put("n", { id: "a" });
+  await db.remove("n", "a");
+  const report = await db.applyChanges([
+    incoming("n", { id: "a", rev: 9, value: { id: "a", t: "复活" } })
+  ], { tombstoneDominates: true });
+  assert.equal(report.conflicts[0].reason, "tombstone-dominates");
+  assert.equal(await db.get("n", "a"), null, "墓碑被复活了");
+});
+
+test("墓碑也能原样入站（远端删了，本机跟着删）", async () => {
+  const port = makePort();
+  const db = store(port);
+  await db.put("n", { id: "a" });
+  await db.applyChanges([
+    incoming("n", { id: "a", rev: 4, deleted: true })
+  ]);
+  assert.equal(await db.get("n", "a"), null);
+  assert.equal((await db.get("n", "a", { includeDeleted: true })).rev, 4);
+});
+
+test("同一批里两条改同一条 id：后一条要看见前一条", async () => {
+  // ⚠ IndexedDB 那边靠"一个事务里顺序执行"天然拿到这个。这边是 readMany 一次
+  //   读全批，少了 overlay 的话后一条拿着过时的 current 去判，表现是同一批里的
+  //   第二次修改被当成冲突丢掉 —— 一次拉取只落了一半。
+  const port = makePort();
+  const db = store(port);
+  const report = await db.applyChanges([
+    incoming("n", { id: "a", rev: 1, updatedAt: 100, value: { id: "a", t: "一" } }),
+    incoming("n", { id: "a", rev: 2, updatedAt: 200, value: { id: "a", t: "二" } })
+  ]);
+  assert.deepEqual(report.conflicts, [], "第二条被误判成冲突");
+  assert.equal(report.applied.length, 2);
+  assert.equal((await db.get("n", "a")).value.t, "二");
+});
+
+test("整批一次提交 —— 入站也不许半批落地", async () => {
+  const port = makePort();
+  const db = store(port);
+  const before = port.commits;
+  await db.applyChanges([
+    incoming("n", { id: "a", rev: 1 }),
+    incoming("n", { id: "b", rev: 1 }),
+    incoming("m", { id: "c", rev: 1 })
+  ]);
+  assert.equal(port.commits - before, 1, "拆成了多次提交");
+});
+
+test("subscribe 收到入站通知，且标着 remote", async () => {
+  // ⚠ remote 标记是上层区分"别人改的"和"我改的"的唯一依据；丢了它，
+  //   界面会把同步拉回来的改动当成本机操作去回放。
+  const port = makePort();
+  const db = store(port);
+  const seen = [];
+  db.subscribe({ collection: "n" }, (change) => seen.push(change));
+  await db.applyChanges([incoming("n", { id: "a", rev: 6 }, { cursor: 42 })]);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].remote, true);
+  assert.equal(seen[0].operation, "put");
+  assert.equal(seen[0].cursor, 42, "不入队时该带上来的那个远端游标");
+});
+
+test("因果集合：没有证明的入站记录进不来", async () => {
+  // causal 集合（卡片这类）要求记录自带父版本证明，否则无从判断它是不是
+  // 接在本机这一版后面 —— 放进来就等于允许凭空分叉。
+  const port = makePort();
+  const db = store(port, { causalCollections: ["card-entities"] });
+  const report = await db.applyChanges([
+    incoming("card-entities", { id: "a", rev: 1 })
+  ]);
+  assert.equal(report.applied.length, 0);
+  assert.equal(report.conflicts.length, 1);
+  assert.ok(report.conflicts[0].reason, "拒绝了却没说原因");
+});
+
+test("因果集合：snapshotBaseline 下允许把空库铺满", async () => {
+  const port = makePort();
+  const db = store(port, { causalCollections: ["card-entities"] });
+  const report = await db.applyChanges([
+    incoming("card-entities", { id: "a", rev: 3 })
+  ], { snapshotBaseline: true });
+  assert.deepEqual(report.conflicts, []);
+  assert.equal((await db.get("card-entities", "a")).rev, 3);
+});
+
+test("空输入不过桥", async () => {
+  const port = makePort();
+  const db = store(port);
+  const before = port.commits + port.reads;
+  const report = await db.applyChanges([]);
+  assert.deepEqual(report, { applied: [], conflicts: [], skipped: [] });
+  assert.equal(port.commits + port.reads, before);
+});
+
+test("close 之后不接受入站写入", async () => {
+  const port = makePort();
+  const db = store(port);
+  db.close();
+  await assert.rejects(() => db.applyChanges([incoming("n", { id: "a", rev: 1 })]),
+                       (error) => error.code === "BW_DATA_CLOSED");
 });

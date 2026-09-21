@@ -334,6 +334,183 @@
       });
     }
 
+    // ── 入站（同步把别处的记录写进来）──
+
+    /** 同步拉回来的记录**原样**落库：rev / updatedAt / 墓碑都按来的样子写。
+     *
+     * ⚠ 这里绝不能走 `put`。`put` 会把 rev 推高、updatedAt 换成现在 —— 那条记录
+     *   就变成了"本机刚改的"，于是下一轮同步把它当成本地新改动又推回去，两台设备
+     *   来回顶。入站与本地写是两条路，区别就在这。
+     *
+     * ⚠ 默认**不写 journal**（`journal !== true`）。journal 是发出去的队列；把
+     *   入站记录塞进去就是一个同步回环：A 推给 B，B 原样再推回 A。
+     *   `journal: true` 只给"导入一份历史"这种场合用，与 IndexedDB 那边同名同义。
+     *
+     * ⚠ 判据（sameDataValue / 因果证明 / 墓碑优先）全部取自 `data-store.js`，
+     *   与 IndexedDB 版共用同一套。这个函数只负责「读什么、写什么、按什么顺序」。
+     */
+    function applyChanges(incoming, applyOptions) {
+      var normalized;
+      try {
+        assertOpen();
+        incoming = Array.isArray(incoming) ? D.cloneJSON(incoming, 'incoming') : [];
+        normalized = incoming.map(D.normalizeIncomingChange);
+      } catch (error) { return Promise.reject(error); }
+      applyOptions = applyOptions || {};
+      var journalImported = applyOptions.journal === true;
+      var tombstoneDominates = applyOptions.tombstoneDominates === true;
+      var snapshotBaseline = applyOptions.snapshotBaseline === true;
+      if (!normalized.length) {
+        return Promise.resolve({ applied: [], conflicts: [], skipped: [] });
+      }
+
+      var keyOf = function (collection, id) { return collection + ' ' + id; };
+      return Promise.all([
+        Promise.resolve(port.readMany(normalized.map(function (item) {
+          return { collection: item.collection, id: item.record.id };
+        }))),
+        Promise.all(normalized.map(function (item) {
+          return item.mutationId
+            ? Promise.resolve(port.remembered(item.mutationId))
+            : Promise.resolve(null);
+        }))
+      ]).then(function (parts) {
+        var stored = parts[0] || [];
+        var replays = parts[1] || [];
+        // ⚠ 同一批里两条改同一个 id 时，后一条必须看见前一条的结果。
+        //   IndexedDB 那边靠"一个事务里顺序执行"天然拿到，这边要自己叠一层
+        //   overlay —— 少了它，后一条会拿着过时的 current 去判，表现是
+        //   同一批里的第二次修改被当成冲突丢掉。
+        var overlay = {};
+        var applied = [];
+        var conflicts = [];
+        var skipped = [];
+        var entries = [];
+        var notifications = [];
+
+        normalized.forEach(function (item, index) {
+          var collection = item.collection;
+          var clean = item.record;
+          var mutationId = item.mutationId;
+          if (replays[index]) { skipped.push(mutationId); return; }
+
+          var key = keyOf(collection, clean.id);
+          var current = Object.prototype.hasOwnProperty.call(overlay, key)
+            ? overlay[key]
+            : (stored[index] || null);
+          var incomingRev = clean.rev;
+          var currentRev = Number((current && current.rev) || 0);
+          var sameBusiness = !!current && D.sameDataValue(current, clean);
+          var causalRequired = causalCollections.has(collection);
+          var proof = causalRequired ? D.inspectCausalProof(clean) : null;
+          var linearTombstoneChild = causalRequired && proof.valid &&
+            D.causalParentMatches(current, proof);
+
+          function reject(reason, withRevs) {
+            var conflict = {
+              mutationId: mutationId, collection: collection, id: clean.id,
+              local: current ? D.cloneJSON(current, 'local') : null,
+              incoming: D.cloneJSON(clean, 'incoming'), reason: reason
+            };
+            if (withRevs) {
+              conflict.incomingRev = incomingRev;
+              conflict.currentRev = currentRev;
+            }
+            conflicts.push(conflict);
+          }
+
+          if (sameBusiness && incomingRev <= currentRev) {
+            // 已经是这个内容了：把 mutationId 记下来（让重发认得出来）就算完。
+            // ⚠ 备忘里存的是**库里那一版**（current），不是来的那一版。桥把
+            //   "写记录"和"记备忘"用同一个 json，存 clean 就会把更新的 current
+            //   覆盖成旧的 —— 而重放时返回库里真有的那版本来也更诚实。
+            skipped.push(mutationId || (collection + '/' + clean.id));
+            if (mutationId) {
+              entries.push({ collection: collection, id: clean.id, record: current,
+                             mutationId: mutationId, expectedRev: currentRev,
+                             journal: false, change: null });
+            }
+            return;
+          }
+          if (tombstoneDominates && current && current.deleted === true &&
+              clean.deleted !== true && !linearTombstoneChild) {
+            reject('tombstone-dominates', false);
+            return;
+          }
+          var causalAccepted = causalRequired && (
+            (snapshotBaseline && current === null) ||
+            (proof.valid && D.causalParentMatches(current, proof)));
+          if (!sameBusiness && causalRequired && !causalAccepted) {
+            reject(proof.valid ? 'causal-parent-mismatch' : proof.reason, true);
+            return;
+          }
+          if (!sameBusiness && !causalRequired && current && incomingRev <= currentRev) {
+            reject(incomingRev === currentRev ? 'same-rev-different-value' : 'stale-incoming',
+                   true);
+            return;
+          }
+          if (causalRequired && !sameBusiness && currentRev >= Number.MAX_SAFE_INTEGER) {
+            reject('causal-revision-overflow', true);
+            return;
+          }
+
+          var accepted = D.cloneJSON(clean, 'record');
+          if (causalRequired && !sameBusiness) {
+            accepted.rev = Math.max(incomingRev, currentRev + 1);
+          }
+          var operation = accepted.deleted ? 'remove' : 'put';
+          overlay[key] = accepted;
+          entries.push({
+            collection: collection, id: accepted.id, record: accepted,
+            mutationId: mutationId, expectedRev: currentRev, journal: journalImported,
+            change: journalImported
+              ? { mutationId: mutationId, operation: operation, collection: collection,
+                  record: D.cloneJSON(accepted, 'change.record'),
+                  imported: true, remote: false }
+              : null
+          });
+          applied.push({ collection: collection, id: accepted.id, rev: accepted.rev,
+                         cursor: null, entryIndex: entries.length - 1 });
+          notifications.push({
+            // 不写 journal 时没有本机游标可报，就带上来的那个（远端游标）。
+            cursor: journalImported ? 0 : (Number(item.change && item.change.cursor) || 0),
+            mutationId: mutationId, operation: operation, collection: collection,
+            record: D.cloneJSON(accepted, 'change.record'), remote: !journalImported
+          });
+        });
+
+        if (!entries.length) {
+          return { applied: applied, conflicts: conflicts, skipped: skipped };
+        }
+        return Promise.resolve(port.commit(entries.map(function (entry) {
+          return {
+            collection: entry.collection, id: entry.id, record: entry.record,
+            mutationId: entry.mutationId, expectedRev: entry.expectedRev,
+            now: timestamp(),
+            // journal:false → 原生侧只写记录和 mutation 备忘，不动 journal/游标。
+            journal: entry.journal, change: entry.change
+          };
+        }))).then(function (receipt) {
+          var cursors = (receipt && receipt.cursors) || [];
+          applied.forEach(function (item, index) {
+            var cursor = Number(cursors[item.entryIndex]);
+            item.cursor = journalImported && cursor > 0 ? cursor : null;
+            delete item.entryIndex;
+            if (item.cursor) notifications[index].cursor = item.cursor;
+          });
+          notify(notifications);
+          return { applied: applied, conflicts: conflicts, skipped: skipped };
+        });
+      });
+    }
+
+    // ⚠ **故意没有 `migrateLegacyCausal`。** 它只在 checkpoint 带着
+    //   `__legacyCausalMigration` 标记时被调用，而那个标记是 sync-v2→v3 升级
+    //   一份**既有** checkpoint 时打的；新建的原生库 instanceEpoch 是新的，
+    //   旧 checkpoint 在 decode 阶段就被判为不存在，标记到不了这里。
+    //   真走到了，sync-coordinator 会抛 `BW_SYNC_CAUSAL_MIGRATION_UNAVAILABLE`
+    //   —— 一个说得清楚的硬错误，比在这条数据路径上放一段谁也没跑过的迁移好。
+
     // ── journal ──
 
     function changes(query) {
@@ -424,6 +601,7 @@
       remove: remove,
       batch: batch,
       changes: changes,
+      applyChanges: applyChanges,
       subscribe: subscribe,
       instanceEpoch: instanceEpoch,
       status: status,

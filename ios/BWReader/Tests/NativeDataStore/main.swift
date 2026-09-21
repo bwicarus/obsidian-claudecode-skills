@@ -126,6 +126,39 @@ try! rollback.putMeta("epoch", json: "\"e2\"")
 check(try! rollback.meta("epoch") == "\"e2\"", "meta 没覆盖")
 check(try! rollback.meta("没有这个") == nil, "不存在的 meta 不该有值")
 
+// ── journal 传 nil：只写记录，不入队、不动游标 ──
+// ⚠ 入站同步靠这条形状。journal 是"待发出"的队列；把同步拉回来的记录也塞进去
+//   就成了回环 —— A 推给 B、B 原样再推回 A，两台设备来回顶而谁都没改过东西。
+let inbound = try! ReaderNativeDataStore(path: ":memory:")
+_ = try! inbound.commit(record: record("hl", "local", rev: 1, at: 10), mutationId: nil,
+                        journalJSON: { "{\"cursor\":\($0)}" }, expectedRev: nil, now: 10)
+let cursorBeforeInbound = try! inbound.cursor()
+let inboundCursor = try! inbound.commit(record: record("hl", "remote", rev: 9, at: 20),
+                                        mutationId: "r1", journalJSON: nil,
+                                        expectedRev: nil, now: 20)
+check(inboundCursor == 0, "不入队时该报 0，实际 \(inboundCursor)")
+check(try! inbound.cursor() == cursorBeforeInbound, "不入队却动了游标")
+check(try! inbound.journalCount() == 1, "不入队却多了一条 journal")
+// 记录本身要真写进去，mutation 备忘也要留（重发时认得出来）。
+check(try! inbound.record(collection: "hl", id: "remote")?.rev == 9, "入站记录没落库")
+check(try! inbound.mutationResult(mutationId: "r1") != nil, "入站的 mutation 备忘没留")
+inbound.close()
+
+// ── 同一批里两条改同一条 id：后一条的 expectedRev 是前一条刚写出的 rev ──
+// ⚠ 核对必须逐条「读当前 → 比 → 写」。改成"先整批核对、再整批写"的话，第二条
+//   在核对那一刻还看不到第一条，于是被判成冲突 —— 表现是一次拉取只落了一半。
+let chained = try! ReaderNativeDataStore(path: ":memory:")
+try! chained.inTransaction {
+    _ = try chained.commitWithinTransaction(
+        record: record("hl", "same", rev: 1, at: 1), mutationId: nil,
+        journalJSON: nil, expectedRev: 0, now: 1)
+    _ = try chained.commitWithinTransaction(
+        record: record("hl", "same", rev: 2, at: 2), mutationId: nil,
+        journalJSON: nil, expectedRev: 1, now: 2)
+}
+check(try! chained.record(collection: "hl", id: "same")?.rev == 2, "同批第二条没落地")
+chained.close()
+
 // ── 真文件：落盘之后重开还在（内存库验不到这条）──
 let file = FileManager.default.temporaryDirectory
     .appendingPathComponent("bw-datastore-test-\(UUID().uuidString).sqlite")
