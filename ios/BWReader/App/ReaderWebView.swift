@@ -352,6 +352,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     @Published var nativeFigure: ReaderNativeFigureModel?
     @Published var nativeGrammar: ReaderNativeGrammarModel?
     @Published var nativeHighlightEditor: ReaderNativeHighlightEditorModel?
+    /// EPUB 选区操作条上的色板。与网页工具栏同一份来源（RC.settings.hlColors），
+    /// 所以用户改过色板之后两边一致。取不到就空着 —— 不猜一组默认色，
+    /// 那会让他划出一个自己没设过的颜色。
+    /// ⚠ 存储属性只能待在类主体里：extension 里放 @Published 会直接编译失败
+    ///   （extensions must not contain stored properties）。2026-09-22 为此红过一轮。
+    @Published private(set) var epubHighlightColors: [String] = []
     private var nativePDFMountTask: Task<Void, Never>?
     var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
@@ -5489,11 +5495,6 @@ extension ReaderWebViewModel: WKNavigationDelegate {
 extension ReaderWebViewModel: WKUIDelegate {
     /// 当前这本是 EPUB 吗 —— 选区操作条只在 EPUB 上出（PDF 有自己的选区菜单）。
     var isEPUBBook: Bool { currentLocalBook?.format == .epub }
-
-    /// EPUB 选区操作条上的色板。与网页工具栏同一份来源（RC.settings.hlColors），
-    /// 所以用户改过色板之后两边一致。取不到就空着 —— 不猜一组默认色，
-    /// 那会让他划出一个自己没设过的颜色。
-    @Published private(set) var epubHighlightColors: [String] = []
 
     func refreshEPUBHighlightColors() {
         guard isEPUBBook else { epubHighlightColors = []; return }
