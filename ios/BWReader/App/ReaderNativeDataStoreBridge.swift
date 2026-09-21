@@ -17,9 +17,6 @@ struct ReaderNativeDataStoreBridge {
     enum BridgeError: Error { case invalidRequest(String) }
 
     let store: ReaderNativeDataStore
-    /// 每本书一个库。⚠ 身份用**内容摘要**而不是 localBookId —— 与 iCloud 同步
-    /// 同一口径：本机导入的书在每台设备上 id 都不同，而同一个文件的 sha256 一样。
-    let contentSHA256: String
 
     /// 时钟可注入，测试里才能造出确定的 rememberedAt。
     var now: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
@@ -176,5 +173,76 @@ struct ReaderNativeDataStoreBridge {
             throw BridgeError.invalidRequest("记录不是合法 JSON")
         }
         return text
+    }
+}
+
+
+/// 按库名持有若干个 `ReaderNativeDataStore`，并把网页递来的请求路由过去。
+///
+/// ⚠ 为什么是**三个库**而不是每本书一个：`native-local-runtime.js` 本来就分
+/// global / document / device 三套（见 `createStores`），书的隔离靠记录里的
+/// `documentId`，不是靠分库。照着它分，迁移时才是一对一。
+/// device 那个库还会被整个删掉重建（回收墓碑空间），分开放才删得干净。
+///
+/// ⚠ **库名走白名单**：名字来自网页，直接拿去拼文件路径的话，一个
+/// `../../` 就能写到沙盒里别的地方。宁可拒绝一个合法但没登记的名字，
+/// 也不要让页面决定往哪写。
+final class ReaderNativeDataStoreHost {
+    enum HostError: Error, CustomStringConvertible {
+        case unknownStore(String)
+        var description: String {
+            switch self {
+            case .unknownStore(let name): return "没有登记的库：" + name
+            }
+        }
+    }
+
+    static let allowedStores: Set<String> = [
+        "bw-reader-native-v1-global",
+        "bw-reader-native-v1-document",
+        "bw-reader-native-v1-device"
+    ]
+
+    private let root: URL
+    private var stores: [String: ReaderNativeDataStore] = [:]
+
+    init(root: URL? = nil) {
+        let base = root ?? (FileManager.default.urls(for: .applicationSupportDirectory,
+                                                     in: .userDomainMask).first
+                            ?? FileManager.default.temporaryDirectory)
+            .appendingPathComponent("BWReader/data-store", isDirectory: true)
+        self.root = base
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    }
+
+    func bridge(for name: String) throws -> ReaderNativeDataStoreBridge {
+        guard Self.allowedStores.contains(name) else { throw HostError.unknownStore(name) }
+        if let existing = stores[name] { return ReaderNativeDataStoreBridge(store: existing) }
+        let store = try ReaderNativeDataStore(
+            path: root.appendingPathComponent(name + ".sqlite").path)
+        stores[name] = store
+        return ReaderNativeDataStoreBridge(store: store)
+    }
+
+    /// 处理一条网页请求：`{ store, action, ... }`。
+    func handle(_ request: [String: Any]) throws -> [String: Any] {
+        guard let name = request["store"] as? String else {
+            throw ReaderNativeDataStoreBridge.BridgeError.invalidRequest("缺少 store")
+        }
+        return try bridge(for: name).handle(request)
+    }
+
+    /// device 库整个丢掉重建（回收墓碑空间）。⚠ 只对 device 开放：
+    /// global/document 里是用户的东西，"回收空间"不该能把它们一起清了。
+    func resetDeviceStore() throws {
+        let name = "bw-reader-native-v1-device"
+        stores[name]?.close()
+        stores[name] = nil
+        try? FileManager.default.removeItem(at: root.appendingPathComponent(name + ".sqlite"))
+    }
+
+    func closeAll() {
+        stores.values.forEach { $0.close() }
+        stores.removeAll()
     }
 }

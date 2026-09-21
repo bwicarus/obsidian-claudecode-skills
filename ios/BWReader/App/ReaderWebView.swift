@@ -13,6 +13,7 @@ private let nativeReaderGeometryMessageName = "bwNativeReaderGeometry"
 private let nativeLocalNotesMessageName = "bwNativeLocalNotes"
 private let nativeAnkiMobileMessageName = "bwNativeAnkiMobile"
 private let nativeConversationMessageName = "bwNativeConversation"
+private let nativeDataStoreMessageName = "bwNativeDataStore"
 
 struct ReaderLastLocalBookReference: Codable, Equatable, Sendable {
     let libraryID: String
@@ -326,6 +327,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
     private var nativeReadingProjectionMessageProxy: WeakScriptMessageHandler?
     private var nativeReaderGeometryMessageProxy: WeakScriptMessageHandlerWithReply?
+    private var nativeDataStoreMessageProxy: WeakScriptMessageHandlerWithReply?
     private var nativeProjectionRefreshTask: Task<Void, Never>?
     private var nativeInkSurfaceTask: Task<Void, Never>?
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
@@ -358,6 +360,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// ⚠ 存储属性只能待在类主体里：extension 里放 @Published 会直接编译失败
     ///   （extensions must not contain stored properties）。2026-09-22 为此红过一轮。
     @Published private(set) var epubHighlightColors: [String] = []
+    /// 本机数据库。⚠ 懒开：没开启新存储的用户不该因为装了这个版本就多出一个
+    /// SQLite 文件 —— 第一次真有请求进来才建。
+    private lazy var nativeDataStoreHost = ReaderNativeDataStoreHost()
     private var nativePDFMountTask: Task<Void, Never>?
     var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
@@ -1348,6 +1353,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             nativeReaderGeometryMessageProxy,
             contentWorld: .page,
             name: nativeReaderGeometryMessageName
+        )
+        let nativeDataStoreMessageProxy =
+            WeakScriptMessageHandlerWithReply(delegate: self)
+        self.nativeDataStoreMessageProxy = nativeDataStoreMessageProxy
+        contentController.addScriptMessageHandler(
+            nativeDataStoreMessageProxy,
+            contentWorld: .page,
+            name: nativeDataStoreMessageName
         )
         let nativeLocalNotesMessageProxy =
             WeakScriptMessageHandlerWithReply(delegate: self)
@@ -5147,6 +5160,32 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 return
             }
             handleNativeAnkiMobileRequest(body, replyHandler: replyHandler)
+            return
+        }
+        if message.name == nativeDataStoreMessageName {
+            guard
+                message.frameInfo.isMainFrame,
+                message.webView === webView,
+                isTrustedReaderURL(webView.url),
+                isTrustedReaderURL(message.frameInfo.request.url),
+                let body = message.body as? [String: Any]
+            else {
+                // ⚠ 来源不可信时**不能**回一个"空结果" —— 那会被当成"库里没有
+                //   这条记录"，于是调用方以为数据不存在。必须是错误。
+                replyHandler(nil, "数据库请求来源无效")
+                return
+            }
+            do {
+                replyHandler(try nativeDataStoreHost.handle(body), nil)
+            } catch {
+                // 冲突是**正常分支**（乐观并发），要让 JS 那侧认得出来去重试，
+                // 而不是当成一次失败往上抛。
+                if case ReaderNativeDataStore.StoreError.revisionConflict = error {
+                    replyHandler(["ok": false, "code": "BW_DATA_CONFLICT"], nil)
+                } else {
+                    replyHandler(nil, String(describing: error))
+                }
+            }
             return
         }
         if message.name == nativeReaderGeometryMessageName {
