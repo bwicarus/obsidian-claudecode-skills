@@ -604,8 +604,30 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             try? await Task.sleep(for: .milliseconds(180))
             guard let self, !Task.isCancelled else { return }
             self.publishNativeInkSurfaces()
+            self.publishNativeVisibleText()
             // 翻页后可见页变了，生词下划线也要跟着取 —— 同一个节流窗口里做完。
             self.refreshNativePageOverlays()
+        }
+    }
+
+    /// 把「用户此刻看得见的正文」推给助手。
+    ///
+    /// ⚠ 助手的 `_visibleText()` 是从 `.page-wrap` 的 `__charBoxes` 拼的 —— 接管后
+    /// 一页都没有，于是它拿到**空字符串**：后端系统提示里「紧扣可见段落」那条就此
+    /// 失效，回答变泛而没有任何人看得出原因。这是一处纯粹的静默降级。
+    /// 截断（1000 字 + 省略号）仍留在网页那一处，这里只供原文。
+    func publishNativeVisibleText() {
+        guard let document = nativePDFDocument else { return }
+        var parts: [String] = []
+        for page in document.position.visiblePages.prefix(4) {
+            if let text = document.pageText(page), !text.isEmpty { parts.append(text) }
+        }
+        let joined = String(parts.joined(separator: "\n").prefix(4000))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = try? await self.webView.callAsyncJavaScript(
+                "window.__bwNativeVisibleText = text; return true;",
+                arguments: ["text": joined], in: nil, contentWorld: .page)
         }
     }
 

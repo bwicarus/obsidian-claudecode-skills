@@ -550,6 +550,16 @@
   // 都紧扣"用户此刻在看的这段",而非泛泛的整页/整章主题(后端 _sys_prompt 的「紧扣可见段落」指引靠它才生效)。
   function _visibleText() {
     try {
+      // ⚠ 原生正文接管时这条路**一个字都拿不到**：正文由 PDFKit 画，.page-wrap
+      //   上没有 __charBoxes。后端系统提示里「紧扣可见段落」那条就此失效，回答
+      //   变泛而没有任何人看得出原因 —— 一处纯粹的静默降级。
+      //   原生按可见页把正文推过来（用的是同一个选区核心的阅读顺序规则），
+      //   截断仍在下面这一处统一做。
+      var nativeText = window.__bwNativeVisibleText;
+      if (window.RC?.readerNavigation?.nativeViewport && typeof nativeText === 'string') {
+        nativeText = nativeText.replace(/\s+/g, ' ').trim();
+        return nativeText.length > 1000 ? nativeText.slice(0, 1000) + '…' : nativeText;
+      }
       var main = document.getElementById('main'); if (!main) return '';
       var mr = main.getBoundingClientRect(), top = mr.top, bot = mr.bottom;
       var pws = document.querySelectorAll('.page-wrap[data-page-num]'), parts = [];

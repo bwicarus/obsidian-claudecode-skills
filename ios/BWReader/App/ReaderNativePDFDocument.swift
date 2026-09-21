@@ -109,6 +109,24 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     }
     @Published private(set) var vocabSentences: [Int: [VocabSentence]] = [:]
 
+    /// 整页正文（按阅读顺序）。
+    ///
+    /// ⚠ 用的是**同一个选区核心**（`pdf-selection-core.js`）的 range(0, n-1)，
+    /// 与网页那侧 `_charsRangeToText(chars, 0, n-1)` 是同一套分块/阅读顺序规则 ——
+    /// 自己按字符数组拼字符串会在表格/多栏页上给出另一种顺序。
+    /// 结果缓存：一页的正文不会变，而滚动时这条路每帧都可能被问到。
+    private var pageTexts: [Int: String] = [:]
+
+    func pageText(_ page: Int) -> String? {
+        if let cached = pageTexts[page] { return cached }
+        guard let chars = characterPages[page], !chars.chars.isEmpty,
+              let core = selectionCores[page],
+              let value = try? core.range(from: 0, to: chars.chars.count - 1) else { return nil }
+        if pageTexts.count > 24 { pageTexts.removeAll() }
+        pageTexts[page] = value.text
+        return value.text
+    }
+
     func setVocabSentences(_ sentences: [VocabSentence], page: Int) {
         vocabSentences[page] = sentences
     }
