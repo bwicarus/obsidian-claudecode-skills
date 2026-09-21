@@ -14,6 +14,7 @@ enum ReaderNativeConversationScript {
       let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null, selectionSubscription = null, selectionRegistry = null;
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
       let controls = null, controlsObserver = null, suspended = false;
+      let settingsModels = null, settingsVoice = null;
       let drawerElement = null, drawerObserver = null, contextObserver = null, contextElement = null, toolbarObserver = null, toolbarElement = null;
       const navigationID = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
       const hooked = new WeakMap();
@@ -300,6 +301,7 @@ enum ReaderNativeConversationScript {
         if (typeof window.__asstSend === 'function') out.push('send');
         if (document.getElementById('asst-send')) out.push('stop');
         if (typeof rc().assistant?.openModelSettings === 'function') out.push('openModels');
+        if (rc().assistant?.settingsService) out.push('nativeSettings');
         if (typeof window.openSettings === 'function' || document.getElementById('ep-set-btn')) out.push('openSettings');
         if (document.getElementById('asst-review-toggle')) out.push('openReview');
         if (typeof window.openSearch === 'function' || document.getElementById('ep-search-btn')) out.push('openSearch');
@@ -335,6 +337,7 @@ enum ReaderNativeConversationScript {
           if (scopeKey) previousNodes.forEach(node => excludedNodes.add(node));
           scopeKey = nextKey; scope = 'reader-' + hash(nextKey); actions.clear(); nodeIDs = new WeakMap(); lastSignature = '';
           window.__bwNativeSelection = null;
+          settingsModels = null; settingsVoice = null;
         }
         actions = new Map();
         const all = thread ? Array.from(thread.children).filter(el => el.matches('.asst-msg,.vc-card,.vc-if,.rc-turn')) : [];
@@ -435,7 +438,10 @@ enum ReaderNativeConversationScript {
         if (!command || typeof command !== 'object' || Array.isArray(command)) return { ok: false, error: '无效操作' };
         if (getScopeKey() !== scopeKey) snapshot();
         if (command.scope && command.scope !== scope) return { ok: false, error: '会话已切换，请重新操作' };
-        if (Object.keys(command).some(key => !['action', 'scope', 'text', 'actionId', 'x', 'y'].includes(key))) return { ok: false, error: '不支持的操作参数' };
+        const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
+        if (command.action === 'settingsRead') parameterKeys.push('section');
+        if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
+        if (Object.keys(command).some(key => !parameterKeys.includes(key))) return { ok: false, error: '不支持的操作参数' };
         const action = command.action;
         try {
           if (action === 'send') {
@@ -478,6 +484,24 @@ enum ReaderNativeConversationScript {
             setLegacy(action === 'showLegacy');
           } else if (action === 'refresh') {
             rc().assistant?.reloadHistory?.();
+          } else if (action === 'settingsRead') {
+            const service = rc().assistant?.settingsService, captured = scope;
+            if (!service || command.scope !== scope || !['models', 'voice', 'profiles'].includes(command.section)) return { ok: false, error: '设置尚未就绪' };
+            const value = await service[command.section]();
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '页面已切换' };
+            if (command.section === 'models') settingsModels = value;
+            if (command.section === 'voice') settingsVoice = value;
+            return { ok: true, value };
+          } else if (action === 'settingsWrite') {
+            const service = rc().assistant?.settingsService, captured = scope;
+            if (!service || command.scope !== scope) return { ok: false, error: '设置尚未就绪' };
+            let result;
+            if (command.section === 'models' && command.value && settingsModels) result = await service.setAction(command.value, settingsModels);
+            else if (command.section === 'profiles') result = await service.profile(command.op, command.name);
+            else if (command.section === 'voice' && settingsVoice) result = await service.setField(command.key, command.value, command.device === true, settingsVoice.cfg);
+            else return { ok: false, error: '请先读取当前配置' };
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '页面已切换，请在原账户核对保存结果' };
+            return { ok: true, value: result };
           } else if (action === 'mediaResource') {
             const target = actions.get(command.actionId);
             if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected || !target.resource) {

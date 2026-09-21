@@ -17,6 +17,69 @@ from browser_exe import CHROME
 
 
 class NativeConversationBridgeBrowser(unittest.TestCase):
+    def test_native_settings_preserve_catalog_and_confirmed_writes(self):
+        bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
+        source = (ROOT / '_server_deploy/static/pdf/rc-assistant.js').read_text(encoding='utf-8')
+        end = source.index('})();', source.index('  RC.assistant =')) + len('})();')
+        with sync_playwright() as p:
+            browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
+            page = browser.new_page()
+            page.route('**/*', lambda r: r.fulfill(status=200, body='<html></html>') if r.request.url == 'http://reader.test/' else r.abort())
+            page.goto('http://reader.test/')
+            page.set_content('<div id="side-pane-asst"><div id="asst-thread"></div></div>')
+            page.evaluate('''() => {
+              window.receipts=[];window.writes=[];window.rejectSave=false;window.voice={rt_engine:'openai_rtc',rt_voice:'cedar',rt_tool_reply:true};
+              window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};
+              window.RC={turnCard:{}};window.__asstSend=()=>{};
+              window.preferences={ok:true,actions:{explain:{pref:{backend:'codex',variant:'verified',depth:'high'},default:{backend:'codex',variant:'verified',depth:'low'}}},names:{explain:'解释'},locked:{},
+                catalog:{backends:['codex'],variants:{codex:['verified','blocked']},depths:{codex:['low','high']},codex_depths_by_model:{verified:['low','high']},codex_capabilities:{verified:{selectable:true,fast:true},blocked:{selectable:false}}}};
+              window.fetch=async (url,opts)=>{
+                let result;
+                if (opts?.method==='POST') {
+                  const body=JSON.parse(opts.body);writes.push({url,body});
+                  if (rejectSave) result={ok:false,error:'保存失败测试'};
+                  else if (url.endsWith('/action-pref')) result={ok:true,pref:body.backend?body:null};
+                  else if (url.endsWith('/voice-config')) {Object.assign(voice,body);result={ok:true,cfg:voice};}
+                  else result={ok:true,profiles:[body.name],active:body.name};
+                } else if (url.endsWith('/action-prefs')) result=preferences;
+                else if (url.endsWith('/voice-config')) result={ok:true,cfg:voice};
+                else result={ok:true,profiles:['原方案'],active:'原方案'};
+                return {ok:true,json:async()=>JSON.parse(JSON.stringify(result))};
+              };
+            }''')
+            page.add_script_tag(content=source[:end])
+            page.add_script_tag(content=bridge)
+            page.wait_for_timeout(100)
+            scope = page.evaluate('receipts[receipts.length-1].scope')
+            def command(action, **values):
+                return page.evaluate('(c)=>__bwNativeConversation.perform(c)', dict(action=action, scope=scope, **values))
+            self.assertIn('nativeSettings', page.evaluate('receipts[receipts.length-1].capabilities'))
+            models = command('settingsRead', section='models')
+            self.assertTrue(models['ok'], models)
+            self.assertEqual(models['value']['actions']['explain']['pref']['depth'], 'high')
+            blocked = command('settingsWrite', section='models', value={'action':'explain','backend':'codex','variant':'blocked','depth':'low','fast':False})
+            self.assertFalse(blocked['ok'])
+            self.assertEqual(page.evaluate('writes'), [])
+            valid = {'action':'explain','backend':'codex','variant':'verified','depth':'low','fast':True}
+            self.assertTrue(command('settingsWrite', section='models', value=valid)['ok'])
+            voice = command('settingsRead', section='voice')['value']
+            self.assertEqual(next(f for f in voice['fields'] if f['key']=='rt_voice')['value'], 'cedar')
+            self.assertTrue(next(f for f in voice['fields'] if f['key']=='rc-voice-cue')['disabled'])
+            self.assertFalse(command('settingsWrite', section='voice', key='rt_speed', value=9)['ok'])
+            self.assertFalse(command('settingsWrite', section='voice', key='rc-voice-cue', value=True, device=True)['ok'])
+            self.assertTrue(command('settingsWrite', section='voice', key='rt_voice', value='marin')['ok'])
+            self.assertEqual(page.evaluate('voice.rt_voice'), 'marin')
+            self.assertTrue(command('settingsWrite', section='voice', key='rc-voice-sub', value=False, device=True)['ok'])
+            self.assertEqual(page.evaluate("localStorage.getItem('rc-voice-sub')"), '0')
+            self.assertFalse(command('settingsWrite', section='voice', key='openai_api_key', value='not-allowed')['ok'])
+            self.assertTrue(command('settingsWrite', section='profiles', op='save', name='新方案')['ok'])
+            page.evaluate('rejectSave=true')
+            failed = command('settingsWrite', section='models', value=valid)
+            self.assertFalse(failed['ok'])
+            self.assertIn('保存失败', failed['error'])
+            self.assertFalse(page.evaluate('receipts[receipts.length-1].legacyVisible'))
+            browser.close()
+
     def test_projection_commands_and_lifecycle(self):
         source = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
         assistant = (ROOT / '_server_deploy/static/pdf/rc-assistant.js').read_text(encoding='utf-8')

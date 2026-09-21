@@ -280,6 +280,12 @@
       ['POST'],
       '模型与 Fast 预设是账户级服务端配置；只有服务端持久化成功后才显示保存完成。'
     ),
+    remoteRequired(
+      'assistant.preference-profiles.manage',
+      ['/api/assistant/pref-profiles'],
+      ['GET', 'POST'],
+      '读取、保存、应用或删除账户的模型预设；复用服务端配置，等待保存回执。'
+    ),
 
     /* 同属 command outbox，但不应阻塞当前交互。 */
     backgroundMutation(

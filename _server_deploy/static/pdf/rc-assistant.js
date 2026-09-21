@@ -190,11 +190,28 @@
   // ════════════════════════════════════════════════════════════════════════
 
   // 给某动作存 (后端/型号/深度) 预设;backend 传 '' 清除回默认。跟感叹号「更强重答」共用此预设。
-  function _setActionPref(action, backend, variant, depth, okMsg, fast) {
+  function _readModelPrefs() {
+    return fetch('/api/assistant/action-prefs').then(function (r) { return r.json(); });
+  }
+  function _readVoiceSettings() {
+    return fetch('/api/assistant/voice-config').then(function (r) { return r.json(); });
+  }
+  function _readProfiles() {
+    return fetch('/api/assistant/pref-profiles').then(function (r) { return r.json(); });
+  }
+  function _writeProfiles(op, name) {
+    return fetch('/api/assistant/pref-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: op, name: name }) }).then(function (r) { return r.json(); });
+  }
+  function _writeVoiceSettings(body) {
+    return fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) }).then(function (r) { return r.json(); });
+  }
+  function _setActionPref(action, backend, variant, depth, okMsg, fast, silent) {
     return fetch('/api/assistant/action-pref', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: action, backend: backend || '', variant: variant || '', depth: depth || '', fast: !!fast }) })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.ok && typeof _toast === 'function') _toast(okMsg || '已设置'); return d; })
+      .then(function (d) { if (d && d.ok && !silent && typeof _toast === 'function') _toast(okMsg || '已设置'); return d; })
       .catch(function () {});
   }
   // ── ⚙ 模型设置面板:列出各 AI 任务,每个可设 后端/型号/深度 ──
@@ -361,6 +378,126 @@
     ['zh_female_gaolengyujie_moon_bigtts', '高冷御姐'],
     ['zh_female_wanwanxiaohe_moon_bigtts', '湾湾小何(台湾腔)'],
     ['en_female_lauren_moon_bigtts', 'Lauren(纯英语)']];
+  function _nativeVoiceFields(cfg) {
+    var c = cfg || {}, fields = [];
+    function field(key, label, kind, fallback, extra) {
+      fields.push(Object.assign({ key: key, label: label, kind: kind, value: c[key] == null ? fallback : c[key], section: '通话' }, extra || {}));
+    }
+    function choice(key, label, values, fallback, extra) {
+      field(key, label, 'choice', fallback, Object.assign({ options: values.map(function (v) {
+        return Array.isArray(v) ? { value: v[0], label: v[1] } : { value: v, label: v };
+      }) }, extra || {}));
+    }
+    function range(key, label, fallback, min, max, step, extra) {
+      field(key, label, 'range', fallback, Object.assign({ min: min, max: max, step: step }, extra || {}));
+    }
+    var engine = c.rt_engine === 'openai' ? 'openai_rtc' : c.rt_engine === 'computer_client' ? '' : (c.rt_engine || '');
+    choice('rt_engine', '普通语音引擎', [['', '豆包 S2S'], ['openai_rtc', 'GPT Realtime'], ['grok', 'Grok Voice']], '');
+    fields[0].value = engine;
+    if (engine === 'openai_rtc') {
+      choice('rt_model', '模型', ['gpt-realtime-2.1-mini', 'gpt-realtime-2.1'], 'gpt-realtime-2.1-mini');
+      choice('rt_voice', '声音', ['marin', 'cedar', 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse'], 'marin');
+      range('rt_speed', '通话语速', 1, 0.5, 1.5, 0.05);
+      choice('rt_lang', '语言', [['', '自动'], ['zh', '中文'], ['ja', '日本語'], ['en', 'English']], '');
+      choice('rt_noise', '噪音抑制', [['', '近场：耳机或手持'], ['far', '远场：桌面外放']], '');
+      choice('rt_eagerness', '接话灵敏度', [['auto', '自动'], ['low', '多等一下'], ['medium', '适中'], ['high', '尽快接话']], 'auto');
+      choice('rt_effort', '思考强度', ['minimal', 'low', 'medium', 'high'], 'low');
+      field('rt_instructions', '附加指令', 'text', '');
+      field('rt_full_duplex', '允许说话时打断（耳机）', 'toggle', false);
+      field('rt_image', '图像输入', 'toggle', false);
+      field('rt_tool_reply', '工具完成后口头回报', 'toggle', false);
+    } else {
+      if (engine === 'grok') {
+        choice('rt_grok_voice', 'Grok 声音', ['eve', 'ara', 'rex', 'sal', 'leo'], 'eve');
+        choice('rt_grok_vad', '轮次判定', [['', '本地 VAD'], ['server', '服务端 VAD']], '');
+      }
+      choice('speaker', '豆包声音', _VC_SPK, _VC_SPK[0][0]);
+      choice('explicit_dialect', '方言', _VC_DIA, '');
+      range('speech_rate', '豆包语速', 0, -50, 100, 5);
+      range('loudness_rate', '豆包音量', 0, -50, 100, 5);
+      field('bot_name', '助手名字', 'text', '');
+      field('speaking_style', '说话风格', 'text', '');
+      field('system_role', '背景设定', 'text', '');
+      field('enable_music', '唱歌能力', 'toggle', false);
+    }
+    choice('tts_speaker', '朗读声音', _VC_TTS_SPK, _VC_TTS_SPK[0][0], { section: '朗读与输入' });
+    range('tts_speech_rate', '朗读语速', 0, -50, 100, 5, { section: '朗读与输入' });
+    field('tts_instruction', '默认朗读语气', 'text', '', { section: '朗读与输入' });
+    field('asr_v2', 'ASR 2.0（需已开通）', 'toggle', false, { section: '朗读与输入' });
+    return fields;
+  }
+  function _nativeDeviceFields(cfg) {
+    var specifications = [
+      ['asst-followups-on', '显示追问建议', 'toggle', '0'],
+      ['rc-voice-sub', '朗读字幕', 'toggle', '1'],
+      ['rc-voice-bridge', '回声桥', 'choice', 'auto'],
+      ['rc-voice-card-hide', '文字卡自动收起', 'toggle', '1'],
+      ['rc-voice-card-secs', '文字卡停留秒数', 'range', '20'],
+      ['rc-voice-cue', '任务完成提示音', 'toggle', '1']
+    ];
+    return specifications.map(function (s) {
+      var saved = localStorage.getItem(s[0]), value = saved == null ? s[3] : saved;
+      var out = { key: s[0], label: s[1], kind: s[2], section: '本设备', device: true,
+        value: s[2] === 'toggle' ? value === '1' : s[2] === 'range' ? Number(value) : value };
+      if (s[2] === 'choice') out.options = [{ value: 'auto', label: '自动' }, { value: '1', label: '总是' }, { value: '0', label: '关闭' }];
+      if (s[2] === 'range') Object.assign(out, { min: 5, max: 60, step: 5 });
+      if (s[0] === 'rc-voice-cue') out.disabled = !!cfg.rt_tool_reply;
+      return out;
+    });
+  }
+  function _settingsReceipt(result) {
+    if (!result || result.ok !== true) throw new Error((result && result.error) || '设置未确认保存，请重试或重新读取');
+    return result;
+  }
+  var _nativeSettingsService = {
+    models: function () { return _readModelPrefs().then(_settingsReceipt); },
+    profiles: function () { return _readProfiles().then(_settingsReceipt); },
+    voice: function () { return _readVoiceSettings().then(_settingsReceipt).then(function (d) {
+      return { fields: _nativeVoiceFields(d.cfg).concat(_nativeDeviceFields(d.cfg)), cfg: d.cfg };
+    }); },
+    setAction: function (value, current) {
+      var cat = current && current.catalog, info = current && current.actions && current.actions[value.action];
+      if (!cat || !info) return Promise.reject(new Error('任务配置已变化，请重新读取'));
+      if (value.backend) {
+        var backends = (cat.backends_by_action || {})[value.action] || cat.backends || [];
+        var variants = (cat.variants || {})[value.backend] || [];
+        var paidBase = String(value.variant || '').replace(/@paid$/, '');
+        var selectable = value.backend !== 'codex' || ((cat.codex_capabilities || {})[value.variant] || {}).selectable === true;
+        if (!backends.includes(value.backend) || ((current.locked || {})[value.action] || []).includes(value.backend) ||
+            (!variants.includes(value.variant) && !(value.backend === 'gemini' && variants.includes(paidBase))) || !selectable ||
+            !_depthList(cat, value.backend, value.variant).includes(value.depth) || (value.fast && !_fastSupported(cat, value.backend, value.variant))) {
+          return Promise.reject(new Error('不支持这个模型组合，未修改原设置'));
+        }
+      }
+      return _setActionPref(value.action, value.backend, value.variant, value.depth, '', value.fast, true).then(_settingsReceipt).then(function (d) {
+        if (value.backend && !d.pref) throw new Error('该模型组合未保存，请重新读取可用型号');
+        return d;
+      });
+    },
+    profile: function (op, name) {
+      if (!['save', 'apply', 'delete'].includes(op) || typeof name !== 'string' || !name.trim() || name.trim().length > 20 || name.startsWith('_')) {
+        return Promise.reject(new Error('预设名称需为 1–20 个字符，且不能以下划线开头'));
+      }
+      return _writeProfiles(op, name.trim()).then(_settingsReceipt);
+    },
+    setField: function (key, value, device, current) {
+      var fields = device ? _nativeDeviceFields(current || {}) : _nativeVoiceFields(current || {});
+      var field = fields.find(function (f) { return f.key === key; });
+      if (!field || field.disabled) return Promise.reject(new Error('当前不能修改这项设置'));
+      var valid = field.kind === 'toggle' ? typeof value === 'boolean'
+        : field.kind === 'choice' ? field.options.some(function (o) { return o.value === value; })
+        : field.kind === 'range' ? typeof value === 'number' && isFinite(value) && value >= field.min && value <= field.max
+        : typeof value === 'string' && value.length <= 16000;
+      if (!valid) return Promise.reject(new Error('设置值无效'));
+      if (device) { localStorage.setItem(key, field.kind === 'toggle' ? (value ? '1' : '0') : String(value)); return Promise.resolve({ ok: true }); }
+      var body = {}; body[key] = value;
+      return _writeVoiceSettings(body).then(_settingsReceipt).then(function (d) {
+        if (key === 'rt_tool_reply') localStorage.setItem('rc-voice-toolreply', value ? '1' : '0');
+        try { RC.voicecall && RC.voicecall.pushCfg && RC.voicecall.pushCfg(); } catch (_) {}
+        return d;
+      });
+    }
+  };
   function _renderVoiceCfg(container) {
     container.querySelectorAll('.ams-voice-part').forEach(function (n) { n.remove(); });   // 切引擎重绘:先清旧区块
     var h = document.createElement('div'); h.className = 'ams-sub ams-voice-part';
@@ -370,7 +507,7 @@
     var card = document.createElement('div'); card.className = 'ams-task ams-voice-part';
     card.innerHTML = '<div class="ams-tdef">加载中…</div>';
     container.appendChild(card);
-    fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
+    _readVoiceSettings().then(function (d) {
       if (!d || !d.ok) { card.innerHTML = '<div class="ams-tdef">拉取语音设置失败</div>'; return; }
       var c = d.cfg || {};
       // 历史 computer_client 值只属于旧电话复用方案；独立电脑按钮上线后，
@@ -483,8 +620,7 @@
           if (k !== 'rt_engine') return;
           _renderVoiceCfg(container);
         }
-        fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-          .then(function (r) { return r.json(); })
+        _writeVoiceSettings(body)
           .then(function (x) {
             if (x && x.ok) {
               if (typeof _toast === 'function') _toast('已保存');
@@ -580,7 +716,7 @@
     if (!container) return;
     var _rootEl = container;   // 外层容器引用:下面 528 行 container 被重指到 pane1,预设切换的整体重渲必须用它(否则 tab 行叠加,用户实测每切一次多一组)
     container.innerHTML = '<div class="ams-sub">加载中…</div>';
-    fetch('/api/assistant/action-prefs').then(function (r) { return r.json(); }).then(function (d) {
+    _readModelPrefs().then(function (d) {
       if (!d || !d.ok) { container.innerHTML = '<div class="ams-sub">拉取设置失败</div>'; return; }
       container.innerHTML = '';
       // 89(用户设计):内容太多→Tab 分区。tab1=阅读 AI 任务(预设+各环节模型);tab2=语音通话·朗读
@@ -620,14 +756,13 @@
       var pbar = document.createElement('div'); pbar.className = 'ams-profiles';
       container.appendChild(pbar);
       (function _loadProfiles() {
-        fetch('/api/assistant/pref-profiles').then(function (r) { return r.json(); }).then(function (p) {
+        _readProfiles().then(function (p) {
           if (!p || !p.ok) return;
           var act = p.active || '';   // 当前应用中的预设(存/应用会设,单项改动会清)
           pbar.innerHTML = '';
           function _del(nm) {
             if (!confirm('删除预设「' + nm + '」?')) return;
-            fetch('/api/assistant/pref-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ op: 'delete', name: nm }) }).then(_loadProfiles).catch(function () {});
+            _writeProfiles('delete', nm).then(_loadProfiles).catch(function () {});
           }
           (p.profiles || []).forEach(function (nm) {
             var b = document.createElement('button'); b.className = 'ams-prof' + (nm === act ? ' on' : ''); b.textContent = (nm === act ? '✓ ' : '') + nm;
@@ -641,9 +776,7 @@
             b.addEventListener('click', function () {
               if (_held) { _held = false; return; }   // 长按删除后 iOS 可能补发 click
               b.disabled = true;
-              fetch('/api/assistant/pref-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ op: 'apply', name: nm }) })
-                .then(function (r) { return r.json(); })
+              _writeProfiles('apply', nm)
                 .then(function (d) {
                   if (d && d.ok) { if (typeof _toast === 'function') _toast('已切换到「' + nm + '」'); renderModelSettings(_rootEl, focusAction); }
                   else { b.disabled = false; if (typeof _toast === 'function') _toast('应用失败'); }
@@ -654,9 +787,7 @@
           var add = document.createElement('button'); add.className = 'ams-prof ams-prof-add'; add.textContent = '＋存为预设';
           add.addEventListener('click', function () {
             var nm = prompt('新预设名(复制当前全部设置为一个新预设;之后在它页面里的改动会自动存进它):'); if (!nm || !nm.trim()) return;
-            fetch('/api/assistant/pref-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ op: 'save', name: nm.trim() }) })
-              .then(function (r) { return r.json(); })
+            _writeProfiles('save', nm.trim())
               .then(function (d) { if (d && d.ok) { if (typeof _toast === 'function') _toast('已保存'); _loadProfiles(); } })
               .catch(function () {});
           });
@@ -803,6 +934,7 @@
     contextCard: contextCard,
     openModelSettings: openModelSettings,
     renderModelSettings: renderModelSettings,
+    settingsService: _nativeSettingsService,
     paidNotice: paidNotice
   };
 })();

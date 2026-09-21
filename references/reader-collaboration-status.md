@@ -19,6 +19,9 @@
   `ea57982f` 补同图多实例取消上下文，定向浏览器通过；Swift 与 768 一致。
   handoff 0 错误/0 警告。详见 `reader-native-migration.md`，线上仍是 1.1.85 (764)。
   用户纠正无需定时续办，误建的 `reader-2` 已删除；不要再次创建自动任务。
+  模型/普通语音设置已接入原生编辑器，共用原设置服务并校验能力目录与保存回执；
+  三项桥接浏览器用例及 2104 项 Node 合同通过，本轮 Swift 尚待 Apple 编译。
+  电脑/Codex 通话独立配置、阅读区和其他列明的交互仍需继续迁移，未宣称整版完成。
 
 - 0.2.49 Windows 隔离测试已完成；未触碰日常 Chrome profile。
 - 文档便签 repository、background port、facade 和共享便签 UI 已接通，定向合同测试通过。

@@ -79,6 +79,9 @@ struct ReaderNativeWorkspace<Document: View>: View {
         .foregroundStyle(ReaderNativeTheme.ink)
         .tint(ReaderNativeTheme.accent)
         .task(id: enabled) { await reader.setNativeConversationMode(enabled) }
+        .sheet(item: $conversation.settingsPanel) { panel in
+            ReaderNativeSettingsView(model: panel)
+        }
     }
 
     private var navigationBar: some View {
