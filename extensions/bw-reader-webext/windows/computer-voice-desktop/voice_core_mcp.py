@@ -68,7 +68,13 @@ TOOLS = [
                                                      "title": {"type": "string", "description": "来电界面上显示的一句话（默认取 text 开头）"},
                                                      "reason": {"type": "string", "description": "为什么打（写进日志）"}},
                      "required": ["text"], "additionalProperties": False}},
-    {"name": "voice_say", "description": "让语音模型立刻把这段话念出来（近乎原文）。会话没开会先自动开。", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": False}},
+    {"name": "voice_say", "description": (
+        "让语音模型立刻把这段话念出来（近乎原文）。会话没开会先自动开。\n"
+        "⚠ **他用语音问你的那一轮不要调它** —— 那一轮你的回答本来就会被念给他，"
+        "再 say 一次就是同一个问题念两遍（2026-09-21 实录：他问一句听见三句）。"
+        "委派轮里调它会被拒，返回 reason=delegation-owns-speech。\n"
+        "它是给**没人问你的时候**用的：通知、定时提醒到期、你主动找他。"),
+     "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": False}},
     {"name": "schedule_list", "description": "列出所有定时任务：id、名称、周期、下次运行、上次状态与摘要。", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "schedule_create", "description": ("登记或覆盖一条定时任务（自建调度器，不依赖桌面 Codex）。flow 用 bw-reader-skill-flow/1：steps 里每步恰好是 "
         "command（本地脚本参数列表，输出一行 JSON）/ tool（阅读器 MCP 工具名+args）/ needs_ai（prompt+input+images+schema，单独用便宜模型跑一次，不带上下文）/ "
@@ -246,7 +252,10 @@ def call_tool(name: str, args: dict) -> dict:
             started = http("POST", "/session/start", {"reason": name})
             if started.get("ok") is False:
                 return {"ok": False, "msg": "会话没开起来：" + str(started.get("msg"))}
-        r = http("POST", "/say" if name == "voice_say" else "/tell", {"text": text, "role": "developer"})
+        # source=backend：让运行器知道这是后台模型自己要开口的。用户语音委派的那一轮
+        # 答案本来就会被念出来，再 say 一次就是同一个问题念两遍（2026-09-21 实录）。
+        r = http("POST", "/say" if name == "voice_say" else "/tell",
+                 {"text": text, "role": "developer", "source": "backend"})
         return r
     return {"ok": False, "msg": f"未知工具 {name}"}
 
