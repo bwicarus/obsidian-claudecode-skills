@@ -854,6 +854,21 @@ def copy_raw_static(root: Path) -> None:
     reader = b"".join(part.read_bytes() for part in parts)
     write_bytes(root, "static/pdf/reader.js", reader)
     write_bytes(root, "native/pdf-selection-core.js", native_pdf_selection_core().encode("utf-8"))
+    write_bytes(root, "native/user-state-merge.js", native_user_state_merge().encode("utf-8"))
+
+
+def native_user_state_merge() -> str:
+    """跨设备同步的三方合并规则，原样搬进包里在 JavaScriptCore 里跑。
+
+    ⚠ 不做任何裁剪或改写：它已经是纯函数模块（不读存储、不发网络、不认识
+    CloudKit），node 契约测试跑的就是这一份文件。复制一份改一改的话，
+    "两台设备各改各的怎么合" 就会有两种答案。
+    """
+    source = STATIC / "reader-runtime" / "user-state-merge.js"
+    text = source.read_text(encoding="utf-8")
+    if "mergeDomain" not in text or "user-state-merge/1" not in text:
+        raise SystemExit("native user-state merge source boundary changed")
+    return text
 
 
 def native_pdf_selection_core() -> str:
@@ -1873,6 +1888,9 @@ def validate_bundle(root: Path, *, require_manifest: bool = True) -> dict[str, o
     selection_core = root / "native/pdf-selection-core.js"
     if not selection_core.is_file() or selection_core.read_text(encoding="utf-8") != native_pdf_selection_core():
         raise SystemExit("ReaderBundle native PDF selection core differs from original algorithms")
+    merge_core = root / "native/user-state-merge.js"
+    if not merge_core.is_file() or merge_core.read_text(encoding="utf-8") != native_user_state_merge():
+        raise SystemExit("ReaderBundle user-state merge core differs from the tested module")
     if sha256_file(root / "static/qa/marked.js") != EXPECTED_MARKED_SHA256:
         raise SystemExit("ReaderBundle marked.js differs from pinned marked@9.1.6")
     for relative, expected in EXPECTED_PDFJS_FILES.items():
