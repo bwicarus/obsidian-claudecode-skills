@@ -449,11 +449,28 @@ enum ReaderNativeConversationScript {
         if (actions.size) out.push('openArtifact', 'action', 'inspectArtifact');
         return out;
       }
-      function applyVisualMode() {
+      // ⚠ 条件里**去掉了 `isOpen()`**（2026-09-22 修「点侧栏按钮就崩」）。
+      //   原来是"网页抽屉已经开着"才压住它，于是每次开侧栏的顺序必然是
+      //   **先让网页抽屉按自己的样式开出来，再由下一次快照去压** ——
+      //   ① 用户看见**旧版侧栏闪一下**；
+      //   ② `body.ep-side-open` 给 `#ep-viewer` 上 `margin-right` 且带 .4s 过渡
+      //      → **整本 EPUB 连续重排 400ms**，同时抽屉的 backdrop-filter 开始合成；
+      //      快照落地后这条 CSS 再把 margin 压回 0 → **又一次整本重排**。
+      //      大书上这一串足以把 WebContent 进程顶掉，表现就是"点一下就崩"
+      //      （其实是渲染进程被杀、App 自动重载，而它一声不响）。
+      //   改成只看"这个面是不是归原生管"（tab 是 asst）：抽屉从第一帧起就隐藏、
+      //   margin 恒为 0，开关它不再改变任何布局，也从不绘制。
+      // ⚠ 保留 tab 判断**不是**多余的：网页自己也会开抽屉到 grammar/kg/vocab
+      //   （epub-html.js 的 onOpenPanel 等），那些面原生没接管，一并压住就是
+      //   "点了什么都不出来"。只压归原生管的那一个。
+      function applyVisualMode(assistantOverride) {
         const root = document.documentElement;
+        const owns = nativeMode && !legacyVisible &&
+          (assistantOverride === true ||
+           (assistantOverride !== false && activeTab() === 'asst'));
         root.classList.toggle('bw-native-navigation', nativeMode);
         root.classList.toggle('bw-native-page-cards', nativeMode && !legacyVisible);
-        root.classList.toggle('bw-native-conversation-active', nativeMode && !legacyVisible && isOpen() && activeTab() === 'asst');
+        root.classList.toggle('bw-native-conversation-active', owns);
       }
       function setLegacy(visible) {
         legacyVisible = !!visible;
@@ -648,7 +665,11 @@ enum ReaderNativeConversationScript {
           } else if (action === 'toggleAssistant') {
             if (!drawer()?.open || !drawer()?.close) return { ok: false, error: '侧栏尚未准备好' };
             if (isOpen() && activeTab() === 'asst') { drawer().close(); legacyVisible = false; }
-            else drawer().open('asst');
+            // ⚠ **先压住再开**，顺序不能反：反过来就是"网页抽屉先开出来、下一次
+            //   快照才去压"，那一瞬间正是旧侧栏闪一下 + 整本重排的来源。
+            //   这里传 true 是因为此刻 DOM 里的 activeTab 还没切到 asst
+            //   （setTab 在 open() 内部才跑）。
+            else { applyVisualMode(true); drawer().open('asst'); }
           } else if (action === 'clearSelection') {
             if (typeof window.__clearFocusSel !== 'function') return { ok: false, error: '选区尚未准备好' };
             window.__clearFocusSel();

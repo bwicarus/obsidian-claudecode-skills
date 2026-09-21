@@ -311,6 +311,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     @Published private(set) var isLoading = false
     @Published private(set) var loadError: String?
+    /// 渲染进程被回收后的提示。⚠ 它不是"错误提示"，是**唯一的目击证词**：
+    /// 页面已经重载、功能也恢复了，但如果这里不出声，这件事就等于没发生过 ——
+    /// 用户只会说"点一下就崩"，而没有任何地方记得崩之前在做什么。
+    @Published private(set) var webContentRecoveryNotice: String?
+    private var webContentTerminationCount = 0
     @Published private(set) var libraryPresentationRequestID: UUID?
     /// 顶栏「App 设置」请求打开原生工具 sheet。与书库那条同一套做法：
     /// 网页按钮不做 URL 导航，直接经通道请求原生弹 sheet。
@@ -5370,12 +5375,40 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
 
 extension ReaderWebViewModel: WKNavigationDelegate {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        // ⚠ 这里原来**一声不响**地重载（2026-09-22 修）：渲染进程被系统杀掉，
+        //   页面白屏转圈再自己回来，用户只能叫它"崩溃"，而崩之前在做什么、
+        //   崩了几次，没有任何地方说得出来。于是每次都只能靠猜。
+        //   页面里的线索随进程一起没了，能留下证据的只有 App 进程这一侧。
+        noteWebContentTermination()
         invalidateNativePDFDocument()
         nativeConversation.resetForNavigation()
         webContentProcessNeedsReload = true
         isLoading = false
         guard readerForeground, isLocalRuntimeURL(webView.url) else { return }
         reloadLocalRuntimeAfterRecoveryIfNeeded(serverRebuilt: false)
+    }
+
+    func dismissWebContentRecoveryNotice() { webContentRecoveryNotice = nil }
+
+    /// 把这次回收记成一句人看得懂的话。**在 `resetForNavigation()` 之前调**
+    /// —— 它会把上一条命令连同会话状态一起清掉，那正是我们要的线索。
+    private func noteWebContentTermination() {
+        webContentTerminationCount += 1
+        var line = "阅读页渲染进程被系统回收，已自动重载"
+        if !nativeConversation.lastCommandAction.isEmpty {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm:ss"
+            let when = nativeConversation.lastCommandAt.map { "，" + formatter.string(from: $0) } ?? ""
+            line += "（上一步：" + nativeConversation.lastCommandAction + when + "）"
+        }
+        if webContentTerminationCount > 1 { line += " · 本次阅读第 \(webContentTerminationCount) 次" }
+        webContentRecoveryNotice = line
+        let ticket = webContentTerminationCount
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            guard let self, self.webContentTerminationCount == ticket else { return }
+            self.webContentRecoveryNotice = nil
+        }
     }
 
     func webView(

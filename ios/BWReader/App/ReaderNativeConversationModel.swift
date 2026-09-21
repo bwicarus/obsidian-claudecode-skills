@@ -252,6 +252,16 @@ final class ReaderNativeConversationModel: ObservableObject {
         revision = nextRevision
     }
 
+    /// 最后一条发给页面的命令（动作名 + 时刻）。
+    ///
+    /// ⚠ 它存在的唯一理由是：**渲染进程被杀时，页面里的线索全部跟着没了**，
+    /// 而这个值活在 App 进程里，页面死了它还在。没有它，用户看到的就是
+    /// 「点一下就崩」—— 没有任何东西能说出崩之前在做什么，而那正是
+    /// 2026-09-22 这次查起来最费劲的地方。
+    /// 只留动作名和时刻，**不留参数**（参数里可能有选区正文这类内容）。
+    private(set) var lastCommandAction = ""
+    private(set) var lastCommandAt: Date?
+
     func resetForNavigation() {
         inspection = nil
         settingsPanel = nil
@@ -378,6 +388,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         let ticket = generation
         pendingActions.insert(action)
         error = nil
+        lastCommandAction = action
+        lastCommandAt = Date()
         defer { if generation == ticket { pendingActions.remove(action) } }
         let failure = await commandHandler(command)
         guard !Task.isCancelled, generation == ticket else { return false }
