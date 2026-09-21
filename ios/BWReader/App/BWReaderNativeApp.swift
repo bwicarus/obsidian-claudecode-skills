@@ -133,7 +133,10 @@ private struct ReaderRootView: View {
     /// 原生正文**真的盖上去了**才算接管。只看开关会在文档还没挂上来的那一段
     /// 把网页层也藏掉，屏幕上就是一片空白。
     private var nativePDFSurfaceActive: Bool {
+        // ⚠ 「显示旧界面」时必须让开：网页层此时被藏着，原生正文又盖在上面，
+        // 点了旧界面会得到一片空白 —— 一个没有出路的死角。
         nativePDFRendererEnabled && reader.nativePDFDocument != nil
+            && !reader.nativeConversation.legacyVisible
     }
 
     var body: some View {
@@ -163,7 +166,7 @@ private struct ReaderRootView: View {
                 .allowsHitTesting(!nativePDFSurfaceActive)
                 .accessibilityHidden(nativePDFSurfaceActive)
 
-            if nativePDFRendererEnabled, let document = reader.nativePDFDocument {
+            if nativePDFSurfaceActive, let document = reader.nativePDFDocument {
                 ReaderNativePDFViewport(
                     document: document,
                     onTranslateSentence: { sentence in

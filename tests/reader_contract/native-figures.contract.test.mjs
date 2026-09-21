@@ -50,11 +50,15 @@ test("② 带入与否的权威在网页，原生只发起", () => {
 
 test("③ 徽标是真控件，锚点缺失时退图框角落", () => {
   // ⚠ Canvas 接不到点击 —— 画在 Canvas 里的徽标点不动。
-  const badge = body(DOC, "// 图徽标：同样必须是真控件", "}.clipped()");
+  const badge = DOC.slice(DOC.indexOf("struct ReaderNativeFigureBadge"));
   assert.match(badge, /Button \{/);
-  assert.match(badge, /onOpenFigure\?\(figure\)/);
-  assert.match(badge, /figure\.badge\.map/, "服务端算好的锚点优先");
-  assert.match(badge, /rect\.maxX - side \* 0\.7/, "没有锚点时退图框右上角");
+  assert.match(badge, /onOpen\?\(figure\)/);
+  assert.match(badge, /guard let badge = figure\.badge/, "服务端算好的锚点优先");
+  assert.match(badge, /box\.maxX - side \* 0\.7/, "没有锚点时退图框右上角");
+  // ⚠ 位置算法必须拆成具名步骤：一串 min/max 嵌在 .position 里会让 Swift 编译器
+  // 直接放弃类型检查（"unable to type-check this expression in reasonable time"）。
+  assert.match(badge, /private func anchor\(box: CGRect, frame: CGRect\) -> CGPoint/);
+  assert.match(badge, /private func clamped\(_ point: CGPoint, in frame: CGRect\)/);
   // DOM 那侧的回退要 hitsText 避开正文（需要文字层），接管后没有。
   const entry = body(SRC, "window.__bwReaderPageFigures = async function",
                      "window.__bwReaderFigureAttach");

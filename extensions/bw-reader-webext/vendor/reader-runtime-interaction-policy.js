@@ -511,6 +511,13 @@
       }
     ),
     remoteRequired(
+      'ai.grammar.history.save',
+      ['/pdf/api/grammar-history-save'],
+      ['POST'],
+      '语法分析历史存在服务器上（两个表面共用同一份「最近分析过的句子」）',
+      { transport: { extensionBridge: true, serviceWorker: 'none' } }
+    ),
+    remoteRequired(
       'ai.grammar.compute',
       ['/pdf/api/grammar-analyze', '/pdf/api/grammar-stream'],
       ['POST'],

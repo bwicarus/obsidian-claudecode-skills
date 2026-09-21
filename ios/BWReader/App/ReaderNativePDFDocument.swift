@@ -252,6 +252,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     var onHighlight: ((HighlightRequest) -> Void)?
     /// 选区菜单里点了查词/翻译：(页码, 原文, "dict" | "translate")。
     var onLookup: ((Int, String, String) -> Void)?
+    /// 页码、整句、焦点串。
+    var onGrammar: ((Int, String, String) -> Void)?
     private var access: ReaderLocalBookAccess?
     private var digest = ""
     private var generation = UUID()
@@ -791,6 +793,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                 page: number, text: value.text, sentence: value.sentence, color: color,
                 rects: rects, pageWidth: chars.pageWidth, pageHeight: chars.pageHeight))
         }
+        overlay.onGrammar = { [weak self] value in
+            self?.onGrammar?(number, value.sentence, value.text)
+        }
         overlay.onLookup = { [weak self] value, mode in
             self?.onLookup?(number, value.text, mode)
         }
@@ -871,6 +876,7 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     var onHighlight: ((ReaderNativePDFSelection.Value, String) -> Void)?
     /// 查词 / 整段翻译：(选中, "dict" | "translate")。取数在阅读器那侧，这里只发起。
     var onLookup: ((ReaderNativePDFSelection.Value, String) -> Void)?
+    var onGrammar: ((ReaderNativePDFSelection.Value) -> Void)?
     private var start: Int?
     private var selected: ReaderNativePDFSelection.Value?
     private let leadingHandle = ReaderNativePDFSelectionHandle()
@@ -1009,6 +1015,12 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
             UIAction(title: "翻译", image: UIImage(systemName: "translate")) { [weak self] _ in
                 guard let self, self.selected?.indexes == value.indexes else { return }
                 self.onLookup?(value, "translate")
+            },
+            UIAction(title: "语法", image: UIImage(systemName: "chart.bar.doc.horizontal")) { [weak self] _ in
+                guard let self, self.selected?.indexes == value.indexes else { return }
+                // 分析对象是**整句**，焦点是选中的那一段 —— 与网页那侧同一口径
+                // （它也是先 _expandSentenceFromRange 取整句再把选中串当 focus）。
+                self.onGrammar?(value)
             },
             // 划线走阅读器自己的 __bwReaderHighlightExactText —— 与 AI 划线同一条
             // 路径、同一套存储。不在原生这边另写一套保存逻辑。
@@ -1215,35 +1227,14 @@ struct ReaderNativePDFViewport: View {
             }
 
             // 图徽标：同样必须是真控件（Canvas 接不到点击）。轻点 → 描述面板。
+            // ⚠ 位置算法拆成 ReaderNativeFigureBadge 里的具名步骤 —— 写成一串
+            // min/max 嵌套在 .position 里，Swift 编译器会直接放弃类型检查
+            // （"unable to type-check this expression in reasonable time"）。
             ForEach(document.position.visiblePages, id: \.self) { number in
                 let _ = document.geometryRevision
                 ForEach(document.figures[number] ?? []) { figure in
-                    if let rect = document.viewRect(normalized: figure.box, page: number),
-                       let page = document.viewRect(normalized: CGRect(x: 0, y: 0, width: 1, height: 1),
-                                                    page: number) {
-                        let side: CGFloat = 26
-                        // 有服务端锚点就用它；没有就退图框右上角内缩（见 Figure 的注释）。
-                        let center: CGPoint = figure.badge.map {
-                            CGPoint(x: page.minX + $0.x * page.width,
-                                    y: page.minY + $0.y * page.height)
-                        } ?? CGPoint(x: rect.maxX - side * 0.7, y: rect.minY + side * 0.7)
-                        Button {
-                            onOpenFigure?(figure)
-                        } label: {
-                            Image(systemName: "photo")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: side, height: side)
-                                .background(
-                                    Circle().fill(figure.attached
-                                        ? Color(red: 0.188, green: 0.820, blue: 0.345)
-                                        : ReaderNativeTheme.accent))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(figure.caption.isEmpty ? "图说明" : figure.caption)
-                        .position(x: min(max(page.minX + side / 2, center.x), page.maxX - side / 2),
-                                  y: min(max(page.minY + side / 2, center.y), page.maxY - side / 2))
-                    }
+                    ReaderNativeFigureBadge(document: document, figure: figure, page: number,
+                                            onOpen: onOpenFigure)
                 }
             }
         }.clipped()
@@ -1277,5 +1268,56 @@ enum ReaderNativeVocabPalette {
         case "known": return 1.5
         default: return 0
         }
+    }
+}
+
+/// 一个图徽标。位置计算分成具名的几步：服务端锚点 → 图框角落回退 → 夹进页面内。
+struct ReaderNativeFigureBadge: View {
+    @ObservedObject var document: ReaderNativePDFDocument
+    let figure: ReaderNativePDFDocument.Figure
+    let page: Int
+    let onOpen: ((ReaderNativePDFDocument.Figure) -> Void)?
+
+    private let side: CGFloat = 26
+
+    var body: some View {
+        if let box = document.viewRect(normalized: figure.box, page: page),
+           let frame = document.viewRect(normalized: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                        page: page) {
+            let center = clamped(anchor(box: box, frame: frame), in: frame)
+            Button {
+                onOpen?(figure)
+            } label: {
+                Image(systemName: "photo")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: side, height: side)
+                    .background(Circle().fill(fill))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(figure.caption.isEmpty ? "图说明" : figure.caption)
+            .position(x: center.x, y: center.y)
+        }
+    }
+
+    private var fill: Color {
+        figure.attached ? Color(red: 0.188, green: 0.820, blue: 0.345) : ReaderNativeTheme.accent
+    }
+
+    /// 服务端预算好的锚点优先（贴着图的空白角，跨加载位置一致）；
+    /// 缺它时退图框右上角内缩 —— DOM 那侧的四角回退要文字层，接管后没有。
+    private func anchor(box: CGRect, frame: CGRect) -> CGPoint {
+        guard let badge = figure.badge else {
+            return CGPoint(x: box.maxX - side * 0.7, y: box.minY + side * 0.7)
+        }
+        return CGPoint(x: frame.minX + badge.x * frame.width,
+                       y: frame.minY + badge.y * frame.height)
+    }
+
+    private func clamped(_ point: CGPoint, in frame: CGRect) -> CGPoint {
+        let half = side / 2
+        let x = min(max(frame.minX + half, point.x), frame.maxX - half)
+        let y = min(max(frame.minY + half, point.y), frame.maxY - half)
+        return CGPoint(x: x, y: y)
     }
 }

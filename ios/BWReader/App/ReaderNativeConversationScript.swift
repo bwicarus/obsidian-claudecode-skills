@@ -609,7 +609,7 @@ enum ReaderNativeConversationScript {
         if (command.action === 'settingsRead') parameterKeys.push('section');
         if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup',
              'nativeCardMove', 'nativeCardResize', 'nativeVocabMark',
-             'nativeFigureAttach'].includes(command.action)) parameterKeys.push('value');
+             'nativeFigureAttach', 'nativeGrammar'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -760,6 +760,34 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
             if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
             return { ok: true, value: { id: value.id } };
+          } else if (action === 'nativeGrammar') {
+            // 原生语法面板：只取**数据**。analyze() 把结果渲成 .grammar-block 塞进容器，
+            // 接管后那个容器不在屏幕上，跑完也没人看得见。前置（哪些 KG 开着、有没有
+            // 跟踪节点）留在 RC.grammar 那一处，别复制到原生。
+            const value = command.value;
+            if (!value || typeof value.sentence !== 'string' || !value.sentence.trim() ||
+                value.sentence.length > 4000) return { ok: false, error: '句子无效' };
+            const grammar = rc().grammar;
+            if (!grammar?.analyzeData) return { ok: false, error: '语法分析尚未就绪' };
+            const captured = scope;
+            let result;
+            try {
+              result = await grammar.analyzeData({
+                sentence: value.sentence,
+                text: typeof value.text === 'string' && value.text.trim() ? value.text : value.sentence,
+                file: window.FILE_REL || '',
+                aiParams: typeof window._getAiOverrides === 'function' ? window._getAiOverrides : null
+              });
+            } catch (error) {
+              const code = String(error && error.message || error);
+              const said = { BW_GRAMMAR_NO_KG: '请先在阅读设置里启用至少一个语法 KG',
+                             BW_GRAMMAR_NO_TRACKED: '已启用的 KG 里没有跟踪中的节点',
+                             BW_GRAMMAR_SHORT: '句子太短',
+                             BW_GRAMMAR_EMPTY: '没有选中内容' }[code];
+              return { ok: false, error: said || code.slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            return { ok: true, value: result };
           } else if (action === 'nativeFigureAttach') {
             // 原生图描述面板的「带入助手」。带入与否的权威是网页那侧的 __figAttached
             // （它就是助手上下文的来源），所以这里转交并把回执里的真实状态带回去 ——

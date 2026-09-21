@@ -822,17 +822,25 @@
       }
       try {
         var sp = block.__spacy || {};
-        fetch('/pdf/api/grammar-history-save', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ file: spec.file || '', item: {
-            sentence: spec.sentence, text: spec.text, sentence_zh: block.__zh || '',
-            tokens: sp.tokens || [], deps: sp.deps || [], clauses: sp.clauses || [],
-            components: sp.components || [], clause_tree: sp.clause_tree || null,
-            analyses: block.__points || []
-          } })
-        }).catch(function () {});
+        saveHistoryItem(spec.file || '', {
+          sentence: spec.sentence, text: spec.text, sentence_zh: block.__zh || '',
+          tokens: sp.tokens || [], deps: sp.deps || [], clauses: sp.clauses || [],
+          components: sp.components || [], clause_tree: sp.clause_tree || null,
+          analyses: block.__points || []
+        });
       } catch (e) {}
     });
+  }
+
+  // 历史落库：网页块和原生面板共用一处，两个表面看到的「最近分析过的句子」才一致。
+  function saveHistoryItem(file, item) {
+    try {
+      // @interaction ai.grammar.history.save
+      fetch('/pdf/api/grammar-history-save', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: file || '', item: item })
+      }).catch(function () {});
+    } catch (e) {}
   }
 
   // ── 🎴 整句+译文+分析+追问 → 一张 Anki 卡(后台 job + 浮条进度)──
@@ -947,7 +955,65 @@
     if (_loaded) run(); else loadTracked(file).then(run);
   }
 
+  // 原生阅读区要的是**数据**而不是 HTML 块：analyze() 把结果渲成 .grammar-block
+  // 塞进容器里，接管后那个容器不在屏幕上，分析跑完也没人看得见。
+  //
+  // 这里复用 analyze 的全部前置（启用的 KG、有没有跟踪节点、句子长度）和同两条
+  // 端点，只是把结果原样交出去。⚠ 别把前置判断复制到原生那侧 —— 「哪些 KG 开着」
+  // 是这里的缓存（_enabledBooks/_hasTracked），复制过去必然漂移。
+  function analyzeData(spec) {
+    spec = spec || {};
+    var file = spec.file || '';
+    var text = String(spec.text || '').trim();
+    var sentence = String(spec.sentence != null ? spec.sentence : text).trim();
+    var run = function () {
+      if (!text) return Promise.reject(new Error('BW_GRAMMAR_EMPTY'));
+      if (!_enabledBooks.length) return Promise.reject(new Error('BW_GRAMMAR_NO_KG'));
+      if (!_hasTracked) return Promise.reject(new Error('BW_GRAMMAR_NO_TRACKED'));
+      if (sentence.length < 6) return Promise.reject(new Error('BW_GRAMMAR_SHORT'));
+      return safeFetch('/pdf/api/grammar-analyze', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, sentence: sentence, file: file, enabled_books: _enabledBooks })
+      }, { retries: 2 }).then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(function (d) {
+        if (!d || !d.ok) throw new Error((d && d.error) || 'BW_GRAMMAR_FAILED');
+        var out = {
+          sentence: sentence, text: text, engine: d.engine || '',
+          zh: d.sentence_zh || '', tokens: d.tokens || [], deps: d.deps || [],
+          clauses: d.clauses || [], components: d.components || [],
+          points: d.analyses || []
+        };
+        // spacy 只给结构，语法点与译文由 AI 流补 —— 与 analyze() 里同一个判断。
+        if (d.engine !== 'spacy') return out;
+        var ap = (spec.aiParams ? (function () { try { return spec.aiParams() || {}; } catch (e) { return {}; } })() : {});
+        return aiStreamFn('/pdf/api/grammar-stream', {
+          method: 'POST',
+          body: { sentence: sentence, text: text, file: file, enabled_books: _enabledBooks,
+                  model: ap.model || '', effort: ap.effort || '' }
+        }).then(function (res) {
+          var acc = (res && res.text) || '';
+          var tm = acc.match(/\[\[TRANS\]\]([\s\S]*?)(\[\[\/TRANS\]\]|\[\[POINTS\]\]|$)/);
+          if (tm && tm[1].trim()) out.zh = tm[1].trim();
+          var pm = acc.match(/\[\[POINTS\]\]([\s\S]*?)(\[\[\/POINTS\]\]|$)/);
+          try { out.points = JSON.parse((pm && pm[1].trim()) || '[]') || []; } catch (e) { out.points = []; }
+          // 历史跟网页那侧同一份：两个表面看到的「最近分析过的句子」必须一致。
+          saveHistoryItem(file, {
+            sentence: sentence, text: text, sentence_zh: out.zh,
+            tokens: out.tokens, deps: out.deps, clauses: out.clauses,
+            components: out.components, clause_tree: d.clause_tree || null,
+            analyses: out.points
+          });
+          return out;
+        });
+      });
+    };
+    return _loaded ? run() : loadTracked(file).then(run);
+  }
+
   RC.grammar = {
+    analyzeData: analyzeData,
     extractSentence: extractSentence,
     loadTracked: loadTracked,
     enabledBooks: function () { return _enabledBooks.slice(); },

@@ -350,6 +350,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 原生查词/翻译面板。非 nil 即弹出（在 ReaderNativeWorkspace 里呈现）。
     @Published var nativeLookup: ReaderNativeLookupModel?
     @Published var nativeFigure: ReaderNativeFigureModel?
+    @Published var nativeGrammar: ReaderNativeGrammarModel?
     private var nativePDFMountTask: Task<Void, Never>?
     var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
@@ -778,6 +779,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         // 布局一变就重推墨迹表面：滚动/缩放后页面的屏幕位置变了，不推的话
         // Pencil 会画在上一帧的位置上。挂载那次的 onGeometry 已在回调里自清。
+        document.onGrammar = { [weak self] _, sentence, focus in
+            Task { @MainActor [weak self] in
+                self?.openNativeGrammar(sentence: sentence, focus: focus)
+            }
+        }
         document.onGeometry = { [weak self] in
             Task { @MainActor [weak self] in self?.scheduleNativeInkSurfacePublish() }
         }
@@ -877,6 +883,21 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeLookup = panel
     }
 
+    /// 选区菜单里点了「语法」。分析对象是整句，焦点是选中那一段。
+    private func openNativeGrammar(sentence: String, focus: String) {
+        let whole = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        let picked = focus.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 整句取不到时退用选中串：宁可分析得窄一点，也不要什么都不发生。
+        let target = whole.isEmpty ? picked : whole
+        guard !target.isEmpty, target.count <= 4000 else { return }
+        nativeGrammar = ReaderNativeGrammarModel(
+            sentence: target, focus: picked.isEmpty ? target : picked
+        ) { [weak self] command in
+            await self?.requestNativeConversationCommand(command)
+                ?? ["ok": false, "error": "阅读页已关闭"]
+        }
+    }
+
     /// 点图徽标 → 原生描述面板。描述文本随图一起取过来了，这里不再回网页问一次。
     func openNativeFigurePanel(_ figure: ReaderNativePDFDocument.Figure) {
         let panel = ReaderNativeFigureModel(figure: figure) { [weak self] command in
@@ -974,7 +995,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
-            "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach"]
+            "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach",
+            "nativeGrammar"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {
