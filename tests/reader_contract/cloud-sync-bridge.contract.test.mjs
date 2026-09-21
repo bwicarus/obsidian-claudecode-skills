@@ -95,3 +95,27 @@ test("⑨ 关掉同步不等于删数据", () => {
   // 用户多半是"先别同步"而不是"把这些都扔了"。真要清由 accountChange 那条路负责。
   assert.doesNotMatch(code(setter), /clearAll|removeItem/);
 });
+
+test("⑩ EPUB 的写入也要标脏", () => {
+  // ⚠ EPUB 写入**不经过** withNativePDFWriter（那是 PDF 专属的写者租约），
+  // 于是它们此前一次都没 ping 过。原生正文那边无所谓（EPUB 没有原生渲染器），
+  // 但"这本书脏了"挂在同一条信号上 —— 不补这一处，EPUB 里划的线永远不会
+  // 同步出去，而且完全无声。
+  assert.match(RUNTIME, /function announceUserStateKindWrite\(kind\)/);
+  assert.match(RUNTIME, /'epub-highlights': true/);
+  assert.match(RUNTIME, /'epub-ink': true/);
+  // 两条 document 域写入路径都要报。
+  const mutateDoc = body(RUNTIME, "function mutateDocumentState(kind, fallback",
+                         "function deviceStateId(kind)");
+  assert.match(mutateDoc, /announceUserStateKindWrite\(kind\)/);
+  const mutateHl = body(RUNTIME, "function mutateHighlightCollection(kind, mutator",
+                        "// 启动迁移：整册数组");
+  assert.match(mutateHl, /announceUserStateKindWrite\(kind\)/);
+  // 清单要盖住 userStateDomainsFromRecords 实际读的那几种：少一种，那种东西的
+  // 改动就不会触发同步。
+  for (const kind of ["reading-position", "document-highlights", "ink",
+                      "document-notes-legacy", "user-pages", "card-placements",
+                      "entity-references"]) {
+    assert.match(RUNTIME, new RegExp(`'${kind}': true`), kind + " 不在标脏清单里");
+  }
+});

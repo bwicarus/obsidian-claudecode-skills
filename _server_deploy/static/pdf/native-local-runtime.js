@@ -535,6 +535,22 @@
     } catch (_) {}
   }
 
+  // 用户状态的九种记录。⚠ 这份清单必须与 userStateDomainsFromRecords 里实际读的
+  // 那几种对上 —— 少一种，那种东西的改动就不会触发同步（而且完全无声）。
+  var USER_STATE_RECORD_KINDS = {
+    'reading-position': true, 'document-highlights': true, 'epub-highlights': true,
+    'ink': true, 'epub-ink': true, 'document-notes-legacy': true,
+    'user-pages': true, 'card-placements': true, 'entity-references': true
+  };
+
+  // EPUB 的写入**不经过** withNativePDFWriter（那条是 PDF 专属的写者租约），
+  // 于是它们此前一次都没 ping 过 —— 原生正文那边无所谓（EPUB 没有原生渲染器），
+  // 但 iCloud 同步的"这本书脏了"也挂在同一条信号上：不补这一处，EPUB 里划的线
+  // 永远不会同步出去。
+  function announceUserStateKindWrite(kind) {
+    if (USER_STATE_RECORD_KINDS[kind] === true) announceNativeReadingStateWrite('state:' + kind);
+  }
+
   function withNativePDFWriter(label, task) {
     var lease;
     return Promise.resolve().then(function () {
@@ -898,6 +914,11 @@
   function mutateDocumentState(kind, fallback, mutator, batchOptions) {
     return serializeLocalStateMutation('document', kind, function () {
       return mutateDocumentStateNow(kind, fallback, mutator, batchOptions);
+    }).then(function (value) {
+      // 只在成功分支报：失败时什么都没落库。PDF 那条路会经 withNativePDFWriter
+      // 再报一次，重复 ping 是无害的（投影刷新有节流、标脏是幂等的）。
+      announceUserStateKindWrite(kind);
+      return value;
     });
   }
 
@@ -1370,6 +1391,9 @@
   function mutateHighlightCollection(kind, mutator, batchOptions) {
     return serializeLocalStateMutation('document', kind, function () {
       return mutateHighlightCollectionNow(kind, mutator, batchOptions);
+    }).then(function (value) {
+      announceUserStateKindWrite(kind);
+      return value;
     });
   }
 

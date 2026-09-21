@@ -44,8 +44,16 @@
 - (b) 维持现状：Windows 当枢纽，不上 iCloud。
 - (c) iCloud 成为阅读器用户状态的唯一同步通道，Windows 按需向 App 取。
 
-推荐 (a)：它同时满足「同账号跨设备同步」和「Windows 全量留底」，而且不把
-Windows 放进手机↔iPad 的关键路径上。
+**✅ 用户 2026-09-21 拍板：按 (a) 做。**
+iCloud 管 Apple 设备之间，Windows 只收单向留底 —— 手机↔iPad 不再经过
+Windows/Pi，Windows 仍拿全量备份，**不产生双写**。
+
+由此定下的两条，改之前先回到这里：
+- 阅读器用户状态（高亮/便签/笔迹/插入页/阅读位置）在 Apple 设备之间的权威通道
+  是 **iCloud**。Windows 那条 outbox/sync-batch 继续存在，但它的角色是**留底**，
+  不是仲裁者 —— 别再往它上面加"谁更新"的判断。
+- 因此也**不要**为了省事把 iCloud 合并结果再推一份给 Windows 当"同步"：
+  留底是单向的，推回来就又变成双写了。
 
 **落地顺序**（每步都可单独发版，不必一次做完）：
 1. Swift 侧实现与 `indexeddb-store.js` 等价的 store（collections / journal /
