@@ -537,6 +537,27 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                         document.highlightSearchHits(query: query, page: page)
                     }
                 }
+                // 整页翻译（译页）：另一次调用，因为它自带开关且要出网取译文，
+                // 塞进 page-overlay 会让关着译页的常规刷新也等它一遍。
+                let slices = try? await self.webView.callAsyncJavaScript(
+                    "return await window.__bwReaderPageTranslateSlices?.(page);",
+                    arguments: ["page": page], in: nil, contentWorld: .page)
+                guard self.nativePDFDocument === document,
+                      let size = document.characterPageSize(page) else { return }
+                let rows = (slices as? [[String: Any]] ?? []).compactMap {
+                    row -> ReaderNativePDFDocument.TranslationSlice? in
+                    guard let text = row["text"] as? String, !text.isEmpty,
+                          let x = row["x"] as? Double, let y = row["y"] as? Double,
+                          let width = row["w"] as? Double,
+                          let fontSize = row["fontSize"] as? Double,
+                          size.width > 0, size.height > 0 else { return nil }
+                    // 点坐标 → 归一化，跟高亮/下划线同一口径。字号按页高归一化：
+                    // 画的时候乘回该页在屏幕上的高度，缩放跟着页面走。
+                    return .init(origin: CGPoint(x: x / size.width, y: y / size.height),
+                                 width: width / size.width,
+                                 fontScale: fontSize / size.height, text: text)
+                }
+                document.setTranslationSlices(rows, page: page)
             }
         }
     }
@@ -647,7 +668,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func performNativeConversationCommand(_ command: [String: Any]) async -> String? {
         let receipt = await requestNativeConversationCommand(command)
-        return receipt["ok"] as? Bool == true ? nil : (receipt["error"] as? String ?? "操作未完成，请重试")
+        let ok = receipt["ok"] as? Bool == true
+        // 顶栏「阅读工具」里的那些按钮点的是网页工具栏（译页/注音/生词下划线/图描述…），
+        // 它们改的正是原生正文要画的东西。不在这儿重取一次，表现就是「点了译页没反应」
+        // —— 网页那侧确实开了，只是原生没去拿新数据。
+        if ok, command["action"] as? String == "liveAction" { refreshNativePageOverlays() }
+        return ok ? nil : (receipt["error"] as? String ?? "操作未完成，请重试")
     }
 
     func updateNativePDFSelection(_ values: [ReaderNativePDFDocument.CharacterSelection],

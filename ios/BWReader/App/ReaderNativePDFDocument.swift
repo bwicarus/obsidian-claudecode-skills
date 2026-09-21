@@ -103,6 +103,24 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         vocabSentences[page] = sentences
     }
 
+    /// 整页翻译（译页）的一个译文片段：一行译文落在原文那一行的**字框顶部留白**里
+    /// ——「行间对照」而不是遮住原文。切分/分配/字号全在网页那侧算好
+    /// （`_pageTranslateSlices`），这里只按页面缩放画。
+    ///
+    /// ⚠ `fontScale` 是**按页高归一化**的字号，不是 pt：画的时候乘回该页在屏幕上的
+    /// 高度，缩放才跟着页面走。存 pt 的话放大页面译文就还是小的。
+    struct TranslationSlice {
+        let origin: CGPoint        // 归一化，左上
+        let width: Double          // 归一化
+        let fontScale: Double      // 归一化字号（× 页面屏幕高度 = 实际字号）
+        let text: String
+    }
+    @Published private(set) var translationSlices: [Int: [TranslationSlice]] = [:]
+
+    func setTranslationSlices(_ slices: [TranslationSlice], page: Int) {
+        translationSlices[page] = slices
+    }
+
     /// 句子配色：与网页 `SENT_COLORS` 一一对应，按序号取模。
     /// ⚠ 顺序也要一致 —— 同一页同一句在两个表面上必须是同一个颜色，否则
     /// 「刚才那句绿的」在另一个表面上指的是别的句子。
@@ -1102,6 +1120,28 @@ struct ReaderNativePDFViewport: View {
                             Text(rt).font(.system(size: fontSize)).foregroundStyle(ReaderNativeTheme.ink),
                             in: CGRect(x: box.minX, y: max(0, box.minY - fontSize * 0.34),
                                        width: w, height: fontSize * 1.2))
+                    }
+                    // 整页翻译：行间小字。位置/字号是网页那侧按点坐标算好的，
+                    // 这里只乘回该页在屏幕上的尺寸。译页与振假名互斥（网页那侧
+                    // 开一个就关另一个），所以两者不会同时挤在同一条留白里。
+                    for slice in document.translationSlices[number] ?? [] {
+                        let fontSize = slice.fontScale * frame.height
+                        guard fontSize >= 4 else { continue }
+                        let box = CGRect(x: frame.minX + slice.origin.x * frame.width,
+                                         y: frame.minY + slice.origin.y * frame.height,
+                                         width: slice.width * frame.width,
+                                         height: fontSize * 1.2)
+                        // 观感照 .page-tr-rt：白底半透明 + 深蓝 600 字重 + **左对齐**。
+                        // ⚠ Canvas 的 draw(_:in:) 是**居中**的，用它会让译文在行上飘到
+                        // 中间，跟原文对不上 —— 所以按 leading 锚点画。
+                        pageContext.fill(
+                            Path(roundedRect: box.insetBy(dx: -1, dy: 0), cornerRadius: 2),
+                            with: .color(.white.opacity(0.86)))
+                        pageContext.draw(
+                            Text(slice.text)
+                                .font(.system(size: fontSize, weight: .semibold))
+                                .foregroundStyle(Color(red: 0.043, green: 0.239, blue: 0.569)),
+                            at: CGPoint(x: box.minX, y: box.midY), anchor: .leading)
                     }
                     for stroke in document.ink[number] ?? [] {
                         ReaderNativeInkDrawing.draw(stroke, in: frame, context: &pageContext)

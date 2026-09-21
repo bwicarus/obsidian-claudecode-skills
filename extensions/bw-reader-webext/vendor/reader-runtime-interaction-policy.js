@@ -727,6 +727,15 @@
       }
     ),
     cachedRead(
+      'document.page-translate.read',
+      ['/pdf/api/page-translate'],
+      'private-stale-while-revalidate',
+      {
+        transport: { serviceWorker: 'private-swr' },
+        reason: '整页翻译（译页）按页取逐句译文；同一页翻两次结果一样，值得缓存。'
+      }
+    ),
+    cachedRead(
       'document.page-figures.read',
       ['/pdf/api/page-figures'],
       'private-stale-while-revalidate',
