@@ -37,6 +37,22 @@ TOOLS = [
                      "properties": {"id": {"type": "string",
                                            "description": "通知 id，形如 ntf-xxxxxxxxxxxx"}},
                      "required": ["id"], "additionalProperties": False}},
+    {"name": "review_deck", "description": (
+        "取现在该复习的一组卡：正面念给他听、背面对照他的回答、外加评分要用的身份。\n"
+        "⚠ **不需要他正在看书，也不需要阅读器在前台。** 这组卡读的是本机的复制副本文件，"
+        "不是页面 —— 他出门只戴着耳机时照样能复习。别拐去问阅读器要（那条路会回"
+        "「来源不在线」，2026-09-21 实录：AI 因此以为复习这件事做不了）。\n"
+        "可以只复习一个范围：book=书名的一段（同名多副本自动取并集）、pages=\"10-30\"、"
+        "kind=due 只做到期的 / new 只做新卡。\n"
+        "返回里 scopes 列着**所有**可选的书和各自张数 —— 他说「换一本」「还有别的吗」时"
+        "直接报这些，不要再调一次。narrowedToNothing=true 表示是范围筛空了（多半书名说岔了），"
+        "跟「没有要复习的卡」不是一回事，别说成复习完了。"),
+     "inputSchema": {"type": "object", "properties": {
+         "book": {"type": "string", "description": "只复习这本：书名含这段文字，或 repbookId 全等；留空=全部"},
+         "pages": {"type": "string", "description": '只复习这几页上的卡，如 "10-30" 或 "12"；没有页码的卡不参与'},
+         "kind": {"type": "string", "enum": ["all", "due", "new"], "description": "默认 all"},
+         "limit": {"type": "integer", "description": "最多取几张，1–50，默认 10"}},
+      "additionalProperties": False}},
     {"name": "kj_node_ensure", "description": ("查找或创建知识节点，一步到位（用户 2026-09-15）。按名称在本地节点库找：名称或别名完全一致 → 直接返回该节点；"
         "没有 → 按给的 kind/aliases/summary 新建并返回新编号。返回 {ok, nodeId, created, matched, candidates}。制卡（reader_anki_draft 的 nodeIds）前用它拿编号，"
         "不要再自己跑脚本分两步。有近似但不完全一致的候选时也会新建，并把候选列在 candidates 里 —— 你若认为其中某个就是同一概念，用返回的 nodeId 之外那个即可。"),
@@ -149,6 +165,37 @@ def kj_node_ensure(args: dict) -> dict:
     return out
 
 
+def review_deck_tool(args: dict) -> dict:
+    """语音复习要念的那一组卡。**进程内直接读文件，不经阅读器也不经网络。**
+
+    ⚠ 不要改成去调某个 HTTP 端点"顺便统一一下"：这个工具存在的全部理由就是
+    它在阅读器不在线时仍然成立（用户 2026-09-21 出门戴耳机复习）。
+    """
+    try:
+        import review_deck                                   # 与本文件同目录
+    except Exception as error:                               # noqa: BLE001
+        return {"ok": False, "msg": "review_deck 模块加载失败：%s" % error}
+    pages_raw = str(args.get("pages") or "").strip()
+    pages = review_deck.parse_pages(pages_raw) if pages_raw else None
+    if pages_raw and pages is None:
+        return {"ok": False, "msg": 'pages 要写成 "10-30" 或 "12"'}
+    try:
+        limit = int(args.get("limit") or review_deck.DEFAULT_LIMIT)
+    except (TypeError, ValueError):
+        return {"ok": False, "msg": "limit 要是个整数"}
+    kind = str(args.get("kind") or "all").strip().lower() or "all"
+    if kind not in ("all", "due", "new"):
+        return {"ok": False, "msg": "kind 只能是 all / due / new"}
+    try:
+        payload = review_deck.take(
+            None, limit, book=str(args.get("book") or ""),
+            pages=pages, kind=kind)
+    except Exception as error:                               # noqa: BLE001
+        return {"ok": False, "msg": "取复习卡失败：%s" % error}
+    payload["ok"] = True
+    return payload
+
+
 def call_tool(name: str, args: dict) -> dict:
     if name == "schedule_list":
         return http("GET", "/tasks")
@@ -178,6 +225,8 @@ def call_tool(name: str, args: dict) -> dict:
         return http("POST", "/session/start", {"reason": args.get("reason") or "backend"})
     if name == "notify_ack":
         return http("POST", "/notify/ack", {"id": str(args.get("id") or "").strip()})
+    if name == "review_deck":
+        return review_deck_tool(args)
     if name == "kj_node_ensure":
         return kj_node_ensure(args)
     if name == "voice_call":
