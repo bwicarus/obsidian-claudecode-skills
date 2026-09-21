@@ -5505,11 +5505,15 @@ extension ReaderWebViewModel: WKUIDelegate {
             ("翻译", "translate", "translate"),
             ("解释", "lightbulb", "explain"),
         ]
-        let items = actions.map { title, icon, mode in
+        var items = actions.map { title, icon, mode in
             UIAction(title: title, image: UIImage(systemName: icon)) { [weak self] _ in
                 Task { @MainActor [weak self] in await self?.openEPUBLookup(mode: mode) }
             }
         }
+        items.append(UIAction(title: "语法", image: UIImage(systemName: "chart.bar.doc.horizontal")) {
+            [weak self] _ in
+            Task { @MainActor [weak self] in await self?.openEPUBGrammar() }
+        })
         animator.addMenuElement(UIMenu(title: "", options: .displayInline, children: items))
     }
 
@@ -5529,6 +5533,30 @@ extension ReaderWebViewModel: WKUIDelegate {
         }
         openNativeLookup(page: 0, text: text,
                          sentence: payload["context"] as? String ?? "", mode: mode)
+    }
+
+    /// EPUB 的「语法」。分析对象是**所在句**，焦点是选中那一段 —— 与 PDF 同一口径。
+    /// ⚠ EPUB 给的 context 是所在**块**（比句子宽）。`RC.grammar.analyzeData` 内部
+    /// 不会再切句，所以这里先用 `RC.grammar.extractSentence` 把那一句抠出来 ——
+    /// 直接把整段送进去，AI 会去分析一段而不是一句。
+    @MainActor
+    private func openEPUBGrammar() async {
+        let value = try? await webView.callAsyncJavaScript(
+            """
+            const sel = window.__bwReaderEpubSelection?.();
+            if (!sel || !sel.text) return null;
+            const g = window.RC && window.RC.grammar;
+            const sentence = (g && g.extractSentence)
+              ? (g.extractSentence(sel.context || sel.text, sel.text) || sel.text) : sel.text;
+            return { text: sel.text, sentence: sentence };
+            """,
+            arguments: [:], in: nil, contentWorld: .page)
+        guard let payload = value as? [String: Any],
+              let text = payload["text"] as? String, !text.isEmpty else {
+            nativeConversation.report("没有选中内容。")
+            return
+        }
+        openNativeGrammar(sentence: payload["sentence"] as? String ?? text, focus: text)
     }
 
     private func readerDialogPresenter(for webView: WKWebView) -> UIViewController? {

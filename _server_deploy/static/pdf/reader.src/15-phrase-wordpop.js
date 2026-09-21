@@ -1194,3 +1194,7 @@ window.__bwReaderCreateNote = function (request) {
   sticky.createAt({ kind: 'pdf', page: page, x: x, y: y });
   return { page: page, x: x, y: y };
 };
+
+// 当前书的相对路径。两个阅读器各有各的变量名（PDF 是 FILE_REL、EPUB 是 FREL），
+// 而原生那侧的动作不该知道自己站在哪个阅读器上 —— 给它一个同名的口子。
+window.__bwReaderFileRel = function () { return FILE_REL || ''; };

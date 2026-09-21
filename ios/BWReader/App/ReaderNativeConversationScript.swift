@@ -857,7 +857,11 @@ enum ReaderNativeConversationScript {
               result = await grammar.analyzeData({
                 sentence: value.sentence,
                 text: typeof value.text === 'string' && value.text.trim() ? value.text : value.sentence,
-                file: window.FILE_REL || '',
+                // ⚠ 别直接读 window.FILE_REL：那是 PDF 的变量，EPUB 上它是空的，
+                // 而空 file 会让 loadTracked 当成"没有这本书"——启用的 KG 一个都取不到，
+                // 于是语法分析在 EPUB 上永远回"请先启用至少一个语法 KG"。
+                file: (typeof window.__bwReaderFileRel === 'function'
+                  ? window.__bwReaderFileRel() : (window.FILE_REL || '')),
                 aiParams: typeof window._getAiOverrides === 'function' ? window._getAiOverrides : null
               });
             } catch (error) {

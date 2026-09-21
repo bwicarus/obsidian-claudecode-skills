@@ -93,3 +93,25 @@ test("⑧ 选区此刻去问，不缓存", () => {
   assert.match(EPUB, /window\.__bwReaderEpubSelection = function/);
   assert.match(EPUB, /context: String\(cur\.ctx \|\| ''\)/);
 });
+
+test("⑨ 取当前书用不分阅读器的那个口子", () => {
+  const SCRIPT = readFileSync(new URL("ios/BWReader/App/ReaderNativeConversationScript.swift", ROOT), "utf8")
+    .replace(/\r\n/g, "\n");
+  // ⚠ window.FILE_REL 是 PDF 的变量，EPUB 上它是空的；而空 file 会让 loadTracked
+  // 当成"没有这本书" —— 启用的 KG 一个都取不到，于是语法分析在 EPUB 上永远回
+  // 「请先启用至少一个语法 KG」。
+  assert.match(SCRIPT, /typeof window\.__bwReaderFileRel === 'function'/);
+  assert.match(EPUB, /window\.__bwReaderFileRel = function \(\) \{ return FREL \|\| ''; \}/);
+  assert.match(PDF, /window\.__bwReaderFileRel = function \(\) \{ return FILE_REL \|\| ''; \}/);
+});
+
+test("⑩ EPUB 语法送的是所在句，不是整段", () => {
+  const WEBVIEW = readFileSync(new URL("ios/BWReader/App/ReaderWebView.swift", ROOT), "utf8")
+    .replace(/\r\n/g, "\n");
+  const grammar = WEBVIEW.slice(WEBVIEW.indexOf("private func openEPUBGrammar() async"));
+  // EPUB 给的 context 是所在**块**（比句子宽），analyzeData 内部不再切句 ——
+  // 直接送整段的话，AI 会去分析一段而不是一句。
+  assert.match(grammar, /g\.extractSentence\(sel\.context \|\| sel\.text, sel\.text\)/);
+  assert.match(grammar, /openNativeGrammar\(sentence: payload\["sentence"\]/);
+  assert.ok(WEBVIEW.includes('UIAction(title: "语法"'), "菜单里要有语法");
+});

@@ -5919,6 +5919,9 @@
     }
   } catch (e) {}
 
+  // 同 PDF 那侧：给原生动作一个不分阅读器的口子取当前书。
+  window.__bwReaderFileRel = function () { return FREL || ''; };
+
   // 当前选区（给 App 的原生选区菜单用）。
   //
   // ⚠ 返回 `context` 而不只是选中串：一词多义时释义要看所在句，解释更要靠它把
