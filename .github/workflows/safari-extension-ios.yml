@@ -248,6 +248,14 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativePDFCrop.swift ios/BWReader/Tests/NativePDFCrop/main.swift -o "$RUNNER_TEMP/native-pdf-crop-test"
           "$RUNNER_TEMP/native-pdf-crop-test"
 
+      # 日语词链：NLTokenizer 给的是裸形态素，「禁止されている」会散成五个可点的
+      # 片段（用户 2026-09-21）。这一步守两件事：变形并回词里，**且助词绝不被并走**
+      # —— 后者错了会让点词查不到东西，比拆开更糟。
+      - name: Verify Japanese word chain merging
+        run: |
+          xcrun swiftc ios/BWReader/App/ReaderJapaneseWordChain.swift ios/BWReader/Tests/JapaneseWordChain/main.swift -o "$RUNNER_TEMP/japanese-word-chain-test"
+          "$RUNNER_TEMP/japanese-word-chain-test"
+
       - name: Build unsigned simulator candidate
         shell: bash
         run: |

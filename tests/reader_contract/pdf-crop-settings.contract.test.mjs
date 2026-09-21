@@ -24,10 +24,23 @@ function functionSource(source, name) {
   throw new Error(`${name} body is incomplete`);
 }
 
-function cropHarness(fetchImpl, refitImpl = async () => {}) {
-  const events = { stored: [], refit: 0, remembered: 0, button: 0, order: [] };
+function cropHarness(fetchImpl, refitImpl = async () => {}, nativeViewport = null) {
+  const events = { stored: [], refit: 0, remembered: 0, button: 0, order: [], native: [] };
   const context = vm.createContext({
     fetch: fetchImpl,
+    // 原生裁边（2026-09-21）把 crop 同时交给 PDFKit：saveCropSettings 里多了
+    // `RC.readerNavigation?.nativeViewport` 这一支。沙箱里没有 RC 时它是
+    // ReferenceError —— 函数在第一行就炸，下面几条断言测的其实什么都不是。
+    // 默认不给 nativeViewport：走的仍是原来的网页路径，老断言含义不变。
+    RC: {
+      readerNavigation: {
+        nativeViewport,
+        performNativeViewport: async (action, payload) => {
+          events.native.push([action, payload]);
+          events.order.push("native-crop");
+        },
+      },
+    },
     FILE_REL: "localbook:test",
     localStorage: {
       setItem(key, value) { events.stored.push([key, value]); },
@@ -132,7 +145,12 @@ test("settings closes and reports success only after the crop save resolves", ()
 });
 
 test("an unconfigured crop toggle opens settings instead of enabling a zero crop", () => {
-  const start = LOADER.indexOf("window.toggleCrop = () => {");
+  // ⚠ 别把签名写死：原来找的是字面量 `window.toggleCrop = () => {`，
+  //   2026-09-21 原生裁边把它改成 async 之后，这条测试就再也找不到函数体了 ——
+  //   红的不是行为，是"长得不一样了"。要钉的是下面那条不变量：没配比例时先去设置、
+  //   **在切换之前 return**。
+  const signature = /window\.toggleCrop = (?:async )?\(\) => \{/.exec(LOADER);
+  const start = signature ? signature.index : -1;
   const end = LOADER.indexOf("\n};", start);
   assert.ok(start >= 0 && end > start);
   const body = LOADER.slice(start, end);

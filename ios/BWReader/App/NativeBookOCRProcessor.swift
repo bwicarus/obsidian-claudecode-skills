@@ -615,14 +615,30 @@ actor NativeBookOCRProcessor {
         if let language = NLLanguageRecognizer.dominantLanguage(for: text) {
             tokenizer.setLanguage(language)
         }
-        var ranges: [WordTokenRange] = []
+        var spans: [Range<String.Index>] = []
         tokenizer.enumerateTokens(
             in: text.startIndex..<text.endIndex
         ) { range, _ in
-            ranges.append(WordTokenRange(id: ranges.count, range: range))
+            spans.append(range)
             return true
         }
-        return ranges
+        // NLTokenizer 给日语的是**裸形态素**：「禁止されている」会切成 禁止/さ/れ/て/いる，
+        // 于是页面上能单独点中「れ」（用户 2026-09-21）。服务端那套 fugashi 分词一直
+        // 会把变形并回词里，App 这边缺的就是这一步。见 ReaderJapaneseWordChain。
+        // 非日语文本不受影响：那里没有全平假名的 token，合并规则一条都命中不了。
+        let surfaces = spans.map { String(text[$0]) }
+        var adjacent: [Bool] = []
+        adjacent.reserveCapacity(spans.count)
+        for (index, span) in spans.enumerated() {
+            adjacent.append(index > 0 && spans[index - 1].upperBound == span.lowerBound)
+        }
+        let groups = ReaderJapaneseWordChain.groupIDs(
+            surfaces: surfaces,
+            adjacentToPrevious: adjacent
+        )
+        return spans.enumerated().map { index, span in
+            WordTokenRange(id: index < groups.count ? groups[index] : index, range: span)
+        }
     }
 
     private static func wordID(

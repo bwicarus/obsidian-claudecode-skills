@@ -2400,10 +2400,47 @@
       return Promise.resolve(_readerOutputReject(error));
     }
   }
+  /// 当前真正打开的是哪一本。取不到就返回 ''（调用方据此放行，不猜）。
+  function _readerOutputCurrentFile() {
+    try {
+      var viewport = window.__nativeReaderViewport;
+      if (viewport && typeof viewport.file === 'string' && viewport.file) {
+        return viewport.file;
+      }
+    } catch (e) {}
+    try {
+      var host = RC.documentHost && RC.documentHost.current && RC.documentHost.current();
+      if (host && typeof host.file === 'string' && host.file) return host.file;
+    } catch (e2) {}
+    return '';
+  }
+
   function _acceptReaderRealtimeOutput(delivery) {
     if (!delivery || !delivery.correlation || !delivery.kind) {
       return Promise.resolve(_readerOutputReject('BW_READER_REALTIME_OUTPUT_INVALID'));
     }
+    // ⚠ 投递到这里从来**没有人核对过是哪一本书**（2026-09-21 查出来的既有隐患）。
+    //   今天窗口只有重连那几秒所以没炸；但带词锚的卡是 durable 的 —— 它先落 outbox，
+    //   重放时桥会把它改投给**当时在线的任何一个来源**（ReaderRealtimeOutput.cs：
+    //   `SourceInstanceId = lease.SourceInstanceId`）。所以给《A 书》第 27 页排的卡，
+    //   可能在你打开《B 书》时落到 B 的第 27 页上。
+    //   这里按书拒收，错误信息里带 UNAVAILABLE —— 桥的 ReplayMayWaitForAnotherSource
+    //   认这个词，会把它**留在队列里**等那本书打开，而不是判失败丢掉。
+    //   只管带 bind 的卡：别的 kind（对话、工具状态）不进 outbox，拦下去就是直接丢。
+    //   取不到当前书身份时一律放行 —— 宁可维持今天的行为，也不要凭猜测拒收。
+    try {
+      var _bound = delivery.kind === 'card' && delivery.payload &&
+        delivery.payload.card && delivery.payload.card.bind;
+      var _want = String((delivery && delivery.file) || '');
+      var _have = _bound ? _readerOutputCurrentFile() : '';
+      if (_bound && _want && _have && _want !== _have) {
+        return Promise.resolve({
+          outcome: 'rejected',
+          error: 'BW_READER_REALTIME_OUTPUT_DOCUMENT_UNAVAILABLE: ' +
+            '这条卡是投给另一本书的，当前打开的不是它；已留在队列里等那本书打开'
+        });
+      }
+    } catch (eDoc) {}
     var correlation = String(delivery.correlation);
     var seen = _readerOutputSeen[correlation];
     if (seen) {
