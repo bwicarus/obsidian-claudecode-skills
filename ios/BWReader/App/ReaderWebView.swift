@@ -464,6 +464,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
+    /// 内容摘要变了（真实改页写回 PDF）→ 重挂原生正文。
+    ///
+    /// ⚠ 不重挂的后果不是"报错"，而是**静默停更**：原生那边显示的仍是改页前的
+    /// 文档，而投影/划线/定位全都因为 `matches` 失败而默默什么都不做。
+    /// 静默失败比崩溃更难发现 —— 用户只会觉得"插进去的页没出现"。
+    private func remountNativePDFIfContentChanged(_ digest: String) {
+        guard let document = nativePDFDocument, let bookID = currentLocalBook?.id,
+              !document.matches(bookID: bookID, contentSHA256: digest) else { return }
+        invalidateNativePDFDocument()
+        // 另起一轮：当前这次调用可能正发生在 prepare 里面（它也会取摘要），
+        // 就地重挂会递归。
+        Task { @MainActor [weak self] in self?.mountNativePDFDocumentIfEnabled() }
+    }
+
     /// 取可见页的**页面叠加数据**（生词下划线 + 已掌握词面集），交给原生正文画。
     ///
     /// ⚠ **只取数据**：「哪些词该画下划线」「哪些词不注音」牵涉共享仓库的掌握事实、
@@ -2351,6 +2365,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 && $0.relativePath == original.relativePath
         }) ?? current
         currentLocalBookContentSHA256 = digest
+        // ⚠ 真实改页（插入页写回 PDF 文件）会换掉内容摘要。而原生正文的每一条路
+        //   —— 投影、划线、定位、墨迹表面 —— 都 `guard document.matches(digest)`，
+        //   摘要一变它们会**静默全停**：屏幕上还是旧的那一份，却再也不更新。
+        //   所以摘要变了就重挂一次。
+        remountNativePDFIfContentChanged(digest)
         if let baseURL = localRuntimeServer?.baseURL {
             nativeBookOCRBridge?.updateTrustedContext(
                 baseURL: baseURL,
