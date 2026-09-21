@@ -1,0 +1,148 @@
+import SwiftUI
+
+struct ReaderNativePagePlacement: Identifiable {
+    let id: String
+    let title: String
+    let rect: CGRect
+    let bound: Bool
+    let collapsed: Bool
+    let floating: Bool
+    let controls: [String: String]
+    let parts: [ReaderNativeConversationPart]
+
+    init?(_ value: [String: Any]) {
+        guard let id = value["id"] as? String,
+              let box = value["rect"] as? [String: NSNumber],
+              let x = box["x"]?.doubleValue, let y = box["y"]?.doubleValue,
+              let w = box["width"]?.doubleValue, let h = box["height"]?.doubleValue,
+              [x, y, w, h].allSatisfy({ $0.isFinite }), w > 0, h > 0 else { return nil }
+        self.id = id
+        title = value["title"] as? String ?? "卡片"
+        rect = CGRect(x: x, y: y, width: w, height: h)
+        bound = value["bound"] as? Bool ?? false
+        collapsed = value["collapsed"] as? Bool ?? false
+        floating = value["floating"] as? Bool ?? false
+        controls = value["controls"] as? [String: String] ?? [:]
+        parts = (value["parts"] as? [[String: Any]] ?? []).compactMap(ReaderNativeConversationPart.init)
+    }
+}
+
+@MainActor
+struct ReaderNativePageCards: View {
+    @ObservedObject var reader: ReaderWebViewModel
+    @ObservedObject var model: ReaderNativeConversationModel
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                ForEach(model.placements) { item in
+                    let rect = reader.nativePageCardRect(item.rect, in: geometry.frame(in: .global))
+                    if rect.maxX > 0 && rect.maxY > 0 && rect.minX < geometry.size.width && rect.minY < geometry.size.height {
+                        ReaderNativePlacedCard(item: item, reader: reader, model: model,
+                                               origin: geometry.frame(in: .global).origin,
+                                               rect: rect, available: geometry.size)
+                            .offset(x: rect.minX, y: rect.minY)
+                    }
+                }
+            }
+        }
+        .clipped()
+    }
+}
+
+@MainActor
+private struct ReaderNativePlacedCard: View {
+    let item: ReaderNativePagePlacement
+    @ObservedObject var reader: ReaderWebViewModel
+    @ObservedObject var model: ReaderNativeConversationModel
+    let origin: CGPoint
+    let rect: CGRect
+    let available: CGSize
+    @GestureState private var translation: CGSize = .zero
+    @State private var confirmRemoval = false
+    @State private var operationError: String?
+    @State private var lastTouch = Date.distantPast
+
+    private var width: CGFloat { item.collapsed ? 44 : min(max(240, rect.width), max(44, available.width)) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                if item.collapsed {
+                    Button { run("expand") } label: {
+                        Image(systemName: item.bound ? "pin.fill" : "rectangle.on.rectangle")
+                            .frame(width: 44, height: 44)
+                    }.accessibilityLabel("展开" + item.title)
+                        .simultaneousGesture(moveGesture)
+                } else {
+                    Label(item.title, systemImage: item.bound ? "pin.fill" : "line.3.horizontal")
+                        .font(.caption.weight(.medium)).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .gesture(moveGesture)
+                    Button { run("collapse") } label: { Image(systemName: "minus") }
+                        .accessibilityLabel("收起卡片")
+                    Menu {
+                        if !item.bound && !item.floating {
+                            Button("锚定到正文", systemImage: "pin") { run("anchor") }
+                        }
+                        Button(item.floating ? "关闭浮动卡片" : "移除这处卡片", systemImage: "trash", role: .destructive) { confirmRemoval = true }
+                    } label: { Image(systemName: "ellipsis").frame(width: 28, height: 32) }
+                }
+            }
+            .padding(.horizontal, item.collapsed ? 0 : 10)
+            .frame(minHeight: item.collapsed ? 44 : 36)
+            if !item.collapsed {
+                Divider()
+                ScrollView {
+                    ReaderNativeConversationArtifacts(parts: item.parts, model: model).padding(8)
+                }
+                .frame(maxHeight: max(120, min(460, min(rect.height, available.height - 40))))
+            }
+        }
+        .frame(width: width)
+        .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14))
+        .overlay(RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14).stroke(ReaderNativeTheme.accent.opacity(0.2)))
+        .shadow(color: .black.opacity(0.12), radius: translation == .zero ? 8 : 16, y: 3)
+        .offset(translation)
+        .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
+            if item.floating, Date().timeIntervalSince(lastTouch) > 2 {
+                lastTouch = Date()
+                if let id = item.controls["touch"], !model.isPerforming("liveAction") {
+                    Task { await model.touchPageCard(id) }
+                }
+            }
+        })
+        .disabled(model.isPerforming("liveAction"))
+        .confirmationDialog("仅移除这处书页卡片，原卡和学习记录会保留。", isPresented: $confirmRemoval, titleVisibility: .visible) {
+            Button("移除", role: .destructive) { run("remove") }
+        }
+        .alert("卡片操作未完成", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
+            Button("好") { operationError = nil }
+        } message: { Text(operationError ?? "") }
+    }
+
+    private var moveGesture: some Gesture {
+        DragGesture(minimumDistance: 6)
+            .updating($translation) { value, state, _ in state = value.translation }
+            .onEnded { value in
+                guard let action = item.controls["move"] else { return }
+                let scope = model.scope
+                let point = CGPoint(x: origin.x + rect.minX + value.translation.width + 1,
+                                    y: origin.y + rect.minY + value.translation.height + 1)
+                Task {
+                    await reader.placeNativeConversationCard(actionID: action, scope: scope, windowPoint: point)
+                    if model.scope == scope { operationError = model.error }
+                }
+            }
+    }
+
+    private func run(_ key: String) {
+        guard let id = item.controls[key] else { return }
+        Task {
+            if !(await model.perform("liveAction", parameters: ["actionId": id])) {
+                operationError = model.error ?? "操作未确认，请重试。"
+            }
+        }
+    }
+}

@@ -139,6 +139,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published var inspection: ReaderNativeArtifactInspection?
     @Published var settingsPanel: ReaderNativeSettingsModel?
     @Published var searchPanel: ReaderNativeSearchModel?
+    @Published private(set) var placements: [ReaderNativePagePlacement] = []
     // Presentation survives closing/repositioning the SwiftUI sidebar, but is
     // scoped to this conversation and never persisted as a second history.
     @Published var draft = ""
@@ -220,6 +221,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         ready = payload["ready"] as? Bool ?? false
         busy = payload["busy"] as? Bool ?? false
         legacyVisible = payload["legacyVisible"] as? Bool ?? false
+        placements = (payload["placements"] as? [[String: Any]] ?? []).compactMap(ReaderNativePagePlacement.init)
         sidebarOpen = payload["sidebarOpen"] as? Bool ?? false
         selectionText = (payload["selection"] as? [String: Any])?["text"] as? String ?? ""
         attachments = (payload["attachments"] as? [[String: Any]] ?? []).compactMap(ReaderNativeContextAttachment.init)
@@ -246,6 +248,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         ready = false
         busy = false
         legacyVisible = false
+        placements = []
         sidebarOpen = false
         selectionText = ""
         attachments = []
@@ -294,6 +297,13 @@ final class ReaderNativeConversationModel: ObservableObject {
         if value["contextKey"] == nil { value["contextKey"] = review["contextKey"] as? String ?? "" }
         if value["cardId"] == nil { value["cardId"] = (review["current"] as? [String: Any])?["id"] as? String ?? "" }
         return await perform("reviewAction", parameters: ["value": value])
+    }
+
+    func touchPageCard(_ id: String) async {
+        // Reading renews the existing floating-card timer; it must not disable
+        // the ongoing native drag/scroll gesture as a pending user command.
+        guard let inspectionHandler else { return }
+        _ = await inspectionHandler(["action": "liveAction", "scope": scope, "actionId": id])
     }
 
     @discardableResult

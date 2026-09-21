@@ -17,6 +17,54 @@ from browser_exe import CHROME
 
 
 class NativeConversationBridgeBrowser(unittest.TestCase):
+    def test_native_page_cards_share_saved_placements_without_web_buttons(self):
+        bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
+            page = browser.new_page()
+            page.route('**/*', lambda r: r.fulfill(status=200, body='<html></html>') if r.request.url == 'http://reader.test/' else r.abort())
+            page.goto('http://reader.test/')
+            page.set_content('<div id="book" style="position:relative;width:900px;height:700px"></div><div id="side-pane-asst"><div id="asst-thread"></div></div>')
+            page.evaluate('''() => {
+              window.receipts=[];window.records=[];window.__asstSend=()=>{};
+              window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};
+              window.RC={turnCard:{}};window.RCInk={drawStroke:()=>{},hit:()=>false};
+              window.repo={newId:()=> 'c_'+'f'.repeat(32),list:async()=>records,get:async id=>records.find(x=>x.id===id),
+                create:async input=>{const r={...input,id:input.noteId,rev:1};records.push(r);return r;},
+                patch:async(id,fields,options)=>{const i=records.findIndex(x=>x.id===id);if(records[i].rev!==options.ifRev)throw Error('conflict');return records[i]={...records[i],...fields,rev:records[i].rev+1};},
+                remove:async id=>{const r=records.find(x=>x.id===id);records=records.filter(x=>x.id!==id);return {...r,deleted:true,rev:r.rev+1};},subscribe:()=>()=>{}};
+            }''')
+            page.add_script_tag(path=str(ROOT / '_server_deploy/static/pdf/rc-stickynote.js'))
+            page.evaluate('''() => RC.stickynote.init({documentId:'book-a',repository:repo,disablePortal:true,
+              mount:anchor=>({el:document.getElementById('book'),left:anchor.x,top:anchor.y}),
+              anchorFromPoint:(x,y)=>({kind:'point',x,y}),toast:()=>{}})''')
+            page.add_script_tag(content=bridge)
+            page.evaluate('__bwNativeConversation.setNativeMode(true)')
+            saved = page.evaluate('RC.stickynote.placeHtmlAt(50,60,{content:"<b>原始卡片</b>",isHtml:true,cid:"original-id",label:"知识卡"})')
+            self.assertEqual(saved['html']['cid'], 'original-id')
+            page.wait_for_function('receipts.at(-1)?.placements?.length === 1')
+            projected = page.evaluate('receipts.at(-1).placements[0]')
+            self.assertEqual(projected['parts'][0]['data']['text'], '<b>原始卡片</b>')
+            self.assertNotIn('version', projected)
+            self.assertEqual(page.locator('[data-bw-native-placement]').count(), 1)
+            page.evaluate("document.querySelectorAll('.rc-note-anchor,.rc-note-del,.vc-card-pin').forEach(x=>x.remove())")
+            def act(key, item=None, **extra):
+                item = item or page.evaluate('receipts.at(-1).placements[0]')
+                return page.evaluate('(c)=>__bwNativeConversation.perform(c)', dict(action='liveAction',scope=page.evaluate('receipts.at(-1).scope'),actionId=item['controls'][key],**extra))
+            self.assertTrue(act('collapse')['ok'])
+            page.wait_for_function('receipts.at(-1).placements[0].collapsed')
+            self.assertFalse(act('move', item=projected, x=.2, y=.2)['ok'])
+            self.assertTrue(act('expand')['ok'])
+            page.wait_for_function('!receipts.at(-1).placements[0].collapsed')
+            self.assertTrue(act('move', x=.2, y=.2)['ok'])
+            page.wait_for_function('records[0].anchor.x > 100')
+            self.assertEqual(page.evaluate('records[0].html.cid'), 'original-id')
+            page.wait_for_timeout(100)
+            self.assertTrue(act('remove')['ok'])
+            page.wait_for_function('receipts.at(-1).placements.length === 0')
+            self.assertEqual(page.evaluate('records.length'), 0)
+            browser.close()
+
     def test_native_search_preserves_locations_and_rejects_stale_results(self):
         bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
         pdf = (ROOT / '_server_deploy/static/pdf/reader.src/11-search.js').read_text(encoding='utf-8')
@@ -413,6 +461,8 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
               RC.sidedrawer.init({tabs:[{name:'asst',label:'助手'}],defaultTab:'asst'});
               RC.stickynote={createHtmlAt:(x,y,payload)=>{drops.push({x,y,payload});return true;},
                 createCardAt:(x,y,cards,gid)=>{drops.push({x,y,cards,gid});return true;}};
+              RC.stickynote.placeHtmlAt=async(x,y,payload)=>{drops.push({x,y,payload});return {id:'saved-placement'};};
+              RC.stickynote.placeCardAt=async(x,y,cards,gid)=>{drops.push({x,y,cards,gid});return {id:'saved-placement'};};
             }''')
             page.add_script_tag(content=source)
             page.evaluate('__bwNativeConversation.setNativeMode(true)')

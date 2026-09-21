@@ -5500,6 +5500,34 @@
     },
     push: function (text, label, isHtml, force, cid, opts) { try { return _cardPush(text, label, isHtml, force, cid, opts); } catch (e) { return null; } },
     close: function (c) { try { _cardClose(c); } catch (e) {} },
+    nativeFloatingState: function () {
+      return _cards.list.filter(function (c) { return c.el && c.el.isConnected; }).map(function (c) {
+        return { record: c, root: c.el, cid: c.cid, title: c.label, raw: c.raw, isHtml: c.isHtml };
+      });
+    },
+    nativeFloatingAction: async function (c, key, point) {
+      if (!_cards.list.includes(c) || !c.el.isConnected) throw new Error('卡片已经更新或关闭');
+      if (key === 'touch') { _armAuto(c, c.el); return true; }
+      if (key === 'remove') { _cardClose(c); return true; }
+      if (key === 'expand' || key === 'collapse') {
+        _cardForm(c.el, key === 'expand' ? 'full' : 'dot'); _armAuto(c, c.el); return true;
+      }
+      if (key !== 'move' || !point || ![point.x, point.y].every(Number.isFinite)) throw new Error('落点无效');
+      var body = c.el.querySelector('.vc-card-bd'), saved;
+      // Keep the original timer from removing a card while its transfer is saving.
+      clearTimeout(c.t); c.t = null;
+      try {
+        if (body && body.__fc && RC.flashcard && RC.stickynote.placeCardAt) {
+          saved = await RC.stickynote.placeCardAt(point.x, point.y, RC.flashcard.snapshot(body), body.__fc.gid);
+        } else if (RC.stickynote.placeHtmlAt) {
+          saved = await RC.stickynote.placeHtmlAt(point.x, point.y, { content: String(c.raw || ''),
+            contextText: c.isHtml ? '' : String(c.raw || ''), isHtml: c.isHtml, label: c.label, cid: c.cid });
+        }
+        if (!saved) throw new Error('卡片位置未保存');
+        _cardClose(c);
+        return true;
+      } finally { if (_cards.list.includes(c)) _armAuto(c, c.el); }
+    },
     form: function (el, f) { try { return _cardForm(el, f); } catch (e) { return 'full'; } },
     layout: function () { try { _cardLayout(); } catch (e) {} },
     mkCid: _mkCid,
@@ -6384,6 +6412,7 @@
     });
   }
   function _cardsVisSync() {   // 77:侧栏开=浮层卡全部消失(不挡内容);关=回来
+    try { window.dispatchEvent(new Event('rc:placement-changed')); } catch (_) {}
     var open = _sideOpen();
     var w = document.getElementById('vc-cards');
     if (w) w.style.display = open ? 'none' : '';
@@ -6468,6 +6497,7 @@
       if (lb && _pins.map[lb]) { _pinForget(lb, c.el.dataset && c.el.dataset.vcCid, c.el); _pinSync(); _chipRender(); }
     } catch (e) {}
     _cards.list.splice(i, 1);
+    try { window.dispatchEvent(new Event('rc:placement-changed')); } catch (_) {}
     try { clearTimeout(c.t); } catch (e) {}
     c.el.style.opacity = '0';
     setTimeout(function () { try { c.el.remove(); } catch (e) {} }, 320);
@@ -6803,6 +6833,7 @@
       w.appendChild(el);
     }
     _cards.list.push(c);
+    try { window.dispatchEvent(new Event('rc:placement-changed')); } catch (_) {}
     var _plain = _cards.list.filter(function (x) { return !x.el.classList.contains('vc-hasdot'); });
     while (_plain.length > 4) {   // 70:被选中(带入上下文)的卡不被数量裁剪挤掉;工具卡不参与裁剪
       var victim = null;
@@ -6868,6 +6899,7 @@
       if (sm && !sm.textContent) sm.textContent = ((el.querySelector('.vc-card-bd') || {}).textContent || '').replace(/\s+/g, ' ').trim().slice(0, 42);
     }
     try { _cardLayout(); } catch (e) {}
+    try { window.dispatchEvent(new Event('rc:placement-changed')); } catch (_) {}
     return f;
   }
 

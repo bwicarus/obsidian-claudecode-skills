@@ -267,6 +267,68 @@ function loadStickynote({
   return { sandbox, documentId, container, fetchCalls, toasts };
 }
 
+test("native card placement awaits the durable receipt and retains the original group identity", async () => {
+  const gate = deferred();
+  let created;
+  const repository = {
+    newId: () => `c_${"d".repeat(32)}`, list: async () => [], get: async () => null,
+    create(input) { created = structuredClone(input); return gate.promise; },
+    patch: async () => null, remove: async () => null, subscribe: () => () => {},
+  };
+  const { sandbox } = loadStickynote({ repository });
+  await tick();
+  const api = sandbox.RC.stickynote;
+  let settled = false;
+  const operation = api.placeCardAt(20, 30, [{ front: "原问题", back: "原答案", _st: "saved" }], "original-group")
+    .then(value => { settled = true; return value; });
+  await tick();
+  assert.equal(settled, false);
+  assert.equal(api.notes().length, 0);
+  assert.equal(created.card.gid, "original-group");
+  assert.equal(created.card.cid, "original-group");
+  assert.equal(Object.hasOwn(created.card, "bind"), false);
+  gate.resolve({ ...created, id: created.noteId, rev: 1, deleted: false });
+  const receipt = await operation;
+  assert.equal(receipt.id, created.noteId);
+  assert.equal(api.notes().length, 1);
+  repository.create = async () => { throw new Error("disk unavailable"); };
+  assert.equal(await api.placeHtmlAt(20, 30, { content: "不能丢失的卡片", cid: "failed-original" }), null);
+  assert.equal(api.notes().length, 1);
+});
+
+test("native placement controls retain CAS, free placement semantics and explicit removal", async () => {
+  const id = `c_${"e".repeat(32)}`;
+  let current = { ...note("web:https://example.test/article", id, 1, ""),
+    card: { gid: "original", cid: "original", cards: [{ front: "问题", back: "答案" }] } };
+  let writes = 0, removals = 0;
+  const repository = {
+    newId: () => id, list: async () => [current], get: async () => current, create: async () => null,
+    patch: async (noteId, fields, options) => {
+      assert.equal(noteId, id); assert.equal(options.ifRev, current.rev);
+      writes++; current = { ...current, ...structuredClone(fields), rev: current.rev + 1 }; return current;
+    },
+    remove: async () => { removals++; return { ...current, rev: current.rev + 1, deleted: true }; },
+    subscribe: () => () => {},
+  };
+  const { sandbox } = loadStickynote({ repository });
+  await tick();
+  const api = sandbox.RC.stickynote;
+  const first = api.nativePlacementState()[0];
+  const act = (state, key, extra = {}) => api.nativePlacementAction({ id, generation: state.generation, version: state.version, key, ...extra });
+  assert.equal(await act(first, "collapse"), true);
+  assert.equal(api.notes()[0].card.form, "dot");
+  await assert.rejects(act(first, "move", { x: 40, y: 50 }), /已更新/);
+  assert.equal(writes, 1);
+  const fresh = api.nativePlacementState()[0];
+  assert.equal(await act(fresh, "move", { x: 40, y: 50 }), true);
+  assert.equal(Object.hasOwn(api.notes()[0].card, "bind"), false);
+  const moved = api.nativePlacementState()[0];
+  await assert.rejects(act(moved, "remove"), /确认/);
+  assert.equal(removals, 0);
+  assert.equal(await act(moved, "remove", { confirmed: true }), true);
+  assert.equal(api.notes().length, 0);
+});
+
 test("native Pencil tool/style sync is atomic, updates mounted note UI, and keeps regions on the page", async () => {
   const id = `c_${"a".repeat(32)}`;
   const repository = {

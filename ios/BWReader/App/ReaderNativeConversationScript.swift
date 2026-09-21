@@ -240,20 +240,20 @@ enum ReaderNativeConversationScript {
           const cardElement = node.matches('.vc-card') ? node : node.querySelector('.vc-card');
           const body = cardElement?.querySelector('.vc-card-bd') || node.querySelector('.vc-if-bd');
           if ((group || body) && rc().stickynote) {
-            part.data.dragId = registerAction(part.id + '-place', node, command => {
+            part.data.dragId = registerAction(part.id + '-place', node, async command => {
               if (![command.x, command.y].every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
               const x = command.x * innerWidth, y = command.y * innerHeight;
               let accepted = false;
-              if (group && rc().flashcard?.snapshot && rc().stickynote.createCardAt) {
+              if (group && rc().flashcard?.snapshot && rc().stickynote.placeCardAt) {
                 const cards = rc().flashcard.snapshot(group);
-                accepted = rc().stickynote.createCardAt(x, y, cards, group.__fc.gid);
-              } else if (body && rc().stickynote.createHtmlAt) {
-                accepted = rc().stickynote.createHtmlAt(x, y, {
+                accepted = await rc().stickynote.placeCardAt(x, y, cards, group.__fc.gid);
+              } else if (body && rc().stickynote.placeHtmlAt) {
+                accepted = await rc().stickynote.placeHtmlAt(x, y, {
                   content: body.innerHTML, contextText: body.textContent || '', isHtml: true,
                   cid: cardElement?.dataset.vcCid || cardElement?.__vcCard?.cid || '', label: part.title
                 });
               }
-              if (!accepted) throw new Error('请把卡片拖到书页正文上');
+              if (!accepted) throw new Error('卡片位置未保存，请检查落点后重试');
             });
           }
         }
@@ -288,6 +288,82 @@ enum ReaderNativeConversationScript {
           removeId: registerAction('context-remove:' + item.id, thread, () => registry.deselect(item.id))
         }));
       }
+      function pagePlacements() {
+        const owner = rc().stickynote;
+        if (!nativeMode || legacyVisible || !owner?.nativePlacementState) return [];
+        return owner.nativePlacementState().flatMap(item => {
+          // Media/script and ink-bearing placements need their own native renderer.
+          // Keep their originals intact until that renderer is migrated.
+          const rich = item.card ? JSON.stringify(item.card.cards) : item.html?.content || '';
+          const supported = !item.hasInk && !!(item.card || item.html) &&
+            !/<(?:iframe|video|audio|img|svg|canvas|script|table|button|input|select|textarea)\b/i.test(rich);
+          item.root.toggleAttribute('data-bw-native-placement', !!supported);
+          if (!supported || !item.visible) return [];
+          const id = 'placement-' + hash(item.generation + ':' + item.id);
+          const token = id + '-' + hash(item.version);
+          const invoke = async (key, extra = {}) => { const ok = await owner.nativePlacementAction({
+            id: item.id, generation: item.generation, version: item.version, key, ...extra
+          }); if (!ok) throw new Error('卡片操作未确认'); return ok; };
+          const controls = {};
+          for (const key of ['anchor', 'collapse', 'expand', 'remove']) {
+            controls[key] = registerAction(token + '-' + key, item.root, () => invoke(key, { confirmed: key === 'remove' }));
+          }
+          controls.move = registerAction(token + '-move', item.root, command => {
+            if (![command.x, command.y].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
+            return invoke('move', { x: command.x * innerWidth, y: command.y * innerHeight });
+          });
+          const parts = item.card
+            ? projectPart({ kind: 'cards', cards: item.card.cards, gid: item.card.gid }, id, item.root, '')
+            : [{ id: id + '-html', kind: 'general', title: item.html.label || '卡片', text: '', status: 'saved',
+                data: { text: item.html.content, format: item.html.isHtml ? 'html' : 'text' } }];
+          if (item.html) {
+            parts[0].actionId = registerAction(id + '-html', item.root, () => {});
+            actions.get(parts[0].actionId).inspect = () => ({ kind: 'general', title: parts[0].title, content: item.html });
+          }
+          // Reuse the same learning-card and selection services as sidebar cards.
+          liveArtifacts([{ parts }]);
+          parts.forEach(part => { part.data.dragId = controls.move; });
+          return [{ id, title: item.html?.label || (item.card?.cards.length > 1 ? '学习卡组' : '学习卡'),
+            bound: item.bound, collapsed: item.collapsed, controls, parts,
+            rect: { x: item.rect.x / innerWidth, y: item.rect.y / innerHeight,
+              width: item.rect.width / innerWidth, height: item.rect.height / innerHeight } }];
+        });
+      }
+      function floatingPlacements() {
+        const owner = rc().voiceCard;
+        if (!nativeMode || legacyVisible || isOpen() || !owner?.nativeFloatingState) return [];
+        return owner.nativeFloatingState().flatMap((item, index) => {
+          const group = flashGroup(item.root), structured = item.root.__vcCard;
+          const supported = !!group || structured && ['fact', 'general', 'weather', 'news', 'images'].includes(structured.kind) ||
+            typeof item.raw === 'string' && !/<(?:iframe|video|audio|img|svg|canvas|script|table|button|input|select|textarea)\b/i.test(item.raw);
+          item.root.toggleAttribute('data-bw-native-placement', supported);
+          if (!supported) return [];
+          const rect = item.root.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return [];
+          const id = 'floating-' + hash(item.cid || messageID(item.root, index));
+          let parts;
+          if (group) parts = projectPart({ kind: 'cards', cards: group.__fc.cards, gid: group.__fc.gid }, id, item.root, '');
+          else if (structured) parts = projectPart({ kind: 'card', card: structured }, id, item.root, '');
+          else {
+            const part = artifact(id, item.root, item.title);
+            part.kind = 'general'; part.data = { text: item.raw, format: item.isHtml ? 'html' : 'text' };
+            actions.get(part.actionId).inspect = () => ({ kind: 'general', title: item.title, content: item.raw });
+            parts = [part];
+          }
+          liveArtifacts([{ parts }]);
+          const controls = {};
+          for (const key of ['expand', 'collapse', 'remove', 'move', 'touch']) {
+            controls[key] = registerAction(id + '-' + key, item.root, command => {
+              if (key === 'move' && ![command.x, command.y].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
+              return owner.nativeFloatingAction(item.record, key, { x: command.x * innerWidth, y: command.y * innerHeight });
+            });
+          }
+          parts.forEach(part => { part.data.dragId = controls.move; });
+          return [{ id, title: item.title, floating: true, bound: false,
+            collapsed: item.root.classList.contains('vc-dot') || item.root.classList.contains('vc-min'), controls, parts,
+            rect: { x: rect.left / innerWidth, y: rect.top / innerHeight, width: rect.width / innerWidth, height: rect.height / innerHeight } }];
+        });
+      }
       function getScopeKey() {
         let identity = '', history = '', mode = pane()?.dataset.assistantMode || 'normal';
         try { const state = account()?.snapshot(); identity = [state?.contextId || '', state?.namespace || '', state?.generation ?? '', state?.active || false].join(':'); } catch (_) {}
@@ -317,6 +393,7 @@ enum ReaderNativeConversationScript {
       function applyVisualMode() {
         const root = document.documentElement;
         root.classList.toggle('bw-native-navigation', nativeMode);
+        root.classList.toggle('bw-native-page-cards', nativeMode && !legacyVisible);
         root.classList.toggle('bw-native-conversation-active', nativeMode && !legacyVisible && isOpen() && activeTab() === 'asst');
       }
       function setLegacy(visible) {
@@ -356,12 +433,13 @@ enum ReaderNativeConversationScript {
         }).filter(Boolean);
         previousNodes = all;
         liveArtifacts(messages);
+        const placements = [...pagePlacements(), ...floatingPlacements()];
         const readingTools = toolbarActions();
         const attachments = selectedAttachments();
         const review = conversationMode() === 'review' ? rc().review?.presentationState?.() || null : null;
         if (review) review.contextKey = hash(review.contextKey);
         const payload = { version: 1, scope, revision: 0, title: text(document.title, 160) || '阅读助手', ready: isReady(), busy: isBusy(),
-          legacyVisible, selection: selectedContext(), attachments, readingTools, review, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          legacyVisible, selection: selectedContext(), attachments, readingTools, review, placements, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -378,7 +456,10 @@ enum ReaderNativeConversationScript {
         names.forEach(name => {
           if (installed.has(name) || typeof owner[name] !== 'function') return;
           const original = owner[name];
-          owner[name] = function (...args) { try { return original.apply(this, args); } finally { schedule(); } };
+          owner[name] = function (...args) {
+            try { const result = original.apply(this, args); if (result?.then) result.then(schedule, schedule); return result; }
+            finally { schedule(); }
+          };
           installed.add(name);
         });
       }
@@ -445,6 +526,8 @@ enum ReaderNativeConversationScript {
         observeDrawer();
         applyVisualMode();
         wrapNotifications(rc().turnCard, ['addPart', 'draftText', 'freezeDraft', 'reconcile', 'cliPart', 'busy', 'idle', 'status', 'progress', 'drop', 'rename', 'reset']);
+        wrapNotifications(rc().stickynote, ['placeCardAt', 'placeHtmlAt', 'nativePlacementAction', 'mountPending', 'repositionAll', 'loadAll']);
+        wrapNotifications(rc().voiceCard, ['nativeFloatingAction']);
         if (!accountSubscription && account()?.subscribe) accountSubscription = account().subscribe(schedule);
       }
       async function perform(command) {
@@ -579,6 +662,7 @@ enum ReaderNativeConversationScript {
       style.id = 'bw-native-conversation-style';
       style.textContent = `
         .bw-native-navigation #header,.bw-native-navigation #ep-top,.bw-native-navigation #fs-restore {display:none!important}
+        .bw-native-page-cards [data-bw-native-placement] {opacity:0!important;pointer-events:none!important}
         .bw-native-conversation-active #ep-side,.bw-native-conversation-active #grammar-panel,
         .bw-native-conversation-active #side-handle,.bw-native-conversation-active #ep-side-handle {visibility:hidden!important;pointer-events:none!important}
         .bw-native-conversation-active body.grammar-open #main,.bw-native-conversation-active body.grammar-open #header {padding-right:0!important}
@@ -590,7 +674,10 @@ enum ReaderNativeConversationScript {
         if (!thread || !thread.isConnected || records.some(record => Array.from(record.addedNodes).some(node => node.nodeType === 1 && (['asst-thread', 'asst-input', 'asst-computer', 'asst-call'].includes(node.id) || node.querySelector?.('#asst-thread,#asst-input,#asst-computer,#asst-call'))))) schedule();
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
-      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'rc:review-presentation-changed', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
+      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'rc:review-presentation-changed', 'rc:placement-changed', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
+      window.addEventListener('scroll', schedule, { capture: true, passive: true });
+      window.addEventListener('resize', schedule, { passive: true });
+      window.addEventListener('pointerup', schedule, { capture: true, passive: true });
       window.addEventListener('pageshow', () => { suspended = false; mountObserver.observe(document.documentElement, { childList: true, subtree: true }); thread = null; controls = null; drawerElement = null; contextElement = null; toolbarElement = null; schedule(); });
       window.addEventListener('pagehide', () => { suspended = true; threadObserver?.disconnect(); controlsObserver?.disconnect(); drawerObserver?.disconnect(); contextObserver?.disconnect(); toolbarObserver?.disconnect(); mountObserver.disconnect(); if (timer != null) clearTimeout(timer); timer = null; });
       window.__bwNativeConversation = Object.freeze({ perform, setNativeMode, snapshot: () => { lastSignature = ''; snapshot(); } });

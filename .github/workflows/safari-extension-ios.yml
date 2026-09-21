@@ -13,6 +13,10 @@ on:
         description: "Upload to TestFlight after building"
         type: boolean
         default: false
+      compile_only:
+        description: "Compile simulator candidate only; skip signing, archive and TestFlight"
+        type: boolean
+        default: false
       inspect_only:
         description: "Only read an existing TestFlight build status (no build or upload)"
         type: boolean
@@ -257,6 +261,7 @@ jobs:
             | tee "$RUNNER_TEMP/build-logs/simulator-build.log"
 
       - name: Import signing certificate
+        if: ${{ !inputs.compile_only }}
         env:
           P12_BASE64: ${{ secrets.APPLE_DIST_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.APPLE_DIST_P12_PASSWORD }}
@@ -278,6 +283,7 @@ jobs:
           security find-identity -v -p codesigning build.keychain
 
       - name: Install provisioning profiles
+        if: ${{ !inputs.compile_only }}
         env:
           APP_PROFILE_BASE64: ${{ secrets.APPLE_APP_PROFILE_BASE64 }}
           EXTENSION_PROFILE_BASE64: ${{ secrets.APPLE_EXTENSION_PROFILE_BASE64 }}
@@ -294,6 +300,7 @@ jobs:
           test -s "$PROFILES/BWReader-App-Store-Extension.mobileprovision"
 
       - name: Place App Store Connect API key
+        if: ${{ !inputs.compile_only }}
         env:
           API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
@@ -309,6 +316,7 @@ jobs:
             ~/.appstoreconnect/private_keys/
 
       - name: Prepare Widget App Store profile
+        if: ${{ !inputs.compile_only }}
         env:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
@@ -428,6 +436,7 @@ jobs:
       # 自动开 App Groups(ac119d01),失败后整段回退(64e5ab2e)。要 capability
       # 只能人去后台点,所以设计上不要。
       - name: Prepare Watch App Store profile
+        if: ${{ !inputs.compile_only }}
         env:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
@@ -540,6 +549,7 @@ jobs:
       # All three targets now use deterministic App Store profiles and the one
       # imported distribution certificate; no development certificate is made.
       - name: Archive signed device candidate
+        if: ${{ !inputs.compile_only }}
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
@@ -557,6 +567,7 @@ jobs:
             | tee "$RUNNER_TEMP/build-logs/archive.log"
 
       - name: Validate archived app and extension
+        if: ${{ !inputs.compile_only }}
         env:
           SAFARI_PACKAGE: ${{ steps.safari.outputs.package }}
         shell: bash
@@ -806,6 +817,7 @@ jobs:
           codesign -d --verbose=4 "$WIDGET_PATH" 2>&1 | tee "$RUNNER_TEMP/build-logs/widget-codesign.txt"
 
       - name: Export IPA
+        if: ${{ !inputs.compile_only }}
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
@@ -849,7 +861,7 @@ jobs:
           find "$RUNNER_TEMP/export" -maxdepth 1 -type f -print
 
       - name: Upload to TestFlight
-        if: ${{ inputs.upload }}
+        if: ${{ inputs.upload && !inputs.compile_only }}
         env:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
@@ -877,7 +889,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Clean up signing material
-        if: always()
+        if: ${{ always() && !inputs.compile_only }}
         env:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
         shell: bash

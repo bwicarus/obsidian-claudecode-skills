@@ -536,6 +536,7 @@
     }
     var index = noteIndex(noteId);
     if (index >= 0) notes.splice(index, 1);
+    try { window.dispatchEvent(new Event('rc:placement-changed')); } catch (_) {}
   }
   // LIST、CHANGE 与本地操作 RESULT 共用同一增量投影。相同 rev 是同一次写的
   // 重放，不重建 DOM；更旧 rev 永远不能覆盖。删除 CHANGE 即使先于旧 LIST
@@ -571,6 +572,7 @@
     } else {
       ensureMounted(next);
     }
+    try { window.dispatchEvent(new Event('rc:placement-changed')); } catch (_) {}
     return next;
   }
   // Legacy /pdf/api/notes commits do not carry repository revisions.  This
@@ -779,7 +781,7 @@
       return data.note;
     });
   }
-  function patchNote(note, fields, cb) {
+  function patchNote(note, fields, cb, expectedState) {
     if (!O || !note || !noteIdOf(note)) return Promise.resolve(null);
     var generation = _generation;
     var id = noteIdOf(note);
@@ -791,6 +793,7 @@
         if (!repoReady()) throw new Error('便签 repository 合同不完整');
         var latest = currentNote(id);
         if (!latest) throw new Error('便签已经不存在');
+        if (expectedState && JSON.stringify(latest) !== expectedState) throw new Error('卡片已更新，请重新操作');
         return O.repository.patch(id, payload, {
           ifRev: Number(latest.rev) || 0,
           mutationId: mid
@@ -3303,7 +3306,7 @@
     }
     return bind;
   }
-  function createCardAt(clientX, clientY, cards, gid) {
+  function createCardAt(clientX, clientY, cards, gid, waitForSave) {
     if (!O || !O.anchorFromPoint || !cards || !cards.length) return false;
     var oversized = cards.some(function (card) {
       if (!card || typeof card !== 'object') return true;
@@ -3330,18 +3333,18 @@
     gid = gid || cid0;
     var w0 = 300, bw0 = 0; try { var mm = O.mount(anchor); if (mm && mm.el && mm.el.clientWidth) { bw0 = mm.el.clientWidth; w0 = Math.max(240, Math.min(480, Math.round(bw0 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽(缩放等比跟随,用户拍板)
     // gid/cid 原样携带，同一学习卡组跨宿主共享；repository 不重编号业务卡。
-    createRecord(
+    var saved = createRecord(
       anchor,
       { color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid, cid: cid0, base_w: bw0 } },
       '卡片便签已建(所在页尚未渲染,渲染后出现)',
       '✅ 自由卡片已放进书页'
     );
-    return true;
+    return waitForSave ? saved : true;
   }
 
   // 通用卡便签:天气/搜索/图/文字等 vc-card 的 HTML 快照 → 钉页。
   // 允许的交互由共享模块按自描述 data-* 属性做全局委托；便签不持久化闭包。
-  function createHtmlAt(clientX, clientY, htmlObj) {
+  function createHtmlAt(clientX, clientY, htmlObj, waitForSave) {
     if (!O || !O.anchorFromPoint || !htmlObj || !htmlObj.content) return false;
     var rawContent = normalizeHtmlCardImageAssets(htmlObj.content);
     if (rawContent.length > PAGE_CARD_CONTENT_LIMIT) {
@@ -3384,13 +3387,13 @@
       base_w: bw1
     };
     // cid 原样持久化，重开不换号。
-    createRecord(
+    var saved = createRecord(
       anchor,
       { color: '#0d1322', w: w1, h: 210, collapsed: false, html: html1 },
       '卡片便签已建(所在页尚未渲染,渲染后出现)',
       '✅ 自由卡片已放进书页'
     );
-    return true;
+    return waitForSave ? saved : true;
   }
 
   function _sameWordBind(a, b) {
@@ -3703,6 +3706,70 @@
     O = clearOptions ? null : priorOptions;
   }
 
+  // Native presentation shares the original placement repository and card state.
+  // DOM nodes here provide geometry/lifetime only; commands never click web controls.
+  function nativePlacementState() {
+    if (!O) return [];
+    return notes.map(function (note) {
+      var ctl = ctls[noteIdOf(note)], slot = cardPayloadSlot(note);
+      if (!ctl || !slot || !ctl.root.isConnected) return null;
+      var rect = ctl.root.getBoundingClientRect();
+      return { id: noteIdOf(note), generation: _generation, version: JSON.stringify(note),
+        root: ctl.root, card: cloneValue(note.card || null), html: cloneValue(note.html || null),
+        hasInk: !!(note.strokes && note.strokes.length), bound: !!wordBindOf(note),
+        collapsed: !!note.collapsed || note[slot].form === 'dot' || note[slot].form === 'min',
+        visible: rect.width > 0 && rect.height > 0,
+        rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
+    }).filter(Boolean);
+  }
+  async function nativePlacementAction(command) {
+    if (!O || !command || command.generation !== _generation) throw new Error('书籍已切换');
+    var note = currentNote(command.id), ctl = ctls[command.id];
+    if (!note || !ctl || JSON.stringify(note) !== command.version) throw new Error('卡片已更新，请重新操作');
+    var slot = cardPayloadSlot(note), fields = {}, payload;
+    if (!slot) throw new Error('此内容尚未迁移');
+    if (command.key === 'anchor') {
+      if (wordBindOf(note)) return true;
+      // Same selection-first/nearby-word rule as the original anchor control.
+      var resolved = resolveFreeCardBind(ctl);
+      if (!resolved) throw new Error('请先选中文字，或将卡片移到正文附近');
+      payload = cloneValue(note[slot]); payload.bind = resolved.bind; fields[slot] = payload;
+    } else if (command.key === 'collapse' || command.key === 'expand') {
+      payload = cloneValue(note[slot]); payload.form = command.key === 'collapse' ? 'dot' : 'full';
+      fields[slot] = payload; fields.collapsed = false;
+    } else if (command.key === 'move') {
+      if (![command.x, command.y].every(Number.isFinite)) throw new Error('落点无效');
+      var point = { x: command.x, y: command.y };
+      var anchor = _probeHidden(ctl.root, function () { return reanchorAt(ctl, point.x, point.y); });
+      if (!anchor) throw new Error('请放到书页正文上');
+      fields.anchor = anchor;
+      // Preserve the old rule: moving a bound card rebinds at the destination;
+      // moving a free card does not silently turn it into a word-bound card.
+      if (wordBindOf(note)) {
+        payload = cloneValue(note[slot]);
+        payload.bind = _probeHidden(ctl.root, function () { return wordBindFromPoint(point.x, point.y); });
+        fields[slot] = payload;
+      }
+    } else if (command.key === 'remove') {
+      if (command.confirmed !== true) throw new Error('请确认移除这处书页卡片');
+      return await deleteNote(note);
+    } else throw new Error('不支持的卡片操作');
+    var saved = await patchNote(note, fields, null, command.version);
+    if (!saved || command.generation !== _generation) throw new Error('卡片保存未确认');
+    var live = ctls[command.id];
+    if (live) {
+      if (command.key === 'move' || command.key === 'anchor') {
+        var oldBind = wordBindOf(note);
+        if (oldBind && window.__pageBindRemove) window.__pageBindRemove(oldBind, command.id);
+        live._bindMarked = false; live._bindOpen = false;
+        live.root.classList.remove('rc-note-word-open');
+        if (live.portaled) portalOut(live);
+      }
+      ensureMounted(saved);
+    }
+    return true;
+  }
+
   // ─────────────────────────── 公开 API ───────────────────────────
   RC.stickynote = {
     // opts:
@@ -3859,6 +3926,10 @@
     createVideoAt: createVideoAt,
     createCardAt: createCardAt,   // 卡片便签(制卡卡 📌 钉页 / 真机拖出复用)
     createHtmlAt: createHtmlAt,   // 通用卡便签(天气/搜索/图等 vc-card 钉页)
+    placeCardAt: function (x, y, cards, gid) { return Promise.resolve(createCardAt(x, y, cards, gid, true)); },
+    placeHtmlAt: function (x, y, card) { return Promise.resolve(createHtmlAt(x, y, card, true)); },
+    nativePlacementState: nativePlacementState,
+    nativePlacementAction: nativePlacementAction,
     persistBoundCard: persistBoundCard,   // AI page-chars：Promise 只在 create+本地投影成功后 ok:true
     cardContextText: cardContextText,   // 收藏/上下文共用正面+背面可读投影；raw/meta 仍保留完整卡记录
     bindCardSelection: bindCardSelection,   // 固定学习卡整卡长按：PWA/普通网页共用同一语义与完整快照

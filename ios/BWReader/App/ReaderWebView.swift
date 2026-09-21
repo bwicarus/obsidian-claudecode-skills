@@ -389,6 +389,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
     }
 
+    func nativePageCardRect(_ rect: CGRect, in container: CGRect) -> CGRect {
+        let local = CGRect(x: rect.minX * webView.bounds.width, y: rect.minY * webView.bounds.height,
+                           width: rect.width * webView.bounds.width, height: rect.height * webView.bounds.height)
+        return webView.convert(local, to: nil).offsetBy(dx: -container.minX, dy: -container.minY)
+    }
+
     func placeNativeConversationCard(actionID: String, scope: String, windowPoint: CGPoint) async {
         guard scope == nativeConversation.scope, webView.window != nil,
               webView.bounds.width > 0, webView.bounds.height > 0 else { return }

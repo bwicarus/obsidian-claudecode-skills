@@ -28,6 +28,11 @@ struct ReaderNativeWorkspace<Document: View>: View {
                     GeometryReader { page in
                         document()
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .overlay {
+                                if enabled && !conversation.legacyVisible {
+                                    ReaderNativePageCards(reader: reader, model: conversation)
+                                }
+                            }
                             .dropDestination(for: ReaderNativeCardTransfer.self) { values, location in
                                 guard let payload = values.first,
                                       payload.scope == conversation.scope,

@@ -132,7 +132,7 @@ private struct ReaderNativeConversationTools: View {
 }
 
 @MainActor
-private struct ReaderNativeConversationArtifacts: View {
+struct ReaderNativeConversationArtifacts: View {
     let parts: [ReaderNativeConversationPart]
     @ObservedObject var model: ReaderNativeConversationModel
     @State private var visibleID: String?
@@ -255,7 +255,7 @@ private struct ReaderNativeConversationArtifactCard: View {
                     richContent(detail)
                 }
             } else if part.kind == "general" || part.kind == "knowledge" {
-                richContent(firstText(part.string("text"), part.text))
+                richContent(firstText(part.string("text"), part.text), format: part.string("format").isEmpty ? nil : part.string("format"))
             } else if part.kind == "weather" {
                 weatherContent
             } else if part.kind == "news" {
