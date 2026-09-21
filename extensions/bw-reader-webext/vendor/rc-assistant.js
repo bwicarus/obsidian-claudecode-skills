@@ -455,6 +455,19 @@ if (window.__bwPwaProviderOnly) return;
   var _nativeSettingsService = {
     models: function () { return _readModelPrefs().then(_settingsReceipt); },
     profiles: function () { return _readProfiles().then(_settingsReceipt); },
+    computer: function () {
+      if (!RC.computerVoice || !RC.computerVoice.readSettingsState) return Promise.reject(new Error('电脑通话尚未就绪'));
+      return RC.computerVoice.readSettingsState();
+    },
+    setComputerTarget: function (target) {
+      if (!['codex-desktop', 'chatgpt-classic'].includes(target) || !RC.computerVoice || !RC.computerVoice.setTargetApp) {
+        return Promise.reject(new Error('电脑通话目标不可用'));
+      }
+      return RC.computerVoice.setTargetApp(target).then(function (saved) {
+        if (saved !== target) throw new Error('电脑通话目标未确认保存');
+        return { ok: true, target: saved };
+      });
+    },
     voice: function () { return _readVoiceSettings().then(_settingsReceipt).then(function (d) {
       return { fields: _nativeVoiceFields(d.cfg).concat(_nativeDeviceFields(d.cfg)), cfg: d.cfg };
     }); },

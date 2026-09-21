@@ -20,6 +20,8 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
     def test_native_settings_preserve_catalog_and_confirmed_writes(self):
         bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
         source = (ROOT / '_server_deploy/static/pdf/rc-assistant.js').read_text(encoding='utf-8')
+        computer = (ROOT / '_server_deploy/static/pdf/rc-computer-voice.js').read_text(encoding='utf-8')
+        computer_settings = computer[computer.index('  async function readSettingsState()'):computer.index('  function mountSettings(container)')]
         end = source.index('})();', source.index('  RC.assistant =')) + len('})();')
         with sync_playwright() as p:
             browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
@@ -48,6 +50,22 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
               };
             }''')
             page.add_script_tag(content=source[:end])
+            page.evaluate('''() => {
+              window.target='codex-desktop';window.targetBusy=false;window.targetWrites=[];window.connectionFails=false;
+              window.computerTargetLoaded=true;window.bridgeVoiceEnabledKnown=true;window.bridgeVoiceEnabled=true;
+              window.lastClientFailure={code:'RECENT_ERROR',message:'可复制的连接错误',at:'now'};
+              window.loadComputerTarget=async()=>target;
+              window.getComputerTarget=()=>target;
+              window.computerTargetBusy=()=>targetBusy;
+              window.statusReasonMessage=x=>x;
+              window.availability=async()=>{if(connectionFails)throw new Error('连接离线测试');return {state:'ready',status:{codexVoice:{status:'available',active:false}}};};
+              RC.computerVoice={setTargetApp:async value=>{
+                if(targetBusy)throw new Error('请先结束当前电脑语音');
+                targetWrites.push(value);target=value;return target;
+              }};
+            }''')
+            page.add_script_tag(content=computer_settings)
+            page.evaluate('RC.computerVoice.readSettingsState=readSettingsState')
             page.add_script_tag(content=bridge)
             page.wait_for_timeout(100)
             scope = page.evaluate('receipts[receipts.length-1].scope')
@@ -73,6 +91,22 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertEqual(page.evaluate("localStorage.getItem('rc-voice-sub')"), '0')
             self.assertFalse(command('settingsWrite', section='voice', key='openai_api_key', value='not-allowed')['ok'])
             self.assertTrue(command('settingsWrite', section='profiles', op='save', name='新方案')['ok'])
+            computer_state = command('settingsRead', section='computer')['value']
+            self.assertEqual(computer_state['target'], 'codex-desktop')
+            self.assertEqual(computer_state['clientError']['code'], 'RECENT_ERROR')
+            self.assertFalse(computer_state['status']['codexVoice']['active'])
+            self.assertEqual(page.evaluate('targetWrites'), [])
+            self.assertFalse(command('settingsWrite', section='computer', value='unknown')['ok'])
+            page.evaluate('targetBusy=true')
+            self.assertFalse(command('settingsWrite', section='computer', value='chatgpt-classic')['ok'])
+            self.assertEqual(page.evaluate('targetWrites'), [])
+            page.evaluate('targetBusy=false')
+            self.assertTrue(command('settingsWrite', section='computer', value='chatgpt-classic')['ok'])
+            page.evaluate('connectionFails=true')
+            computer_state = command('settingsRead', section='computer')['value']
+            self.assertEqual(computer_state['target'], 'chatgpt-classic')
+            self.assertIsNone(computer_state['status'])
+            self.assertEqual(computer_state['errors'], ['连接离线测试'])
             page.evaluate('rejectSave=true')
             failed = command('settingsWrite', section='models', value=valid)
             self.assertFalse(failed['ok'])

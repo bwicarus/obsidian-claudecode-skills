@@ -486,7 +486,7 @@ enum ReaderNativeConversationScript {
             rc().assistant?.reloadHistory?.();
           } else if (action === 'settingsRead') {
             const service = rc().assistant?.settingsService, captured = scope;
-            if (!service || command.scope !== scope || !['models', 'voice', 'profiles'].includes(command.section)) return { ok: false, error: '设置尚未就绪' };
+            if (!service || command.scope !== scope || !['models', 'voice', 'profiles', 'computer'].includes(command.section)) return { ok: false, error: '设置尚未就绪' };
             const value = await service[command.section]();
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '页面已切换' };
             if (command.section === 'models') settingsModels = value;
@@ -498,6 +498,7 @@ enum ReaderNativeConversationScript {
             let result;
             if (command.section === 'models' && command.value && settingsModels) result = await service.setAction(command.value, settingsModels);
             else if (command.section === 'profiles') result = await service.profile(command.op, command.name);
+            else if (command.section === 'computer') result = await service.setComputerTarget(command.value);
             else if (command.section === 'voice' && settingsVoice) result = await service.setField(command.key, command.value, command.device === true, settingsVoice.cfg);
             else return { ok: false, error: '请先读取当前配置' };
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '页面已切换，请在原账户核对保存结果' };

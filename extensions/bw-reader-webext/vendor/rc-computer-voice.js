@@ -12940,6 +12940,26 @@ if (window.__bwPwaProviderOnly) return;
     stopSnapshotLink();
   }
 
+  // Shared semantic settings snapshot: status reads never send START, capture
+  // audio or change the saved target. Preserve partial failure information so
+  // one unavailable service does not hide the other settings.
+  async function readSettingsState() {
+    var results = await Promise.allSettled([loadComputerTarget(), availability()]);
+    var connection = results[1].status === 'fulfilled' ? results[1].value : null;
+    var failure = results.filter(function (r) { return r.status === 'rejected'; })
+      .map(function (r) { return String(r.reason && r.reason.message || r.reason); });
+    return {
+      target: computerTargetLoaded ? getComputerTarget() : null,
+      busy: computerTargetBusy(),
+      state: connection && connection.state || 'unavailable',
+      reason: connection && (statusReasonMessage(connection.reason) || connection.reason) || '',
+      status: connection && connection.status || null,
+      voiceEnabled: bridgeVoiceEnabledKnown ? bridgeVoiceEnabled : null,
+      clientError: lastClientFailure ? Object.assign({}, lastClientFailure) : null,
+      errors: failure,
+    };
+  }
+
   function mountSettings(container) {
     if (!container) return;
     var existingRoot = container.querySelector(".rc-computer-voice-settings");
@@ -13257,6 +13277,7 @@ if (window.__bwPwaProviderOnly) return;
     pageCards: pageCards,
     directContract: DIRECT_CONTRACT,
     availability: availability,
+    readSettingsState: readSettingsState,
     reserveSelectedEngineUpdate: reserveSelectedEngineUpdate,
     beginSelectedEngineUpdate: beginSelectedEngineUpdate,
     isSelectedEngineRevisionCurrent: isSelectedEngineRevisionCurrent,
