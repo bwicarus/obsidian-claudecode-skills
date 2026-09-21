@@ -621,7 +621,14 @@ window.__bwReaderPageOverlay = async function (page) {
     masteredFuri: _rubyEnabled() ? (d.mastered_furi || []).slice(0, 4000) : null,
     // 搜索跳转后要在这一页把命中亮出来。网页那条路要 __charBoxes（接管时不存在），
     // 所以把待办标记交给原生消费，取走即清 —— 只亮一次，别每次翻页重亮。
-    searchQuery: _takePendingSearchQuery(page)
+    searchQuery: _takePendingSearchQuery(page),
+    // 生词句子（含未掌握词的整句）：rects 同样是点坐标。text 留着让原生那侧
+    // 点「译」时直接送进翻译，不必再回来问一次。
+    vocabSentences: (d.vocab_sentences || []).slice(0, 64).map((s) => ({
+      rects: (s.rects || []).slice(0, 64),
+      text: String(s.text || '').slice(0, 2000),
+      count: Number(s.count) || 0
+    })).filter((s) => s.rects.length)
   };
 };
 

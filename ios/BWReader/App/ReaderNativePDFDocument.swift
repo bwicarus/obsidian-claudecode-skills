@@ -88,6 +88,36 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
     }
 
+    /// 生词句子：含未掌握词的整句，网页那侧画成排线框 + 行首一个「译」按钮。
+    /// rects 归一化；text 留着，点「译」时直接送进翻译，不必再回网页问一次。
+    struct VocabSentence: Identifiable {
+        let id: String
+        let index: Int
+        let page: Int
+        let text: String
+        let rects: [CGRect]
+    }
+    @Published private(set) var vocabSentences: [Int: [VocabSentence]] = [:]
+
+    func setVocabSentences(_ sentences: [VocabSentence], page: Int) {
+        vocabSentences[page] = sentences
+    }
+
+    /// 句子配色：与网页 `SENT_COLORS` 一一对应，按序号取模。
+    /// ⚠ 顺序也要一致 —— 同一页同一句在两个表面上必须是同一个颜色，否则
+    /// 「刚才那句绿的」在另一个表面上指的是别的句子。
+    static func sentenceStroke(_ index: Int) -> Color {
+        let palette: [Color] = [
+            Color(red: 0.85, green: 0.47, blue: 0.02),   // #d97706 橙
+            Color(red: 0.02, green: 0.59, blue: 0.41),   // #059669 绿
+            Color(red: 0.15, green: 0.39, blue: 0.92),   // #2563eb 蓝
+            Color(red: 0.58, green: 0.20, blue: 0.92),   // #9333ea 紫
+            Color(red: 0.86, green: 0.15, blue: 0.47),   // #db2777 粉
+            Color(red: 0.03, green: 0.57, blue: 0.70),   // #0891b2 青
+        ]
+        return palette[((index % palette.count) + palette.count) % palette.count]
+    }
+
     /// 搜索命中：跳过去之后在那一页把命中处亮出来，几秒后自动淡掉。
     ///
     /// ⚠ 网页那条路（`_highlightSearchResultsOnPage`）要 `__charBoxes`，原生接管时
@@ -997,6 +1027,9 @@ private struct ReaderNativePDFSurface: UIViewRepresentable {
 
 struct ReaderNativePDFViewport: View {
     @ObservedObject var document: ReaderNativePDFDocument
+    /// 点行首的「译」：把整句交给原生翻译面板。
+    /// ⚠ 按钮必须是**真控件**，不能画在 Canvas 里 —— Canvas 接不到点击。
+    var onTranslateSentence: ((ReaderNativePDFDocument.VocabSentence) -> Void)?
     var body: some View {
         ZStack {
             ReaderNativePDFSurface(document: document)
@@ -1012,6 +1045,26 @@ struct ReaderNativePDFViewport: View {
                     for highlight in document.highlights[number] ?? [] {
                         if let rect = document.viewRect(normalized: highlight.rect, page: number) {
                             pageContext.fill(Path(rect), with: .color(highlight.color.opacity(0.3)))
+                        }
+                    }
+                    // 生词句子：135° 排线 + 细边框，与网页那套排线同一个观感
+                    // （网页用 repeating-linear-gradient，这里直接画线）。
+                    for sentence in document.vocabSentences[number] ?? [] {
+                        let stroke = ReaderNativePDFDocument.sentenceStroke(sentence.index)
+                        for normalized in sentence.rects {
+                            guard let rect = document.viewRect(normalized: normalized, page: number),
+                                  rect.width > 1, rect.height > 1 else { continue }
+                            var hatch = pageContext
+                            hatch.clip(to: Path(rect))
+                            var line = Path()
+                            var x = rect.minX - rect.height
+                            while x < rect.maxX {
+                                line.move(to: CGPoint(x: x, y: rect.maxY))
+                                line.addLine(to: CGPoint(x: x + rect.height, y: rect.minY))
+                                x += 4
+                            }
+                            hatch.stroke(line, with: .color(stroke.opacity(0.33)), lineWidth: 1)
+                            pageContext.stroke(Path(rect), with: .color(stroke.opacity(0.45)), lineWidth: 0.8)
                         }
                     }
                     // 搜索命中：黄底，与网页那侧同一个意思（几秒后自动淡掉）。
@@ -1055,6 +1108,33 @@ struct ReaderNativePDFViewport: View {
                     }
                 }
             }.allowsHitTesting(false)
+
+            // 「译」按钮：贴在每个生词句子首行的左侧外沿。画在 Canvas 里点不到，
+            // 所以单独一层真控件；位置随 geometryRevision 重算。
+            ForEach(document.position.visiblePages, id: \.self) { number in
+                // 读一次 geometryRevision：滚动/缩放后按钮要跟着走。
+                // 与上面 Canvas 里的同一招（那里也是 `let _ = document.geometryRevision`）。
+                let _ = document.geometryRevision
+                ForEach(document.vocabSentences[number] ?? []) { sentence in
+                    if let first = sentence.rects.first,
+                       let rect = document.viewRect(normalized: first, page: number),
+                       rect.height > 8 {
+                        let side = min(26, max(14, rect.height))
+                        Button {
+                            onTranslateSentence?(sentence)
+                        } label: {
+                            Text("译")
+                                .font(.system(size: side * 0.6, weight: .semibold))
+                                .foregroundStyle(ReaderNativePDFDocument.sentenceStroke(sentence.index))
+                                .frame(width: side, height: side)
+                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("翻译整句")
+                        .position(x: rect.minX - side * 0.6, y: rect.midY)
+                    }
+                }
+            }
         }.clipped()
     }
 }

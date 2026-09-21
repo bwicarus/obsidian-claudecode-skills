@@ -516,6 +516,22 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     // 跟"这一页没有已掌握的词"不是一回事。
                     let mastered = payload["masteredFuri"] as? [String]
                     document.setFuriganaMastered(mastered, enabled: mastered != nil, page: page)
+                    let sentences = (payload["vocabSentences"] as? [[String: Any]] ?? [])
+                        .enumerated().compactMap { index, row -> ReaderNativePDFDocument.VocabSentence? in
+                            guard let text = row["text"] as? String, !text.isEmpty,
+                                  let rects = row["rects"] as? [[Double]] else { return nil }
+                            let boxes = rects.compactMap { r -> CGRect? in
+                                guard r.count == 4, size.width > 0, size.height > 0 else { return nil }
+                                return CGRect(x: r[0] / size.width, y: r[1] / size.height,
+                                              width: (r[2] - r[0]) / size.width,
+                                              height: (r[3] - r[1]) / size.height)
+                            }
+                            guard !boxes.isEmpty else { return nil }
+                            // id 要带页码：不同页的第 0 句不能撞成同一个。
+                            return .init(id: "\(page):\(index)", index: index, page: page,
+                                         text: text, rects: boxes)
+                        }
+                    document.setVocabSentences(sentences, page: page)
                     // 搜索跳转后要亮的那个词。网页那侧取走即清，所以只会亮一次。
                     if let query = payload["searchQuery"] as? String, !query.isEmpty {
                         document.highlightSearchHits(query: query, page: page)
@@ -786,6 +802,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     static let nativePDFRendererDefaultsKey = "reader.nativePDFRenderer"
+
+    /// 生词句子行首的「译」：整句交给原生翻译面板（与选区菜单里的「翻译」同一个，
+    /// 不另做一套句子翻译 UI）。
+    func openNativeSentenceTranslation(_ sentence: ReaderNativePDFDocument.VocabSentence) {
+        openNativeLookup(page: sentence.page, text: sentence.text, mode: "translate")
+    }
 
     /// 原生选区菜单里点了查词/翻译：开一个原生面板，取数仍在阅读器那侧。
     private func openNativeLookup(page: Int, text: String, mode: String) {
