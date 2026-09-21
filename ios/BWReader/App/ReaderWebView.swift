@@ -9,6 +9,7 @@ private let nativeComputerContextMessageName = "bwNativeComputerContext"
 private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
 private let nativePencilInkMessageName = "bwNativePencilInk"
 private let nativeReadingProjectionMessageName = "bwNativeReadingProjection"
+private let nativeReaderGeometryMessageName = "bwNativeReaderGeometry"
 private let nativeLocalNotesMessageName = "bwNativeLocalNotes"
 private let nativeAnkiMobileMessageName = "bwNativeAnkiMobile"
 private let nativeConversationMessageName = "bwNativeConversation"
@@ -324,6 +325,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
     private var nativeReadingProjectionMessageProxy: WeakScriptMessageHandler?
+    private var nativeReaderGeometryMessageProxy: WeakScriptMessageHandlerWithReply?
     private var nativeProjectionRefreshTask: Task<Void, Never>?
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
     private var nativeAnkiMobileMessageProxy:
@@ -840,6 +842,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         contentController.add(
             nativeReadingProjectionMessageProxy,
             name: nativeReadingProjectionMessageName
+        )
+        // 原生字符层的定位通道：网页那几个 AI 划线入口在原生接管时问它要坐标，
+        // 这样就不必再把目标页在网页里渲出来（那正是双份渲染的最后一处来源）。
+        let nativeReaderGeometryMessageProxy =
+            WeakScriptMessageHandlerWithReply(delegate: self)
+        self.nativeReaderGeometryMessageProxy = nativeReaderGeometryMessageProxy
+        contentController.addScriptMessageHandler(
+            nativeReaderGeometryMessageProxy,
+            contentWorld: .page,
+            name: nativeReaderGeometryMessageName
         )
         let nativeLocalNotesMessageProxy =
             WeakScriptMessageHandlerWithReply(delegate: self)
@@ -4625,6 +4637,36 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 return
             }
             handleNativeAnkiMobileRequest(body, replyHandler: replyHandler)
+            return
+        }
+        if message.name == nativeReaderGeometryMessageName {
+            guard
+                message.frameInfo.isMainFrame,
+                message.webView === webView,
+                isTrustedReaderURL(webView.url),
+                isTrustedReaderURL(message.frameInfo.request.url),
+                let body = message.body as? [String: Any],
+                Set(body.keys) == ["action", "page", "text"],
+                body["action"] as? String == "binding",
+                let page = (body["page"] as? NSNumber)?.intValue, page > 0,
+                let text = body["text"] as? String, !text.isEmpty, text.count <= 16000
+            else {
+                replyHandler(nil, "原生定位请求无效")
+                return
+            }
+            guard let document = nativePDFDocument else {
+                // ⚠ 没挂原生正文时要**明确说不可用**，让调用方退回网页那条老路；
+                //   回成"定位失败"会让它以为这段文字不在书里。
+                replyHandler(["ok": false, "code": "BW_NATIVE_GEOMETRY_UNAVAILABLE"], nil)
+                return
+            }
+            guard let value = document.resolveBinding(page: page, text: text) else {
+                replyHandler(["ok": false, "code": "BW_NATIVE_GEOMETRY_MISS"], nil)
+                return
+            }
+            var payload = value
+            payload["ok"] = true
+            replyHandler(payload, nil)
             return
         }
         guard message.name == nativeLocalNotesMessageName else {

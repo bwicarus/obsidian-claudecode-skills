@@ -83,6 +83,30 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     private var domainHeaders: [ReaderBookUserStateDomainName: (revision: Int64, digest: String)] = [:]
     private var lastPageFrames: [Int: CGRect] = [:]
     private var lastViewBounds = CGRect.null
+    /// 用原生字符层把一段原文定位到某页上，返回**点坐标**的矩形 + 页面尺寸。
+    ///
+    /// ⚠ 存在的理由：网页那几个 AI 划线入口（`__bwReaderHighlightExactText` 等）
+    /// 靠 `_pdfExactTextPage` 取 `__charBoxes`，而那要求该页**在网页里渲出来**。
+    /// 原生接管正文后网页不再批量渲染，这条路就成了唯一不必渲染的定位方式。
+    /// 页还没取到字符层时返回 nil —— 由调用方决定是等还是退回旧路，这里不猜。
+    func resolveBinding(page: Int, text: String) -> [String: Any]? {
+        guard let chars = characterPages[page], let core = selectionCores[page],
+              chars.pageWidth > 0, chars.pageHeight > 0,
+              let value = try? core.binding(["text": text]) else { return nil }
+        // core 给的 rects 已被 Swift 侧按页宽高归一化（见 ReaderNativePDFSelection），
+        // 存储要的是点，这里乘回去 —— 与选区划线同一口径。
+        let rects = value.rects.map { rect -> [Double] in
+            [rect.minX * chars.pageWidth, rect.minY * chars.pageHeight,
+             rect.maxX * chars.pageWidth, rect.maxY * chars.pageHeight]
+        }
+        guard !rects.isEmpty else { return nil }
+        return [
+            "page": page, "text": value.text, "indexes": value.indexes,
+            "rects": rects, "pageWidth": chars.pageWidth, "pageHeight": chars.pageHeight,
+            "quality": value.quality ?? "", "matches": value.matches,
+        ]
+    }
+
     private var characterPages: [Int: NativeBookOCRPageCharacters] = [:]
     private var selectionCores: [Int: ReaderNativePDFSelection] = [:]
     private var characterReads: [Int: Task<Void, Never>] = [:]

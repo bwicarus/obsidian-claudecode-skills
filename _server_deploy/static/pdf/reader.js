@@ -8388,6 +8388,39 @@ window.__bwReaderHighlightRange = async function (request) {
   };
 };
 
+/// 原生字符层定位 + 本地直写。拿不到就返回 null，由调用方退回网页路径。
+///
+/// ⚠ 存在的理由：网页那条路要 `_pdfExactTextPage` 取 `__charBoxes`，而那要求
+/// 目标页**在网页里渲出来**。原生接管正文后网页不再批量渲染，于是"AI 划线"
+/// 反过来会把网页渲染重新变成必需品 —— 那正是两套渲染器同时渲同一本书的来源。
+async function _nativeExactHighlight(request, colorValue) {
+  const sink = window.webkit?.messageHandlers?.bwNativeReaderGeometry;
+  const runtime = window.__BW_READER_RUNTIME__;
+  if (!sink || typeof sink.postMessage !== 'function' ||
+      !runtime || typeof runtime.savePDFHighlight !== 'function') return null;
+  const page = Number(request.target.page);
+  if (!Number.isInteger(page) || page < 1) return null;
+  let located;
+  try {
+    located = await sink.postMessage({ action: 'binding', page, text: String(request.text || '') });
+  } catch (_) {
+    return null;   // 通道不在（桌面/扩展表面）→ 退回网页路径
+  }
+  if (!located || located.ok !== true || !Array.isArray(located.rects) || !located.rects.length) {
+    return null;   // 原生说不可用或没命中 → 退回网页路径，别在这里下结论
+  }
+  const saved = await runtime.savePDFHighlight({
+    file: FILE_REL, page, rects: located.rects, color: colorValue,
+    text: located.text || request.text, kind: 'note', sentence: '', body: '',
+    note: request.note || '',
+    page_w: Number(located.pageWidth), page_h: Number(located.pageHeight),
+    id: request.mutationId
+  });
+  if (!saved || saved.ok !== true) throw new Error('BW_READER_HIGHLIGHT_SAVE_REJECTED');
+  const id = (saved.highlight && saved.highlight.id) || saved.id || request.mutationId;
+  return { ok: true, status: 'highlight_saved', id, page, text: located.text || request.text };
+}
+
 window.__bwReaderHighlightExactText = async function (request) {
   request = request || {};
   if (request.file !== FILE_REL) throw new Error('BW_READER_HIGHLIGHT_WRONG_BOOK');
@@ -8395,6 +8428,10 @@ window.__bwReaderHighlightExactText = async function (request) {
   const colors = { yellow:'#fff59d', green:'#a7f3d0', blue:'#a3d4ff', pink:'#fda4af' };
   if (!colors[request.color]) throw new Error('BW_READER_HIGHLIGHT_COLOR_INVALID');
   if (!/^c_[a-f0-9]{8,32}$/.test(request.mutationId || '')) throw new Error('BW_READER_HIGHLIGHT_MUTATION_ID');
+  // 原生正文接管时先问原生字符层要坐标：那条路**不需要把这一页在网页里渲出来**。
+  // 拿到就直接落库；原生回"不可用/没命中"才退回下面的网页路径（它会按需渲单页）。
+  const viaNative = await _nativeExactHighlight(request, colors[request.color]);
+  if (viaNative) return viaNative;
   const pw = await _pdfExactTextPage(request.target.page);
   const range = _pdfExactTextRange(pw.__charBoxes, request.text);
   const highlight = await saveHighlight({
