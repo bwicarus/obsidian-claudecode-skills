@@ -59,6 +59,10 @@ struct ReaderNativeReadingSettingsView: View {
                         language("英语", code: "en")
                         language("日语", code: "ja")
                         settingToggle("插图 AI 描述", key: "figures")
+                            .disabled(model.state["figuresAvailable"] as? Bool != true)
+                        ForEach(model.state["warnings"] as? [String] ?? [], id: \.self) { warning in
+                            Text(warning).font(.caption).foregroundStyle(.secondary)
+                        }
                     } header: { Text("本书语言与插图") }
                     footer: { Text("未选中的语言视为已掌握，免于翻译。开启插图描述后，沿用本书逐页生成的流程。") }
                     Section {

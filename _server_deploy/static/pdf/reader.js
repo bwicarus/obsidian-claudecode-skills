@@ -10590,6 +10590,8 @@ window.saveSettings = async () => {
 // buttons; book writes retain the original repository and confirmed receipts.
 window.RC = window.RC || {};
 RC.readerPreferences = {
+  figuresAvailable: false,
+  warnings: [],
   async read() {
     const book = FILE_REL;
     const get = async path => {
@@ -10599,13 +10601,18 @@ RC.readerPreferences = {
       if (!response.ok || data?.ok !== true) throw new Error(data?.error || '本书设置读取失败');
       return data;
     };
+    // Language/crop are local in the native runtime; figure analysis belongs
+    // to the verified remote book. Its outage must not disable local settings.
     const [langs, figures, crop] = await Promise.all([
-      get('/pdf/api/book-langs'), get('/pdf/api/book-figures'), get('/pdf/api/book-crop')
+      get('/pdf/api/book-langs'), get('/pdf/api/book-figures').then(value => ({value}), error => ({error})), get('/pdf/api/book-crop')
     ]);
     if (book !== FILE_REL) throw new Error('书籍已切换');
-    if (!Array.isArray(langs.langs) || typeof figures.enabled !== 'boolean' || !crop.crop ||
+    if (!Array.isArray(langs.langs) || !crop.crop ||
         ['l','r','t','b'].some(k => !Number.isFinite(crop.crop[k]) || crop.crop[k] < 0 || crop.crop[k] > 45)) throw new Error('本书设置格式无效');
-    BOOK_LANGS = langs.langs; window.__figBookOn = figures.enabled; _crop = { ...crop.crop };
+    this.figuresAvailable = typeof figures.value?.enabled === 'boolean';
+    this.warnings = this.figuresAvailable ? [] : ['插图分析设置暂不可读取：' + (figures.error?.message || '返回格式无效')];
+    BOOK_LANGS = langs.langs; _crop = { ...crop.crop };
+    if (this.figuresAvailable) window.__figBookOn = figures.value.enabled;
     return this.state();
   },
   state() {
@@ -10614,7 +10621,8 @@ RC.readerPreferences = {
       clickTranslate: on('pdf-click-translate-unmastered', true), autoOrient: on('pdf-auto-orient', false),
       debug: on('pdf-debug', false), languages: BOOK_LANGS.slice(), figures: !!window.__figBookOn,
       grammar: RC.grammar?.getViewMode('pdf-grammar-view') || _grammarViewMode,
-      colors: getHlColors().slice(), crop: { ..._crop }, cropEnabled: !!_cropOn };
+      colors: getHlColors().slice(), crop: { ..._crop }, cropEnabled: !!_cropOn,
+      figuresAvailable: this.figuresAvailable, warnings: this.warnings.slice() };
   },
   async perform(key, value) {
     const booleans = { vocabulary: 'pdf-vocab-underline', clickTranslate: 'pdf-click-translate-unmastered',

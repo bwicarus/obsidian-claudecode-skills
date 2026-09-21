@@ -53,6 +53,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
               window.fetch=async (url, opts)=>{
                 const body=opts?.body?JSON.parse(opts.body):null;
                 if(body)writes.push({url,body});
+                if(window.figuresOffline&&url.includes('book-figures'))throw Error('figure server offline');
                 if(window.failSave)return {ok:false,status:500,json:async()=>({ok:false,error:'disk failed'})};
                 if(body?.langs)bookConfig.langs=body.langs;
                 if(body&&'enabled' in body)bookConfig.enabled=body.enabled;
@@ -85,6 +86,13 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertTrue(command('grammar', 'tree')['ok'])
             self.assertTrue(command('colors', ['#abc','#aabbccdd'])['ok'])
             self.assertFalse(command('colors', ['url(javascript:bad)'])['ok'])
+            page.evaluate('window.figuresOffline=true')
+            partial = command()
+            self.assertTrue(partial['ok'])
+            self.assertFalse(partial['value']['figuresAvailable'])
+            self.assertIn('figure server offline', partial['value']['warnings'][0])
+            self.assertTrue(command('vocabulary', True)['ok'])
+            page.evaluate('window.figuresOffline=false')
             page.evaluate('window.failSave=true')
             self.assertFalse(command('figures', True)['ok'])
             self.assertFalse(page.evaluate('__figBookOn'))
