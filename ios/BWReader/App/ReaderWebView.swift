@@ -344,6 +344,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     @Published private(set) var nativePDFDocument: ReaderNativePDFDocument?
     /// 挂载失败的原因。**要能看见** —— 否则原生阅读区白着而日志里什么都没有。
     @Published private(set) var nativePDFMountFailure: String?
+    /// 原生查词/翻译面板。非 nil 即弹出（在 ReaderNativeWorkspace 里呈现）。
+    @Published var nativeLookup: ReaderNativeLookupModel?
     private var nativePDFMountTask: Task<Void, Never>?
     var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
@@ -527,6 +529,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     page: page, text: text, color: color, bookID: bookID, contentSHA256: digest)
             }
         }
+        document.onLookup = { [weak self] page, text, mode in
+            Task { @MainActor [weak self] in
+                self?.openNativeLookup(page: page, text: text, mode: mode)
+            }
+        }
         document.onSelection = { [weak self] values in
             Task { @MainActor [weak self] in
                 _ = await self?.updateNativePDFSelection(values, bookID: bookID, contentSHA256: digest, scope: scope)
@@ -593,6 +600,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     static let nativePDFRendererDefaultsKey = "reader.nativePDFRenderer"
+
+    /// 原生选区菜单里点了查词/翻译：开一个原生面板，取数仍在阅读器那侧。
+    private func openNativeLookup(page: Int, text: String, mode: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 2000, ["dict", "translate"].contains(mode) else { return }
+        nativeLookup = ReaderNativeLookupModel(
+            text: trimmed, mode: mode, page: max(0, page),
+            // 句境交给词典：同一个词在不同句子里释义不同，网页那侧也是带着它查的。
+            context: String(trimmed.prefix(320))
+        ) { [weak self] command in
+            await self?.requestNativeConversationCommand(command)
+                ?? ["ok": false, "error": "阅读页已关闭"]
+        }
+    }
 
     /// 原生选区菜单里点了划线。
     ///
@@ -669,7 +690,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
-            "nativeSelectionHighlight"]
+            "nativeSelectionHighlight", "nativeSelectionLookup"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {

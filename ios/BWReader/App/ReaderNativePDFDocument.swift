@@ -56,6 +56,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     var onGeometry: (() -> Void)?
     /// 选区菜单里点了划线：(页码, 原文, 颜色键)。交给壳走阅读器自己的划线路径。
     var onHighlight: ((Int, String, String) -> Void)?
+    /// 选区菜单里点了查词/翻译：(页码, 原文, "dict" | "translate")。
+    var onLookup: ((Int, String, String) -> Void)?
     private var access: ReaderLocalBookAccess?
     private var digest = ""
     private var generation = UUID()
@@ -562,6 +564,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         overlay.onHighlight = { [weak self] value, color in
             self?.onHighlight?(number, value.text, color)
         }
+        overlay.onLookup = { [weak self] value, mode in
+            self?.onLookup?(number, value.text, mode)
+        }
         // PDFKit owns embedded text selection. The overlay supplies native
         // interaction only for scanned pages or a user-selected OCR override.
         overlay.embeddedText = !(page.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
@@ -637,6 +642,8 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     /// ⚠ 这四个键必须与阅读器色板一致：那是**用户自己的墨水**，存在他的笔记里，
     /// 改名或改值等于改写既有数据。
     var onHighlight: ((ReaderNativePDFSelection.Value, String) -> Void)?
+    /// 查词 / 整段翻译：(选中, "dict" | "translate")。取数在阅读器那侧，这里只发起。
+    var onLookup: ((ReaderNativePDFSelection.Value, String) -> Void)?
     private var start: Int?
     private var selected: ReaderNativePDFSelection.Value?
     private let leadingHandle = ReaderNativePDFSelectionHandle()
@@ -767,6 +774,14 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
                 guard let self, selected?.indexes == value.indexes else { return }
                 do { if let sentence = try selectionCore?.sentence(value.indexes) { display(sentence) } }
                 catch { onError?() }
+            },
+            UIAction(title: "查词", image: UIImage(systemName: "character.book.closed")) { [weak self] _ in
+                guard let self, self.selected?.indexes == value.indexes else { return }
+                self.onLookup?(value, "dict")
+            },
+            UIAction(title: "翻译", image: UIImage(systemName: "translate")) { [weak self] _ in
+                guard let self, self.selected?.indexes == value.indexes else { return }
+                self.onLookup?(value, "translate")
             },
             // 划线走阅读器自己的 __bwReaderHighlightExactText —— 与 AI 划线同一条
             // 路径、同一套存储。不在原生这边另写一套保存逻辑。

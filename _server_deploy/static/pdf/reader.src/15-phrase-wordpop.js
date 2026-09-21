@@ -1024,3 +1024,49 @@ window.onLookupWord = () => {
 };
 
 // 拿点击/触摸位置对应的 (node, offset)，可跨 span
+
+// ── 原生阅读区的查词/翻译**数据入口**（2026-09-21）────────────────────────────
+//
+// 只查，不画。原生 PDF 主阅读区用它拿数据、自己用原生控件渲染；网页阅读器那边
+// 继续用 showWordPopover / 词组小框，一行不改。
+//
+// ⚠ 语言路由**复用这里的 _isJaWord**，不在原生那侧复制一份：它依赖 BOOK_LANGS
+//   （这本书声明了哪些语言），复制过去就会变成两份会各自漂移的判据 —— 而漂移的
+//   表现是"同一个词在网页上查中日词典、在原生上查英文词典"。
+// ⚠ 端点也沿用网页那两条，不另开：日语 /pdf/api/dict-jp，其余 /pdf/api/dict-quick；
+//   整段翻译走 /pdf/api/translate-sentence。
+window.__bwReaderLookupData = async function (request) {
+  request = request || {};
+  const text = String(request.text || '').trim();
+  if (!text || text.length > 2000) throw new Error('BW_READER_LOOKUP_TEXT');
+  const context = String(request.context || '').slice(0, 320);
+  const page = Number(request.page) || (typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0;
+  const file = encodeURIComponent(FILE_REL || '');
+  if (request.mode === 'translate') {
+    const r = await (await fetch('/pdf/api/translate-sentence', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text}),
+    })).json();
+    if (!r || r.ok !== true) throw new Error('BW_READER_TRANSLATE_FAILED');
+    return {mode: 'translate', text, zh: r.zh || ''};
+  }
+  const isJa = _isJaWord(text);
+  if (isJa) {
+    // @interaction dictionary.jp.read
+    const d = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
+      '&file=' + file + '&page=' + encodeURIComponent(page) +
+      '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')) +
+      '&context=' + encodeURIComponent(context))).json();
+    if (!d || d.ok !== true) throw new Error('BW_READER_LOOKUP_MISS');
+    return {mode: 'dict', jp: true, word: text, zh: d.zh || '',
+            reading: d.reading || '', accent: (d.accent != null ? d.accent : null),
+            kanji: Array.isArray(d.kanji) ? d.kanji.slice(0, 12) : []};
+  }
+  // 英文路径**一次新请求都不加**：直接用网页小框那条现成的 _lookupWordFetch
+  // （同一个端点、同样带 langs 和句境）。少一处 fetch 就少一处会漂移的写法。
+  const d = await _lookupWordFetch(text, context);
+  if (!d || d.ok !== true) throw new Error('BW_READER_LOOKUP_MISS');
+  return {mode: 'dict', jp: false, word: d.word || text, lemma: d.lemma || '',
+          phonetic: d.phonetic || '', translation: d.translation || '',
+          definition: String(d.definition || '').slice(0, 4000)};
+};

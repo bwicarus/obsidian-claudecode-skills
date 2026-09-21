@@ -607,7 +607,7 @@ enum ReaderNativeConversationScript {
         if (command.scope && command.scope !== scope) return { ok: false, error: '会话已切换，请重新操作' };
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
-        if (command.action === 'nativePageSelection' || command.action === 'nativeSelectionHighlight') parameterKeys.push('value');
+        if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -704,6 +704,27 @@ enum ReaderNativeConversationScript {
             });
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换，请在原书核对结果' };
             return { ok: true, value: { id: saved?.id || '', page: value.page } };
+          } else if (action === 'nativeSelectionLookup') {
+            // 原生阅读区的查词/翻译。**只取数据**，渲染在原生那侧。
+            // 语言路由和端点都在阅读器自己的 __bwReaderLookupData 里，这里不复制。
+            const value = command.value;
+            if (!value || typeof value.text !== 'string' || !value.text.trim() ||
+                value.text.length > 2000 ||
+                !['dict', 'translate'].includes(value.mode)) return { ok: false, error: '查询参数无效' };
+            if (typeof window.__bwReaderLookupData !== 'function') return { ok: false, error: '词典尚未就绪' };
+            const captured = scope;
+            let data;
+            try {
+              data = await window.__bwReaderLookupData({
+                text: value.text, mode: value.mode,
+                context: typeof value.context === 'string' ? value.context : '',
+                page: Number.isSafeInteger(value.page) ? value.page : 0
+              });
+            } catch (error) {
+              return { ok: false, error: String(error && error.message || error).slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            return { ok: true, value: data };
           } else if (action === 'readingSettingsRead' || action === 'readingSettingsWrite') {
             const owner = rc().readerPreferences, captured = scope;
             if (!owner?.state || !owner?.perform || command.scope !== scope) return { ok: false, error: '阅读设置尚未就绪' };
