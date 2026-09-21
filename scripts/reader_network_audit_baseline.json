@@ -4,7 +4,7 @@
   "note": "Existing debt only. Retired allowances must be removed in the same change; new fingerprints or higher counts fail --check.",
   "summary": {
     "cache-first-unannotated": 3,
-    "dynamic-unannotated": 124,
+    "dynamic-unannotated": 122,
     "local-immediate-unannotated": 6,
     "unclassified-literal": 73
   },
@@ -21,7 +21,6 @@
     "dynamic-unannotated|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/epub-ink?file=' + encodeURIComponent(FREL))|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/epub-ink?file=' + encodeURIComponent(f))|dynamic endpoint/method needs @interaction <id>": 2,
     "dynamic-unannotated|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/epub-nodes?file=' + encodeURIComponent(FREL))|dynamic endpoint/method needs @interaction <id>": 1,
-    "dynamic-unannotated|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/epub-search?file=' + encodeURIComponent(FREL) + '&q=' + encodeURIComponent(q))|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/fav-meta?id=' + encodeURIComponent(_FAV_FID))|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/ink?file=' + encodeURIComponent(f))|dynamic endpoint/method needs @interaction <id>": 2,
     "dynamic-unannotated|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/userpages?file=' + encodeURIComponent(f))|dynamic endpoint/method needs @interaction <id>": 1,
@@ -91,7 +90,6 @@
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/08-charlayer.js|fetch|fetch(charsUrl(ov.cv))|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/09-ruby.js|fetch|fetch('/pdf/api/furigana-verify?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/10-pagetranslate.js|fetch|fetch('/pdf/api/page-translate?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)|dynamic endpoint/method needs @interaction <id>": 1,
-    "dynamic-unannotated|_server_deploy/static/pdf/reader.src/11-search.js|fetch|fetch('/pdf/api/search?file=' + encodeURIComponent(FILE_REL) + '&q=' + encodeURIComponent(q) + '&limit=200')|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js|fetch|fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(word) + '&file=' + encodeURIComponent(FILE_REL || '') + '&page=' + ((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0) + '&context=' + encodeURIComponent(ctx || '') + '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')))|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js|fetch|fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER + '&cv=' + encodeURIComponent(cv))|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js|fetch|fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)|dynamic endpoint/method needs @interaction <id>": 1,

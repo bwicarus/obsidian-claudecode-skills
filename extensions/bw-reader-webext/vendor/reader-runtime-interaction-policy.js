@@ -160,6 +160,10 @@
   }
 
   var POLICIES = [
+    networkRead('reader.document.search', ['/pdf/api/search', '/pdf/api/epub-search'], {
+      local: { owner: 'native-local-runtime', data: 'active-book-text-and-ocr' },
+      reason: '显式全文检索；App 由本地阅读 runtime 和 OCR 索引接管，其他宿主沿用既有查询通道。结果保留未识别页面状态。'
+    }),
     /* 首批 local-first 门禁：掌握、收藏、标注、便签与复习答题。 */
     localMutation(
       'vocabulary.mastery.set',

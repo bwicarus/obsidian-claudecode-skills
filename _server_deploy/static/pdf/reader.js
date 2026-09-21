@@ -3473,6 +3473,30 @@ window.togglePageTranslate = () => {
 
 // ──────── 全文搜索（F4） ────────
 let _searchTimer = null, _searchSeq = 0;
+async function _queryBookSearch(q, options) {
+  // @interaction reader.document.search
+  const r = await fetch('/pdf/api/search?file=' + encodeURIComponent(FILE_REL) +
+    '&q=' + encodeURIComponent(q) + '&limit=200', { signal: options?.signal });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return await r.json();
+}
+window.RC = window.RC || {};
+window.RC.readerSearch = {
+  search: async (query, options) => {
+    const q = String(query || '').trim();
+    if (!q) return { total: 0, pages: 0, incomplete: false, results: [] };
+    const data = await _queryBookSearch(q, options);
+    if (!data || data.ok !== true) throw new Error(data?.error || '搜索失败');
+    return { total: data.total, pages: data.pages, incomplete: !!data.incomplete,
+      results: (data.matches || []).map(m => ({ locator: m.page,
+        label: 'P' + (window._dispPage ? window._dispPage(m.page) : m.page),
+        excerpt: String(m.snippet || ''), count: m.count || 1 })) };
+  },
+  jump: (result, query) => {
+    if (!Number.isInteger(result?.locator) || result.locator < 1) throw new Error('搜索位置已失效');
+    _jumpSearchPage(result.locator, query);
+  }
+};
 window.openSearch = () => {
   const p = document.getElementById('search-panel');
   p.classList.add('open');
@@ -3494,9 +3518,7 @@ window._runSearch = async () => {
   stat.textContent = '搜索中…';
   box.innerHTML = '<div class="sr-empty">⏳ 首次搜索本书需建索引（约几秒）…</div>';
   try {
-    const r = await fetch('/pdf/api/search?file=' + encodeURIComponent(FILE_REL) +
-      '&q=' + encodeURIComponent(q) + '&limit=200');
-    const d = await r.json();
+    const d = await _queryBookSearch(q);
     if (seq !== _searchSeq) return;   // 已被更新的查询取代
     if (!d.ok) { box.innerHTML = '<div class="sr-empty">搜索失败：' + (d.error || '?') + '</div>'; stat.textContent = ''; return; }
     stat.textContent = d.total + ' 处 / ' + d.pages + ' 页' + (d.incomplete ? ' · 部分页待识别' : '');
@@ -3530,10 +3552,13 @@ window._pendingSearchHighlight = null;   // {query, page}：跳转后等该页 c
 window._searchJump = (pg) => {
   const q = (document.getElementById('search-input').value || '').trim();
   closeSearch();
+  _jumpSearchPage(pg, q);
+};
+function _jumpSearchPage(pg, q) {
   window._pendingSearchHighlight = q ? {query: q, page: pg} : null;
   goToPage(pg);
   _applyPendingSearchHighlight();   // 已加载的页立即高亮；未加载则轮询等待
-};
+}
 // 轮询等目标页 __charBoxes 就绪（单页/连续模式通用），就绪后画命中高亮
 function _applyPendingSearchHighlight(tries) {
   tries = tries || 0;

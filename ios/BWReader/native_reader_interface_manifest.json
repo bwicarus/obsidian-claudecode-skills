@@ -3228,6 +3228,12 @@
     {
       "surface": "epub",
       "resource": "static/reader-runtime/interaction-policy.js",
+      "path": "/pdf/api/search",
+      "reason": "Shared PDF search policy declaration, not a request from the EPUB shell. Actual search remains in each document's original local handler."
+    },
+    {
+      "surface": "epub",
+      "resource": "static/reader-runtime/interaction-policy.js",
       "path": "/pdf/api/toc",
       "reason": "Shared policy declaration for the PDF surface; the query channel opens toc to PDF only."
     },
@@ -3260,6 +3266,12 @@
       "resource": "static/reader-runtime/interaction-policy.js",
       "path": "/pdf/api/epub-manifest",
       "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+    },
+    {
+      "surface": "pdf",
+      "resource": "static/reader-runtime/interaction-policy.js",
+      "path": "/pdf/api/epub-search",
+      "reason": "Shared EPUB search policy declaration, not a request from the PDF shell. Actual search remains in each document's original local handler."
     },
     {
       "surface": "pdf",

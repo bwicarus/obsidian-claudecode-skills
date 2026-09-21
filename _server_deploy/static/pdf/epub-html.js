@@ -3172,6 +3172,27 @@
   }
 
   // ── 搜索(照搬 PDF:居中浮层 + 防抖 oninput + 计数 + Esc 关)──
+  function queryBookSearch(q, options) {
+    // @interaction reader.document.search
+    return fetch('/pdf/api/epub-search?file=' + encodeURIComponent(FREL) + '&q=' + encodeURIComponent(q), { signal: options && options.signal })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (d) { if (!d || d.ok === false || d.error) throw new Error(d && d.error || '搜索失败'); return d; });
+  }
+  RC.readerSearch = {
+    search: async function (query, options) {
+      var q = String(query || '').trim();
+      if (!q) return { total: 0, results: [] };
+      var d = await queryBookSearch(q, options);
+      return { total: (d.results || []).length, incomplete: !!d.incomplete,
+        results: (d.results || []).map(function (m) {
+          return { locator: m.idx, label: String(m.loc || ''), excerpt: String(m.excerpt || ''), count: 1 };
+        }) };
+    },
+    jump: function (result, query) {
+      if (!result || !Number.isInteger(result.locator) || result.locator < 0 || result.locator >= secEls.length) throw new Error('搜索位置已失效');
+      jumpTo(result.locator, false); _searchHilite(result.locator, query);
+    }
+  };
   var sp = $('ep-search');
   $('ep-search-btn').addEventListener('click', function () { sp.classList.add('open'); setTimeout(function () { $('ep-search-in').focus(); }, 100); });
   $('ep-search-x').addEventListener('click', function () { sp.classList.remove('open'); });
@@ -3179,7 +3200,7 @@
     var q = ($('ep-search-in').value || '').trim(), res = $('ep-search-res'), stat = $('ep-search-stat');
     if (!q) { res.innerHTML = ''; if (stat) stat.textContent = ''; return; }
     if (stat) stat.textContent = '…'; res.innerHTML = '<div class="ep-sr-empty"><span class="ep-spin"></span> 搜索中…</div>';
-    fetch('/pdf/api/epub-search?file=' + encodeURIComponent(FREL) + '&q=' + encodeURIComponent(q)).then(function (r) { return r.json(); }).then(function (d) {
+    queryBookSearch(q).then(function (d) {
       var rs = (d && d.results) || []; if (!rs.length) { res.innerHTML = '<div class="ep-sr-empty">没找到「' + esc(q) + '」</div>'; if (stat) stat.textContent = '0'; return; }
       if (stat) stat.textContent = rs.length + ' 处';
       res.innerHTML = ''; var rx = new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');

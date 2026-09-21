@@ -82,6 +82,9 @@ struct ReaderNativeWorkspace<Document: View>: View {
         .sheet(item: $conversation.settingsPanel) { panel in
             ReaderNativeSettingsView(model: panel)
         }
+        .sheet(item: $conversation.searchPanel) { panel in
+            ReaderNativeSearchView(model: panel)
+        }
     }
 
     private var navigationBar: some View {

@@ -15,6 +15,7 @@ enum ReaderNativeConversationScript {
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
       let controls = null, controlsObserver = null, suspended = false;
       let settingsModels = null, settingsVoice = null;
+      let searchController = null, searchResults = new Map(), searchQuery = '', searchSequence = 0;
       let drawerElement = null, drawerObserver = null, contextObserver = null, contextElement = null, toolbarObserver = null, toolbarElement = null;
       const navigationID = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
       const hooked = new WeakMap();
@@ -302,6 +303,7 @@ enum ReaderNativeConversationScript {
         if (document.getElementById('asst-send')) out.push('stop');
         if (typeof rc().assistant?.openModelSettings === 'function') out.push('openModels');
         if (rc().assistant?.settingsService) out.push('nativeSettings');
+        if (rc().readerSearch?.search) out.push('nativeSearch', 'openSearch');
         if (typeof window.openSettings === 'function' || document.getElementById('ep-set-btn')) out.push('openSettings');
         if (rc().review?.performNativeInteraction) out.push('openReview', 'reviewAction');
         else if (document.getElementById('asst-review-toggle')) out.push('openReview');
@@ -339,6 +341,7 @@ enum ReaderNativeConversationScript {
           scopeKey = nextKey; scope = 'reader-' + hash(nextKey); actions.clear(); nodeIDs = new WeakMap(); lastSignature = '';
           window.__bwNativeSelection = null;
           settingsModels = null; settingsVoice = null;
+          searchController?.abort(); searchResults.clear(); searchQuery = ''; searchSequence++;
         }
         actions = new Map();
         const all = thread ? Array.from(thread.children).filter(el => el.matches('.asst-msg,.vc-card,.vc-if,.rc-turn')) : [];
@@ -496,6 +499,24 @@ enum ReaderNativeConversationScript {
             setLegacy(action === 'showLegacy');
           } else if (action === 'refresh') {
             rc().assistant?.reloadHistory?.();
+          } else if (action === 'searchRead') {
+            const owner = rc().readerSearch, captured = scope;
+            if (!owner?.search || command.scope !== scope) return { ok: false, error: '搜索尚未就绪' };
+            const sequence = ++searchSequence;
+            searchController?.abort(); searchController = new AbortController();
+            searchResults.clear(); searchQuery = String(command.text || '').trim();
+            const value = await owner.search(searchQuery, { signal: searchController.signal });
+            if (captured !== scope || getScopeKey() !== scopeKey || sequence !== searchSequence) return { ok: false, error: '搜索内容已切换' };
+            const results = (value.results || []).map((result, index) => {
+              const id = 'search-' + hash(scope + ':' + sequence + ':' + index);
+              searchResults.set(id, result);
+              return { id, label: text(result.label, 240), excerpt: text(result.excerpt, 6000), count: result.count || 1 };
+            });
+            return { ok: true, value: { total: value.total || 0, pages: value.pages || 0, incomplete: !!value.incomplete, results } };
+          } else if (action === 'searchJump') {
+            const result = searchResults.get(command.actionId);
+            if (!result || command.scope !== scope || !rc().readerSearch?.jump) return { ok: false, error: '搜索结果已更新，请重新选择' };
+            await rc().readerSearch.jump(result, searchQuery);
           } else if (action === 'settingsRead') {
             const service = rc().assistant?.settingsService, captured = scope;
             if (!service || command.scope !== scope || !['models', 'voice', 'profiles', 'computer'].includes(command.section)) return { ok: false, error: '设置尚未就绪' };

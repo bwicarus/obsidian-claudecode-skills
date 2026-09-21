@@ -410,7 +410,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             "showLegacy", "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
-            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction"]
+            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {

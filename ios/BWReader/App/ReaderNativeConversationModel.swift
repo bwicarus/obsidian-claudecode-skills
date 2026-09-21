@@ -138,6 +138,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var error: String?
     @Published var inspection: ReaderNativeArtifactInspection?
     @Published var settingsPanel: ReaderNativeSettingsModel?
+    @Published var searchPanel: ReaderNativeSearchModel?
     // Presentation survives closing/repositioning the SwiftUI sidebar, but is
     // scoped to this conversation and never persisted as a second history.
     @Published var draft = ""
@@ -196,6 +197,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         if nextScope != scope {
             inspection = nil
             settingsPanel = nil
+            searchPanel = nil
             generation = UUID()
             pendingSelections = []
             deliveringSelection = false
@@ -231,6 +233,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     func resetForNavigation() {
         inspection = nil
         settingsPanel = nil
+        searchPanel = nil
         if !scope.isEmpty { retiredNavigationScopes.insert(scope) }
         generation = UUID()
         scope = ""
@@ -295,6 +298,10 @@ final class ReaderNativeConversationModel: ObservableObject {
 
     @discardableResult
     func perform(_ action: String, parameters: [String: Any] = [:]) async -> Bool {
+        if action == "openSearch", supports("nativeSearch"), let inspectionHandler {
+            searchPanel = ReaderNativeSearchModel(scope: scope, request: inspectionHandler)
+            return true
+        }
         if action == "openModels", supports("nativeSettings"), let inspectionHandler {
             settingsPanel = ReaderNativeSettingsModel(scope: scope, request: inspectionHandler)
             return true

@@ -17,6 +17,66 @@ from browser_exe import CHROME
 
 
 class NativeConversationBridgeBrowser(unittest.TestCase):
+    def test_native_search_preserves_locations_and_rejects_stale_results(self):
+        bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
+        pdf = (ROOT / '_server_deploy/static/pdf/reader.src/11-search.js').read_text(encoding='utf-8')
+        epub = (ROOT / '_server_deploy/static/pdf/epub-html.js').read_text(encoding='utf-8')
+        epub = epub[epub.index('  function queryBookSearch('):epub.index("  var sp = $('ep-search');")]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
+            page = browser.new_page()
+            page.route('**/*', lambda r: r.fulfill(status=200, body='<html></html>') if r.request.url == 'http://reader.test/' else r.abort())
+            page.goto('http://reader.test/')
+            page.set_content('<div id="side-pane-asst"><div id="asst-thread"></div></div>')
+            page.evaluate('''() => {
+              window.receipts=[];window.requests=[];window.jumps=[];window.highlights=[];
+              window.book='native.pdf';window.FILE_REL=book;window.FREL='native.epub';window.secEls=[{},{}];
+              window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};
+              window.RC={adapter:()=>({getContext:()=>({file:book,page:1})}),turnCard:{}};
+              window.__asstSend=()=>{};window._dispPage=p=>p-2;
+              window.goToPage=p=>jumps.push(p);window.jumpTo=p=>jumps.push(p);
+              window._searchHilite=(p,q)=>highlights.push([p,q]);
+              window.fetch=async(url,options)=>{
+                requests.push({url,signal:options.signal});
+                if(new URL(url,location.href).searchParams.get('q')==='slow') await new Promise(resolve=>{window.finishSlow=resolve;});
+                return {ok:true,json:async()=>url.includes('epub-search')
+                  ? {results:[{idx:1,loc:'第二章',excerpt:'章节命中'}]}
+                  : {ok:true,total:3,pages:1,incomplete:true,matches:[{page:7,snippet:'命中文本',count:3}]}};
+              };
+            }''')
+            page.add_script_tag(content=pdf)
+            page.add_script_tag(content=bridge)
+            page.evaluate('__bwNativeConversation.setNativeMode(true)')
+            page.wait_for_function('receipts.at(-1)?.capabilities?.includes("nativeSearch")')
+            scope = page.evaluate('receipts.at(-1).scope')
+            def command(action, **values):
+                return page.evaluate('(c)=>__bwNativeConversation.perform(c)', dict(action=action, scope=scope, **values))
+            result = command('searchRead', text=' 命中 ')
+            self.assertTrue(result['ok'])
+            self.assertTrue(result['value']['incomplete'])
+            hit = result['value']['results'][0]
+            self.assertEqual(hit['label'], 'P5')
+            self.assertNotIn('locator', hit)
+            self.assertTrue(command('searchJump', actionId=hit['id'])['ok'])
+            self.assertEqual(page.evaluate('jumps'), [7])
+            self.assertEqual(page.evaluate('_pendingSearchHighlight'), dict(query='命中', page=7))
+            page.evaluate('(scope)=>{window.slow=__bwNativeConversation.perform({action:"searchRead",scope,text:"slow"});}', scope)
+            command('searchRead', text='new')
+            self.assertTrue(page.evaluate('requests.at(-2).signal.aborted'))
+            page.evaluate('finishSlow()')
+            self.assertFalse(page.evaluate('slow')['ok'])
+            self.assertFalse(command('searchJump', actionId=hit['id'])['ok'])
+            page.add_script_tag(content=epub)
+            result = command('searchRead', text='章节')
+            self.assertEqual(result['value']['results'][0]['label'], '第二章')
+            hit = result['value']['results'][0]
+            self.assertTrue(command('searchJump', actionId=hit['id'])['ok'])
+            self.assertEqual(page.evaluate('highlights'), [[1, '章节']])
+            page.evaluate('history.replaceState(null,"","/?file=other.epub")')
+            self.assertFalse(command('searchJump', actionId=hit['id'])['ok'])
+            self.assertEqual(page.evaluate('jumps'), [7, 1])
+            browser.close()
+
     def test_native_review_uses_original_queue_and_semantic_answer_selection(self):
         bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
         with sync_playwright() as p:
