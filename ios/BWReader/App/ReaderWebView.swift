@@ -1267,6 +1267,40 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         let conversationProxy = WeakScriptMessageHandler(delegate: self)
         nativeConversationMessageProxy = conversationProxy
         contentController.add(conversationProxy, name: nativeConversationMessageName)
+        // ⚠ 网页那套外壳（顶栏等）在 App 这个表面上**默认就不存在**，而不是
+        //   "先存在、再由脚本盖住"（2026-09-22 用户：「为何要压制，既然重置了就把
+        //   原版删掉啊」）。
+        //
+        //   原来的做法把这条样式写在 `ReaderNativeConversationScript` 里，而那个
+        //   脚本是 **atDocumentEnd** 注入的，还要再等 Swift 把 setNativeMode 送到
+        //   页面才会生效。可原生顶栏是 SwiftUI 画的，**不等任何人**。中间这段窗口
+        //   里两套一起在；更糟的是只要那条消息没送到（页面重载、渲染进程被回收后
+        //   恢复、脚本还没装好），这个"两套同时存在"的状态就是**永久**的 ——
+        //   用户看到的"所有元素好像都有两种实现"正是它。
+        //
+        //   改成 atDocumentStart 落一条样式 + 一个类：默认没有网页外壳；关掉原生
+        //   界面时才由 `bw-native-legacy-chrome` 把它放回来。**失败的方向反过来了**
+        //   —— 脚本没跑成，结果是"网页外壳不出现"（原生顶栏照常工作），
+        //   而不是"两套一起出现"。
+        let legacyChrome = !(UserDefaults.standard.object(forKey: "reader.nativeInterfaceEnabled") as? Bool ?? true)
+        contentController.addUserScript(WKUserScript(
+            source: """
+            (() => {
+              const root = document.documentElement;
+              root.classList.add('bw-native-shell');
+              if (\(legacyChrome ? "true" : "false")) root.classList.add('bw-native-legacy-chrome');
+              const style = document.createElement('style');
+              style.id = 'bw-native-shell-style';
+              style.textContent =
+                '.bw-native-shell:not(.bw-native-legacy-chrome) #header,' +
+                '.bw-native-shell:not(.bw-native-legacy-chrome) #ep-top,' +
+                '.bw-native-shell:not(.bw-native-legacy-chrome) #fs-restore{display:none!important}';
+              root.appendChild(style);
+            })();
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         contentController.addUserScript(WKUserScript(
             source: ReaderNativeConversationScript.source,
             injectionTime: .atDocumentEnd,

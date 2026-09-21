@@ -46,6 +46,15 @@ final class ReaderNativeFaultReporter {
     private var origin = ""
     private var outbox: [[String: String]] = []
     private var sending = false
+    /// 上一次投递的结果。⚠ 摆在设置里给人看 —— 诊断通道自己哑掉时，
+    /// 如果它也不出声，就又回到"什么都没发生"。这次就是这么卡住的：
+    /// 837 装上了、崩了，而 Windows 这边一条都没收到，没人说得出为什么。
+    private(set) var lastDeliveryNote = "还没有需要上报的故障"
+
+    /// 给「阅读设置 → 诊断」显示的一行。
+    var statusLine: String {
+        "发件箱 \(outbox.count) 条 · \(lastDeliveryNote)"
+    }
 
     private lazy var stateURL: URL = {
         let base = (FileManager.default.urls(for: .applicationSupportDirectory,
@@ -132,12 +141,22 @@ final class ReaderNativeFaultReporter {
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.setValue(self?.origin ?? "", forHTTPHeaderField: "Origin")
                 request.httpBody = try? JSONSerialization.data(withJSONObject: row)
-                guard let (_, reply) = try? await URLSession.shared.data(for: request),
-                      (200...299).contains((reply as? HTTPURLResponse)?.statusCode ?? 0) else { break }
+                do {
+                    let (_, reply) = try await URLSession.shared.data(for: request)
+                    let status = (reply as? HTTPURLResponse)?.statusCode ?? 0
+                    guard (200...299).contains(status) else {
+                        self?.lastDeliveryNote = "上次投递被拒：HTTP \(status)"
+                        break
+                    }
+                } catch {
+                    self?.lastDeliveryNote = "上次投递失败：" + error.localizedDescription
+                    break
+                }
                 delivered += 1
             }
             guard let self else { return }
             self.sending = false
+            if delivered > 0 { self.lastDeliveryNote = "已送出 \(delivered) 条" }
             if delivered > 0 {
                 self.outbox.removeFirst(min(delivered, self.outbox.count))
                 self.persist(clean: false)

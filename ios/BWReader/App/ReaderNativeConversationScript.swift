@@ -469,6 +469,10 @@ enum ReaderNativeConversationScript {
           (assistantOverride === true ||
            (assistantOverride !== false && activeTab() === 'asst'));
         root.classList.toggle('bw-native-navigation', nativeMode);
+        // 网页外壳的"放回来"开关。⚠ 默认（没有这个类）＝**不存在** —— 那条样式
+        //   在 atDocumentStart 就落好了，不依赖这个脚本、也不依赖 setNativeMode
+        //   送没送到。这里只负责"该放回来的时候放回来"。
+        root.classList.toggle('bw-native-legacy-chrome', !nativeMode || legacyVisible);
         root.classList.toggle('bw-native-page-cards', nativeMode && !legacyVisible);
         root.classList.toggle('bw-native-conversation-active', owns);
         // ⚠ 真正的修复在这一行，上面那几个 class 只是第二道。无头＝抽屉退成纯状态：
@@ -1104,7 +1108,10 @@ enum ReaderNativeConversationScript {
       const style = document.createElement('style');
       style.id = 'bw-native-conversation-style';
       style.textContent = `
-        .bw-native-navigation #header,.bw-native-navigation #ep-top,.bw-native-navigation #fs-restore {display:none!important}
+        /* 网页外壳的隐藏规则不在这里 —— 见 ReaderWebView 里 atDocumentStart 那条
+           (bw-native-shell)。写在这里就要等本脚本跑完再等 setNativeMode 送到,
+           而原生顶栏是 SwiftUI 画的、不等任何人。bw-native-navigation 这个类保留,
+           因为 epub-html.js 和原生选区条还拿它判断"现在是原生导航"。 */
         .bw-native-page-cards [data-bw-native-placement] {opacity:0!important;pointer-events:none!important}
         .bw-native-conversation-active #ep-side,.bw-native-conversation-active #grammar-panel,
         .bw-native-conversation-active #side-handle,.bw-native-conversation-active #ep-side-handle {visibility:hidden!important;pointer-events:none!important}

@@ -119,3 +119,29 @@ test("故障会自己送出去，而不是死在原地", () => {
   assert.match(app, /beginSession\(origin: ReaderServer\.origin\)/);
   assert.match(app, /endSession\(\)/, "没有干净退出标记 → 每次启动都误报");
 });
+
+test("网页外壳的隐藏在 documentStart 落地，不靠消息送达", () => {
+  // ⚠ 这是 2026-09-22「所有元素好像都有两种实现同时存在」的根因：
+  //   原来这条样式写在 atDocumentEnd 的脚本里，还要再等 Swift 把 setNativeMode
+  //   送到页面才生效；而原生顶栏是 SwiftUI 画的、**不等任何人**。中间那段窗口
+  //   两套一起在，消息一旦没送到（页面重载/渲染进程被回收后恢复）就是**永久**两套。
+  const view = readFileSync(new URL(
+    "../../ios/BWReader/App/ReaderWebView.swift", import.meta.url), "utf8");
+  const start = view.indexOf("bw-native-shell-style");
+  assert.ok(start > 0, "没有 documentStart 那条外壳样式");
+  const after = view.slice(start, start + 800);
+  assert.match(after, /injectionTime: \.atDocumentStart/, "外壳样式必须在 documentStart");
+  // 默认方向必须是"没有网页外壳"，关掉原生界面才放回来 ——
+  // 失败时的结果就从"两套都在"变成"只有原生"。
+  assert.match(view, /:not\(\.bw-native-legacy-chrome\) #header/);
+
+  const js = embeddedScript("ReaderNativeConversationScript.swift");
+  // ⚠ 只认那条**外壳隐藏**规则搬没搬走。#header 本身不能当判据：
+  //   同一段样式里还有一条合法的 body.grammar-open #header{padding-right:0}，
+  //   拿它做断言等于用自己的合法代码绊自己（今天已经栽过一次）。
+  const styles = js.slice(js.indexOf("bw-native-conversation-style"));
+  assert.doesNotMatch(styles.slice(0, 1400), /#fs-restore|#ep-top/,
+                      "外壳隐藏规则又被搬回 documentEnd 的脚本里了");
+  const fn = js.slice(js.indexOf("function applyVisualMode("), js.indexOf("function setLegacy("));
+  assert.match(fn, /bw-native-legacy-chrome', !nativeMode \|\| legacyVisible/);
+});

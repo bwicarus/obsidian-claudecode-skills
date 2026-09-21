@@ -167,7 +167,19 @@ struct ReaderNativeReadingSettingsView: View {
                              + "首次启动会把老数据搬过去，书多的话会多等几秒。"
                              + "搬家失败会自动关回去并报错，老数据不会被动。")
                     }
-                    Section("诊断") { settingToggle("显示阅读日志", key: "debug") }
+                    Section {
+                        settingToggle("显示阅读日志", key: "debug")
+                        // ⚠ 上报通道自己的状态。它哑掉时如果也不出声，就又回到
+                        //   "什么都没发生" —— 2026-09-22 正是这么卡住的：包装上了、
+                        //   崩了，而电脑那边一条都没收到，没人说得出为什么。
+                        Text(ReaderNativeFaultReporter.shared.statusLine)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    } header: {
+                        Text("诊断")
+                    } footer: {
+                        Text("出问题时 App 会把现场自动发到你的电脑；发不出去就留着下次再发。")
+                    }
                 }
             }
             .disabled(model.busy)
