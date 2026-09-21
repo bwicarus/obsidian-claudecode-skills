@@ -46,6 +46,7 @@ final class ReaderNativePDFSelection {
 
     func range(from start: Int, to end: Int) throws -> Value? { try invoke("range", arguments: [start, end]) }
     func exact(_ indexes: [Int]) throws -> Value? { try invoke("exact", arguments: [indexes]) }
+    func sentence(_ indexes: [Int]) throws -> Value? { try invoke("sentence", arguments: [indexes]) }
 
     private func invoke(_ method: String, arguments: [Any]) throws -> Value? {
         context.exception = nil

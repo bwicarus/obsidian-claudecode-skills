@@ -56,10 +56,12 @@ class NativePDFSelectionCoreTests(unittest.TestCase):
         self.assertTrue(all(rect[2] < 100 for rect in selected['rects']))
 
     def test_exact_pdf_selection_does_not_expand_to_another_word(self):
-        selected = self.run_core([self.char('A', 0, 0), self.char('B', 8, 0), self.char('C', 16, 0)], ['exact([1])'])[0]
+        selected, sentence = self.run_core([self.char('A', 0, 0), self.char('B', 8, 0), self.char('C', 16, 0)], ['exact([1])', 'sentence([1])'])
         self.assertEqual(selected['indexes'], [1])
         self.assertEqual(selected['text'], 'B')
         self.assertEqual(selected['sentence'], 'ABC')
+        self.assertEqual(sentence['text'], 'ABC')
+        self.assertEqual(sentence['indexes'], [0, 1, 2])
 
     def test_vertical_text_keeps_reading_order_and_column_rects(self):
         chars = [self.char('上', 80, 0, line=0, vertical=True), self.char('次', 50, 0, line=1, vertical=True),

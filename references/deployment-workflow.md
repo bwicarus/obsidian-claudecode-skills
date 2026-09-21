@@ -6,7 +6,15 @@
 
 ## 先决事实
 
-- **唯一部署机是 Pi**（`/home/bwicarus/claude` 检出、`/home/bwicarus/webapp` 生产）。
+> **当前 Reader 入口更新（2026-09-21 核对）**：iOS 账户服务器已指向 Windows 的
+> `bwicarus-2.taile44d0c.ts.net`；ReaderPC 的 `readerpc_services.py` 托管本机 Flask。
+> 先核对 `discover_server_project_root()`、`default_server_services()` 与实际监听进程，
+> 不要把下述历史 Pi 流程用于当前 Reader 账户服务。该控制器会监视服务器工作树的 Python
+> 变化并自动重启，源码检出并非隔离的部署目录；准备候选时保持生产工作树只读。
+> App 内的 Swift/打包资源仍经 Actions/TestFlight 发布。Apple 登录接口目前仅在原生迁移
+> 分支实现，线上只读查询 `/login/apple/status` 仍为 404，不能当成已经部署。
+
+- **以下为历史 Pi 发布流程**（`/home/bwicarus/claude` 检出、`/home/bwicarus/webapp` 生产）。
   VPS 自 2026-06-10 暂停，代码停在 5-28；除非明确要恢复 VPS，否则不要往它部署。
 - **Windows 不直接写 Pi 生产**。源码只经 git 上游流动（见
   [`cross-machine-dev-setup.md`](cross-machine-dev-setup.md)）。

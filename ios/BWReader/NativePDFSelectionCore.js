@@ -47,5 +47,13 @@ globalThis.BWNativePDFSelection = function (page) {
       values.sort((a, b) => a - b);
       return selected(values[0], values[values.length - 1], new Set(values));
     },
+    sentence(indexes) {
+      if (!Array.isArray(indexes) || !indexes.length || indexes.length > chars.length) throw new Error('Invalid selection indexes');
+      const values = indexes.map(i => positions.get(i));
+      if (values.some(i => i == null)) throw new Error('Unknown selection index');
+      values.sort((a, b) => a - b);
+      const range = _expandSentenceFromRange(chars, values[0], values[values.length - 1]);
+      return selected(range.start, range.end);
+    },
   });
 };

@@ -31,7 +31,7 @@ final class ReaderNativeAppPrefsBridge: NSObject, WKScriptMessageHandlerWithRepl
     var onOpenVaultPicker: (() -> Void)?
     /// 网页请求唤起「输入 / 替换 OpenAI Key」的单一用途 sheet。**Key 永不经过 JS**。
     var onOpenRealtimeKey: (() -> Void)?
-    /// 网页请求唤起 Pi 登录（固定 origin 的 WKWebView，cookie 落共享 dataStore）。
+    /// 请求唤起原生 Apple 登录；固定账户服务器会话落入共享 dataStore。
     var onOpenPiLogin: (() -> Void)?
 
     /// 这条消息是否来自可信来源。

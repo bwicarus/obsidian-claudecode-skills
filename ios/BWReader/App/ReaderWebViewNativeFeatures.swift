@@ -199,6 +199,8 @@ final class ReaderNativeVisualCaptureBroker {
 
     private weak var webView: WKWebView?
     private weak var pencilCanvas: UIView?
+    private weak var nativeDocumentViewport: UIView?
+    private var usesNativeDocument = false
 
     func bind(webView: WKWebView, pencilCanvas: UIView) {
         self.webView = webView
@@ -210,21 +212,31 @@ final class ReaderNativeVisualCaptureBroker {
         self.pencilCanvas = nil
     }
 
+    func setNativeDocumentViewport(_ viewport: UIView?) {
+        nativeDocumentViewport = viewport
+        usesNativeDocument = viewport != nil
+    }
+
     func capture(
         region: ReaderNativeVisualCaptureRegion?
     ) throws -> ReaderNativeVisualCaptureResult {
-        guard let webView, webView.window != nil else {
+        try Self.encode(captureImage(region: region))
+    }
+
+    func captureImage(region: ReaderNativeVisualCaptureRegion?) throws -> UIImage {
+        let currentViewport: UIView? = usesNativeDocument ? nativeDocumentViewport : webView
+        guard let currentViewport, currentViewport.window != nil else {
             throw ReaderNativeVisualCaptureError.pageUnavailable
         }
         guard let pencilCanvas, pencilCanvas.window != nil else {
             throw ReaderNativeVisualCaptureError.pencilOverlayUnavailable
         }
-        guard let host = Self.lowestCommonAncestor(webView, pencilCanvas) else {
+        guard let host = Self.lowestCommonAncestor(currentViewport, pencilCanvas) else {
             throw ReaderNativeVisualCaptureError.hierarchyUnavailable
         }
 
         host.layoutIfNeeded()
-        let viewport = webView.convert(webView.bounds, to: host)
+        let viewport = currentViewport.convert(currentViewport.bounds, to: host)
             .intersection(host.bounds)
         guard viewport.width >= 8, viewport.height >= 8 else {
             throw ReaderNativeVisualCaptureError.emptyViewport
@@ -237,7 +249,7 @@ final class ReaderNativeVisualCaptureBroker {
             throw ReaderNativeVisualCaptureError.emptyViewport
         }
 
-        let displayScale = webView.window?.screen.scale ?? UIScreen.main.scale
+        let displayScale = currentViewport.window?.screen.scale ?? UIScreen.main.scale
         let boundedScale = min(
             displayScale,
             Self.maximumLongEdge /
@@ -267,7 +279,7 @@ final class ReaderNativeVisualCaptureBroker {
         guard hierarchyRendered else {
             throw ReaderNativeVisualCaptureError.hierarchyRenderFailed
         }
-        return try Self.encode(image)
+        return image
     }
 
     /// Reconstructs an arbitrary PDF page without scrolling the live reader.
@@ -1005,34 +1017,10 @@ extension ReaderWebViewModel {
         )
     }
 
-    /// Takes a pixel-accurate image of only the currently visible WKWebView.
-    /// It intentionally does not capture the full scrollable document. App
-    /// Realtime delivery keeps this JPEG in native code; the binary response
-    /// remains available for non-delivery callers and web fallbacks.
+    /// Uses the same visible reading hierarchy as realtime visual capture,
+    /// including native cards and Pencil layers. It excludes the AI sidebar.
     func captureNativeViewportImage() async throws -> UIImage {
-        guard webView.url != nil else {
-            throw NativeReaderCaptureError.pageUnavailable
-        }
-        guard !webView.bounds.isEmpty else {
-            throw NativeReaderCaptureError.emptyViewport
-        }
-        let configuration = WKSnapshotConfiguration()
-        configuration.rect = webView.bounds
-        let image: UIImage = try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<UIImage, Error>) in
-            webView.takeSnapshot(with: configuration) { image, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let image {
-                    continuation.resume(returning: image)
-                } else {
-                    continuation.resume(
-                        throwing: NativeReaderCaptureError.snapshotUnavailable
-                    )
-                }
-            }
-        }
-        return image
+        try captureNativeReadingHierarchyImage()
     }
 
     @discardableResult

@@ -19,8 +19,11 @@ test("App visual capture renders the shared WKWebView and PencilKit hierarchy", 
   assert.match(broker, /@MainActor\s+final class ReaderNativeVisualCaptureBroker/);
   assert.match(broker, /private weak var webView: WKWebView\?/);
   assert.match(broker, /private weak var pencilCanvas: UIView\?/);
-  assert.match(broker, /lowestCommonAncestor\(webView, pencilCanvas\)/);
-  assert.match(broker, /webView\.convert\(webView\.bounds, to: host\)/);
+  assert.match(broker, /lowestCommonAncestor\(currentViewport, pencilCanvas\)/);
+  assert.match(broker, /currentViewport\.convert\(currentViewport\.bounds, to: host\)/);
+  assert.match(broker, /usesNativeDocument \? nativeDocumentViewport : webView/);
+  assert.match(broker, /guard let currentViewport, currentViewport\.window != nil/);
+  assert.match(CAPTURE, /func captureNativeViewportImage\(\) async throws -> UIImage \{\s*try captureNativeReadingHierarchyImage\(\)/);
   assert.match(broker, /host\.drawHierarchy\([\s\S]*afterScreenUpdates: true/);
   assert.doesNotMatch(broker, /webView\.takeSnapshot/);
   assert.doesNotMatch(broker, /base64EncodedString/);

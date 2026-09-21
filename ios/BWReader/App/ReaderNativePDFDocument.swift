@@ -439,7 +439,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
 }
 
 @MainActor
-private final class ReaderNativePDFTextOverlay: UIView {
+private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDelegate, UIGestureRecognizerDelegate {
     var characters: NativeBookOCRPageCharacters? { didSet { clearSelection() } }
     var selectionCore: ReaderNativePDFSelection? { didSet { clearSelection() } }
     var embeddedText = false
@@ -449,6 +449,10 @@ private final class ReaderNativePDFTextOverlay: UIView {
     var onError: (() -> Void)?
     private var start: Int?
     private var selected: ReaderNativePDFSelection.Value?
+    private let leadingHandle = ReaderNativePDFSelectionHandle()
+    private let trailingHandle = ReaderNativePDFSelectionHandle()
+    private var handleAnchor: Int?
+    private lazy var editMenu = UIEditMenuInteraction(delegate: self)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -456,27 +460,64 @@ private final class ReaderNativePDFTextOverlay: UIView {
         let gesture = UILongPressGestureRecognizer(target: self, action: #selector(selectText(_:)))
         gesture.minimumPressDuration = 0.3
         gesture.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        gesture.delegate = self
         addGestureRecognizer(gesture)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tapText(_:)))
+        tap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        tap.delegate = self; tap.require(toFail: gesture)
+        addGestureRecognizer(tap)
+        addInteraction(editMenu)
+        for (index, handle) in [leadingHandle, trailingHandle].enumerated() {
+            handle.tag = index; handle.isHidden = true
+            handle.accessibilityLabel = index == 0 ? "选区起点" : "选区终点"
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(moveHandle(_:)))
+            pan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            handle.addGestureRecognizer(pan); addSubview(handle)
+        }
     }
     required init?(coder: NSCoder) { return nil }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard let touched = touch.view else { return true }
+        return !touched.isDescendant(of: leadingHandle) && !touched.isDescendant(of: trailingHandle)
+    }
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        var parent = superview
+        while let current = parent {
+            if let scroll = current as? UIScrollView {
+                for handle in [leadingHandle, trailingHandle] {
+                    if let pan = handle.gestureRecognizers?.first { scroll.panGestureRecognizer.require(toFail: pan) }
+                }
+                break
+            }
+            parent = current.superview
+        }
+    }
+    override func layoutSubviews() { super.layoutSubviews(); updateHandles(); setNeedsDisplay() }
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard let characters, !embeddedText || characters.textAuthority == .localOverride else { return false }
+        if [leadingHandle, trailingHandle].contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return true }
         return hit(point) != nil
     }
     private func hit(_ point: CGPoint) -> Int? {
         guard let p = canonicalPoint?(point) else { return nil }
         return selectionCore?.hit(p)
     }
+    @objc private func tapText(_ gesture: UITapGestureRecognizer) {
+        guard let index = hit(gesture.location(in: self)) else { return }
+        resolve(index, index); showMenu()
+    }
     @objc private func selectText(_ gesture: UILongPressGestureRecognizer) {
         guard let selectionCore else { return }
         switch gesture.state {
         case .began:
+            editMenu.dismissMenu()
             start = hit(gesture.location(in: self))
             if let start { resolve(start, start) }
         case .changed, .ended:
             if let start, let point = canonicalPoint?(gesture.location(in: self)),
                let end = selectionCore.hit(point, anchor: start, exactOnly: false) { resolve(start, end) }
-            if gesture.state == .ended { self.start = nil }
+            if gesture.state == .ended { self.start = nil; showMenu() }
         case .cancelled, .failed: start = nil
         default: break
         }
@@ -484,16 +525,84 @@ private final class ReaderNativePDFTextOverlay: UIView {
     private func resolve(_ start: Int, _ end: Int) {
         do {
             guard let value = try selectionCore?.range(from: start, to: end), value.indexes != selected?.indexes else { return }
-            selected = value; setNeedsDisplay(); onSelect?(value)
+            display(value)
         } catch { onError?() }
     }
-    func clearSelection() { start = nil; selected = nil; setNeedsDisplay() }
+    private func display(_ value: ReaderNativePDFSelection.Value) {
+        selected = value; updateHandles(); setNeedsDisplay(); onSelect?(value)
+    }
+    private func updateHandles() {
+        guard let selected, let chars = characters,
+              let first = selected.indexes.first, let last = selected.indexes.last,
+              chars.chars.indices.contains(first), chars.chars.indices.contains(last) else {
+            leadingHandle.isHidden = true; trailingHandle.isHidden = true; return
+        }
+        for (index, pair) in [(leadingHandle, chars.chars[first]), (trailingHandle, chars.chars[last])].enumerated() {
+            let (handle, char) = pair
+            let normalized = CGRect(x: char.x0 / chars.pageWidth, y: char.y0 / chars.pageHeight,
+                                    width: (char.x1-char.x0) / chars.pageWidth, height: (char.y1-char.y0) / chars.pageHeight)
+            guard let rect = project?(normalized) else { handle.isHidden = true; continue }
+            let vertical = char.vertical == true
+            let point = vertical ? CGPoint(x: rect.midX, y: index == 0 ? rect.minY : rect.maxY)
+                                 : CGPoint(x: index == 0 ? rect.minX : rect.maxX, y: index == 0 ? rect.minY : rect.maxY)
+            handle.frame = CGRect(x: point.x - 22, y: point.y - 22, width: 44, height: 44)
+            handle.isHidden = false
+        }
+    }
+    @objc private func moveHandle(_ gesture: UIPanGestureRecognizer) {
+        guard let selected, let core = selectionCore else { return }
+        if gesture.state == .began {
+            editMenu.dismissMenu()
+            handleAnchor = gesture.view === leadingHandle ? selected.indexes.last : selected.indexes.first
+        }
+        if gesture.state == .began || gesture.state == .changed || gesture.state == .ended,
+           let anchor = handleAnchor, let point = canonicalPoint?(gesture.location(in: self)),
+           let end = core.hit(point, anchor: anchor, exactOnly: false) { resolve(anchor, end) }
+        if gesture.state == .ended { handleAnchor = nil; showMenu() }
+        if gesture.state == .cancelled || gesture.state == .failed { handleAnchor = nil }
+    }
+    private func showMenu() {
+        guard let first = selected?.rects.first, let rect = project?(first) else { return }
+        editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: CGPoint(x: rect.midX, y: rect.minY)))
+    }
+    func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                             suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard let value = selected else { return nil }
+        return UIMenu(children: [
+            UIAction(title: "复制", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
+                guard self?.selected?.indexes == value.indexes else { return }
+                UIPasteboard.general.string = value.text
+            },
+            UIAction(title: "选整句", image: UIImage(systemName: "text.quote")) { [weak self] _ in
+                guard let self, selected?.indexes == value.indexes else { return }
+                do { if let sentence = try selectionCore?.sentence(value.indexes) { display(sentence) } }
+                catch { onError?() }
+            },
+        ])
+    }
+    func clearSelection() {
+        start = nil; handleAnchor = nil; selected = nil
+        editMenu.dismissMenu(); updateHandles(); setNeedsDisplay()
+    }
     override func draw(_ rect: CGRect) {
         guard let selected, let context = UIGraphicsGetCurrentContext() else { return }
         context.setFillColor(UIColor.systemTeal.withAlphaComponent(0.22).cgColor)
         for normalized in selected.rects {
             if let box = project?(normalized) { context.fill(box) }
         }
+    }
+}
+
+@MainActor
+private final class ReaderNativePDFSelectionHandle: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame); backgroundColor = .clear; isOpaque = false
+    }
+    required init?(coder: NSCoder) { return nil }
+    override func draw(_ rect: CGRect) {
+        UIColor.systemTeal.setFill()
+        UIBezierPath(ovalIn: CGRect(x: bounds.midX - 5, y: bounds.midY - 5, width: 10, height: 10)).fill()
+        UIBezierPath(rect: CGRect(x: bounds.midX - 1, y: bounds.midY - 11, width: 2, height: 22)).fill()
     }
 }
 

@@ -458,6 +458,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return receipt["ok"] as? Bool == true
     }
 
+    func setNativeDocumentCaptureViewport(_ view: UIView?) {
+        localRuntimeServer?.visualCaptureBroker.setNativeDocumentViewport(view)
+    }
+
+    func captureNativeReadingHierarchyImage() throws -> UIImage {
+        guard let localRuntimeServer else { throw NativeReaderCaptureError.pageUnavailable }
+        return try localRuntimeServer.visualCaptureBroker.captureImage(region: nil)
+    }
+
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             "showLegacy", "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
