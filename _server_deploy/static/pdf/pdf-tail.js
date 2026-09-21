@@ -389,12 +389,24 @@ document.addEventListener('pointermove', e => {
     var page = parseInt(pw.dataset && pw.dataset.pageNum, 10);
     return Number.isFinite(page) ? 'page:' + page : null;
   }
+  // 原生正文接管：网页不再渲页，`__inkCanvas` 和 dataset.loaded 都不会有。
+  // 但墨迹本身不需要那块画布 —— 笔画存在 pw.__inkStrokes 上，落库走 byPage[num]，
+  // 画出来的事归 PDFKit。所以接管时只认"这是本书的某一页"。
+  function nativeInkTakeover() {
+    try { return !!(window.RC && window.RC.readerNavigation && window.RC.readerNavigation.nativeViewport); }
+    catch (_) { return false; }
+  }
   function eligible(pw) {
-    if (!pw || !pw.__inkCanvas) return false;
+    if (!pw) return false;
     if (pw.classList.contains('pdf-upage')) {
-      return !pw.classList.contains('editing') &&
+      return !!pw.__inkCanvas && !pw.classList.contains('editing') &&
         !pw.classList.contains('fav-up-editing');
     }
+    if (nativeInkTakeover()) {
+      return Number.isFinite(parseInt(pw.dataset && pw.dataset.pageNum, 10)) &&
+        !document.body.classList.contains('up-editing');
+    }
+    if (!pw.__inkCanvas) return false;
     return pw.dataset.loaded === '1' &&
       !document.body.classList.contains('up-editing');
   }
@@ -431,6 +443,23 @@ document.addEventListener('pointermove', e => {
   function describe() {
     surfaceMap = Object.create(null);
     var surfaces = [];
+    if (nativeInkTakeover()) {
+      // 接管时页面的位置只有原生知道（网页这边没渲、滚动也不同步）。原生按可见页
+      // 算好屏幕矩形塞进 __bwNativeInkSurfaces，这里照用；id 仍是 'page:N'，
+      // 于是 resolveSurface / 落库那一路完全不用改。
+      var supplied = Array.isArray(window.__bwNativeInkSurfaces) ? window.__bwNativeInkSurfaces : [];
+      supplied.slice(0, 64).forEach(function (item) {
+        var id = item && String(item.id || '');
+        if (!/^page:\d+$/.test(id) || !item.rect) return;
+        var pw = document.querySelector('.page-wrap[data-page-num="' + id.slice(5) + '"]');
+        if (!pw || !eligible(pw)) return;
+        var rect = item.rect;
+        if (!(rect.width > 0 && rect.height > 0)) return;
+        surfaceMap[id] = pw;
+        surfaces.push({ id: id, rect: rect, exclusions: [] });
+      });
+      return { type: 'layout', documentToken: documentToken, surfaces: surfaces };
+    }
     document.querySelectorAll('.page-wrap[data-page-num], .pdf-upage').forEach(function (pw) {
       if (!eligible(pw)) return;
       var id = surfaceId(pw), rect = normalizedRect(pw.__inkCanvas.getBoundingClientRect());
@@ -440,6 +469,8 @@ document.addEventListener('pointermove', e => {
     });
     return { type: 'layout', documentToken: documentToken, surfaces: surfaces };
   }
+  // 原生那侧算完可见页的屏幕矩形后调它（见 ReaderWebViewModel.publishNativeInkSurfaces）。
+  window.__bwNativeInkSurfacesChanged = function () { scheduleReport(); };
   function report() {
     if (window.__BW_NATIVE_PENCILKIT_INK__ !== true) return;
     try {

@@ -327,6 +327,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeReadingProjectionMessageProxy: WeakScriptMessageHandler?
     private var nativeReaderGeometryMessageProxy: WeakScriptMessageHandlerWithReply?
     private var nativeProjectionRefreshTask: Task<Void, Never>?
+    private var nativeInkSurfaceTask: Task<Void, Never>?
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
     private var nativeAnkiMobileMessageProxy:
         WeakScriptMessageHandlerWithReply?
@@ -461,6 +462,49 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         guard receipt["ok"] as? Bool == true else {
             throw NSError(domain: "ReaderCardInk", code: 1, userInfo: [NSLocalizedDescriptionKey: receipt["error"] as? String ?? "卡片笔迹尚未保存"])
         }
+    }
+
+    /// 把可见页的屏幕矩形推给墨迹层。
+    ///
+    /// ⚠ 原生接管后网页不再渲页：`__inkCanvas` 不存在、`getBoundingClientRect`
+    /// 量不到任何东西 —— 墨迹表面会一个都没有，**Pencil 在原生正文上直接画不了**。
+    /// 页面位置此时只有 PDFKit 知道，所以由这边算好塞过去。
+    /// id 仍用 `page:N`，落库那一路（resolveSurface → byPage）完全不用改。
+    /// 合并成一次：滚动时布局回调每帧都来，逐帧过一次 WebKit 没有意义。
+    /// 与导航桥同一口径（180ms）。
+    private func scheduleNativeInkSurfacePublish() {
+        guard nativeInkSurfaceTask == nil else { return }
+        nativeInkSurfaceTask = Task { @MainActor [weak self] in
+            defer { self?.nativeInkSurfaceTask = nil }
+            try? await Task.sleep(for: .milliseconds(180))
+            guard let self, !Task.isCancelled else { return }
+            self.publishNativeInkSurfaces()
+        }
+    }
+
+    func publishNativeInkSurfaces() {
+        guard let document = nativePDFDocument,
+              webView.bounds.width > 0, webView.bounds.height > 0 else { return }
+        var surfaces: [[String: Any]] = []
+        for page in document.position.visiblePages.prefix(8) {
+            guard let pageRect = document.viewRect(
+                normalized: CGRect(x: 0, y: 0, width: 1, height: 1), page: page) else { continue }
+            let local = webView.convert(document.view.convert(pageRect, to: nil), from: nil)
+            guard local.width > 0, local.height > 0 else { continue }
+            surfaces.append([
+                "id": "page:\(page)",
+                "rect": ["x": local.minX / webView.bounds.width,
+                         "y": local.minY / webView.bounds.height,
+                         "width": local.width / webView.bounds.width,
+                         "height": local.height / webView.bounds.height],
+            ])
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: surfaces),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.callAsyncJavaScript(
+            "window.__bwNativeInkSurfaces = JSON.parse(value);"
+            + "window.__bwNativeInkSurfacesChanged?.();",
+            arguments: ["value": json], in: nil, contentWorld: .page) { _ in }
     }
 
     /// 原生正文接管时拖动页卡：把落点换成 **PDF 页内归一化坐标**再写锚点。
@@ -600,6 +644,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 self?.openNativeLookup(page: page, text: text, mode: mode)
             }
         }
+        // 布局一变就重推墨迹表面：滚动/缩放后页面的屏幕位置变了，不推的话
+        // Pencil 会画在上一帧的位置上。挂载那次的 onGeometry 已在回调里自清。
+        document.onGeometry = { [weak self] in
+            Task { @MainActor [weak self] in self?.scheduleNativeInkSurfacePublish() }
+        }
+        publishNativeInkSurfaces()
         document.onSelection = { [weak self] values in
             Task { @MainActor [weak self] in
                 _ = await self?.updateNativePDFSelection(values, bookID: bookID, contentSHA256: digest, scope: scope)
@@ -611,6 +661,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func invalidateNativePDFDocument() {
         nativePDFMountTask?.cancel()
         nativePDFMountTask = nil
+        nativeInkSurfaceTask?.cancel()
+        nativeInkSurfaceTask = nil
+        nativeProjectionRefreshTask?.cancel()
+        nativeProjectionRefreshTask = nil
         nativePDFNavigationBridge?.invalidate()
         activeNativePDFDocument?.onSelection = nil
         activeNativePDFDocument?.onGeometry = nil
