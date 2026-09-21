@@ -607,7 +607,8 @@ enum ReaderNativeConversationScript {
         if (command.scope && command.scope !== scope) return { ok: false, error: '会话已切换，请重新操作' };
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
-        if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup'].includes(command.action)) parameterKeys.push('value');
+        if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup',
+             'nativeCardMove', 'nativeCardResize'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -721,6 +722,43 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换，请在原书核对结果' };
             if (!saved || saved.ok !== true) return { ok: false, error: '划线未落库' };
             return { ok: true, value: { id: (saved.highlight && saved.highlight.id) || saved.id || '', page: value.page } };
+          } else if (action === 'nativeCardMove' || action === 'nativeCardResize') {
+            // 原生正文接管时的页卡拖动 / 改大小。
+            //
+            // ⚠ 走 `/pdf/api/notes` 的 PATCH（字段级合并），本地 runtime 就地落库。
+            //   **不走网页的锚点解析器**：那条路把落点当成网页视口坐标，而原生接管后
+            //   网页视口里根本没有那一页，卡会飞到别处。页码与页内归一化坐标由原生
+            //   那侧用 PDFKit 的 canonicalPoint 算好，这里只负责写。
+            const value = command.value;
+            const fileRel = window.__PDF_CFG && window.__PDF_CFG.file_rel;
+            if (!value || typeof value.id !== 'string' || !value.id ||
+                typeof fileRel !== 'string' || !fileRel) return { ok: false, error: '页卡参数无效' };
+            const patch = { file: fileRel, id: value.id };
+            if (action === 'nativeCardMove') {
+              if (!Number.isSafeInteger(value.page) || value.page < 1 ||
+                  !Number.isFinite(value.x) || !Number.isFinite(value.y) ||
+                  value.x < 0 || value.x > 1 || value.y < 0 || value.y > 1) {
+                return { ok: false, error: '落点不在页面内' };
+              }
+              patch.anchor = { kind: 'pdf', page: value.page, x: value.x, y: value.y };
+            } else {
+              if (!(Number(value.w) > 0) || !(Number(value.h) > 0)) return { ok: false, error: '尺寸无效' };
+              patch.w = Number(value.w); patch.h = Number(value.h);
+            }
+            const captured = scope;
+            let saved;
+            try {
+              const r = await fetch('/pdf/api/notes', {
+                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(patch)
+              });
+              saved = await r.json();
+            } catch (error) {
+              return { ok: false, error: String(error && error.message || error).slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
+            return { ok: true, value: { id: value.id } };
           } else if (action === 'nativeSelectionLookup') {
             // 原生阅读区的查词/翻译。**只取数据**，渲染在原生那侧。
             // 语言路由和端点都在阅读器自己的 __bwReaderLookupData 里，这里不复制。

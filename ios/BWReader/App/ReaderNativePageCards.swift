@@ -70,10 +70,30 @@ struct ReaderNativePageCards: View {
 
     var body: some View {
         GeometryReader { geometry in
-            ZStack(alignment: .topLeading) {
+            // ⚠ 原生正文滚动/缩放时页卡要跟着动，而 SwiftUI 观察不到 PDFView 内部的
+            //   变化。document 每次布局都会 bump geometryRevision —— 把它读进来，
+            //   这一层才会重算。没有原生文档时按原样渲染，行为不变。
+            if let document = reader.nativePDFDocument {
+                ReaderNativeGeometryTracker(document: document) { _ in cards(in: geometry) }
+            } else {
+                cards(in: geometry)
+            }
+        }
+        .clipped()
+    }
+
+    @ViewBuilder
+    private func cards(in geometry: GeometryProxy) -> some View {
+        ZStack(alignment: .topLeading) {
                 ForEach(model.placements) { item in
-                    ForEach(item.markers) { marker in
-                        let box = reader.nativePageCardRect(marker.rect, in: geometry.frame(in: .global))
+                    // ⚠ 原生正文接管时坐标必须来自 PDFKit 解锚：网页那套 rect 是从
+                    //   DOM 推的，而接管后网页不渲页、滚动也不同步，它已经不对应
+                    //   屏幕上的任何东西。拿不到才退回网页那条路。
+                    let nativeMarkers = reader.nativePageMarkerRects(
+                        id: item.id, in: geometry.frame(in: .global))
+                    ForEach(Array(item.markers.enumerated()), id: \.element.id) { index, marker in
+                        let box = nativeMarkers.map { index < $0.count ? $0[index] : .zero }
+                            ?? reader.nativePageCardRect(marker.rect, in: geometry.frame(in: .global))
                         Button {
                             if let id = item.controls["toggleBound"] {
                                 Task { await model.perform("liveAction", parameters: ["actionId": id]) }
@@ -94,7 +114,11 @@ struct ReaderNativePageCards: View {
                         .accessibilityLabel((item.open ? "收起" : "展开") + item.title + "，标记 " + marker.number)
                         .offset(x: box.minX, y: box.minY)
                     }
-                    let rect = reader.nativePageCardRect(item.rect, in: geometry.frame(in: .global))
+                    // 卡身同理：原生接管时用 PDFKit 解出来的位置和尺寸
+                    // （noteGeometry 会按页宽/base_w 的比例缩放，并处理折叠态）。
+                    let rect = reader.nativePageCardGeometry(
+                        id: item.id, size: item.size, in: geometry.frame(in: .global))
+                        ?? reader.nativePageCardRect(item.rect, in: geometry.frame(in: .global))
                     if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < geometry.size.width && rect.minY < geometry.size.height {
                         ReaderNativePlacedCard(item: item, reader: reader, model: model,
                                                origin: geometry.frame(in: .global).origin,
@@ -103,10 +127,17 @@ struct ReaderNativePageCards: View {
                             .zIndex(10)
                     }
                 }
-            }
         }
-        .clipped()
     }
+}
+
+/// 把 PDFView 内部的布局变化接到 SwiftUI 上。
+/// document 每次布局都会 bump `geometryRevision`；把它读进 body，这一层就会重算。
+@MainActor
+private struct ReaderNativeGeometryTracker<Content: View>: View {
+    @ObservedObject var document: ReaderNativePDFDocument
+    @ViewBuilder let content: (Int) -> Content
+    var body: some View { content(document.geometryRevision) }
 }
 
 @MainActor
@@ -214,11 +245,15 @@ private struct ReaderNativePlacedCard: View {
         DragGesture(minimumDistance: 6)
             .updating($translation) { value, state, _ in state = value.translation }
             .onEnded { value in
-                guard let action = item.controls["move"] else { return }
                 let scope = model.scope
                 let point = CGPoint(x: origin.x + rect.minX + value.translation.width + 1,
                                     y: origin.y + rect.minY + value.translation.height + 1)
                 Task {
+                    // 原生正文接管时走原生锚点：落点要换成**页内**归一化坐标。
+                    // 网页那条路把它当网页视口坐标，而接管后视口里没有那一页 ——
+                    // 卡会飞到别处。原生写失败才退回去。
+                    if await reader.moveNativeCard(id: item.id, windowPoint: point) { return }
+                    guard let action = item.controls["move"] else { return }
                     await reader.placeNativeConversationCard(actionID: action, scope: scope, windowPoint: point)
                     if model.scope == scope { operationError = model.error }
                 }
@@ -244,10 +279,19 @@ private struct ReaderNativePlacedCard: View {
     }
 
     private func saveSize(_ value: CGSize) {
-        guard let action = item.controls["resize"] else { return }
         let scope = model.scope, value = boundedSize(value)
         resizing = value
         Task {
+            // 原生接管时按卡片自身单位存（屏幕尺寸 ÷ 页宽/base_w 的比例）；
+            // 否则每缩放一次书，卡片尺寸就被记错一次。
+            if await reader.resizeNativeCard(id: item.id, size: value) {
+                if scope == model.scope { resizing = nil }
+                return
+            }
+            guard let action = item.controls["resize"] else {
+                if scope == model.scope { resizing = nil }
+                return
+            }
             let saved = await reader.resizeNativeConversationCard(actionID: action, scope: scope, size: value)
             if scope == model.scope {
                 resizing = nil

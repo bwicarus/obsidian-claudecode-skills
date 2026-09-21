@@ -407,6 +407,32 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
     }
 
+    /// 页卡在屏幕上的位置。
+    ///
+    /// ⚠ 原生正文接管时**必须用原生几何**：网页那侧的 rect 是从 DOM 推出来的，
+    /// 而接管之后网页既不渲页、滚动也不跟着动 —— 那套坐标已经不对应屏幕上的
+    /// 任何东西。`noteGeometry` 走 PDFKit 解锚，是唯一还成立的来源。
+    /// 返回 nil = 没有原生几何，调用方退回网页那条路（不猜）。
+    func nativePageCardGeometry(id: String, size: CGSize?, in container: CGRect) -> CGRect? {
+        guard let document = nativePDFDocument,
+              let note = document.notes.first(where: { $0["id"] as? String == id }),
+              let geometry = document.noteGeometry(note, presentationSize: size) else { return nil }
+        return document.view.convert(geometry.rect, to: nil)
+            .offsetBy(dx: -container.minX, dy: -container.minY)
+    }
+
+    /// 页卡的锚标记（钉在正文词上的那些框）。同上：原生接管时由 PDFKit 解锚。
+    func nativePageMarkerRects(id: String, in container: CGRect) -> [CGRect]? {
+        guard let document = nativePDFDocument,
+              let note = document.notes.first(where: { $0["id"] as? String == id }),
+              let geometry = document.noteGeometry(note) else { return nil }
+        // 绑定解不出来时返回空数组而不是 nil：那是"这张卡确实没钉在正文上"，
+        // 跟"没有原生几何"是两回事，退回网页路径反而会画出错位的框。
+        return geometry.bindingRects.map {
+            document.view.convert($0, to: nil).offsetBy(dx: -container.minX, dy: -container.minY)
+        }
+    }
+
     func nativePageCardRect(_ rect: CGRect, in container: CGRect) -> CGRect {
         let local = CGRect(x: rect.minX * webView.bounds.width, y: rect.minY * webView.bounds.height,
                            width: rect.width * webView.bounds.width, height: rect.height * webView.bounds.height)
@@ -435,6 +461,44 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         guard receipt["ok"] as? Bool == true else {
             throw NSError(domain: "ReaderCardInk", code: 1, userInfo: [NSLocalizedDescriptionKey: receipt["error"] as? String ?? "卡片笔迹尚未保存"])
         }
+    }
+
+    /// 原生正文接管时拖动页卡：把落点换成 **PDF 页内归一化坐标**再写锚点。
+    ///
+    /// ⚠ 不能沿用 `placeNativeConversationCard`：那条路把落点换成**网页视口**的
+    /// 归一化坐标，交给网页的锚点解析器。原生接管后网页视口里根本没有那一页，
+    /// 那个坐标不指向任何东西 —— 卡会飞到别处。
+    /// 返回 false = 没有原生几何或落点不在任何页上，调用方退回网页那条路。
+    func moveNativeCard(id: String, windowPoint: CGPoint) async -> Bool {
+        guard let document = nativePDFDocument else { return false }
+        let local = document.view.convert(windowPoint, from: nil)
+        guard let placed = document.canonicalPoint(local, from: document.view) else { return false }
+        let receipt = await requestNativeConversationCommand([
+            "action": "nativeCardMove",
+            "value": ["id": id, "page": placed.page,
+                      "x": placed.point.x, "y": placed.point.y],
+        ])
+        return receipt["ok"] as? Bool == true
+    }
+
+    /// 原生正文接管时改页卡大小。屏幕尺寸 → 卡片自身单位（除以 noteGeometry 用的
+    /// 那个 ratio = 页宽 / base_w），否则每缩放一次书、卡片尺寸就被记错一次。
+    func resizeNativeCard(id: String, size: CGSize) async -> Bool {
+        guard let document = nativePDFDocument,
+              let note = document.notes.first(where: { $0["id"] as? String == id }),
+              let anchor = note["anchor"] as? [String: Any],
+              let page = (anchor["page"] as? NSNumber)?.intValue,
+              let pageRect = document.viewRect(normalized: CGRect(x: 0, y: 0, width: 1, height: 1), page: page),
+              pageRect.width > 0 else { return false }
+        let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any] ?? [:]
+        let base = (payload["base_w"] as? NSNumber)?.doubleValue ?? 0
+        let ratio = base > 0 ? pageRect.width / base : 1
+        guard ratio > 0, size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return false }
+        let receipt = await requestNativeConversationCommand([
+            "action": "nativeCardResize",
+            "value": ["id": id, "w": Double(size.width) / ratio, "h": Double(size.height) / ratio],
+        ])
+        return receipt["ok"] as? Bool == true
     }
 
     func placeNativeConversationCard(actionID: String, scope: String, windowPoint: CGPoint) async {
@@ -700,7 +764,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
-            "nativeSelectionHighlight", "nativeSelectionLookup"]
+            "nativeSelectionHighlight", "nativeSelectionLookup",
+            "nativeCardMove", "nativeCardResize"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {
