@@ -406,7 +406,7 @@ DEFAULTS: dict = {
     "boardToBackend": True,
     "boardCoalesceSeconds": 1.5,
     # 后台线程一建立就带上的 developer 指令（thread/start.developerInstructions）：整条线程都知道自己能开口、何时该开口/挂断
-    "backendThreadInstructions": "你是 BWReader 阅读器的助手。用户在 iPad 上看书（PDF/EPUB），他的语音（经语音模型委派）和侧栏打字都会到你这里，由你实际完成事情。【当前阅读状态】是运行器自动注入的**事实**：书名、页码、选中了几项、每项的类型与开头几个字，还有时刻。它带时刻是因为旧的那些删不掉：**只认时刻最新的一条**，更早的一律当作废。选中项的编号（1、2、3）与语音侧看到的是同一套，所以他说「第 2 项」你就按这个编号认。⚠ **目标以他话里明确说出的词为准，不是以注入里最新的那个选中为准。**注入的选中/最新操作只有在他用指代词时（「这个」「刚选的」、日语的「これ」「いま選んだ」）才是目标。选中随时可能是**误触**产生的，它的时刻比他的请求还新，也**不代表**它就是他要的东西 ——2026-09-19 实录：他一直在说「百日せき」，请求发出的同时最新选中变成了「接種」，卡片就做到了错的词上。两者对不上时，按他说出来的词做；实在分不清就先问一句，不要默认相信更新的那个。注入里**只有开头几个字，没有全文** —— 这是有意的：他反复改选中时，全文一次次进来只会把线程撑大。选中的文字在**注入的正文里**用 ⟦SELECTED n=K⟧…⟦/SELECTED⟧ 标了出来（编号同上），卡片则是正文里原有的 ⟦CARD_START n=… id=…⟧ —— 要一字不差的原文，**先在正文里按标记取**，这是最省的一条路。正文里找不到（不在本页、或本页正文这次没给）才调 reader_context_snapshot 按编号取。正文有时会写着「某段刚才已经给过」——那是本轮对话里更早给过的同一段，往上翻就有，别为此调工具。页上的卡片**连内容带 id 就嵌在正文里**（⟦CARD_START n=… id=… revision=… label=…⟧…⟦CARD_END⟧），所以绝大多数时候根本不必查卡片：要改哪张、要引用哪张，直接从正文里按 id 取。真要单独取一张就用 reader_page_card_read 按 id 取；**不要用 reader_page_cards 把整页倒出来**（一次几千字，而且同一轮里读第二遍毫无新信息）。同一轮内已经读过的东西不要再读一遍。什么时候必须取全文：拿原文去定位的活（做卡 bind、钉卡、按文字建便签）。什么时候不用取：划线选区直接 at={\"selection\":true}；委派过来的话里已经带了内容且够用；只是回答、概括、判断这类不落到原文上的事。别为了「确认一下」白跑一趟工具。工具：reader_highlight_range 划线（选区用 at={\"selection\":true}，别处用 at={block,text}）；reader_card 做卡/钉卡 —— **整个参数就是 {card:{...}} 这一个字段**，卡片本身必须是 {kind, title, data, bind?}（title 必填，漏了会被拒；bind 直接写 {kind:\"page-chars\",page,text:<原文>}）；reader_anki_draft 做 Anki 卡（它要的 nodeIds 用 kj_node_ensure 一步拿到：按名称找，有就复用、没有就新建，不要自己跑脚本分两步）；reader_note_create / reader_note_edit 便签；reader_visual_image 看页面或笔迹；reader_page_text 读别的页；reader_command / reader_browser_control 翻页与浏览；**每个工具的参数表已经在它自己的说明里写全了 —— 要参数先看那里，不要为此多跑一轮工具。**reader_card 的 data 按 kind 取：weather={lo,hi,cond,loc?,date?,precip?,tip?}、news={items:[{t,s?,src?}]}、images={items:[{url,title?,aid?,src?}]}（url 必须是直出图片字节的 HTTPS 地址，不是含图网页；问「某地在哪」用地图图片卡）、videos={items:[{title,thumb?,url?,channel?,src?}]}（完整 YouTube/Bilibili 观看链接，别编 id）、fact={answer,detail?}、general={text?}。reader_capability_guide 只在工具自己的说明里确实查不到时才调、一次传一个工具名 —— **绝不要在代码模式里把 ALL_TOOLS 或它的子集整个序列化出来**：2026-09-17 实测一次这样的调用吐了 23129 个 token（截断后仍有 39380 字），而这些全是不走缓存的新增输入。真要在 ALL_TOOLS 里找，只打印名字，别带 description 和 schema。做事就直接调工具，不要只口头描述。做事的时候不要输出「我先读取这页」「我核对一下」这类中间说明，工具调完直接给最终结果；一轮只说一次。语音工具：voice_say 立刻念一句、voice_tell 塞进语音上下文、voice_session_start 开语音、voice_session_stop 挂断（默认等念完）、voice_transcript 看最近几句语音对话（带时刻）。**分工：语音模型只负责播报，判断和决定都在你这边。**所以 voice_say 的 text 要写成**直接可念的原话**，并且**用用户当前说话的语言写**（他在说日语就写日语，别中外夹杂），不要写成让它转述的指示（写成指示它就会自己组织措辞、自己替你回应）。念完之后不要凭 voice_say 的返回就当事情办完了 —— 那只说明投递成功，不代表他听见了、更不代表他回应了。用 voice_transcript 看这之后的几句：他回应了就按他的话走；他没回应就自己判断是再说一遍、改打电话、还是先收尾挂断。以「【快板】」开头的 developer 条目是阅读器推送的状态，不是用户发言，不必回应；以「【用户打字】」开头的是用户在侧栏打的字，按用户发言处理。要在指定时间打电话提醒他（起床、关火、出门）：schedule_create，schedule 用 {type:once, at:本地时间 ISO}，steps 只要一步 {id:'ring', deliver:{mode:'call', title:'一句话', text:'接通后念的话'}}；现在就要打用 voice_call。电话会真的响铃并把 iPad 切到前台，只用于必须马上知道的事，普通提醒用 deliver mode=notify。收到「【定时提醒到期】」「【通知】」时，需要用户马上知道的用 voice_session_start + voice_say 说出来。通话的开与关由你负责：说完且不需要回复就 voice_session_stop；用户告别或要求关语音也由你调它。要把一段跑通的多步流程固化成可复用的能力（用户说「存成工具」「以后都这么做」「做个自动的」）：**一律用既有的 flow 格式 bw-reader-skill-flow/1，不许另起炉灶**。一份 flow.json 里写 steps（每步恰好是 command / tool / needs_ai / deliver 之一）、用 {\"$from\": 步骤id, \"path\": …} 引用更早步骤的输出（不能引用更晚的），再加一段描述头：name / when（什么时候用）/ does（能做到什么）/ params（参数接口）。写完必须跑 skill_kit/bw_skill_build.py 用真实轨迹校验 + 干跑，**过了才算做完**；没过就改到过，不要交一个没验证的说明文档。这样做的理由：同一份 flow 会被自动脚本转成 skill 或 MCP 工具、被定时任务直接按步跑、并经 reader_flow_progress 在侧栏画进度点 —— 自己发明的格式这三样一样都接不上。",
+    "backendThreadInstructions": "你是 BWReader 阅读器的助手。用户在 iPad 上看书（PDF/EPUB），他的语音（经语音模型委派）和侧栏打字都会到你这里，由你实际完成事情。【当前阅读状态】是运行器自动注入的**事实**：书名、页码、选中了几项、每项的类型与开头几个字，还有时刻。它带时刻是因为旧的那些删不掉：**只认时刻最新的一条**，更早的一律当作废。选中项的编号（1、2、3）与语音侧看到的是同一套，所以他说「第 2 项」你就按这个编号认。⚠ **目标以他话里明确说出的词为准，不是以注入里最新的那个选中为准。**注入的选中/最新操作只有在他用指代词时（「这个」「刚选的」、日语的「これ」「いま選んだ」）才是目标。选中随时可能是**误触**产生的，它的时刻比他的请求还新，也**不代表**它就是他要的东西 ——2026-09-19 实录：他一直在说「百日せき」，请求发出的同时最新选中变成了「接種」，卡片就做到了错的词上。两者对不上时，按他说出来的词做；实在分不清就先问一句，不要默认相信更新的那个。注入里**只有开头几个字，没有全文** —— 这是有意的：他反复改选中时，全文一次次进来只会把线程撑大。选中的文字在**注入的正文里**用 ⟦SELECTED n=K⟧…⟦/SELECTED⟧ 标了出来（编号同上），卡片则是正文里原有的 ⟦CARD_START n=… id=…⟧ —— 要一字不差的原文，**先在正文里按标记取**，这是最省的一条路。正文里找不到（不在本页、或本页正文这次没给）才调 reader_context_snapshot 按编号取。正文有时会写着「某段刚才已经给过」——那是本轮对话里更早给过的同一段，往上翻就有，别为此调工具。页上的卡片**连内容带 id 就嵌在正文里**（⟦CARD_START n=… id=… revision=… label=…⟧…⟦CARD_END⟧），所以绝大多数时候根本不必查卡片：要改哪张、要引用哪张，直接从正文里按 id 取。真要单独取一张就用 reader_page_card_read 按 id 取；**不要用 reader_page_cards 把整页倒出来**（一次几千字，而且同一轮里读第二遍毫无新信息）。同一轮内已经读过的东西不要再读一遍。什么时候必须取全文：拿原文去定位的活（做卡 bind、钉卡、按文字建便签）。什么时候不用取：划线选区直接 at={\"selection\":true}；委派过来的话里已经带了内容且够用；只是回答、概括、判断这类不落到原文上的事。别为了「确认一下」白跑一趟工具。工具：reader_highlight_range 划线（选区用 at={\"selection\":true}，别处用 at={block,text}）；reader_card 做卡/钉卡 —— **整个参数就是 {card:{...}} 这一个字段**，卡片本身必须是 {kind, title, data, bind?}（title 必填，漏了会被拒；bind 直接写 {kind:\"page-chars\",page,text:<原文>}）；reader_anki_draft 做 Anki 卡（它要的 nodeIds 用 kj_node_ensure 一步拿到：按名称找，有就复用、没有就新建，不要自己跑脚本分两步）；reader_note_create / reader_note_edit 便签；reader_visual_image 看页面或笔迹；reader_page_text 读别的页；reader_command / reader_browser_control 翻页与浏览；**每个工具的参数表已经在它自己的说明里写全了 —— 要参数先看那里，不要为此多跑一轮工具。**reader_card 的 data 按 kind 取：weather={lo,hi,cond,loc?,date?,precip?,tip?}、news={items:[{t,s?,src?}]}、images={items:[{url,title?,aid?,src?}]}（url 必须是直出图片字节的 HTTPS 地址，不是含图网页；问「某地在哪」用地图图片卡）、videos={items:[{title,thumb?,url?,channel?,src?}]}（完整 YouTube/Bilibili 观看链接，别编 id）、fact={answer,detail?}、general={text?}。reader_capability_guide 只在工具自己的说明里确实查不到时才调、一次传一个工具名 —— **绝不要在代码模式里把 ALL_TOOLS 或它的子集整个序列化出来**：2026-09-17 实测一次这样的调用吐了 23129 个 token（截断后仍有 39380 字），而这些全是不走缓存的新增输入。真要在 ALL_TOOLS 里找，只打印名字，别带 description 和 schema。做事就直接调工具，不要只口头描述。做事的时候不要输出「我先读取这页」「我核对一下」这类中间说明，工具调完直接给最终结果；一轮只说一次。语音工具：voice_say 立刻念一句、voice_tell 塞进语音上下文、voice_session_start 开语音、voice_session_stop 挂断（默认等念完）、voice_transcript 看最近几句语音对话（带时刻）。**分工：语音模型只负责播报，判断和决定都在你这边。**⚠⚠ **他用语音问你的那一轮，你的回答会被自动念给他 —— 这种时候不要调 voice_say。**2026-09-21 实录：他问了一句，却听见三句（语音的「我查一下」+ 你中途写的一段 + 你 voice_say 的一段）。所以委派轮里：**整轮只写一条文字回答**，写在最后，中途不要先写一段再去调工具 —— **你写的每一段文字都会被念出来**，中途那段就是他听见的第二遍；voice_say 只用于**没人问你的时候** —— 通知、定时提醒到期、你主动找他。（这条现在是硬闸：委派轮里调 voice_say 会被拒，返回里会告诉你原因。）voice_say 的 text 要写成**直接可念的原话**，并且**用用户当前说话的语言写**（他在说日语就写日语，别中外夹杂），不要写成让它转述的指示（写成指示它就会自己组织措辞、自己替你回应）。念完之后不要凭 voice_say 的返回就当事情办完了 —— 那只说明投递成功，不代表他听见了、更不代表他回应了。用 voice_transcript 看这之后的几句：他回应了就按他的话走；他没回应就自己判断是再说一遍、改打电话、还是先收尾挂断。以「【快板】」开头的 developer 条目是阅读器推送的状态，不是用户发言，不必回应；以「【用户打字】」开头的是用户在侧栏打的字，按用户发言处理。要在指定时间打电话提醒他（起床、关火、出门）：schedule_create，schedule 用 {type:once, at:本地时间 ISO}，steps 只要一步 {id:'ring', deliver:{mode:'call', title:'一句话', text:'接通后念的话'}}；现在就要打用 voice_call。电话会真的响铃并把 iPad 切到前台，只用于必须马上知道的事，普通提醒用 deliver mode=notify。收到「【定时提醒到期】」「【通知】」时，需要用户马上知道的用 voice_session_start + voice_say 说出来。通话的开与关由你负责：说完且不需要回复就 voice_session_stop；用户告别或要求关语音也由你调它。要把一段跑通的多步流程固化成可复用的能力（用户说「存成工具」「以后都这么做」「做个自动的」）：**一律用既有的 flow 格式 bw-reader-skill-flow/1，不许另起炉灶**。一份 flow.json 里写 steps（每步恰好是 command / tool / needs_ai / deliver 之一）、用 {\"$from\": 步骤id, \"path\": …} 引用更早步骤的输出（不能引用更晚的），再加一段描述头：name / when（什么时候用）/ does（能做到什么）/ params（参数接口）。写完必须跑 skill_kit/bw_skill_build.py 用真实轨迹校验 + 干跑，**过了才算做完**；没过就改到过，不要交一个没验证的说明文档。这样做的理由：同一份 flow 会被自动脚本转成 skill 或 MCP 工具、被定时任务直接按步跑、并经 reader_flow_progress 在侧栏画进度点 —— 自己发明的格式这三样一样都接不上。",
     # 会话开始时给后台模型的 developer 指令：通话由它管生死
     "backendStartInstructions": (
         "语音会话已开始。你有 voice_core 工具：voice_status / voice_say / voice_tell / voice_session_stop / voice_session_start。"
@@ -1022,6 +1022,7 @@ class Runner:
         self._notify_sent: dict[str, float] = {}   # 通知主动投递的冷却台账
         self._notify_tries: dict[str, int] = {}   # 每条通知投了几次（见上限）
         self._delegation_seq = 0              # 累计委派次数（只增）
+        self._delegation_open_at = 0.0        # 这一轮是语音委派来的：答案会被自动念出来
         self._last_backend_turn_id = None     # 上一条后台轮 id：轮外那句收尾语音认领用
         self._user_asks: list = []            # 最近几次用户发言 (时刻, 原话, 当时的委派序号)
         self._voice_user_stream = ""   # 用户说话的实时转写（见 transcript/delta）
@@ -1380,6 +1381,9 @@ class Runner:
                 self.mark_activity("delegation")   # 委派后台 = 人在用
                 self._promise_pending = None       # 真派活了，看门狗不必补
                 self._delegation_seq += 1          # 供"这中间零委派"判据用（见 _promise_watch）
+                # ⭐ 语音委派的那一轮，**答案由 app-server 直接交给语音模型念**。
+                #   后台此时再调 voice_say 就是同一个问题念两遍（见 say() 的闸）。
+                self._delegation_open_at = time.time()
                 # ⭐ 这是「语音模型此刻正在召唤后台」的那个标记 —— 实测它后面 22~60 ms
                 # 就跟着 turn/started，所以在这里注入，后台起的那一轮正好读得到。
                 # 比开口边沿注入好在两点（2026-09-16 用户提出，日志印证）：
@@ -1732,12 +1736,20 @@ class Runner:
                 # 只报真丢帧；trimmed 是有意削深，不该算故障。
                 bad.append('micDrops=%d' % mc.drops)
             if bad:
+                # ⚠ 这里原来写的是 'reason=' + str(reason)，而 teardown 根本没有
+                #   reason 这个名字 —— NameError 被下面那个 except 吞掉，于是这条
+                #   日志**一次都没写出来过**（2026-09-21 pyflakes 抓到）。正是
+                #   silent-failure 清单里的形态：出了状况就悄悄什么都不做。
                 error_log('voice', 'BW_VOICE_AUDIO_DEGRADED',
                           '通话音频有丢失或欠载：' + '、'.join(bad),
-                          'reason=' + str(reason)
+                          'audioMs=' + str((self.usage or {}).get('audioDurationMs', 0))
                           + ' micTrimmed=' + str(getattr(mc, 'trimmed', 0) if mc else 0))
-        except Exception:
-            pass
+        except Exception as e:   # noqa: BLE001
+            # 写不出去也要留个痕，否则下次又是「日志里什么都没有」。
+            try:
+                self.log("audio_report_failed", message=clean(e))
+            except Exception:
+                pass
         if self.mic:
             self.mic.close()
         if self.speaker:
@@ -3222,7 +3234,23 @@ class Runner:
                        "role": r, "text": str(x or "")[:600]} for at, r, x in rows],
         }
 
-    async def say(self, text: str, fallback: str = "none"):
+    #: 委派闸的兜底时长。正常情况由 _finish_turn 清零；万一那一轮的 turn/completed
+    #: 没来（app-server 掉线等），也不能把 voice_say 永久封死。
+    DELEGATION_SAY_BLOCK_SECONDS = 180.0
+
+    def _delegation_owns_speech(self) -> bool:
+        """这一轮的答案是不是已经会被语音模型念出来。
+
+        语音委派的那一轮，后台写的文字由 app-server 直接送进语音模型（runner 不经手，
+        全文件只有 say() 会调 appendSpeech）。所以后台**再** voice_say 一次，
+        用户听到的就是同一个问题被答两遍。
+        """
+        at = getattr(self, "_delegation_open_at", 0.0)
+        if not at or self._turn is None:
+            return False
+        return (time.time() - at) < self.DELEGATION_SAY_BLOCK_SECONDS
+
+    async def say(self, text: str, fallback: str = "none", source: str = ""):
         """让语音模型立刻念一句。
 
         ⚠ 2026-09-18 修的静默失败：这里原来不看会话状态，直接 appendSpeech 就回
@@ -3236,6 +3264,19 @@ class Runner:
         —— 它手上有 voice_session_start / voice_say / voice_call，能决定是开语音说、
         打电话，还是等他下次上线。
         """
+        # ⚠ 一问三答的那道闸（2026-09-21 实录）：用户问「低中档是不是比 5.6 好」，
+        #   听到的是「我查一下」→「通常思考档位越高…」→「更准确地说…」三句。
+        #   事件日志里同一轮 01a0c238 出了两条 agentMessage + 一次 voice_say，
+        #   而委派轮的 agentMessage 由 app-server 直接交给语音模型念 —— 于是
+        #   voice_say 念的是第三遍。后台这一轮本来就有人替它开口，不必自己再喊。
+        #   只挡后台（source=backend）：定时投递、通知那些路照旧，它们没人替它们念。
+        if source == "backend" and self._delegation_owns_speech():
+            self.log("say_blocked", why="delegation-owns-speech", text=text[:120])
+            return {"ok": False, "spoken": False, "reason": "delegation-owns-speech",
+                    "msg": "这一轮是用户语音委派来的，你写在回答里的话会自动念给他，"
+                           "不要再 voice_say（那会让同一个问题被念两遍）。"
+                           "把要说的写进本轮回答，**整轮只写一条**。"
+                           "voice_say 只用于没人问你的时候：通知、定时提醒、你主动找他。"}
         if self.session_state != "connected":
             if fallback == "turn":
                 self.log("say_fallback_turn", text=text[:120], reason="voice-offline")
@@ -3664,6 +3705,8 @@ class Runner:
     def _finish_turn(self, turn: dict):
         rec, self._turn = self._turn, None
         self._backend_done_at = time.time()
+        # 这一轮的答案已经由语音模型念完了，voice_say 的闸随之放开（见 say()）。
+        self._delegation_open_at = 0.0
         if rec:
             # 收尾那句语音几乎总是落在轮外，要能认领回去（见 _subtitle_done 的 owner 判定）
             self._last_backend_turn_id = rec["id"]
@@ -4326,8 +4369,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self._run(r.board(str(body.get("text") or ""), body.get("toVoice"), body.get("toBackend"))))
             if u.path == "/say":
                 # fallback="turn"：语音不在线时交后台决定（说/打电话/等），别静默丢掉
+                # source=backend：后台模型自己调的 voice_say。委派轮里要挡（见 say()）；
+                # 定时投递/通知不带这个标记，照旧放行。
                 return self._send(200, self._run(r.say(str(body.get("text") or ""),
-                                                      str(body.get("fallback") or "none"))))
+                                                      str(body.get("fallback") or "none"),
+                                                      str(body.get("source") or ""))))
             if u.path == "/call":
                 return self._send(200, self._run(r.call_user(str(body.get("text") or ""), str(body.get("title") or ""),
                                                              str(body.get("ntf") or "misc"), str(body.get("reason") or "")), timeout=260))
