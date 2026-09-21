@@ -85,6 +85,34 @@ window.goToPage = async (n) => {
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 };
 
+window.RC = window.RC || {};
+RC.readerNavigation = {
+  state: () => {
+    const total = pdfDoc?.numPages || 0;
+    return { ready: total > 0, unit: '页', position: currentPage || 1, total,
+      display: window._dispPage(currentPage || 1), firstDisplay: window._dispPage(1),
+      lastDisplay: window._dispPage(total), totalLabel: String(window.__GRP?.total || window._dispPage(total)),
+      backLabel: window.__pageBackAnchor == null ? '' : '回到第 ' + window._dispPage(window.__pageBackAnchor) + ' 页',
+      previous: currentPage > 1 || !!window.__GRP?.prev, next: currentPage < total || !!window.__GRP?.next };
+  },
+  perform: async (key, value) => {
+    if (!pdfDoc?.numPages) throw new Error('书籍尚未加载');
+    if (key === 'previous') await window.changePage(-1);
+    else if (key === 'next') await window.changePage(1);
+    else if (key === 'back') await window.pageGoBack();
+    else if (key === 'page') {
+      const input = String(value).trim();
+      if (!/^-?\d+$/.test(input) || !Number.isSafeInteger(Number(input))) throw new Error('请输入有效页码');
+      const n = Number(input);
+      if (window._grpNavToGlobal && window._grpNavToGlobal(n)) return;
+      await window.goToPage(Math.max(1, Math.min(pdfDoc.numPages, window._pdfFromDisp(n))));
+    } else if (key === 'position') {
+      if (!Number.isInteger(value) || value < 1 || value > pdfDoc.numPages) throw new Error('页码超出范围');
+      await window.goToPage(value);
+    } else throw new Error('不支持的导航操作');
+  }
+};
+
 // 页码对齐:每本书一个偏移(PDF 页 - 书上印的页),存 localStorage(pdf-* 前缀 → 自动跨设备同步)。
 // 显示处一律 _dispPage(pdf)=书上页码;跳页输入按书上页码 → _pdfFromDisp 转回 PDF 页。
 window._pageOffset = function () {
@@ -204,15 +232,16 @@ window.jumpWithBack = function (target) {
   if (!target || target < 1) return;
   const cur = (typeof currentPage !== 'undefined') ? currentPage : 1;
   if (window.__pageBackAnchor == null && target !== cur) window.__pageBackAnchor = cur;  // 第一次跳:记最早的来处
-  goToPage(target);
+  const pending = goToPage(target);
   if (window.__pageBackAnchor != null && window.__pageBackAnchor !== target) _showPageBackBar(window.__pageBackAnchor);
   else _hidePageBackBar();
+  return pending;
 };
 window.pageGoBack = function () {
   const b = window.__pageBackAnchor;
   window.__pageBackAnchor = null;
   _hidePageBackBar();
-  if (b != null) goToPage(b);
+  if (b != null) return goToPage(b);
 };
 function _showPageBackBar(p) {
   let bar = document.getElementById('page-back-bar');

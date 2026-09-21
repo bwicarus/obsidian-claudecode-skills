@@ -112,6 +112,11 @@ struct ReaderNativeWorkspace<Document: View>: View {
                             Task { await conversation.perform("openTOC") }
                         } label: { Image(systemName: "list.bullet") }
                         .accessibilityLabel("书籍目录")
+                        .popover(item: $conversation.tocPanel) { panel in
+                            ReaderNativeTOCView(model: panel)
+                                .frame(idealWidth: 340, idealHeight: 520)
+                                .presentationCompactAdaptation(.sheet)
+                        }
                     }
             } else {
                 Spacer(minLength: 0)
@@ -120,14 +125,18 @@ struct ReaderNativeWorkspace<Document: View>: View {
             }
             if enabled, let page = conversation.readingTools.first(where: { $0.key == "page" }) {
                 Button(page.title) {
-                    Task { await conversation.perform("liveAction", parameters: ["actionId": page.id]) }
+                    Task { await conversation.perform("openNavigation") }
                 }
                 .font(.caption.monospacedDigit())
                 .accessibilityLabel("跳转页码：" + page.title)
+                .popover(item: $conversation.navigationPanel) { panel in
+                    ReaderNativeNavigationView(model: panel)
+                        .presentationCompactAdaptation(.popover)
+                }
             }
             if enabled && !conversation.readingTools.isEmpty {
                 Menu {
-                    ForEach(conversation.readingTools) { control in
+                    ForEach(conversation.readingTools.filter { $0.key != "page" }) { control in
                         Button(control.title) {
                             Task { await conversation.perform("liveAction", parameters: ["actionId": control.id]) }
                         }

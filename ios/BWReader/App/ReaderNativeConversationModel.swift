@@ -139,6 +139,8 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published var inspection: ReaderNativeArtifactInspection?
     @Published var settingsPanel: ReaderNativeSettingsModel?
     @Published var searchPanel: ReaderNativeSearchModel?
+    @Published var tocPanel: ReaderNativeTOCModel?
+    @Published var navigationPanel: ReaderNativeNavigationModel?
     @Published private(set) var placements: [ReaderNativePagePlacement] = []
     // Presentation survives closing/repositioning the SwiftUI sidebar, but is
     // scoped to this conversation and never persisted as a second history.
@@ -199,6 +201,8 @@ final class ReaderNativeConversationModel: ObservableObject {
             inspection = nil
             settingsPanel = nil
             searchPanel = nil
+            tocPanel = nil
+            navigationPanel = nil
             generation = UUID()
             pendingSelections = []
             deliveringSelection = false
@@ -226,6 +230,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         selectionText = (payload["selection"] as? [String: Any])?["text"] as? String ?? ""
         attachments = (payload["attachments"] as? [[String: Any]] ?? []).compactMap(ReaderNativeContextAttachment.init)
         readingTools = (payload["readingTools"] as? [[String: Any]] ?? []).compactMap(ReaderNativeControl.init)
+        if let navigation = payload["navigation"] as? [String: Any] { navigationPanel?.receive(navigation) }
         capabilities = Set(payload["capabilities"] as? [String] ?? [])
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
         messages = nextMessages
@@ -236,6 +241,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         inspection = nil
         settingsPanel = nil
         searchPanel = nil
+        tocPanel = nil
+        navigationPanel = nil
         if !scope.isEmpty { retiredNavigationScopes.insert(scope) }
         generation = UUID()
         scope = ""
@@ -308,6 +315,14 @@ final class ReaderNativeConversationModel: ObservableObject {
 
     @discardableResult
     func perform(_ action: String, parameters: [String: Any] = [:]) async -> Bool {
+        if action == "openNavigation", supports("nativeNavigation"), let inspectionHandler {
+            navigationPanel = ReaderNativeNavigationModel(scope: scope, request: inspectionHandler)
+            return true
+        }
+        if action == "openTOC", supports("nativeTOC"), let inspectionHandler {
+            tocPanel = ReaderNativeTOCModel(scope: scope, request: inspectionHandler)
+            return true
+        }
         if action == "openSearch", supports("nativeSearch"), let inspectionHandler {
             searchPanel = ReaderNativeSearchModel(scope: scope, request: inspectionHandler)
             return true

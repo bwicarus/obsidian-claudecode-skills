@@ -413,13 +413,40 @@
   }
 
   // ── 目录 ──
+  RC.readerNavigation = {
+    state: function () {
+      var current = _curTopIdx + 1, total = secEls.length;
+      return { ready: total > 0, unit: '节', position: current, total: total, display: current,
+        firstDisplay: 1, lastDisplay: total, totalLabel: String(total), backLabel: '', previous: current > 1, next: current < total };
+    },
+    perform: function (key, value) {
+      var position = _curTopIdx + 1;
+      if (key === 'previous') position--;
+      else if (key === 'next') position++;
+      else if (key === 'page' || key === 'position') {
+        if (!/^\d+$/.test(String(value).trim())) throw new Error('请输入有效章节编号');
+        position = Number(value);
+      } else throw new Error('不支持的导航操作');
+      if (!Number.isInteger(position) || position < 1 || position > secEls.length) throw new Error('章节超出范围');
+      return jumpTo(position - 1, false);
+    }
+  };
+  RC.readerTOC = {
+    read: async function () {
+      return TOC.map(function (t) { return { title: String(t.label || ''), level: Math.max(1, Number(t.level) || 1), label: '', locator: t.idx }; });
+    },
+    jump: function (entry) {
+      if (!Number.isInteger(entry?.locator) || !TOC.some(function (t) { return t.idx === entry.locator && String(t.label || '') === entry.title; })) throw new Error('目录内容已更新，请重新打开');
+      return jumpTo(entry.locator, false);
+    }
+  };
   function buildToc() {
     var box = $('ep-toc-list'); box.innerHTML = '';
     TOC.forEach(function (t) {
       var a = document.createElement('div'); a.className = 'ep-toc-i'; a.textContent = t.label;
       // ⑥ 跳转不再自动收抽屉(宽屏正文被挤在左侧仍可见,可连续点目录);仅极窄屏(抽屉≥90vw 盖满)才收,
       // 判定统一走 RC.sidedrawer.afterJump(本文件所有跳转点共用 _drawerAfterJump)。
-      a.onclick = function () { jumpTo(t.idx, false); _drawerAfterJump(); };
+      a.onclick = function () { RC.readerTOC.jump({ locator: t.idx, title: String(t.label || '') }); _drawerAfterJump(); };
       box.appendChild(a);
     });
     if (!TOC.length) box.innerHTML = '<div class="ep-empty">无目录</div>';

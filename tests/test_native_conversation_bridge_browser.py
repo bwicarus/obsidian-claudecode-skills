@@ -17,6 +17,119 @@ from browser_exe import CHROME
 
 
 class NativeConversationBridgeBrowser(unittest.TestCase):
+    def test_native_page_navigation_preserves_offsets_volumes_and_return_anchor(self):
+        bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
+        source = (ROOT / '_server_deploy/static/pdf/reader.src/05-nav.js').read_text(encoding='utf-8')
+        pdf = 'window.changePage =' + source.split('window.changePage =', 1)[1].split('// 页码对齐:', 1)[0]
+        back = 'window.__pageBackAnchor = null;' + source.split('window.__pageBackAnchor = null;', 1)[1].split('function _showPageBackBar', 1)[0]
+        epub = (ROOT / '_server_deploy/static/pdf/epub-html.js').read_text(encoding='utf-8').split('  RC.readerNavigation = {', 1)[1].split('  RC.readerTOC = {', 1)[0]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
+            page = browser.new_page()
+            page.route('**/*', lambda r: r.fulfill(status=200, body='<html></html>') if r.request.url == 'http://reader.test/' else r.abort())
+            page.goto('http://reader.test/')
+            page.set_content('<div id="asst-thread"></div>')
+            page.evaluate('''() => {
+              window.receipts=[];window.saved=[];window.__asstSend=()=>{};
+              window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};
+              window.RC={turnCard:{}};window.pdfDoc={numPages:20};window.currentPage=8;window.readMode='continuous';window.scale=1;
+              window._dispPage=p=>p-4;window._pdfFromDisp=p=>p+4;
+              window.renderPage=async p=>{if(window.failRender)throw Error('render failed');currentPage=p;};
+              window._saveLastPosition=p=>saved.push(p);window._showPageBackBar=()=>{};window._hidePageBackBar=()=>{};
+            }''')
+            page.add_script_tag(content=pdf + back)
+            page.add_script_tag(content=bridge)
+            page.evaluate('__bwNativeConversation.setNativeMode(true)')
+            page.wait_for_function('receipts.at(-1)?.capabilities?.includes("nativeNavigation")')
+            scope = page.evaluate('receipts.at(-1).scope')
+            def command(key=None, value=None):
+                args = dict(action='navigationAction' if key else 'navigationRead',scope=scope)
+                if key: args['text'] = key
+                if value is not None: args['value'] = value
+                return page.evaluate('(c)=>__bwNativeConversation.perform(c)', args)
+            self.assertEqual(command()['value']['display'], 4)
+            self.assertTrue(command('page', '10')['ok'])
+            self.assertEqual(page.evaluate('saved.at(-1).page'), 14)
+            self.assertTrue(command('position', 5)['ok'])
+            self.assertEqual(command()['value']['display'], 1)
+            page.evaluate('jumpWithBack(12)')
+            page.evaluate('jumpWithBack(17)')
+            self.assertEqual(command()['value']['backLabel'], '回到第 1 页')
+            self.assertTrue(command('back')['ok'])
+            self.assertEqual(page.evaluate('currentPage'), 5)
+            self.assertIsNone(page.evaluate('__pageBackAnchor'))
+            self.assertFalse(command('position', 99)['ok'])
+            self.assertFalse(command('page', '2junk')['ok'])
+            page.evaluate('window.failRender=true')
+            self.assertFalse(command('next')['ok'])
+            page.evaluate("window.failRender=false;window._grpNavToGlobal=p=>{window.volumeTarget=p;return true;}")
+            self.assertTrue(command('page', '40')['ok'])
+            self.assertEqual(page.evaluate('volumeTarget'), 40)
+            self.assertEqual(page.evaluate('currentPage'), 5)
+            page.evaluate('window.secEls=[{},{},{}];window._curTopIdx=0;window.jumpTo=(p)=>{_curTopIdx=p;}')
+            page.add_script_tag(content='RC.readerNavigation = {' + epub)
+            self.assertTrue(command('next')['ok'])
+            self.assertEqual(command()['value']['position'], 2)
+            self.assertFalse(command('page', '99')['ok'])
+            page.evaluate('history.replaceState(null,"","/?file=other.epub")')
+            self.assertFalse(command('previous')['ok'])
+            self.assertEqual(page.evaluate('_curTopIdx'), 1)
+            browser.close()
+
+    def test_native_toc_uses_shared_navigation_and_rejects_stale_books(self):
+        bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
+        pdf = (ROOT / '_server_deploy/static/pdf/reader.src/28-shared-drawer.js').read_text(encoding='utf-8').split('  RC.readerTOC = {', 1)[1].split('  const _loadTocPane', 1)[0]
+        epub = (ROOT / '_server_deploy/static/pdf/epub-html.js').read_text(encoding='utf-8').split('  RC.readerTOC = {', 1)[1].split('  function buildToc()', 1)[0]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(executable_path=str(CHROME), headless=True)
+            page = browser.new_page()
+            page.route('**/*', lambda r: r.fulfill(status=200, body='<html></html>') if r.request.url == 'http://reader.test/' else r.abort())
+            page.goto('http://reader.test/')
+            page.set_content('<div id="asst-thread"></div>')
+            page.evaluate('''() => {
+              window.receipts=[]; window.jumps=[]; window.requests=[]; window.__asstSend=()=>{};
+              window.webkit={messageHandlers:{bwNativeConversation:{postMessage:x=>receipts.push(x)}}};
+              window.RC={turnCard:{}};window.FILE_REL='book.pdf';window._pdfFromDisp=p=>p+4;
+              window.jumpWithBack=p=>jumps.push(['pdf',p]);window.jumpTo=(p,s)=>jumps.push(['epub',p,s]);
+              window.TOC=[{label:'第二章',idx:1}];window.slowRead=false;window.failRead=false;
+              window.fetch=async(url,options)=>{
+                requests.push(options);
+                if(slowRead) {slowRead=false;await new Promise(r=>window.finishSlow=r);}
+                return {ok:!failRead,status:503,json:async()=>({entries:[{title:'第一节',level:2,page:6}]})};
+              };
+            }''')
+            page.add_script_tag(content='RC.readerTOC = {' + pdf)
+            page.add_script_tag(content=bridge)
+            page.evaluate('__bwNativeConversation.setNativeMode(true)')
+            page.wait_for_function('receipts.at(-1)?.capabilities?.includes("nativeTOC")')
+            scope = page.evaluate('receipts.at(-1).scope')
+            def command(action, **values):
+                return page.evaluate('(c)=>__bwNativeConversation.perform(c)', dict(action=action,scope=scope,**values))
+            entries = command('tocRead')['value']
+            self.assertEqual(entries[0]['label'], 'P6')
+            self.assertEqual(entries[0]['level'], 2)
+            self.assertNotIn('locator', entries[0])
+            self.assertTrue(command('tocJump', actionId=entries[0]['id'])['ok'])
+            self.assertEqual(page.evaluate('jumps'), [['pdf', 10]])
+            page.evaluate('(scope)=>{slowRead=true;window.slow=__bwNativeConversation.perform({action:"tocRead",scope});}', scope)
+            command('tocRead')
+            self.assertTrue(page.evaluate('requests.at(-2).signal.aborted'))
+            page.evaluate('finishSlow()')
+            self.assertFalse(page.evaluate('slow')['ok'])
+            self.assertFalse(command('tocJump', actionId=entries[0]['id'])['ok'])
+            page.evaluate('failRead=true')
+            self.assertFalse(command('tocRead')['ok'])
+            page.add_script_tag(content='RC.readerTOC = {' + epub)
+            entries = command('tocRead')['value']
+            self.assertTrue(command('tocJump', actionId=entries[0]['id'])['ok'])
+            page.evaluate("TOC[0].label='更新后的章节'")
+            self.assertFalse(command('tocJump', actionId=entries[0]['id'])['ok'])
+            entries = command('tocRead')['value']
+            page.evaluate('history.replaceState(null,"","/?file=other.epub")')
+            self.assertFalse(command('tocJump', actionId=entries[0]['id'])['ok'])
+            self.assertEqual(page.evaluate('jumps'), [['pdf', 10], ['epub', 1, False]])
+            browser.close()
+
     def test_native_page_cards_share_saved_placements_without_web_buttons(self):
         bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
         with sync_playwright() as p:
@@ -347,7 +460,8 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
                 return page.evaluate('receipts[receipts.length-1]')
             first = snapshot()
             self.assertTrue(first['ready'])
-            self.assertIn('openTOC', first['capabilities'])
+            # A legacy tab alone is not a native navigation capability.
+            self.assertNotIn('openTOC', first['capabilities'])
             self.assertFalse(page.evaluate("document.documentElement.classList.contains('bw-native-conversation-active')"))
             page.evaluate('__bwNativeConversation.setNativeMode(true)')
             self.assertNotEqual(page.locator('#ep-side').evaluate('(n)=>getComputedStyle(n).visibility'), 'hidden')

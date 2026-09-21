@@ -1225,6 +1225,34 @@ window.goToPage = async (n) => {
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 };
 
+window.RC = window.RC || {};
+RC.readerNavigation = {
+  state: () => {
+    const total = pdfDoc?.numPages || 0;
+    return { ready: total > 0, unit: '页', position: currentPage || 1, total,
+      display: window._dispPage(currentPage || 1), firstDisplay: window._dispPage(1),
+      lastDisplay: window._dispPage(total), totalLabel: String(window.__GRP?.total || window._dispPage(total)),
+      backLabel: window.__pageBackAnchor == null ? '' : '回到第 ' + window._dispPage(window.__pageBackAnchor) + ' 页',
+      previous: currentPage > 1 || !!window.__GRP?.prev, next: currentPage < total || !!window.__GRP?.next };
+  },
+  perform: async (key, value) => {
+    if (!pdfDoc?.numPages) throw new Error('书籍尚未加载');
+    if (key === 'previous') await window.changePage(-1);
+    else if (key === 'next') await window.changePage(1);
+    else if (key === 'back') await window.pageGoBack();
+    else if (key === 'page') {
+      const input = String(value).trim();
+      if (!/^-?\d+$/.test(input) || !Number.isSafeInteger(Number(input))) throw new Error('请输入有效页码');
+      const n = Number(input);
+      if (window._grpNavToGlobal && window._grpNavToGlobal(n)) return;
+      await window.goToPage(Math.max(1, Math.min(pdfDoc.numPages, window._pdfFromDisp(n))));
+    } else if (key === 'position') {
+      if (!Number.isInteger(value) || value < 1 || value > pdfDoc.numPages) throw new Error('页码超出范围');
+      await window.goToPage(value);
+    } else throw new Error('不支持的导航操作');
+  }
+};
+
 // 页码对齐:每本书一个偏移(PDF 页 - 书上印的页),存 localStorage(pdf-* 前缀 → 自动跨设备同步)。
 // 显示处一律 _dispPage(pdf)=书上页码;跳页输入按书上页码 → _pdfFromDisp 转回 PDF 页。
 window._pageOffset = function () {
@@ -1344,15 +1372,16 @@ window.jumpWithBack = function (target) {
   if (!target || target < 1) return;
   const cur = (typeof currentPage !== 'undefined') ? currentPage : 1;
   if (window.__pageBackAnchor == null && target !== cur) window.__pageBackAnchor = cur;  // 第一次跳:记最早的来处
-  goToPage(target);
+  const pending = goToPage(target);
   if (window.__pageBackAnchor != null && window.__pageBackAnchor !== target) _showPageBackBar(window.__pageBackAnchor);
   else _hidePageBackBar();
+  return pending;
 };
 window.pageGoBack = function () {
   const b = window.__pageBackAnchor;
   window.__pageBackAnchor = null;
   _hidePageBackBar();
-  if (b != null) goToPage(b);
+  if (b != null) return goToPage(b);
 };
 function _showPageBackBar(p) {
   let bar = document.getElementById('page-back-bar');
@@ -14004,12 +14033,28 @@ if (window.PdfAdapter && PdfAdapter.bind) {
 
   // 目录 pane:GET /api/toc?entries=1(book_toc._effective_toc,page=印刷页)→ 简单列表(照 EPUB buildToc)
   let _tocLoadedOnce = false;
+  // Shared data/navigation entry points: native controls never click drawer rows.
+  RC.readerTOC = {
+    read: async (options) => {
+      const r = await fetch('/pdf/api/toc?file=' + encodeURIComponent(FILE_REL) + '&entries=1', { signal: options?.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      if (!d || d.ok === false || !Array.isArray(d.entries)) throw new Error(d?.error || '目录加载失败');
+      return d.entries.map(e => ({ title: String(e.title || ''), level: Math.max(1, Number(e.level) || 1),
+        label: 'P' + e.page, locator: Number(e.page) }));
+    },
+    jump: (entry) => {
+      if (!Number.isInteger(entry?.locator)) throw new Error('目录位置已失效');
+      const page = typeof _pdfFromDisp === 'function' ? _pdfFromDisp(entry.locator) : entry.locator;
+      if (page < 1) throw new Error('目录页码超出书籍范围');
+      return jumpWithBack(page);
+    }
+  };
   const _loadTocPane = (force) => {
     const box = document.getElementById('pdf-toc-list'); if (!box) return;
     if (_tocLoadedOnce && !force) return;
     box.innerHTML = '<div style="color:#5a6680;font-size:12px">加载…</div>';
-    fetch('/pdf/api/toc?file=' + encodeURIComponent(FILE_REL) + '&entries=1').then(r => r.json()).then(d => {
-      const es = (d && d.entries) || [];
+    RC.readerTOC.read().then(es => {
       _tocLoadedOnce = true;
       if (!es.length) { box.innerHTML = '<div style="color:#5a6680;font-size:12px;line-height:1.6">这本书还没有目录。<br>设置面板 →「书籍目录」可建立(原生书签或 AI 识别)。</div>'; return; }
       box.innerHTML = '';
@@ -14017,14 +14062,13 @@ if (window.PdfAdapter && PdfAdapter.bind) {
         const it = document.createElement('div');
         const lv = Math.max(0, (e.level || 1) - 1);
         it.textContent = e.title || '';
-        it.title = '第 ' + (window._dispPage ? window._dispPage(e.page) : e.page) + ' 页';
+        it.title = e.label;
         it.style.cssText = 'padding:6px 8px 6px ' + (8 + lv * 16) + 'px;font-size:' + (lv ? 12.5 : 13.5) + 'px;' +
           (lv ? 'color:#9aa7c4' : 'color:#dbe4f8;font-weight:600') + ';cursor:pointer;border-radius:6px;line-height:1.45';
         it.onmouseenter = () => { it.style.background = '#1a2540'; };
         it.onmouseleave = () => { it.style.background = ''; };
         it.onclick = () => {
-          const pdfPage = (typeof _pdfFromDisp === 'function') ? _pdfFromDisp(e.page) : e.page;
-          try { jumpWithBack(pdfPage); RC.sidedrawer.afterJump(); } catch (_) {}
+          try { RC.readerTOC.jump(e); RC.sidedrawer.afterJump(); } catch (_) {}
         };
         box.appendChild(it);
       });

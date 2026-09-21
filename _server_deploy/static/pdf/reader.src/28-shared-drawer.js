@@ -83,12 +83,28 @@
 
   // 目录 pane:GET /api/toc?entries=1(book_toc._effective_toc,page=印刷页)→ 简单列表(照 EPUB buildToc)
   let _tocLoadedOnce = false;
+  // Shared data/navigation entry points: native controls never click drawer rows.
+  RC.readerTOC = {
+    read: async (options) => {
+      const r = await fetch('/pdf/api/toc?file=' + encodeURIComponent(FILE_REL) + '&entries=1', { signal: options?.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      if (!d || d.ok === false || !Array.isArray(d.entries)) throw new Error(d?.error || '目录加载失败');
+      return d.entries.map(e => ({ title: String(e.title || ''), level: Math.max(1, Number(e.level) || 1),
+        label: 'P' + e.page, locator: Number(e.page) }));
+    },
+    jump: (entry) => {
+      if (!Number.isInteger(entry?.locator)) throw new Error('目录位置已失效');
+      const page = typeof _pdfFromDisp === 'function' ? _pdfFromDisp(entry.locator) : entry.locator;
+      if (page < 1) throw new Error('目录页码超出书籍范围');
+      return jumpWithBack(page);
+    }
+  };
   const _loadTocPane = (force) => {
     const box = document.getElementById('pdf-toc-list'); if (!box) return;
     if (_tocLoadedOnce && !force) return;
     box.innerHTML = '<div style="color:#5a6680;font-size:12px">加载…</div>';
-    fetch('/pdf/api/toc?file=' + encodeURIComponent(FILE_REL) + '&entries=1').then(r => r.json()).then(d => {
-      const es = (d && d.entries) || [];
+    RC.readerTOC.read().then(es => {
       _tocLoadedOnce = true;
       if (!es.length) { box.innerHTML = '<div style="color:#5a6680;font-size:12px;line-height:1.6">这本书还没有目录。<br>设置面板 →「书籍目录」可建立(原生书签或 AI 识别)。</div>'; return; }
       box.innerHTML = '';
@@ -96,14 +112,13 @@
         const it = document.createElement('div');
         const lv = Math.max(0, (e.level || 1) - 1);
         it.textContent = e.title || '';
-        it.title = '第 ' + (window._dispPage ? window._dispPage(e.page) : e.page) + ' 页';
+        it.title = e.label;
         it.style.cssText = 'padding:6px 8px 6px ' + (8 + lv * 16) + 'px;font-size:' + (lv ? 12.5 : 13.5) + 'px;' +
           (lv ? 'color:#9aa7c4' : 'color:#dbe4f8;font-weight:600') + ';cursor:pointer;border-radius:6px;line-height:1.45';
         it.onmouseenter = () => { it.style.background = '#1a2540'; };
         it.onmouseleave = () => { it.style.background = ''; };
         it.onclick = () => {
-          const pdfPage = (typeof _pdfFromDisp === 'function') ? _pdfFromDisp(e.page) : e.page;
-          try { jumpWithBack(pdfPage); RC.sidedrawer.afterJump(); } catch (_) {}
+          try { RC.readerTOC.jump(e); RC.sidedrawer.afterJump(); } catch (_) {}
         };
         box.appendChild(it);
       });

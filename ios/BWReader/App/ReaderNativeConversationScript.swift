@@ -16,6 +16,7 @@ enum ReaderNativeConversationScript {
       let controls = null, controlsObserver = null, suspended = false;
       let settingsModels = null, settingsVoice = null;
       let searchController = null, searchResults = new Map(), searchQuery = '', searchSequence = 0;
+      let tocController = null, tocEntries = new Map(), tocSequence = 0, tocOwner = null;
       let placementScopeKey = '', previousPlacementNodes = [], excludedPlacementNodes = new WeakSet();
       let drawerElement = null, drawerObserver = null, contextObserver = null, contextElement = null, toolbarObserver = null, toolbarElement = null;
       const navigationID = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
@@ -263,14 +264,11 @@ enum ReaderNativeConversationScript {
       }
       function toolbarActions() {
         const root = document.getElementById('header') || document.getElementById('ep-top');
-        if (!root) return [];
-        const page = root.querySelector('#page-scrub');
-        const paging = page ? [{
-          id: registerAction('toolbar-page', page, () => {
-            page.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, pointerId:1, clientX:0}));
-            page.dispatchEvent(new PointerEvent('pointerup', {bubbles:true, pointerId:1, clientX:0}));
-          }), title: page.textContent.trim(), key: 'page', disabled: false
+        const navigation = rc().readerNavigation?.state?.();
+        const paging = navigation?.ready ? [{
+          id: 'native-page', title: navigation.display + ' / ' + navigation.totalLabel, key: 'page', disabled: false
         }] : [];
+        if (!root) return paging;
         return paging.concat(Array.from(root.querySelectorAll('button')).filter(button => !button.hidden && button.getAttribute('aria-hidden') !== 'true').map((button, index) => ({
           id: registerAction('toolbar-' + (button.id || index), button, () => button.click()),
           key: button.id || '', title: text(button.getAttribute('title') || button.getAttribute('aria-label') || button.textContent, 140).trim() || '阅读操作',
@@ -391,11 +389,12 @@ enum ReaderNativeConversationScript {
         if (typeof rc().assistant?.openModelSettings === 'function') out.push('openModels');
         if (rc().assistant?.settingsService) out.push('nativeSettings');
         if (rc().readerSearch?.search) out.push('nativeSearch', 'openSearch');
+        if (rc().readerNavigation?.state && rc().readerNavigation?.perform) out.push('nativeNavigation', 'openNavigation');
         if (typeof window.openSettings === 'function' || document.getElementById('ep-set-btn')) out.push('openSettings');
         if (rc().review?.performNativeInteraction) out.push('openReview', 'reviewAction');
         else if (document.getElementById('asst-review-toggle')) out.push('openReview');
         if (typeof window.openSearch === 'function' || document.getElementById('ep-search-btn')) out.push('openSearch');
-        if (document.querySelector('#ep-side-tabs .ep-side-tab[data-pane="toc"],#ep-side .side-tab[data-pane="toc"]')) out.push('openTOC');
+        if (rc().readerTOC?.read && rc().readerTOC?.jump) out.push('nativeTOC', 'openTOC');
         if (document.getElementById('asst-call')) out.push('toggleVoice');
         if (document.getElementById('asst-computer')) out.push('toggleComputerVoice');
         if (actions.size) out.push('openArtifact', 'action', 'inspectArtifact');
@@ -436,6 +435,7 @@ enum ReaderNativeConversationScript {
           window.__bwNativeSelection = null;
           settingsModels = null; settingsVoice = null;
           searchController?.abort(); searchResults.clear(); searchQuery = ''; searchSequence++;
+          tocController?.abort(); tocEntries.clear(); tocOwner = null; tocSequence++;
         }
         actions = new Map();
         const all = thread ? Array.from(thread.children).filter(el => el.matches('.asst-msg,.vc-card,.vc-if,.rc-turn')) : [];
@@ -459,7 +459,7 @@ enum ReaderNativeConversationScript {
         const review = conversationMode() === 'review' ? rc().review?.presentationState?.() || null : null;
         if (review) review.contextKey = hash(review.contextKey);
         const payload = { version: 1, scope, revision: 0, title: text(document.title, 160) || '阅读助手', ready: isReady(), busy: isBusy(),
-          legacyVisible, selection: selectedContext(), attachments, readingTools, review, placements, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          legacyVisible, selection: selectedContext(), attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -558,7 +558,7 @@ enum ReaderNativeConversationScript {
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
-        if (command.action === 'reviewAction') parameterKeys.push('value');
+        if (command.action === 'reviewAction' || command.action === 'navigationAction') parameterKeys.push('value');
         if (Object.keys(command).some(key => !parameterKeys.includes(key))) return { ok: false, error: '不支持的操作参数' };
         const action = command.action;
         try {
@@ -602,6 +602,29 @@ enum ReaderNativeConversationScript {
             setLegacy(action === 'showLegacy');
           } else if (action === 'refresh') {
             rc().assistant?.reloadHistory?.();
+          } else if (action === 'navigationRead' || action === 'navigationAction') {
+            const owner = rc().readerNavigation, captured = scope;
+            if (!owner?.state || !owner?.perform || command.scope !== scope) return { ok: false, error: '导航尚未就绪' };
+            if (action === 'navigationAction') await owner.perform(command.text, command.value);
+            if (captured !== scope || getScopeKey() !== scopeKey || owner !== rc().readerNavigation) return { ok: false, error: '书籍已切换' };
+            schedule();
+            return { ok: true, value: owner.state() };
+          } else if (action === 'tocRead') {
+            const owner = rc().readerTOC, captured = scope;
+            if (!owner?.read || !owner?.jump || command.scope !== scope) return { ok: false, error: '目录尚未就绪' };
+            const sequence = ++tocSequence;
+            tocController?.abort(); tocController = new AbortController(); tocEntries.clear(); tocOwner = owner;
+            const value = await owner.read({ signal: tocController.signal });
+            if (captured !== scope || getScopeKey() !== scopeKey || sequence !== tocSequence || owner !== rc().readerTOC) return { ok: false, error: '书籍已切换，请重新打开目录' };
+            return { ok: true, value: value.map((entry, index) => {
+              const id = 'toc-' + hash(scope + ':' + sequence + ':' + index);
+              tocEntries.set(id, entry);
+              return { id, title: text(entry.title, 2000), label: text(entry.label, 100), level: Math.max(1, Math.min(12, Number(entry.level) || 1)) };
+            }) };
+          } else if (action === 'tocJump') {
+            const entry = tocEntries.get(command.actionId);
+            if (!entry || command.scope !== scope || tocOwner !== rc().readerTOC) return { ok: false, error: '目录已更新，请重新选择' };
+            await tocOwner.jump(entry);
           } else if (action === 'searchRead') {
             const owner = rc().readerSearch, captured = scope;
             if (!owner?.search || command.scope !== scope) return { ok: false, error: '搜索尚未就绪' };
@@ -670,8 +693,6 @@ enum ReaderNativeConversationScript {
           } else if (action === 'openSearch' && (typeof window.openSearch === 'function' || document.getElementById('ep-search-btn'))) {
             setLegacy(true);
             if (typeof window.openSearch === 'function') window.openSearch(); else document.getElementById('ep-search-btn').click();
-          } else if (action === 'openTOC' && document.querySelector('#ep-side-tabs .ep-side-tab[data-pane="toc"],#ep-side .side-tab[data-pane="toc"]')) {
-            setLegacy(true); drawer()?.open('toc');
           } else return { ok: false, error: '当前页面不支持此操作' };
           schedule();
           return { ok: true };
