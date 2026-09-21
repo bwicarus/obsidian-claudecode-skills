@@ -735,6 +735,206 @@
     };
   }
 
+  // ── 老数据搬家：IndexedDB → App 沙盒里的 SQLite ──
+  //
+  // 一次性、可中断、可重入。只在新存储真接管了之后才跑。
+  //
+  // ⚠ **必须在任何人读库之前跑完**。晚一步的表现是用户看见一个空书架，
+  //   然后在空的上面开始新建东西 —— 等迁移补上来，两份就都在了。
+  //
+  // ⚠ 搬进去用 `applyChanges` 而不是 `put`：`put` 会把 rev 推高、updatedAt 换成
+  //   现在，于是每条老记录都变成"刚刚改的"，同步会把整库当成新改动推一遍。
+  //
+  // ⚠ 不带 `journal`：journal 是"待发出"的队列，凭空造一堆出站事件没有意义。
+  //   新库 instanceEpoch 是新的 → 旧 checkpoint 自动作废 → 同步会做一次完整
+  //   对账。这正是我们要的：**迁移万一漏了什么，对账会从服务器补回来**。
+  //   （所以也**不要**把老的 instanceEpoch 搬过来：搬了就等于拿着一个"已经同步过
+  //   了"的承诺去盖一个可能不完整的库，那是会真丢数据的形状。）
+  var LEGACY_IMPORT_DONE = 'legacyImport';
+
+  function migrateLegacyStoresOnBoot() {
+    if (!nativeStoreEnabled()) return Promise.resolve(null);
+    var registry = required('dataRegistry', 'collections');
+    var collections = registry.collections();
+    var causal = registry.syncCollections();
+    var prefix = 'bw-reader-native-v1';
+    var scopeOf = { global: 'global', document: 'document', device: 'device' };
+    var plan = [];
+    Object.keys(scopeOf).forEach(function (scope) {
+      var names = Object.keys(collections).filter(function (name) {
+        return collections[name].scope === scope;
+      }).sort();
+      // status:pending 的也搬：声明了没启用不等于里面没东西，
+      // 而"跳过它"的代价是那部分数据从此看不见了。
+      if (names.length) plan.push({ scope: scope, collections: names });
+    });
+
+    function note(text, color) {
+      try { if (typeof root.dlog === 'function') root.dlog('存储迁移:' + text, color); } catch (_) {}
+      try { if (root.__bwProbe) root.__bwProbe.probe('legacy-import', text); } catch (_) {}
+    }
+
+    /** 这三个 IndexedDB 库到底存在不存在。都不存在＝全新装，没什么可搬。
+     *  ⚠ 直接开库会**创建**空库，所以能问就先问。问不到就只能开（Safari 老版本）。*/
+    function legacyPresent() {
+      if (!root.indexedDB || typeof root.indexedDB.databases !== 'function') {
+        return Promise.resolve(null);   // 不知道 → 照常走
+      }
+      return root.indexedDB.databases().then(function (list) {
+        // ⚠ 空列表不当"没有"用：全新装确实是空的，但某些容器里这个
+        //   接口也会空手回来。两边的代价不对称：误判"没有"就跳过了真迁移，
+        //   用户看到的是一个空书架；误判"有"不过是白建三个空库。
+        if (!list || !list.length) return null;
+        return list.some(function (item) {
+          return item && String(item.name || '').indexOf(prefix) === 0;
+        });
+      }, function () { return null; });
+    }
+
+    // ⚠ 三个库**各自**有完成标记，必须都完成了才能跳。只看 global 的话，
+    //   global 先搜完、device 搜到一半被打断，下次启动就直接跳过了 ——
+    //   表现是阅读位置/偏好这类东西永久丢在旧库里。
+    return Promise.all(plan.map(function (item) {
+      return storeMeta(stores[item.scope], LEGACY_IMPORT_DONE);
+    })).then(function (flags) {
+      if (flags.length && flags.every(function (flag) { return flag === 'done'; })) return null;
+      return legacyPresent().then(function (present) {
+        if (present === false) {
+          note('没有旧库，跳过');
+          return markAllDone();
+        }
+        return runPlan();
+      });
+    });
+
+    function markAllDone() {
+      return Promise.all(plan.map(function (item) {
+        return putStoreMeta(stores[item.scope], LEGACY_IMPORT_DONE, 'done');
+      })).then(function () { return { migrated: 0, collections: 0 }; });
+    }
+
+    function runPlan() {
+      var totals = { migrated: 0, collections: 0 };
+      var indexed = required('indexedDBStore', 'createIndexedDBDataStore');
+      return plan.reduce(function (chain, item) {
+        return chain.then(function () {
+          var legacy = indexed.createIndexedDBDataStore({
+            dbName: prefix + '-' + item.scope, deviceId: deviceId,
+            // ⚠ channelName 故意**不给**：搬家只读它，不该在页面之间广播变更。
+            causalCollections: item.scope === 'global' ? causal : []
+          });
+          return item.collections.reduce(function (inner, name) {
+            return inner.then(function () {
+              return migrateOne(legacy, stores[item.scope], item.scope, name, totals);
+            });
+          }, Promise.resolve()).then(function () {
+            return putStoreMeta(stores[item.scope], LEGACY_IMPORT_DONE, 'done');
+          }).then(function () {
+            try { legacy.close(); } catch (_) {}
+          }, function (error) {
+            try { legacy.close(); } catch (_) {}
+            throw error;
+          });
+        });
+      }, Promise.resolve()).then(function () {
+        note('完成：' + totals.migrated + ' 条 / ' + totals.collections + ' 个集合');
+        return totals;
+      });
+    }
+
+    function migrateOne(legacy, target, scope, name, totals) {
+      var marker = LEGACY_IMPORT_DONE + ':' + name;
+      return storeMeta(target, marker).then(function (done) {
+        // 逐集合记进度：中断之后重来只补没搬完的那些。没有这个标记的话，
+        // 每次启动都要把整库重读一遍才知道"已经搬过了"。
+        if (done === 'done') return;
+        var moved = 0;
+        // ⚠ **必须翻页读到底**：`list` 的 limit 上限是 1000、**缺省只有 200**。
+        //   把一次 list 当成"全部"的表现是每个集合只搬走前 200 条 —— 而且
+        //   前后数目还对得上（两边都是 200），拿计数去校验根本发现不了。
+        //   按 id 翻（不是 offset）：offset 会随数据变动错位。
+        function page(afterId) {
+          var query = { includeDeleted: true, orderBy: 'id', limit: 1000 };
+          if (afterId != null) query.afterId = afterId;
+          return Promise.resolve(legacy.list(name, query)).then(function (rows) {
+            rows = rows || [];
+            if (!rows.length) return null;
+            return writeChunks(target, name, rows).then(function () {
+              moved += rows.length;
+              return page(rows[rows.length - 1].id);
+            });
+          });
+        }
+        return page(null).then(function () {
+          if (moved) {
+            totals.migrated += moved;
+            totals.collections += 1;
+            note(scope + '/' + name + ' ' + moved + ' 条');
+          }
+          return putStoreMeta(target, marker, 'done');
+        });
+      });
+    }
+
+    /** 分批写：一次提交太大会顶到桥的上限，而且失败时整批不落＝白跑一趟。 */
+    function writeChunks(target, name, rows) {
+      var CHUNK = 100;
+      var index = 0;
+      function next() {
+        if (index >= rows.length) return Promise.resolve();
+        var slice = rows.slice(index, index + CHUNK);
+        index += CHUNK;
+        return Promise.resolve(target.applyChanges(slice.map(function (record) {
+          return { collection: name, record: record };
+        }), {
+          // ⚠ snapshotBaseline：因果集合（卡片这类）的记录自带父版本证明，而空库
+          //   里没有父可对。少了这个开关，卡片一条也搬不进来 —— 而且是"静静地
+          //   全变成 conflicts"，不报错。
+          snapshotBaseline: true
+        })).then(function (report) {
+          report = report || {};
+          if (report.conflicts && report.conflicts.length) {
+            throw dataError(
+              '迁移被判冲突：' + name + ' ' + report.conflicts.length +
+              ' 条（' + String(report.conflicts[0].reason) + '）',
+              'BW_LEGACY_IMPORT_CONFLICT');
+          }
+          // ⚠ 逐条对账，而不是前后比总数：**每一条**都要落在 applied 或 skipped
+          //   里。比总数的话，"少搬了一批"和"两边都只数了一批"看起来一样 ——
+          //   这正是上面翻页那条注释里说的那个陷阱的第二层。
+          var accounted = (report.applied || []).length + (report.skipped || []).length;
+          if (accounted !== slice.length) {
+            throw dataError(
+              '迁移漏了：' + name + ' 送 ' + slice.length +
+              ' 条，只交代了 ' + accounted + ' 条',
+              'BW_LEGACY_IMPORT_SHORT');
+          }
+          return next();
+        });
+      }
+      return next();
+    }
+  }
+
+  // 迁移进度记在**数据所在的那个库自己**的 meta 里，而不是浏览器那侧的键值存储：
+  // 标记与数据同生共死，才不会出现"标记说搬完了、库其实是空的"。
+  function storeMeta(store, key) {
+    if (!store || typeof store.meta !== 'function') return Promise.resolve(null);
+    return Promise.resolve(store.meta(key)).catch(function () { return null; });
+  }
+
+  function putStoreMeta(store, key, value) {
+    if (!store || typeof store.putMeta !== 'function') return Promise.resolve(false);
+    return Promise.resolve(store.putMeta(key, value));
+  }
+
+  function dataError(message, code) {
+    var error = new Error(message);
+    error.name = 'DataStoreError';
+    error.code = code || 'BW_DATA_INVALID';
+    return error;
+  }
+
   function createRouter(localStores) {
     var api = required('storageRouter', 'createStorageRouter');
     var registry = required('dataRegistry', 'scopes');
@@ -15487,7 +15687,18 @@
       // write/read/delete probe on every book switch duplicated real work and
       // could itself queue behind the page being replaced.
       Promise.resolve().then(function () {
-        // device 库回收放最前:它可能整库重建,别让后续迁移读到半途库。
+        // 老数据搜家放**最前**：后面每一步都读库做比对，读到空库就等于对着
+        // 一个还没搜完的状态做判断。失败就让启动失败 —— 存储迁移半途而废的
+        // 表现是"一半数据在这边、一半在那边"，静默继续比启动不了糟得多。
+        return migrateLegacyStoresOnBoot();
+      }).then(function () {
+        // device 库回收放前面:它可能整库重建,别让后续迁移读到半途库。
+        // ⚠ 新存储接管时**不跑**：这套回收是冲着 WebKit IndexedDB "旧版本页不
+        //   回收"那个病灶去的（2026-09-02 单库 16.47GB），SQLite 会复用空闲页，
+        //   没有这个病。更要紧的是它按名字删的是 **IndexedDB** 库、重建出来的
+        //   也是 IndexedDB store —— 在新存储上跑一次，就把三个库里的 device
+        //   那个偷偷换回了 IndexedDB，而其余两个还在 SQLite。
+        if (nativeStoreEnabled()) return null;
         return maintainDeviceStoreOnBoot();
       }).then(function () {
         // 高亮拆分迁移必须先于 PDF 改页恢复：恢复用门面读当前状态做比对，

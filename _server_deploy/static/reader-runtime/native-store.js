@@ -586,6 +586,37 @@
       });
     }
 
+    // 启动期记事本：迁移进度这类「关于这个库本身」的小标记。
+    //
+    // ⚠ 业务数据一律走 collection，**不要**往这里塞。它没有 rev、没有墓碑、
+    //   不进 journal、不参与同步 —— 拿它存业务数据的表现是"这台设备上有、
+    //   别的设备上永远没有"。
+    // ⚠ 保留键挡掉：`instanceEpoch` 和 `cursor` 是库的身份与发号位置，被外面
+    //   覆盖一次就等于让同步跳过一段历史（epoch）或重发一遍（cursor）。
+    var RESERVED_META = { instanceEpoch: true, cursor: true };
+
+    function checkedMetaKey(key) {
+      var name = String(key || '');
+      if (!name) throw fail('meta 键不能为空', 'BW_DATA_INVALID');
+      if (RESERVED_META[name]) {
+        throw fail('meta 键 ' + name + ' 由存储自己维护，不能从外面写', 'BW_DATA_INVALID');
+      }
+      return name;
+    }
+
+    function meta(key) {
+      try { assertOpen(); return Promise.resolve(port.meta(checkedMetaKey(key))); }
+      catch (error) { return Promise.reject(error); }
+    }
+
+    function putMeta(key, value) {
+      try {
+        assertOpen();
+        return Promise.resolve(port.putMeta(checkedMetaKey(key), String(value)))
+          .then(function () { return true; });
+      } catch (error) { return Promise.reject(error); }
+    }
+
     function close() {
       closed = true;
       listeners.splice(0, listeners.length);
@@ -604,6 +635,8 @@
       applyChanges: applyChanges,
       subscribe: subscribe,
       instanceEpoch: instanceEpoch,
+      meta: meta,
+      putMeta: putMeta,
       status: status,
       close: close
     };
