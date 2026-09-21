@@ -15,7 +15,9 @@ import JavaScriptCore
 /// ⚠ 这里**不做单例**：`init?` 可能失败（包里缺文件），而失败时正确的反应是
 /// **放弃这次同步**，不是退化成"整域取一边" —— 静默丢掉另一台设备的改动是这条
 /// 链上最贵的失败。让调用方持有实例，它就必须面对"拿不到合并器"这件事。
-@MainActor
+///
+/// ⚠ 它带一个 JSContext，**不是线程安全的**。持有方必须保证串行使用：
+/// 同步引擎是个 actor，actor 的串行执行就是它的保护。别把实例递出那个隔离域。
 final class ReaderUserStateMerge {
     enum MergeError: Error {
         case invalidPayload       // 传进来的不是合法 JSON
