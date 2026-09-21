@@ -83,7 +83,7 @@
 |---|---|---|
 | 三方合并规则 | `reader-runtime/user-state-merge.js` | ✅ node 里 14 条用例真的在跑 |
 | 合并器（JSCore 壳） | `ios/.../ReaderUserStateMerge.swift` | ✅ 打包器原样烤进包并逐字校验 |
-| 同步引擎 | `ios/.../ReaderCloudUserStateSync.swift` | 写完待 CI；**还没人调用** |
+| 同步引擎 | `ios/.../ReaderCloudUserStateSync.swift` | ✅ 已接线（桥/开关/标脏/开书即合） |
 
 **代码侧已经齐了**（2026-09-22）：桥、开关（阅读设置 → 同步，默认关）、
 本地写入标脏、开书即合待处理、EPUB 写入也标脏。容器是用户当天在后台建的
@@ -105,9 +105,10 @@ entitlements 跑了一次 `compile_only=false upload=false`（签名+归档+校�
 - **域负载用 CKAsset**，不是字段。墨迹很容易超过单字段 1MB，写成字段会在真实的
   书上炸 —— 而且是在最重度的那本书上。
 
-⚠ **与现行架构的冲突已经写在调研文件里，需要用户拍板**：iCloud 直连会和
-「Windows 全量留底＋中继」形成双写。推荐 (a)：iCloud 管 Apple↔Apple、
-Windows 只收单向留底。
+✅ **用户 2026-09-22 拍板**：iCloud 管 Apple↔Apple、**Windows 只收单向留底**。
+由此定下两条 —— Windows 那条 outbox/sync-batch 的角色是留底**不是仲裁者**
+（别再往它上面加"谁更新"的判断）；也**不要**把 iCloud 的合并结果再推一份给
+Windows 当"同步"，推回去就又是双写。
 
 ## 还没做的
 
@@ -121,8 +122,14 @@ Windows 只收单向留底。
    `addAnimations`/`addCompletion`，是纯动画协议加不了项；WKWebView 的编辑菜单
    也没有稳妥的公开路子让宿主插项（`buildMenu(with:)` 管的是菜单栏与上下文菜单）。
    2026-09-22 为此红过一轮 CI。现在是自己画的一条 SwiftUI 条，完全可控。
-   还没做：划线编辑、叠加层（生词下划线/振假名等仍由网页画，而 EPUB 的网页层
-   是可见的，所以**没有坏**，只是不统一）。
+   划线（新建）也已经在条上：色板与网页工具栏同一份来源，落库走底座 `saveHl`，
+   锚点用 `captureSel` 对齐过的 `cur.anchor`（重算一次就会和用户看见的选中范围
+   差几个字）。
+   ⚠ 条读的是 `readerSelectionText` 而**不是** `selectionText`：后者来自
+   `__focusSel`，而 `__setFocusSel` 第一行就是「助手侧栏没开就 return」——
+   用它的话侧栏关着时条永远不出现，且没有任何线索。
+   还没做：**点已有划线去编辑**（PDF 那侧有，EPUB 还没）、叠加层（生词下划线/
+   振假名等仍由网页画，而 EPUB 的网页层是可见的，所以**没有坏**，只是不统一）。
 2. **把旧的删掉**：网页层仍承担 IndexedDB 存储、对话上下文、EPUB 正文。存储那条
    已经动起来了（见上一节），但"删掉"要等调用方也搬完，不在本轮范围内。
 
@@ -156,6 +163,13 @@ Windows 只收单向留底。
   `UIEditMenuInteractionAnimating.addMenuElement`（根本不存在，那是个纯动画协议），
   红一轮 CI 才发现 —— 而本机没有 Swift 编译器，每次猜错的代价就是一整轮。
   查一次两分钟。
+- **`@Published` 这类存储属性只能待在类主体里**，extension 里放会直接编译失败
+  （extensions must not contain stored properties）。方法放 extension 没问题 ——
+  同一天因为这个又红了一轮：往 `WKUIDelegate` 那个 extension 里加功能时，
+  顺手把状态也写在了旁边。
+- 一天两次「猜一下 → 一轮 CI」，合起来的教训是：**改 Swift 时，凡是自己没有
+  十成把握的语言规则或系统 API，先查**。契约测试挡不住这类错（它只看文本），
+  本机也编译不了，CI 是唯一的判官而它很慢。
 
 ## 代码入口
 
