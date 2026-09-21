@@ -1035,6 +1035,39 @@ window.onLookupWord = () => {
 //   表现是"同一个词在网页上查中日词典、在原生上查英文词典"。
 // ⚠ 端点也沿用网页那两条，不另开：日语 /pdf/api/dict-jp，其余 /pdf/api/dict-quick；
 //   整段翻译走 /pdf/api/translate-sentence。
+/// 原生面板用的「标记掌握」入口。
+///
+/// ⚠ 语言分流沿用同一条规则：日语走 jp-vocab-mark、英语走 vocab-mark
+/// （英语那条还会写 vocab 笔记的 frontmatter.user_mark 并锁 mastery）。
+/// 复制到原生那侧会变成两份会漂移的判据 —— 表现是"在原生上标了掌握，
+/// 网页上下划线还在"。
+/// 副作用也留在这里：标完要重画下划线，否则要翻页才看得见变化。
+window.__bwReaderMarkVocab = async function (request) {
+  request = request || {};
+  const word = String(request.word || '').trim();
+  if (!word || word.length > 200) throw new Error('BW_READER_MARK_WORD');
+  const jp = request.jp === true || (request.jp == null && _isJaWord(word));
+  const mark = request.mastered === false ? 'unknown' : 'known';
+  // ⚠ 两条端点各有各的已注册交互 id（vocabulary.mastery.set /
+  //   vocabulary.jp-mastery.set），所以这里**不能**用三元表达式合成 URL ——
+  //   合成之后审计对不上任何一个 id，门禁会判成新增债务。
+  const body = { method: 'POST', headers: {'Content-Type': 'application/json'},
+                 body: JSON.stringify({word, mark}) };
+  let r;
+  if (jp) {
+    // @interaction vocabulary.jp-mastery.set
+    r = await fetch('/pdf/api/jp-vocab-mark', body);
+  } else {
+    // @interaction vocabulary.mastery.set
+    r = await fetch('/pdf/api/vocab-mark', body);
+  }
+  const d = await r.json();
+  if (!d || d.ok === false) throw new Error('BW_READER_MARK_REJECTED');
+  try { const c = _dictCache.get(word); if (c) c.mastered = (mark === 'known'); } catch (_) {}
+  try { refreshVocabUnderlinesForAllPages(); } catch (_) {}
+  return { ok: true, mastered: mark === 'known', jp };
+};
+
 window.__bwReaderLookupData = async function (request) {
   request = request || {};
   const text = String(request.text || '').trim();

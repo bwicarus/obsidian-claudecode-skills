@@ -813,7 +813,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func openNativeLookup(page: Int, text: String, mode: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 2000, ["dict", "translate"].contains(mode) else { return }
-        nativeLookup = ReaderNativeLookupModel(
+        let panel = ReaderNativeLookupModel(
             text: trimmed, mode: mode, page: max(0, page),
             // 句境交给词典：同一个词在不同句子里释义不同，网页那侧也是带着它查的。
             context: String(trimmed.prefix(320))
@@ -821,6 +821,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             await self?.requestNativeConversationCommand(command)
                 ?? ["ok": false, "error": "阅读页已关闭"]
         }
+        // 标了掌握就重取一次叠加数据：否则这一页的下划线要翻页才消失。
+        panel.onMarked = { [weak self] in self?.refreshNativePageOverlays() }
+        nativeLookup = panel
     }
 
     /// 原生选区菜单里点了划线。
@@ -907,7 +910,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
-            "nativeCardMove", "nativeCardResize"]
+            "nativeCardMove", "nativeCardResize", "nativeVocabMark"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {

@@ -608,7 +608,7 @@ enum ReaderNativeConversationScript {
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
         if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup',
-             'nativeCardMove', 'nativeCardResize'].includes(command.action)) parameterKeys.push('value');
+             'nativeCardMove', 'nativeCardResize', 'nativeVocabMark'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -759,6 +759,26 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
             if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
             return { ok: true, value: { id: value.id } };
+          } else if (action === 'nativeVocabMark') {
+            // 原生词典面板的「标记掌握」。判据（日语/英语分流）和副作用（重画下划线）
+            // 都在阅读器那侧的 __bwReaderMarkVocab 里，这里只转交。
+            const value = command.value;
+            if (!value || typeof value.word !== 'string' || !value.word.trim() ||
+                value.word.length > 200) return { ok: false, error: '词无效' };
+            if (typeof window.__bwReaderMarkVocab !== 'function') return { ok: false, error: '词表尚未就绪' };
+            const captured = scope;
+            let saved;
+            try {
+              saved = await window.__bwReaderMarkVocab({
+                word: value.word,
+                jp: typeof value.jp === 'boolean' ? value.jp : null,
+                mastered: value.mastered !== false
+              });
+            } catch (error) {
+              return { ok: false, error: String(error && error.message || error).slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            return { ok: true, value: saved };
           } else if (action === 'nativeSelectionLookup') {
             // 原生阅读区的查词/翻译。**只取数据**，渲染在原生那侧。
             // 语言路由和端点都在阅读器自己的 __bwReaderLookupData 里，这里不复制。

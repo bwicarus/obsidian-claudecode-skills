@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 /// 原生阅读区的查词 / 整段翻译结果面板。
@@ -47,6 +48,40 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
         value = body
     }
 
+    /// 标记掌握 —— 判据（日/英分流）和副作用（重画下划线）都在阅读器那侧，
+    /// 这里只发起。成功后本页的生词下划线会跟着消失。
+    @Published private(set) var mastered = false
+    @Published private(set) var marking = false
+
+    func markMastered() async {
+        guard !marking else { return }
+        marking = true
+        defer { marking = false }
+        let receipt = await request([
+            "action": "nativeVocabMark",
+            "value": ["word": lemma.isEmpty ? headword : lemma,
+                      "jp": isJapanese, "mastered": !mastered],
+        ])
+        guard receipt["ok"] as? Bool == true else {
+            error = receipt["error"] as? String ?? "标记失败，请重试。"
+            return
+        }
+        mastered = (receipt["value"] as? [String: Any])?["mastered"] as? Bool ?? !mastered
+        onMarked?()
+    }
+
+    /// 标完要让原生正文重取一次叠加数据，否则下划线要翻页才消失。
+    var onMarked: (() -> Void)?
+
+    /// 发音：日语读假名，英语读词本身。用系统 TTS，不回网页。
+    func speak() {
+        let spoken = isJapanese && !reading.isEmpty ? reading : headword
+        guard !spoken.isEmpty else { return }
+        let utterance = AVSpeechUtterance(string: spoken)
+        utterance.voice = AVSpeechSynthesisVoice(language: isJapanese ? "ja-JP" : "en-US")
+        ReaderNativeSpeech.shared.speak(utterance)
+    }
+
     private func string(_ key: String) -> String { value[key] as? String ?? "" }
 
     var isJapanese: Bool { value["jp"] as? Bool == true }
@@ -80,6 +115,13 @@ struct ReaderNativeLookupView: View {
                     } else {
                         HStack(alignment: .firstTextBaseline, spacing: 10) {
                             Text(model.headword).font(.title2.weight(.semibold))
+                            Button {
+                                model.speak()
+                            } label: {
+                                Image(systemName: "speaker.wave.2")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("发音")
                             if !model.reading.isEmpty {
                                 Text(model.reading).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
                             }
@@ -106,6 +148,16 @@ struct ReaderNativeLookupView: View {
                         if model.chinese.isEmpty && model.definition.isEmpty {
                             Text("词典里没有这个词。").foregroundStyle(ReaderNativeTheme.muted)
                         }
+                        Divider()
+                        Button {
+                            Task { await model.markMastered() }
+                        } label: {
+                            Label(model.mastered ? "已掌握（点此取消）" : "标记掌握",
+                                  systemImage: model.mastered ? "checkmark.circle.fill" : "star")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(model.marking)
+                        .accessibilityHint("标记掌握后这个词不再画生词下划线")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -122,5 +174,20 @@ struct ReaderNativeLookupView: View {
         }
         .tint(ReaderNativeTheme.accent)
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// 全局共用一个合成器。
+/// ⚠ 每次新建 `AVSpeechSynthesizer` 会让上一句**还没念完就被回收**，表现是
+/// "点了发音没声音"或只响半个音。系统要求它活到念完为止。
+@MainActor
+final class ReaderNativeSpeech {
+    static let shared = ReaderNativeSpeech()
+    private let synthesizer = AVSpeechSynthesizer()
+    private init() {}
+
+    func speak(_ utterance: AVSpeechUtterance) {
+        if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
+        synthesizer.speak(utterance)
     }
 }
