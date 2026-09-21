@@ -416,6 +416,15 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
                 'action':'liveAction','scope':state['scope'],'actionId':media_item['selectID']})['ok'])
             self.assertEqual(page.evaluate('BWReaderRuntime.contextSelections.snapshot().items[0].source'), {'cid':'images_native','item':1})
+            page.evaluate('''() => {
+              const original = document.querySelector('[data-vc-cid="images_native"]');
+              window.imageMirror = __vcInfoCardEl(original.__vcCard);
+              document.body.appendChild(imageMirror);
+              RC.voiceCard.mediaAction(imageMirror, original.__vcCard, 1, 'toggle');
+            }''')
+            self.assertEqual(page.evaluate('BWReaderRuntime.contextSelections.snapshot().items'), [])
+            self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
+                'action':'liveAction','scope':state['scope'],'actionId':media_item['selectID']})['ok'])
             self.assertTrue(page.evaluate('(c)=>__bwNativeConversation.perform(c)', {
                 'action':'liveAction','scope':state['scope'],'actionId':media_item['removeID']})['ok'])
             self.assertEqual(page.evaluate('BWReaderRuntime.contextSelections.snapshot().items'), [])

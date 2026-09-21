@@ -4079,6 +4079,9 @@ if (window.__bwPwaProviderOnly) return;
       var contextID = 'card:' + (card.cid || '') + '/item:' + index;
       var registry = _ctxSelectionRegistry();
       var on = registry ? !registry.isSelected(contextID) : !cell.classList.contains('vc-picked');
+      // Another view of this same image may own the selected CSS state. The
+      // shared registry still has to deselect it when native toggles it off.
+      if (!on && registry) registry.deselect(contextID);
       root.querySelectorAll('.vc-ig-cell.vc-picked').forEach(function (other) {
         other.classList.remove('vc-picked');
         if (other.dataset.pinLabel) _pinForget(other.dataset.pinLabel, other.dataset.vcCid, other);
