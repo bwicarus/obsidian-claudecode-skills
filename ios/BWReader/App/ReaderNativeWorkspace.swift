@@ -91,6 +91,9 @@ struct ReaderNativeWorkspace<Document: View>: View {
         .sheet(item: $reader.nativeLookup) { panel in
             ReaderNativeLookupView(model: panel)
         }
+        .sheet(item: $reader.nativeFigure) { panel in
+            ReaderNativeFigureView(model: panel)
+        }
         .sheet(item: $conversation.searchPanel) { panel in
             ReaderNativeSearchView(model: panel)
         }

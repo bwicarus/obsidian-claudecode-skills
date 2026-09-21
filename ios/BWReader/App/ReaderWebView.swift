@@ -349,6 +349,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     @Published private(set) var nativePDFMountFailure: String?
     /// 原生查词/翻译面板。非 nil 即弹出（在 ReaderNativeWorkspace 里呈现）。
     @Published var nativeLookup: ReaderNativeLookupModel?
+    @Published var nativeFigure: ReaderNativeFigureModel?
     private var nativePDFMountTask: Task<Void, Never>?
     var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
@@ -558,6 +559,30 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                                  fontScale: fontSize / size.height, text: text)
                 }
                 document.setTranslationSlices(rows, page: page)
+                // 插图：徽标 + 图框 + 已生成好的描述。本书没开「插图描述」时网页那侧
+                // 直接回空（不拉端点、不烧 AI），所以这里也就是一个空数组。
+                let figures = try? await self.webView.callAsyncJavaScript(
+                    "return await window.__bwReaderPageFigures?.(page);",
+                    arguments: ["page": page], in: nil, contentWorld: .page)
+                guard self.nativePDFDocument === document else { return }
+                let items = (figures as? [[String: Any]] ?? []).compactMap {
+                    row -> ReaderNativePDFDocument.Figure? in
+                    guard let id = row["id"] as? String, !id.isEmpty,
+                          let box = row["box"] as? [Double], box.count == 4,
+                          box[2] > box[0], box[3] > box[1] else { return nil }
+                    let badge = (row["badge"] as? [Double]).flatMap {
+                        $0.count == 2 ? CGPoint(x: $0[0], y: $0[1]) : nil
+                    }
+                    return .init(id: id, page: page,
+                                 box: CGRect(x: box[0], y: box[1],
+                                             width: box[2] - box[0], height: box[3] - box[1]),
+                                 badge: badge,
+                                 caption: row["caption"] as? String ?? "",
+                                 desc: row["desc"] as? String ?? "",
+                                 group: row["group"] as? Bool == true,
+                                 attached: row["attached"] as? Bool == true)
+                }
+                document.setFigures(items, page: page)
             }
         }
     }
@@ -852,6 +877,19 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeLookup = panel
     }
 
+    /// 点图徽标 → 原生描述面板。描述文本随图一起取过来了，这里不再回网页问一次。
+    func openNativeFigurePanel(_ figure: ReaderNativePDFDocument.Figure) {
+        let panel = ReaderNativeFigureModel(figure: figure) { [weak self] command in
+            await self?.requestNativeConversationCommand(command)
+                ?? ["ok": false, "error": "阅读页已关闭"]
+        }
+        // 带入状态变了，正文上那个持久绿框和徽标颜色要跟着变。
+        panel.onAttachChanged = { [weak self] attached in
+            self?.nativePDFDocument?.setFigureAttached(attached, id: figure.id, page: figure.page)
+        }
+        nativeFigure = panel
+    }
+
     /// 原生选区菜单里点了划线。
     ///
     /// ⚠ **不在原生这边另写一套保存**：走的是阅读器自己的
@@ -936,7 +974,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
-            "nativeCardMove", "nativeCardResize", "nativeVocabMark"]
+            "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {

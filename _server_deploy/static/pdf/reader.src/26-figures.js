@@ -641,6 +641,53 @@
     _fetchFigs(pw, num);
   };
 
+  // ── 原生正文（PDFKit 接管）：图徽标与图区都由原生画，这里只出数据 ──
+  // 接管后 .fig-layer 一个都没有（页面不在 DOM 里），徽标、图区命中层、持久选中高亮
+  // 全都没有宿主。数据本来就是归一坐标，所以原生直接用，判据（哪张图、描述文本、
+  // 带入与否）仍然只在这一处。
+  window.__bwReaderPageFigures = async function (page) {
+    page = Number(page) || 0;
+    if (!page || !window.__figBookOn || typeof FILE_REL === 'undefined' || !FILE_REL) return [];
+    var rec = _cache[page];
+    if (!rec || rec.pending) {
+      try {
+        // @interaction document.page-figures.read
+        var r = await fetch('/pdf/api/page-figures?file=' + encodeURIComponent(FILE_REL) + '&page=' + page);
+        var d = await r.json();
+        if (!d || !d.ok) return [];
+        rec = _cache[page] = { figs: d.figures || [], pending: !!d.pending };
+      } catch (_) { return []; }
+    }
+    var attached = window.__figAttached || [];
+    return (rec.figs || []).slice(0, 24).map(function (f) {
+      var bb = (f.fbox && f.fbox.length === 4) ? f.fbox : f.bbox;
+      if (!bb || bb.length !== 4 || !(bb[2] > bb[0]) || !(bb[3] > bb[1])) return null;
+      var id = _figId(f, page);
+      // 徽标锚点：服务端预算好的那个（贴着图的空白角，跨加载位置一致）优先。
+      // ⚠ 缺它时 DOM 那侧的回退要试四个角并用 hitsText 避开正文 —— 那需要文字层，
+      // 接管后不存在。所以这里退成「图框右上角内缩」，并且**不假装**是同一个位置。
+      var badge = (f.badge && f.badge.length === 2) ? [+f.badge[0], +f.badge[1]] : null;
+      return {
+        id: id, page: page, box: bb.map(Number), badge: badge,
+        caption: String(f.caption || ''), desc: String(f.desc || '').slice(0, 6000),
+        group: !!f.group,
+        attached: attached.some(function (a) { return a.id === id; })
+      };
+    }).filter(Boolean);
+  };
+  // 带入助手（原生面板里的「带入助手」= DOM 那侧长按图的同一个 toggle）。
+  window.__bwReaderFigureAttach = async function (request) {
+    request = request || {};
+    var page = Number(request.page) || 0;
+    var id = String(request.id || '');
+    var rec = _cache[page];
+    if (!page || !id || !rec) throw new Error('BW_READER_FIGURE_MISS');
+    var fig = (rec.figs || []).filter(function (f) { return _figId(f, page) === id; })[0];
+    if (!fig) throw new Error('BW_READER_FIGURE_MISS');
+    _toggleFig(fig, page);
+    return { attached: (window.__figAttached || []).some(function (a) { return a.id === id; }) };
+  };
+
   function schedulePoll(pw, num) {       // 后台描述 ~8-15s,轮询几次拿结果(只在该页仍在 DOM 时)
     if ((_poll[num] || 0) >= 8) return;
     _poll[num] = (_poll[num] || 0) + 1;

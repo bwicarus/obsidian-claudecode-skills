@@ -164,10 +164,16 @@ private struct ReaderRootView: View {
                 .accessibilityHidden(nativePDFSurfaceActive)
 
             if nativePDFRendererEnabled, let document = reader.nativePDFDocument {
-                ReaderNativePDFViewport(document: document) { sentence in
-                    // 行首「译」→ 复用原生翻译面板（与选区菜单里的「翻译」同一个）。
-                    reader.openNativeSentenceTranslation(sentence)
-                }
+                ReaderNativePDFViewport(
+                    document: document,
+                    onTranslateSentence: { sentence in
+                        // 行首「译」→ 复用原生翻译面板（与选区菜单里的「翻译」同一个）。
+                        reader.openNativeSentenceTranslation(sentence)
+                    },
+                    onOpenFigure: { figure in
+                        reader.openNativeFigurePanel(figure)
+                    }
+                )
                     .ignoresSafeArea(edges: .bottom)
             }
 

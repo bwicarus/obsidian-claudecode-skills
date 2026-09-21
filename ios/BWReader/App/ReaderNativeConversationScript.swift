@@ -608,7 +608,8 @@ enum ReaderNativeConversationScript {
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
         if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup',
-             'nativeCardMove', 'nativeCardResize', 'nativeVocabMark'].includes(command.action)) parameterKeys.push('value');
+             'nativeCardMove', 'nativeCardResize', 'nativeVocabMark',
+             'nativeFigureAttach'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -759,6 +760,23 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
             if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
             return { ok: true, value: { id: value.id } };
+          } else if (action === 'nativeFigureAttach') {
+            // 原生图描述面板的「带入助手」。带入与否的权威是网页那侧的 __figAttached
+            // （它就是助手上下文的来源），所以这里转交并把回执里的真实状态带回去 ——
+            // 原生本地先翻按钮会和助手实际看到的东西对不上。
+            const value = command.value;
+            if (!value || typeof value.id !== 'string' || !value.id ||
+                !Number.isFinite(Number(value.page))) return { ok: false, error: '图参数无效' };
+            if (typeof window.__bwReaderFigureAttach !== 'function') return { ok: false, error: '插图尚未就绪' };
+            const captured = scope;
+            let done;
+            try {
+              done = await window.__bwReaderFigureAttach({ id: value.id, page: Number(value.page) });
+            } catch (error) {
+              return { ok: false, error: String(error && error.message || error).slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            return { ok: true, value: done };
           } else if (action === 'nativeVocabMark') {
             // 原生词典面板的「标记掌握」。判据（日语/英语分流）和副作用（重画下划线）
             // 都在阅读器那侧的 __bwReaderMarkVocab 里，这里只转交。

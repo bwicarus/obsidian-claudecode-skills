@@ -121,6 +121,32 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         translationSlices[page] = slices
     }
 
+    /// 一张插图：徽标锚点 + 图框（都归一化）+ 已经生成好的描述。
+    /// ⚠ `badge` 可能为空 —— 服务端还没算好锚点。DOM 那侧此时会试四个角并避开正文，
+    /// 那要文字层；接管后退成图框右上角内缩，位置与网页不保证一致（记在这里，
+    /// 不要以为是 bug）。
+    struct Figure: Identifiable {
+        let id: String
+        let page: Int
+        let box: CGRect            // 归一化
+        let badge: CGPoint?        // 归一化，徽标中心
+        let caption: String
+        let desc: String
+        let group: Bool
+        var attached: Bool
+    }
+    @Published private(set) var figures: [Int: [Figure]] = [:]
+
+    func setFigures(_ items: [Figure], page: Int) {
+        figures[page] = items
+    }
+
+    func setFigureAttached(_ attached: Bool, id: String, page: Int) {
+        guard var items = figures[page], let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].attached = attached
+        figures[page] = items
+    }
+
     /// 句子配色：与网页 `SENT_COLORS` 一一对应，按序号取模。
     /// ⚠ 顺序也要一致 —— 同一页同一句在两个表面上必须是同一个颜色，否则
     /// 「刚才那句绿的」在另一个表面上指的是别的句子。
@@ -1048,6 +1074,8 @@ struct ReaderNativePDFViewport: View {
     /// 点行首的「译」：把整句交给原生翻译面板。
     /// ⚠ 按钮必须是**真控件**，不能画在 Canvas 里 —— Canvas 接不到点击。
     var onTranslateSentence: ((ReaderNativePDFDocument.VocabSentence) -> Void)?
+    /// 点图徽标 → 打开原生描述面板（描述文本是服务端早就生成好的，不在这里烧额度）。
+    var onOpenFigure: ((ReaderNativePDFDocument.Figure) -> Void)?
     var body: some View {
         ZStack {
             ReaderNativePDFSurface(document: document)
@@ -1143,6 +1171,16 @@ struct ReaderNativePDFViewport: View {
                                 .foregroundStyle(Color(red: 0.043, green: 0.239, blue: 0.569)),
                             at: CGPoint(x: box.minX, y: box.midY), anchor: .leading)
                     }
+                    // 已带入助手的图：持久绿框（对应网页 .fig-hl-sel）。临时高亮不画 ——
+                    // 那是点图瞬间的反馈，原生这边点完就开面板了，不需要闪一下。
+                    for figure in document.figures[number] ?? [] where figure.attached {
+                        guard let rect = document.viewRect(normalized: figure.box, page: number) else { continue }
+                        let green = Color(red: 0.188, green: 0.820, blue: 0.345)
+                        pageContext.fill(Path(roundedRect: rect, cornerRadius: 7),
+                                         with: .color(green.opacity(0.12)))
+                        pageContext.stroke(Path(roundedRect: rect, cornerRadius: 7),
+                                           with: .color(green.opacity(0.95)), lineWidth: 2.5)
+                    }
                     for stroke in document.ink[number] ?? [] {
                         ReaderNativeInkDrawing.draw(stroke, in: frame, context: &pageContext)
                     }
@@ -1172,6 +1210,39 @@ struct ReaderNativePDFViewport: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("翻译整句")
                         .position(x: rect.minX - side * 0.6, y: rect.midY)
+                    }
+                }
+            }
+
+            // 图徽标：同样必须是真控件（Canvas 接不到点击）。轻点 → 描述面板。
+            ForEach(document.position.visiblePages, id: \.self) { number in
+                let _ = document.geometryRevision
+                ForEach(document.figures[number] ?? []) { figure in
+                    if let rect = document.viewRect(normalized: figure.box, page: number),
+                       let page = document.viewRect(normalized: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                                    page: number) {
+                        let side: CGFloat = 26
+                        // 有服务端锚点就用它；没有就退图框右上角内缩（见 Figure 的注释）。
+                        let center: CGPoint = figure.badge.map {
+                            CGPoint(x: page.minX + $0.x * page.width,
+                                    y: page.minY + $0.y * page.height)
+                        } ?? CGPoint(x: rect.maxX - side * 0.7, y: rect.minY + side * 0.7)
+                        Button {
+                            onOpenFigure?(figure)
+                        } label: {
+                            Image(systemName: "photo")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: side, height: side)
+                                .background(
+                                    Circle().fill(figure.attached
+                                        ? Color(red: 0.188, green: 0.820, blue: 0.345)
+                                        : ReaderNativeTheme.accent))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(figure.caption.isEmpty ? "图说明" : figure.caption)
+                        .position(x: min(max(page.minX + side / 2, center.x), page.maxX - side / 2),
+                                  y: min(max(page.minY + side / 2, center.y), page.maxY - side / 2))
                     }
                 }
             }
