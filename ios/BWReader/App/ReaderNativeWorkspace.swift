@@ -83,7 +83,10 @@ struct ReaderNativeWorkspace<Document: View>: View {
             ReaderNativeSettingsView(model: panel)
         }
         .sheet(item: $conversation.readingSettingsPanel) { panel in
-            ReaderNativeReadingSettingsView(model: panel)
+            ReaderNativeReadingSettingsView(
+                model: panel,
+                nativePDFMountFailure: reader.nativePDFMountFailure
+            )
         }
         .sheet(item: $conversation.searchPanel) { panel in
             ReaderNativeSearchView(model: panel)

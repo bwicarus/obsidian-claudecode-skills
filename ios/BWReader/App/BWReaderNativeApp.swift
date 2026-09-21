@@ -126,6 +126,15 @@ private struct ReaderRootView: View {
     @State private var libraryStartupNotice: String?
     @State private var nativeToolsInitialAction: ReaderNativeFeatureAction?
     @AppStorage("reader.nativeInterfaceEnabled") private var nativeInterfaceEnabled = true
+    /// 原生 PDF 主阅读区。**默认关**：交接文件第 5 条 —— 未接齐的 PDFKit 主阅读区
+    /// 不默认启用。打开后 ReaderWebView 退到后面当数据层，正文由 PDFKit 画。
+    @AppStorage("reader.nativePDFRenderer") private var nativePDFRendererEnabled = false
+
+    /// 原生正文**真的盖上去了**才算接管。只看开关会在文档还没挂上来的那一段
+    /// 把网页层也藏掉，屏幕上就是一片空白。
+    private var nativePDFSurfaceActive: Bool {
+        nativePDFRendererEnabled && reader.nativePDFDocument != nil
+    }
 
     var body: some View {
         ReaderNativeWorkspace(
@@ -143,8 +152,21 @@ private struct ReaderRootView: View {
         ZStack {
             ReaderNativeTheme.canvas.ignoresSafeArea()
 
+            // ⚠ 原生主阅读区启用时，ReaderWebView **仍然留在层级里**，只是不可见、
+            //   不接触摸。它是本地 runtime 服务、导航桥、对话上下文、user-state
+            //   这些东西的宿主 —— 摘掉它等于把阅读器的数据层一起摘掉。
+            //   这也是统一控制层的铁律：让中间层去适应旧代码，不为新渲染器另造
+            //   一套上层建筑（references/unified-control-layer.md）。
             ReaderWebView(model: reader)
                 .ignoresSafeArea(edges: .bottom)
+                .opacity(nativePDFSurfaceActive ? 0 : 1)
+                .allowsHitTesting(!nativePDFSurfaceActive)
+                .accessibilityHidden(nativePDFSurfaceActive)
+
+            if nativePDFRendererEnabled, let document = reader.nativePDFDocument {
+                ReaderNativePDFViewport(document: document)
+                    .ignoresSafeArea(edges: .bottom)
+            }
 
             if nativeInterfaceEnabled && !reader.nativeConversation.legacyVisible {
                 ReaderNativePageCards(reader: reader, model: reader.nativeConversation)

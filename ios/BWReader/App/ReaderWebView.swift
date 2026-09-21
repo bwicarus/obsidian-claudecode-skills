@@ -334,6 +334,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativePDFMutationBridge: ReaderNativePDFMutationBridge?
     private var nativePDFNavigationBridge: ReaderNativePDFNavigationBridge?
     private weak var activeNativePDFDocument: ReaderNativePDFDocument?
+    /// 主阅读区挂上去的那份原生文档。**强引用在这里**：
+    /// `prepareNativePDFDocument()` 的说明写着「调用方持有这个视口」，而在
+    /// 2026-09-21 之前根本没有调用方 —— 组件建好了却从没挂上界面。
+    /// SwiftUI 要能观察到它才画得出来，所以所有权落在 model 上。
+    @Published private(set) var nativePDFDocument: ReaderNativePDFDocument?
+    /// 挂载失败的原因。**要能看见** —— 否则原生阅读区白着而日志里什么都没有。
+    @Published private(set) var nativePDFMountFailure: String?
+    private var nativePDFMountTask: Task<Void, Never>?
     var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
     private var nativeBookOCRUpdateCancellable: AnyCancellable?
@@ -519,12 +527,63 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func invalidateNativePDFDocument() {
+        nativePDFMountTask?.cancel()
+        nativePDFMountTask = nil
         nativePDFNavigationBridge?.invalidate()
         activeNativePDFDocument?.onSelection = nil
+        activeNativePDFDocument?.onGeometry = nil
         activeNativePDFDocument?.close()
         activeNativePDFDocument = nil
+        if let mounted = nativePDFDocument {
+            mounted.onGeometry = nil
+            mounted.close()
+            nativePDFDocument = nil
+        }
         setNativeDocumentCaptureViewport(nil)
     }
+
+    /// 把原生 PDF 主阅读区挂到界面上。
+    ///
+    /// ⚠ 顺序是被 `attach` 的前置条件定死的：它要求 `document.view.bounds` 已经
+    /// 有尺寸（见 ReaderNativePDFNavigationBridge.attach）。所以必须
+    /// **先发布让 SwiftUI 挂上去、等它布局完，才能 activate** —— 反过来做一定
+    /// 拿到 0×0 然后抛 unavailable。`onGeometry` 就是"已布局"的信号
+    /// （document 自己在 layoutChanged 里触发，此前没人接）。
+    ///
+    /// 默认关：交接文件第 5 条 —— 未接齐的 PDFKit 主阅读区不默认启用。
+    func mountNativePDFDocumentIfEnabled() {
+        guard UserDefaults.standard.bool(forKey: ReaderWebViewModel.nativePDFRendererDefaultsKey) else { return }
+        guard nativePDFDocument == nil, nativePDFMountTask == nil, !isLoading else { return }
+        let generation = bookUserStateContextGeneration
+        nativePDFMountTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if self.bookUserStateContextGeneration == generation { self.nativePDFMountTask = nil } }
+            let document: ReaderNativePDFDocument
+            do { document = try await self.prepareNativePDFDocument() } catch { return }
+            guard !Task.isCancelled, self.bookUserStateContextGeneration == generation else {
+                document.close()
+                return
+            }
+            // ⚠ 回调本身不是 MainActor 隔离的（与 onSelection 同一形态），所以一律
+            //   先跳进 MainActor 再碰视图和模型。
+            document.onGeometry = { [weak self, weak document] in
+                Task { @MainActor [weak self, weak document] in
+                    guard let self, let document,
+                          document.view.bounds.width > 0, document.view.bounds.height > 0,
+                          self.bookUserStateContextGeneration == generation else { return }
+                    document.onGeometry = nil
+                    do { try await self.activateNativePDFDocument(document) } catch {
+                        // 出声：静默失败的表现是「原生阅读区白着，没人知道为什么」。
+                        self.nativePDFMountFailure = String(describing: error).prefix(200).description
+                    }
+                }
+            }
+            self.nativePDFMountFailure = nil
+            self.nativePDFDocument = document
+        }
+    }
+
+    static let nativePDFRendererDefaultsKey = "reader.nativePDFRenderer"
 
     func captureNativeReadingHierarchyImage() throws -> UIImage {
         guard let localRuntimeServer else { throw NativeReaderCaptureError.pageUnavailable }
@@ -4627,6 +4686,9 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         }
         setReaderForeground(readerForeground)
         updateNativeAgentVoiceState()
+        // 书渲完才挂原生主阅读区：prepare 要读原件身份、初始位置和 user-state 包，
+        // 这三样在 didFinish 之前都还没就位。
+        mountNativePDFDocumentIfEnabled()
         if let deferred = deferredBookUserStateMessage {
             deferredBookUserStateMessage = nil
             showBookUserStateMessage(

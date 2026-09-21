@@ -41,6 +41,11 @@ struct ReaderNativeReadingSettingsView: View {
     @State private var crop: [String: Double] = [:]
     @State private var colors: [String] = []
     @State private var newColor = Color.yellow
+    /// 原生 PDF 主阅读区的开关（迁移中，默认关）。与 BWReaderNativeApp 同一个键。
+    @AppStorage("reader.nativePDFRenderer") private var nativePDFRenderer = false
+    /// 挂载失败时把原因摆在开关旁边 —— 否则只看到「开了但没变化」。
+    /// 给默认值是为了不改既有调用点的写法。
+    var nativePDFMountFailure: String? = nil
 
     var body: some View {
         NavigationStack {
@@ -108,6 +113,22 @@ struct ReaderNativeReadingSettingsView: View {
                         Button("保存色板") { Task { await model.save("colors", colors) } }
                             .disabled(colors == savedColors)
                         Button("恢复默认色板") { colors = ["#fff59d", "#a7f3d0", "#a3d4ff", "#fda4af"] }
+                    }
+                    // 原生主阅读区（迁移中）。**默认关**：还没接齐的能力见下面的说明，
+                    // 开着它就用不到那几项 —— 与其让人一头雾水，不如把边界写在开关旁边。
+                    Section {
+                        Toggle("用原生 PDFKit 渲染正文", isOn: $nativePDFRenderer)
+                        if let failure = nativePDFMountFailure {
+                            Label(failure, systemImage: "exclamationmark.triangle")
+                                .font(.footnote).foregroundStyle(.orange)
+                        }
+                    } header: {
+                        Text("原生阅读区（迁移中）")
+                    } footer: {
+                        Text("开启后正文由 PDFKit 画，网页层退到后面继续管数据。"
+                             + "目前已接：位置/翻页/布局/缩放/去边、选字、高亮与墨迹显示。"
+                             + "尚未接：卡片拖放与锁定、Pencil 书写、插入页、页内生成物、"
+                             + "查词与翻译菜单 —— 要用这些先关掉它。")
                     }
                     Section("诊断") { settingToggle("显示阅读日志", key: "debug") }
                 }

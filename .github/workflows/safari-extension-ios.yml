@@ -454,7 +454,7 @@ jobs:
           set -euo pipefail
           API_JSON="$RUNNER_TEMP/fastlane-api-key.json"
           API_JSON="$API_JSON" python <<'PY'
-          import json, os, time, urllib.parse, urllib.request
+          import json, os, time, urllib.error, urllib.parse, urllib.request
           from pathlib import Path
           import jwt
           config = json.loads(Path(os.environ["API_JSON"]).read_text())
@@ -465,8 +465,16 @@ jobs:
               req = urllib.request.Request("https://api.appstoreconnect.apple.com" + path,
                   data=json.dumps(payload).encode() if payload is not None else None, method=method,
                   headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
-              with urllib.request.urlopen(req, timeout=30) as response:
-                  return json.load(response)
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  # ⚠ 苹果把"为什么不行"全写在响应体里，而默认的 HTTPError 只剩一句
+                  #   "400: Bad Request" —— 2026-09-21 就是这样卡住的，一整轮构建
+                  #   只换来一个没有信息量的状态码。出声要带上它说的话。
+                  body = error.read().decode("utf-8", "replace")[:2000]
+                  print("App Store Connect %s %s -> %s\n%s" % (method, path, error.code, body))
+                  raise
           wanted = os.environ["BUNDLE_ID"]
           found = request("GET", "/v1/bundleIds?" + urllib.parse.urlencode(
               {"filter[identifier]": wanted, "limit": 200}))["data"]
@@ -484,11 +492,27 @@ jobs:
           bundle_id = bundles[0]["id"]
           capabilities = request("GET", "/v1/bundleIds/" + bundle_id + "/bundleIdCapabilities?limit=200")["data"]
           if not any(c["attributes"]["capabilityType"] == "SIGN_IN_WITH_APPLE" for c in capabilities):
-              request("POST", "/v1/bundleIdCapabilities", {"data": {
-                  "type": "bundleIdCapabilities", "attributes": {
-                      "capabilityType": "SIGN_IN_WITH_APPLE",
-                      "settings": [{"key": "APPLE_ID_AUTH_APP_CONSENT", "options": [{"key": "PRIMARY_APP_CONSENT", "enabled": True}]}]},
-                  "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle_id}}}}})
+              relationship = {"bundleId": {"data": {"type": "bundleIds", "id": bundle_id}}}
+              # ⚠ 带 settings 的写法被苹果回了 400（2026-09-21 实录）。主 App 开
+              #   Sign in with Apple 本来就不需要 APPLE_ID_AUTH_APP_CONSENT ——
+              #   那一项是给"分组到另一个主 App"的场景用的。先按带 settings 试，
+              #   被拒就退回不带 settings 的最小写法；两次都失败才真的失败。
+              attempts = [
+                  {"capabilityType": "SIGN_IN_WITH_APPLE",
+                   "settings": [{"key": "APPLE_ID_AUTH_APP_CONSENT",
+                                 "options": [{"key": "PRIMARY_APP_CONSENT", "enabled": True}]}]},
+                  {"capabilityType": "SIGN_IN_WITH_APPLE"},
+              ]
+              for index, attributes in enumerate(attempts):
+                  try:
+                      request("POST", "/v1/bundleIdCapabilities", {"data": {
+                          "type": "bundleIdCapabilities", "attributes": attributes,
+                          "relationships": relationship}})
+                      break
+                  except urllib.error.HTTPError as error:
+                      if index + 1 == len(attempts) or error.code not in (400, 409, 422):
+                          raise
+                      print("retrying Sign in with Apple without capability settings")
               print("Enabled Sign in with Apple for Reader")
           else:
               print("Reader Sign in with Apple already enabled")
