@@ -1010,17 +1010,32 @@ if (window.__bwPwaProviderOnly) return;
     if (!word) return null;
     return _dictCache.get(word) || _persistGet(word) || null;
   }
-  function lookupData(word, ctx) {
+  // opts（可选）: {file, page, langs} —— 给**没有开过小框**的调用方用：原生面板
+  // 那条路只要数据，不经 show()，于是 _ctx 里还是上一本书甚至是空的。
+  // 语言数组尤其要紧：它决定英/日分流，拿错就变成"同一个词在两个表面上查了
+  // 不同的词典"。
+  //
+  // ⚠ 整个 _ctx 存下来再改，不是只存 ctx 一个字段：临时覆盖 file/langs 之后
+  // 若只恢复 ctx，别人设的 file 就被我们永久改掉了。
+  function lookupData(word, ctx, opts) {
     word = String(word || '').trim();
     if (!word) return Promise.resolve(null);
     var hit = _dictCache.get(word) || _persistGet(word);
     if (hit) return Promise.resolve(hit);
-    var savedCtx = _ctx.ctx;
-    try { if (ctx) _ctx.ctx = ctx; } catch (_) {}
+    var saved = _ctx;
+    try {
+      _ctx = Object.assign({}, _ctx);
+      if (ctx) _ctx.ctx = ctx;
+      if (opts) {
+        if (opts.file) _ctx.file = opts.file;
+        if (opts.page != null) _ctx.page = opts.page;
+        if (opts.langs) _ctx.langs = opts.langs;
+      }
+    } catch (_) {}
     return Promise.resolve().then(function () { return _lookupFetch(word); }).then(function (d) {
       _cacheDictResult(word, d);
       return d;
-    }).finally(function () { try { _ctx.ctx = savedCtx; } catch (_) {} });
+    }).finally(function () { try { _ctx = saved; } catch (_) {} });
   }
 
   function _pruneJapaneseExampleZhPending() {

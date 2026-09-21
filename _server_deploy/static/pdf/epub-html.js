@@ -5918,4 +5918,52 @@
       try { _favNotebookEntries(); } catch (e) {}   // 收藏夹 NotebookLM 三入口:内联 quick 区已随 pane 被摘 → 重注入共享 #asst-quick
     }
   } catch (e) {}
+
+  // ── 原生面板的取数口（与 PDF 那侧**同名同形状**）──
+  //
+  // App 的原生选区菜单调的是 window.__bwReaderLookupData，它不关心自己站在哪个
+  // 阅读器上。PDF 那份在 reader.src/15-phrase-wordpop.js；这份是 EPUB 的。
+  // 同名同形状 = 壳那边一行都不用改。
+  //
+  // ⚠ 判据不在这里：英/日分流、离线词典、缓存与 stale-while-revalidate 全在
+  // 共享层 RC.wordpop 里（PDF 也用它）。这里只把 EPUB 的 file/langs 交给它 ——
+  // 语言数组尤其要紧，拿错就变成"同一个词在两个表面上查了不同的词典"。
+  window.__bwReaderLookupData = async function (request) {
+    request = request || {};
+    var text = String(request.text || '').trim();
+    if (!text || text.length > 2000) throw new Error('BW_READER_LOOKUP_TEXT');
+    var context = String(request.context || '').slice(0, 320);
+    if (request.mode === 'translate') {
+      var t = await (await fetch('/pdf/api/translate-sentence', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: text}),
+      })).json();
+      if (!t || t.ok !== true) throw new Error('BW_READER_TRANSLATE_FAILED');
+      return {mode: 'translate', text: text, zh: t.zh || ''};
+    }
+    if (request.mode === 'explain') {
+      // 短选区换整句作解释主体 —— 与 PDF 那侧同一条规则（不换的话 AI 拿到的是
+      // 碎词，回答基本都是"内容不完整、请提供上下文"）。
+      var subject = (text.length < 50 && context && context.length > text.length) ? context : text;
+      var e = await (await fetch('/pdf/api/explain', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: subject, context: context}),
+      })).json();
+      if (!e || e.ok !== true) throw new Error('BW_READER_EXPLAIN_FAILED');
+      return {mode: 'explain', text: subject, body: String(e.text || e.answer || '').slice(0, 20000)};
+    }
+    if (!(window.RC && RC.wordpop && RC.wordpop.lookupData)) throw new Error('BW_READER_LOOKUP_MISS');
+    var d = await RC.wordpop.lookupData(text, context,
+      { file: FREL, page: 0, langs: bookLangsArr() });
+    if (!d || d.ok !== true) throw new Error('BW_READER_LOOKUP_MISS');
+    return {mode: request.mode === 'phrase' ? 'phrase' : 'dict', jp: !!d.jp,
+            word: d.word || d.lemma || text, lemma: d.lemma || '',
+            reading: d.reading || '', accent: (d.accent != null ? d.accent : null),
+            kanji: Array.isArray(d.kanji) ? d.kanji.slice(0, 12) : [],
+            phonetic: d.phonetic || '', zh: d.zh || '',
+            translation: d.translation || '',
+            definition: String(d.definition || '').slice(0, 4000),
+            mastered: !!d.mastered};
+  };
+
 })();
