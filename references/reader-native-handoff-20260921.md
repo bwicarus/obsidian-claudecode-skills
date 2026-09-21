@@ -71,19 +71,62 @@
 **崩溃的止血**：原生接管时网页层不再批量渲染（IntersectionObserver 整批早返回、
 首屏也不渲但遮罩照撤）。按需渲单页的路保留给还依赖 `__charBoxes` 的地方。
 
+## 存储与 iCloud 同步（2026-09-21 下午起）
+
+用户要求：「能使用 iCloud 同账号不同设备同步数据是最好的」。选型与调研见
+[`reader-native-storage-and-epub-20260921.md`](reader-native-storage-and-epub-20260921.md)。
+结论是 **CKSyncEngine**（本地存储仍归我们，它只管同步管线）。
+
+已经落地的两块：
+
+| 块 | 文件 | 状态 |
+|---|---|---|
+| 三方合并规则 | `reader-runtime/user-state-merge.js` | ✅ node 里 14 条用例真的在跑 |
+| 合并器（JSCore 壳） | `ios/.../ReaderUserStateMerge.swift` | ✅ 打包器原样烤进包并逐字校验 |
+| 同步引擎 | `ios/.../ReaderCloudUserStateSync.swift` | 写完待 CI；**还没人调用** |
+
+**还差三件才算通**：
+1. **适配器 + markDirty 钩子**：`ReaderWebViewModel` 实现
+   `ReaderCloudUserStateSource`（export/apply 走已有的 package 契约），
+   本地写入后（`bwNativeReadingProjection` 的 user-state-written）标脏。
+2. **开关**：阅读设置里一个 `@AppStorage`，默认关。
+3. **⚠ 需要人去开发者后台的一步**：建 iCloud 容器
+   `iCloud.space.bwicarus.bwreader2`，并给 App ID 打开 iCloud 能力；
+   然后 entitlements 加 `com.apple.developer.icloud-container-identifiers`
+   与 `com.apple.developer.icloud-services`。
+   **顺序不能反**：容器不存在就先加 entitlement 的话，签名会带着一个不存在的
+   容器，整条 TestFlight 管线会红 —— 而这条管线现在是好的。
+
+设计上已经定死、改之前先想清楚的两条：
+- **跨设备的书籍身份 = 内容摘要**，不是 localBookId。本机导入的书在每台设备上
+  id 都不同，而同一个 PDF 的 sha256 一样。字节不同就是不同的书：高亮锚在页坐标
+  上，硬迁过去只会错位。
+- **域负载用 CKAsset**，不是字段。墨迹很容易超过单字段 1MB，写成字段会在真实的
+  书上炸 —— 而且是在最重度的那本书上。
+
+⚠ **与现行架构的冲突已经写在调研文件里，需要用户拍板**：iCloud 直连会和
+「Windows 全量留底＋中继」形成双写。推荐 (a)：iCloud 管 Apple↔Apple、
+Windows 只收单向留底。
+
 ## 还没做的
 
 1. **EPUB 主体。** ⚠ 先想清楚「原生化 EPUB」是什么：EPUB 正文是 XHTML，Apple 没有
    对应 PDFKit 的渲染器，所以它**只能**是 WKWebView。能做的是把选区菜单/查词/划线/
    叠加层按 PDF 那套搬过去，而不是换渲染器。目前 EPUB 仍整个用网页 UI（它是可见的，
    所以**没有坏**，只是不统一）。
-2. **选区 OCR**（文字层坏掉时重新识别）。⚠ 别直接把 `/pdf/api/ocr-selection` 接过来：
-   App 的字符层来自 `NativeBookOCRManager.readerPageCharacters`（本机 OCR 存储），
-   **不读**服务端那套 `cv` 版本号。照搬只会校正"你刚选中的那段文字"，页面的字符层
-   还是旧的 —— 一个看起来成功、下次选还是错的假修复。要做就走 App 自己的 OCR。
-3. **短语/解释的临时高亮**（查词时正文上那圈呼吸高亮）。
-4. **把旧的删掉**：网页层仍承担 IndexedDB 存储、对话上下文、EPUB 正文。真正"删掉"
-   要先把存储层搬到 Swift，那是另一件大工程，不在本轮范围内。
+2. **把旧的删掉**：网页层仍承担 IndexedDB 存储、对话上下文、EPUB 正文。存储那条
+   已经动起来了（见上一节），但"删掉"要等调用方也搬完，不在本轮范围内。
+
+### 已经处理掉、别再当待办的两条
+
+- **选区 OCR** ✅ 做了，但**走的是 App 自己那套**：`/pdf/api/ocr-selection` 在
+  App 内由本地 runtime 接管（`NativeBookOCRBridge`），这条 fetch 根本不出网。
+  ⚠ 这里原本记的是"别做"，因为直连服务端那套只会校正"刚选中的那段文字"，
+  页面字符层还是旧的（App 的字符层来自本机 OCR 存储，不读服务端的 `cv`）——
+  一个看起来成功、下次选还是错的假修复。走本地那条就没这个问题。
+- **短语/解释的临时高亮**：原生这边**不需要**。网页那圈呼吸高亮是"查询进行中"
+  的等待指示（结果框是另开的，正文上得有个东西告诉你在查哪一段）；原生是直接弹
+  面板，面板自带 ProgressView，选区也一直亮着。补一个只是把网页的形态搬过来。
 
 ## 经过验证的工作纪律
 
