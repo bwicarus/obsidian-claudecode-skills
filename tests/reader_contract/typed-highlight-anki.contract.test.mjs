@@ -283,22 +283,29 @@ test("generic make_anki does not expose a saveable card before local draft persi
   assert.match(background, /卡片草稿未写入本地仓库，未显示可保存卡片/);
 });
 
-test("native App proxies only the current verified book for draft registration", () => {
-  const route = MANIFEST.routes.find((entry) => entry.path === "/pdf/api/anki-draft");
-  assert.ok(route);
-  assert.equal(route.owner, "pi");
-  assert.deepEqual(route.methods, ["POST"]);
-  assert.deepEqual(route.surfaces, ["epub", "pdf"]);
-  assert.deepEqual(route.remoteBook, {
-    mode: "required",
-    scope: "current",
-    requiredMethods: ["POST"],
-    identities: [{
-      methods: ["POST"],
-      location: "json",
-      pointer: "/file",
-      transform: "exact",
-    }],
-    continuation: null,
-  });
+test("App 的草稿走桥的投递，不经 HTTP —— 所以它不在接口清单里", () => {
+  // 这条原来断言清单里有 /pdf/api/anki-draft 且 remoteBook 是 required/current。
+  // 原生迁移的 94d96fe9 一刀删了 158 行（这条路由 + 18 条 scanIgnores），
+  // 这条测试就一直红着。查下来**删是对的，没跟上的是这条测试**：
+  //
+  //   · App 里没有任何地方请求这条路由。`interaction-policy.js` 里那句
+  //     `remoteRequired('anki.draft.verify', ['/pdf/api/anki-draft'], …)`
+  //     是**策略声明**不是请求，打包器的消费者扫描只认真实请求 —— 所以把它
+  //     留在清单里，打包会判「无调用方」而拒绝出包。
+  //   · App 的草稿是桥投过来的（delivery.kind === 'anki-draft'）。服务端那条
+  //     HTTP 路由服务的是桌面/扩展表面。
+  //
+  // 改成钉真实形态：清单里不该有它，**但草稿的到达路径必须还在**。
+  assert.equal(
+    MANIFEST.routes.find((entry) => entry.path === "/pdf/api/anki-draft"),
+    undefined,
+    "App 不请求它；列进清单会让打包审计判「无调用方」");
+
+  // ⚠「不在清单里」不等于「这功能没了」。这两条才是它还活着的证据：
+  assert.match(VOICE, /delivery\.kind === 'anki-draft'/,
+    "桥的草稿投递是 App 拿到草稿的唯一路径，它没了才是真的坏了");
+  assert.match(
+    read("_server_deploy/pdf_reader.py"),
+    /@bp\.route\("\/api\/anki-draft", methods=\["POST"\]\)/,
+    "服务端路由服务桌面/扩展表面，别顺手把它也删了");
 });

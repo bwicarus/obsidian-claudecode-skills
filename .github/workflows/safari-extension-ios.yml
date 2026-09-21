@@ -381,9 +381,14 @@ jobs:
                   return json.load(response)
 
           def find_bundle(identifier):
-              query = urllib.parse.urlencode({"filter[identifier]": identifier})
+              # ⚠ filter[identifier] 是前缀匹配，不是全等：取 values[0] 会**静默**
+              #   拿到同前缀的另一个 App ID（2026-09-21 主 App 那一步就栽在这儿）。
+              query = urllib.parse.urlencode({"filter[identifier]": identifier, "limit": 200})
               values = request("GET", "/v1/bundleIds?" + query)["data"]
-              return values[0] if values else None
+              exact = [v for v in values if v["attributes"]["identifier"] == identifier]
+              if len(exact) > 1:
+                  raise SystemExit("bundle id %r matched %d entries" % (identifier, len(exact)))
+              return exact[0] if exact else None
 
           widget_bundle = find_bundle(os.environ["WIDGET_BUNDLE_ID"])
           if widget_bundle is None:
@@ -462,9 +467,20 @@ jobs:
                   headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
               with urllib.request.urlopen(req, timeout=30) as response:
                   return json.load(response)
-          bundles = request("GET", "/v1/bundleIds?" + urllib.parse.urlencode({"filter[identifier]": os.environ["BUNDLE_ID"]}))["data"]
+          wanted = os.environ["BUNDLE_ID"]
+          found = request("GET", "/v1/bundleIds?" + urllib.parse.urlencode(
+              {"filter[identifier]": wanted, "limit": 200}))["data"]
+          # ⚠ filter[identifier] 实际是**前缀匹配**：查 space.bwicarus.bwreader2
+          #   会连 .Extension / .Widget / .watchkitapp 一起返回（2026-09-21 这一步
+          #   第一次真跑就栽在这儿 —— 此前所有 CI 都是 compile_only，从没执行过）。
+          #   所以要在本地按完全相等再筛一次。
+          bundles = [b for b in found if b["attributes"]["identifier"] == wanted]
           if len(bundles) != 1:
-              raise SystemExit("Reader bundle ID was not uniquely resolved")
+              # 出声要带上查到了什么，否则下次还是只有一句"没唯一解析出来"。
+              raise SystemExit(
+                  "Reader bundle ID was not uniquely resolved: wanted %r, matched %r (server returned %r)"
+                  % (wanted, [b["attributes"]["identifier"] for b in bundles],
+                     [b["attributes"]["identifier"] for b in found]))
           bundle_id = bundles[0]["id"]
           capabilities = request("GET", "/v1/bundleIds/" + bundle_id + "/bundleIdCapabilities?limit=200")["data"]
           if not any(c["attributes"]["capabilityType"] == "SIGN_IN_WITH_APPLE" for c in capabilities):
@@ -561,9 +577,14 @@ jobs:
                   return json.load(response)
 
           def find_bundle(identifier):
-              query = urllib.parse.urlencode({"filter[identifier]": identifier})
+              # ⚠ filter[identifier] 是前缀匹配，不是全等：取 values[0] 会**静默**
+              #   拿到同前缀的另一个 App ID（2026-09-21 主 App 那一步就栽在这儿）。
+              query = urllib.parse.urlencode({"filter[identifier]": identifier, "limit": 200})
               values = request("GET", "/v1/bundleIds?" + query)["data"]
-              return values[0] if values else None
+              exact = [v for v in values if v["attributes"]["identifier"] == identifier]
+              if len(exact) > 1:
+                  raise SystemExit("bundle id %r matched %d entries" % (identifier, len(exact)))
+              return exact[0] if exact else None
 
           watch_bundle = find_bundle(os.environ["WATCH_BUNDLE_ID"])
           if watch_bundle is None:
