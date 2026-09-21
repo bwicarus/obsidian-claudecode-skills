@@ -85,17 +85,18 @@
 | 合并器（JSCore 壳） | `ios/.../ReaderUserStateMerge.swift` | ✅ 打包器原样烤进包并逐字校验 |
 | 同步引擎 | `ios/.../ReaderCloudUserStateSync.swift` | 写完待 CI；**还没人调用** |
 
-**还差三件才算通**：
-1. **适配器 + markDirty 钩子**：`ReaderWebViewModel` 实现
-   `ReaderCloudUserStateSource`（export/apply 走已有的 package 契约），
-   本地写入后（`bwNativeReadingProjection` 的 user-state-written）标脏。
-2. **开关**：阅读设置里一个 `@AppStorage`，默认关。
-3. **⚠ 需要人去开发者后台的一步**：建 iCloud 容器
-   `iCloud.space.bwicarus.bwreader2`，并给 App ID 打开 iCloud 能力；
-   然后 entitlements 加 `com.apple.developer.icloud-container-identifiers`
-   与 `com.apple.developer.icloud-services`。
-   **顺序不能反**：容器不存在就先加 entitlement 的话，签名会带着一个不存在的
-   容器，整条 TestFlight 管线会红 —— 而这条管线现在是好的。
+**代码侧已经齐了**（2026-09-22）：桥、开关（阅读设置 → 同步，默认关）、
+本地写入标脏、开书即合待处理、EPUB 写入也标脏。容器是用户当天在后台建的
+**`iCloud.BWICARUS`**（描述 "READER"），entitlements 已加，profiles 已重下。
+
+⚠ **后台那一项必须选「Include CloudKit support」**：「Compatible with Xcode 5」
+只给 iCloud Documents / key-value store，不带 CloudKit，而我们用的是
+CKSyncEngine，选错就完全用不了。（括号里的 Xcode 版本是 2014 年的历史包袱。）
+
+**还没验证的**：真机上两台设备互相同步。`compile_only` 是
+`CODE_SIGNING_ALLOWED=NO` 的无签名构建，验不到 entitlements —— 所以加完
+entitlements 跑了一次 `compile_only=false upload=false`（签名+归档+校验，
+**不上传**）来验签名链路。真正的收敛还要等一次装到设备上的构建。
 
 设计上已经定死、改之前先想清楚的两条：
 - **跨设备的书籍身份 = 内容摘要**，不是 localBookId。本机导入的书在每台设备上
@@ -110,10 +111,14 @@ Windows 只收单向留底。
 
 ## 还没做的
 
-1. **EPUB 主体。** ⚠ 先想清楚「原生化 EPUB」是什么：EPUB 正文是 XHTML，Apple 没有
-   对应 PDFKit 的渲染器，所以它**只能**是 WKWebView。能做的是把选区菜单/查词/划线/
-   叠加层按 PDF 那套搬过去，而不是换渲染器。目前 EPUB 仍整个用网页 UI（它是可见的，
-   所以**没有坏**，只是不统一）。
+1. **EPUB 的其余部分。** ⚠ 先想清楚「原生化 EPUB」是什么：EPUB 正文是 XHTML，
+   Apple 没有对应 PDFKit 的渲染器 —— 业界（Readium）也是 web view 渲正文、外面
+   包一层原生。所以**不换渲染器**。
+   已经做了：**选区菜单换成原生**（查词/词组/翻译/解释，`WKUIDelegate` 的
+   `willPresentEditMenuWithAnimator`），取数口 `__bwReaderLookupData` 与 PDF
+   **同名同形状**，壳那段代码不关心自己站在哪个阅读器上。
+   还没做：语法、划线编辑、叠加层（生词下划线/振假名等仍由网页画，而 EPUB 的
+   网页层是可见的，所以**没有坏**，只是不统一）。
 2. **把旧的删掉**：网页层仍承担 IndexedDB 存储、对话上下文、EPUB 正文。存储那条
    已经动起来了（见上一节），但"删掉"要等调用方也搬完，不在本轮范围内。
 
