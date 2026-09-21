@@ -795,9 +795,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     request, bookID: bookID, contentSHA256: digest)
             }
         }
-        document.onLookup = { [weak self] page, text, mode in
+        document.onLookup = { [weak self] page, text, sentence, mode in
             Task { @MainActor [weak self] in
-                self?.openNativeLookup(page: page, text: text, mode: mode)
+                self?.openNativeLookup(page: page, text: text, sentence: sentence, mode: mode)
             }
         }
         // 布局一变就重推墨迹表面：滚动/缩放后页面的屏幕位置变了，不推的话
@@ -889,17 +889,21 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 生词句子行首的「译」：整句交给原生翻译面板（与选区菜单里的「翻译」同一个，
     /// 不另做一套句子翻译 UI）。
     func openNativeSentenceTranslation(_ sentence: ReaderNativePDFDocument.VocabSentence) {
-        openNativeLookup(page: sentence.page, text: sentence.text, mode: "translate")
+        openNativeLookup(page: sentence.page, text: sentence.text,
+                         sentence: sentence.text, mode: "translate")
     }
 
     /// 原生选区菜单里点了查词/翻译：开一个原生面板，取数仍在阅读器那侧。
-    private func openNativeLookup(page: Int, text: String, mode: String) {
+    private func openNativeLookup(page: Int, text: String, sentence: String, mode: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 2000, ["dict", "translate", "explain", "phrase"].contains(mode) else { return }
+        // ⚠ 句境要用**所在整句**，不是选中串自己。以前这里传的是 trimmed.prefix(320)，
+        // 等于告诉词典"这个词的上下文就是这个词" —— 一词多义时给出的那条释义，
+        // 跟用户正在读的这句话未必是同一个意思。整句取不到才退回选中串。
+        let whole = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
         let panel = ReaderNativeLookupModel(
             text: trimmed, mode: mode, page: max(0, page),
-            // 句境交给词典：同一个词在不同句子里释义不同，网页那侧也是带着它查的。
-            context: String(trimmed.prefix(320))
+            context: String((whole.isEmpty ? trimmed : whole).prefix(320))
         ) { [weak self] command in
             await self?.requestNativeConversationCommand(command)
                 ?? ["ok": false, "error": "阅读页已关闭"]

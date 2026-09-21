@@ -7467,11 +7467,18 @@ window.__bwReaderLookupData = async function (request) {
     // 选区菜单的「解释」。复用底座 _aiStream（同一条 /pdf/api/explain、同一套 rid
     // 重连），只是不往结果框里渲染 —— 接管后那个框不在屏幕上。
     // ⚠ 这里**等它流完**再返回：原生面板只要最终文本，不需要边到边。
+    //
+    // 短选区换成整句作解释主体 —— 照 21-misc-ai.js::onExplain 的同一条规则
+    // （那边用 _expandSentenceFromRange 从字符层取整句；原生那侧选区自带
+    // sentence，经 context 传进来）。不换的话 AI 拿到的是"at"这样的碎词，
+    // 回答基本都是"内容不完整、请提供上下文"。
+    let subject = text;
+    if (text.length < 50 && context && context.length > text.length) subject = context;
     const res = await _aiStream('/pdf/api/explain', {
-      method: 'POST', body: {text, context}
+      method: 'POST', body: {text: subject, context}
     });
     if (!res || !res.ok) throw new Error('BW_READER_EXPLAIN_FAILED');
-    return {mode: 'explain', text, body: String(res.text || '').slice(0, 20000)};
+    return {mode: 'explain', text: subject, body: String(res.text || '').slice(0, 20000)};
   }
   if (request.mode === 'dict-full') {
     // 「展开」：三源融合的完整词条（例句/同反义/音标两版）。网页小框那边点

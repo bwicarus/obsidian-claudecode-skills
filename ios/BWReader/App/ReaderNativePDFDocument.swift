@@ -279,7 +279,10 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     }
     var onHighlight: ((HighlightRequest) -> Void)?
     /// 选区菜单里点了查词/翻译：(页码, 原文, "dict" | "translate")。
-    var onLookup: ((Int, String, String) -> Void)?
+    /// 页码、选中串、**所在整句**、模式。
+    /// ⚠ 整句不是可选的装饰：同一个词在不同句子里释义不同，网页那侧查词也是带着
+    /// 它走的；解释更是靠它把短选区换成整句，否则 AI 只会抱怨"内容不完整"。
+    var onLookup: ((Int, String, String, String) -> Void)?
     /// 页码、整句、焦点串。
     var onGrammar: ((Int, String, String) -> Void)?
     /// 点了已有划线。
@@ -848,7 +851,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             self?.onGrammar?(number, value.sentence, value.text)
         }
         overlay.onLookup = { [weak self] value, mode in
-            self?.onLookup?(number, value.text, mode)
+            self?.onLookup?(number, value.text, value.sentence, mode)
         }
         // PDFKit owns embedded text selection. The overlay supplies native
         // interaction only for scanned pages or a user-selected OCR override.
