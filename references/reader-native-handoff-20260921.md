@@ -114,11 +114,15 @@ Windows 只收单向留底。
 1. **EPUB 的其余部分。** ⚠ 先想清楚「原生化 EPUB」是什么：EPUB 正文是 XHTML，
    Apple 没有对应 PDFKit 的渲染器 —— 业界（Readium）也是 web view 渲正文、外面
    包一层原生。所以**不换渲染器**。
-   已经做了：**选区菜单换成原生**（查词/词组/翻译/解释，`WKUIDelegate` 的
-   `willPresentEditMenuWithAnimator`），取数口 `__bwReaderLookupData` 与 PDF
-   **同名同形状**，壳那段代码不关心自己站在哪个阅读器上。
-   还没做：语法、划线编辑、叠加层（生词下划线/振假名等仍由网页画，而 EPUB 的
-   网页层是可见的，所以**没有坏**，只是不统一）。
+   已经做了：**选区操作条换成原生**（查词/词组/翻译/解释/语法，与 PDF 选区菜单
+   同一组动作、同样顺序），取数口 `__bwReaderLookupData` 与 PDF **同名同形状**，
+   壳那段代码不关心自己站在哪个阅读器上。
+   ⚠ **不要再试系统的编辑菜单**：`UIEditMenuInteractionAnimating` 只有
+   `addAnimations`/`addCompletion`，是纯动画协议加不了项；WKWebView 的编辑菜单
+   也没有稳妥的公开路子让宿主插项（`buildMenu(with:)` 管的是菜单栏与上下文菜单）。
+   2026-09-22 为此红过一轮 CI。现在是自己画的一条 SwiftUI 条，完全可控。
+   还没做：划线编辑、叠加层（生词下划线/振假名等仍由网页画，而 EPUB 的网页层
+   是可见的，所以**没有坏**，只是不统一）。
 2. **把旧的删掉**：网页层仍承担 IndexedDB 存储、对话上下文、EPUB 正文。存储那条
    已经动起来了（见上一节），但"删掉"要等调用方也搬完，不在本轮范围内。
 
@@ -148,6 +152,10 @@ Windows 只收单向留底。
 - **Swift 文件里 CRLF/LF 是混的**，批量替换前按实际内容判断，别整文件一刀切。
 - **heredoc 会吃掉反斜杠**（`\n`、`\u3000`、`\s` 都中过招）。写含转义的代码用 Edit，
   或写完立刻 grep 确认。
+- **不确定的系统 API 先查文档再写**。2026-09-22 凭印象用了
+  `UIEditMenuInteractionAnimating.addMenuElement`（根本不存在，那是个纯动画协议），
+  红一轮 CI 才发现 —— 而本机没有 Swift 编译器，每次猜错的代价就是一整轮。
+  查一次两分钟。
 
 ## 代码入口
 
