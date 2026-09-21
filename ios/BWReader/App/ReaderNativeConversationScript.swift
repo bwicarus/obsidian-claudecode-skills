@@ -135,7 +135,7 @@ enum ReaderNativeConversationScript {
                 return current.route;
               };
               return { index: item.index, title: text(item.title, 240), source: text(item.source, 120),
-                sourceURL: text(item.sourceURL, 4096), mediaID, selected: item.selected, isMap: item.isMap,
+                sourceURL: text(item.sourceURL, 4096), mediaID, selected: item.selected, isMap: item.isMap, map: item.map,
                 selectID: root ? registerAction(id + '-image-select-' + item.index, root, () => rc().voiceCard.mediaAction(root, card, item.index, 'toggle')) : '',
                 removeID: root ? registerAction(id + '-image-remove-' + item.index, root, () => rc().voiceCard.mediaAction(root, card, item.index, 'remove')) : '' };
             });
@@ -296,7 +296,7 @@ enum ReaderNativeConversationScript {
           // Keep their originals intact until that renderer is migrated.
           const rich = item.card ? JSON.stringify(item.card.cards) : item.html?.content || '';
           const supported = !!(item.card || item.html) &&
-            !/<(?:iframe|video|audio|img|svg|canvas|script|table|button|input|select|textarea)\b/i.test(rich);
+            !/<(?:iframe|video|audio|img|svg|canvas|script|button|input|select|textarea)\b/i.test(rich);
           item.root.toggleAttribute('data-bw-native-placement', !!supported);
           for (const marker of item.markers || []) marker.node.toggleAttribute('data-bw-native-placement', !!supported);
           if (!supported || !item.visible && !item.markers?.length) return [];
@@ -318,6 +318,10 @@ enum ReaderNativeConversationScript {
             if (![command.x, command.y].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
             return invoke('move', { x: command.x * innerWidth, y: command.y * innerHeight });
           });
+          controls.resize = registerAction(token + '-resize', item.root, command => {
+            if (![command.value?.width, command.value?.height].every(v => Number.isFinite(v) && v > 0 && v <= 1)) throw new Error('尺寸无效');
+            return invoke('resize', { width: command.value.width * innerWidth, height: command.value.height * innerHeight });
+          });
           const parts = item.card
             ? projectPart({ kind: 'cards', cards: item.card.cards, gid: item.card.gid }, id, item.root, '')
             : [{ id: id + '-html', kind: 'general', title: item.html.label || '卡片', text: '', status: 'saved',
@@ -332,6 +336,7 @@ enum ReaderNativeConversationScript {
           return [{ id, title: item.html?.label || (item.card?.cards.length > 1 ? '学习卡组' : '学习卡'),
             bound: item.bound, collapsed: item.collapsed, visible: item.visible, open: item.open, controls, parts,
             ink: { strokes: item.strokes, aspectRatio: item.iar, geometry: item.inkGeometry },
+            size: item.presentationSize ? { width: item.presentationSize.w / innerWidth, height: item.presentationSize.h / innerHeight } : null,
             markers: (item.markers || []).map(marker => ({ id: id + '-marker-' + marker.index, kind: marker.kind, number: marker.number,
               rect: { x: marker.rect.x / innerWidth, y: marker.rect.y / innerHeight, width: marker.rect.width / innerWidth, height: marker.rect.height / innerHeight } })),
             rect: { x: item.rect.x / innerWidth, y: item.rect.y / innerHeight,
@@ -345,7 +350,7 @@ enum ReaderNativeConversationScript {
           if (excludedPlacementNodes.has(item.root)) return [];
           const group = flashGroup(item.root), structured = item.root.__vcCard;
           const supported = !!group || structured && ['fact', 'general', 'weather', 'news', 'images'].includes(structured.kind) ||
-            typeof item.raw === 'string' && !/<(?:iframe|video|audio|img|svg|canvas|script|table|button|input|select|textarea)\b/i.test(item.raw);
+            typeof item.raw === 'string' && !/<(?:iframe|video|audio|img|svg|canvas|script|button|input|select|textarea)\b/i.test(item.raw);
           item.root.toggleAttribute('data-bw-native-placement', supported);
           if (!supported) return [];
           const rect = item.root.getBoundingClientRect();

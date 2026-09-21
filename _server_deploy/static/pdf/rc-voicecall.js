@@ -5556,7 +5556,7 @@
           route: ref ? _videoCardThumb(item, ref) : _cardImageURL(item),
           sourceURL: _cardHttpsURL(item.page || item.source_url || (ref ? ref.url : item.url)),
           selected: !!(_ctxSelectionRegistry() && _ctxSelectionRegistry().isSelected(id)),
-          isMap: !!_mapMetaFromUrl(item.url) };
+          isMap: !!_mapMetaFromUrl(item.url), map: _mapMetaFromUrl(item.url) };
       }).filter(Boolean);
     },
     mediaAction: _mediaItemAction,

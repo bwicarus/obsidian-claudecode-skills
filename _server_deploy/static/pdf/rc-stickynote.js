@@ -3731,7 +3731,7 @@
       return { id: noteIdOf(note), generation: _generation, version: JSON.stringify(note),
         root: ctl.root, card: cloneValue(note.card || null), html: cloneValue(note.html || null),
         hasInk: !!(note.strokes && note.strokes.length), strokes: cloneValue(note.strokes || []), iar: Number(note.iar) || 0,
-        inkGeometry: JSON.stringify([note.anchor, note.w, note.h, wordBindOf(note)]), bound: !!wordBindOf(note),
+        inkGeometry: nativeInkGeometry(note, ctl), presentationSize: cloneValue(ctl._cardPresentationSize || null), bound: !!wordBindOf(note),
         collapsed: !!note.collapsed || note[slot].form === 'dot' || note[slot].form === 'min',
         visible: rect.width > 0 && rect.height > 0, markers: markers, open: !!ctl._bindOpen,
         rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
@@ -3743,6 +3743,17 @@
     if (!note || !ctl || JSON.stringify(note) !== command.version) throw new Error('卡片已更新，请重新操作');
     var slot = cardPayloadSlot(note), fields = {}, payload;
     if (!slot) throw new Error('此内容尚未迁移');
+    if (command.key === 'resize') {
+      var cid = note[slot].cid || note[slot].gid;
+      if (!cid || !RC.voiceCard || !RC.voiceCard.cardSize) throw new Error('卡片尺寸服务尚未就绪');
+      if (![command.width, command.height].every(Number.isFinite)) throw new Error('卡片尺寸无效');
+      var size = { w: Math.max(180, Math.min(720, Math.round(command.width))),
+        h: Math.max(100, Math.min(720, Math.round(command.height))), updatedAt: Date.now() };
+      await RC.voiceCard.cardSize.set(cid, size);
+      if (command.generation !== _generation || !ctls[command.id]) throw new Error('书籍已切换');
+      try { window.dispatchEvent(new Event('rc:placement-changed')); } catch (_) {}
+      return true;
+    }
     if (command.key === 'toggleBound' || command.key === 'collapse' && wordBindOf(note) && ctl._bindOpen) {
       if (!wordBindOf(note)) throw new Error('这张卡片没有正文锚点');
       toggleBoundCard(ctl, { source: _wordSource(ctl) });
@@ -3792,6 +3803,10 @@
     return true;
   }
 
+  function nativeInkGeometry(note, ctl) {
+    var size = ctl && ctl._cardPresentationSize;
+    return JSON.stringify([note.anchor, note.w, note.h, wordBindOf(note), size ? [size.w, size.h] : null]);
+  }
   function nativeInkAction(command) {
     if (!O || !command || command.generation !== _generation) return Promise.reject(new Error('书籍已切换'));
     if (!/^[A-Za-z0-9_-]{1,96}$/.test(String(command.opId || '')) || !['commit', 'erase', 'createRegion'].includes(command.key)) return Promise.reject(new Error('无效笔迹操作'));
@@ -3805,7 +3820,7 @@
       if (generation !== _generation) throw new Error('书籍已切换');
       var note = currentNote(id), ctl = ctls[id];
       if (!note || !ctl || !cardPayloadSlot(note)) throw new Error('卡片已移除');
-      if (JSON.stringify([note.anchor, note.w, note.h, wordBindOf(note)]) !== command.geometry) throw new Error('卡片位置已改变，请在新位置重画');
+      if (nativeInkGeometry(note, ctl) !== command.geometry) throw new Error('卡片位置已改变，请在新位置重画');
       var raw = Array.isArray(command.segments) ? command.segments : [];
       if (!raw.length || raw.length > 64) throw new Error('无效笔迹分段');
       var strokes = cloneValue(note.strokes || []), iar = Number(note.iar) || Number(command.aspectRatio);

@@ -867,6 +867,13 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.wait_for_timeout(100)
             media = next(p for m in page.evaluate('receipts[receipts.length-1].messages') for p in m['parts'] if p['kind'] == 'images')
             self.assertEqual([i['title'] for i in media['data']['items']], ['第一张'])
+            page.evaluate('''() => {
+              const card=document.querySelector('[data-vc-cid="images_native"]').__vcCard;
+              card.data.items[0].url='https://maps.googleapis.com/maps/api/staticmap?center=35.68,139.76&zoom=13&markers=35.69,139.77&markers=35.70,139.78';
+              __bwNativeConversation.snapshot();
+            }''')
+            media = next(p for m in page.evaluate('receipts.at(-1).messages') for p in m['parts'] if p['kind'] == 'images')
+            self.assertEqual(media['data']['items'][0]['map'], dict(lat=35.68,lon=139.76,zoom=13,marks=[[35.69,139.77],[35.70,139.78]]))
             self.assertEqual(errors, [])
             browser.close()
 

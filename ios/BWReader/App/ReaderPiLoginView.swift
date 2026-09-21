@@ -24,6 +24,8 @@ struct ReaderPiLoginView: View {
                             .foregroundStyle(ReaderNativeTheme.accent)
                         Text("现有书库、收藏和学习记录仍属于同一个账户。")
                             .font(.subheadline).foregroundStyle(.secondary)
+                        Button("退出登录", role: .destructive) { Task { await model.signOut() } }
+                            .disabled(model.busy)
                     }
                 } else if model.needsLink {
                     Section {
@@ -54,12 +56,17 @@ struct ReaderPiLoginView: View {
                 } else {
                     Section {
                         Text(model.linking ? "将 Apple 账户关联到当前 Reader 账户" : "登录 Reader").font(.headline)
+                        if model.linking { Text(model.username).font(.subheadline).foregroundStyle(.secondary) }
                         SignInWithAppleButton(.continue) { request in model.configure(request) }
                         onCompletion: { result in Task { await model.complete(result) } }
                             .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
                             .frame(height: 48).disabled(!model.ready || model.busy)
                         Text("Apple 身份仅用于登录。原有账户与数据不会按邮箱自动合并。")
                             .font(.caption).foregroundStyle(.secondary)
+                        if model.linking {
+                            Button("退出当前账户", role: .destructive) { Task { await model.signOut() } }
+                                .disabled(model.busy)
+                        }
                     }
                 }
                 if model.busy { ProgressView("正在处理…") }

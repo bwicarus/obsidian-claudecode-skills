@@ -40,6 +40,8 @@ final class ReaderAppleSignInModel: ObservableObject {
             guard let nonce = result["nonce"] as? String, let state = result["state"] as? String else { throw failure("登录信息不完整，请重试。") }
             self.nonce = nonce; self.state = state
             linking = result["linking"] as? Bool == true
+            username = result["username"] as? String ?? ""
+            signedIn = linking && result["apple_linked"] as? Bool == true
             ready = true
         } catch { self.error = error.localizedDescription }
     }
@@ -77,6 +79,19 @@ final class ReaderAppleSignInModel: ObservableObject {
             let result = try await send("link", body: ["ticket": ticket, "username": username, "password": password, "invite": invite])
             try await finish(result)
         } catch { self.error = error.localizedDescription }
+    }
+
+    func signOut() async {
+        guard !busy else { return }
+        busy = true; error = nil
+        do {
+            _ = try await send("logout", body: [:])
+            signedIn = false; linking = false; needsLink = false; ready = false
+            username = ""; ticket = ""; nonce = ""; state = ""
+            try ReaderAccountTokenStore.shared.clear()
+            busy = false
+            await prepare()
+        } catch { busy = false; self.error = error.localizedDescription }
     }
 
     private func finish(_ receipt: [String: Any]) async throws {

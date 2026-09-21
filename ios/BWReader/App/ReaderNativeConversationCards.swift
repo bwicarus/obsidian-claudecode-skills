@@ -305,7 +305,7 @@ private struct ReaderNativeConversationArtifactCard: View {
     @ViewBuilder
     private func richContent(_ text: String, format: String? = nil) -> some View {
         let resolved = format ?? (text.range(of: "<[a-z][^>]*>", options: [.regularExpression, .caseInsensitive]) != nil ? "html" : "markdown")
-        ReaderNativeRichText(content: text, format: resolved, onSelection: { selection in
+        ReaderNativeRichDocument(content: text, format: resolved, onSelection: { selection in
             let id = part.string("selectId")
             guard !id.isEmpty else { return }
             model.updateTextSelection(id: id, text: selection)

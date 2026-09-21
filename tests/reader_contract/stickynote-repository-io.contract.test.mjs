@@ -324,6 +324,20 @@ test("native placement controls retain CAS, free placement semantics and explici
   assert.equal(await act(fresh, "move", { x: 40, y: 50 }), true);
   assert.equal(Object.hasOwn(api.notes()[0].card, "bind"), false);
   const moved = api.nativePlacementState()[0];
+  let dimensions = null, finishSize;
+  sandbox.RC.voiceCard = { cardSize: { set: async (cid, size) => {
+    assert.equal(cid, "original"); dimensions = size;
+    await new Promise(resolve => { finishSize = resolve; });
+  } } };
+  let resized = false;
+  const pendingSize = act(moved, "resize", { width: 330, height: 220 }).then(() => { resized = true; });
+  await tick();
+  assert.equal(resized, false, "native resize waits for the existing presentation store receipt");
+  assert.equal(dimensions.w, 330); assert.equal(dimensions.h, 220);
+  finishSize(); await pendingSize;
+  assert.equal(api.notes()[0].card.cid, "original");
+  sandbox.RC.voiceCard.cardSize.set = async () => { throw Error("size write failed"); };
+  await assert.rejects(act(moved, "resize", { width: 350, height: 260 }), /size write failed/);
   await assert.rejects(act(moved, "remove"), /确认/);
   assert.equal(removals, 0);
   assert.equal(await act(moved, "remove", { confirmed: true }), true);

@@ -432,6 +432,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         ])
     }
 
+    func resizeNativeConversationCard(actionID: String, scope: String, size: CGSize) async -> Bool {
+        guard scope == nativeConversation.scope, webView.bounds.width > 0, webView.bounds.height > 0 else { return false }
+        return await nativeConversation.perform("liveAction", parameters: ["actionId": actionID,
+            "value": ["width": min(1, size.width / webView.bounds.width), "height": min(1, size.height / webView.bounds.height)]])
+    }
+
     private func performNativeConversationCommand(_ command: [String: Any]) async -> String? {
         let receipt = await requestNativeConversationCommand(command)
         return receipt["ok"] as? Bool == true ? nil : (receipt["error"] as? String ?? "操作未完成，请重试")

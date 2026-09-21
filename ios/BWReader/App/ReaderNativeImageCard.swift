@@ -9,6 +9,7 @@ struct ReaderNativeImageItem: Identifiable {
     let sourceURL: URL?
     let selected: Bool
     let isMap: Bool
+    let map: ReaderNativeMapData?
     let selectID: String
     let removeID: String
 
@@ -21,6 +22,7 @@ struct ReaderNativeImageItem: Identifiable {
         sourceURL = url?.scheme == "https" ? url : nil
         selected = value["selected"] as? Bool ?? false
         isMap = value["isMap"] as? Bool ?? false
+        map = (value["map"] as? [String: Any]).flatMap(ReaderNativeMapData.init)
         selectID = value["selectID"] as? String ?? ""
         removeID = value["removeID"] as? String ?? ""
     }
@@ -37,7 +39,12 @@ struct ReaderNativeImageCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let image {
+            if let map = item.map {
+                Button { viewing = true } label: {
+                    ReaderNativeMap(data: map, interactive: false).frame(height: 180)
+                        .clipShape(RoundedRectangle(cornerRadius: 10)).allowsHitTesting(false)
+                }.buttonStyle(.plain).accessibilityLabel("打开地图：\(item.title)")
+            } else if let image {
                 Button { viewing = true } label: {
                     Image(uiImage: image).resizable().scaledToFit()
                         .frame(maxWidth: .infinity, maxHeight: 230)
@@ -72,12 +79,9 @@ struct ReaderNativeImageCard: View {
                         .disabled(model.isPerforming("liveAction"))
                 }
             }.font(.caption).buttonStyle(.borderless)
-            if item.isMap {
-                Text("地图交互尚待迁移，目前可查看原图。")
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
         }
         .task(id: "\(model.scope):\(item.id):\(attempt)") {
+            guard item.map == nil else { return }
             failed = false
             do {
                 let bytes = try await model.imageData(item.id)
@@ -94,7 +98,8 @@ struct ReaderNativeImageCard: View {
         }
         .sheet(isPresented: $viewing) {
             NavigationStack {
-                if let image { ReaderNativeZoomImage(image: image).background(Color.black) }
+                if let map = item.map { ReaderNativeMap(data: map, interactive: true).ignoresSafeArea(edges: .bottom) }
+                else if let image { ReaderNativeZoomImage(image: image).background(Color.black) }
             }
             .overlay(alignment: .topTrailing) {
                 Button("完成") { viewing = false }

@@ -80,6 +80,9 @@ def register_reader_apple_auth(app, get_db, user_dir):
             return response_error("登录请求无效")
         now = int(time.time())
         db = get_db()
+        account = db.execute("SELECT username FROM users WHERE id=?", (session.get("user_id"),)).fetchone()
+        if session.get("user_id") and not account:
+            session.clear()
         db.execute("DELETE FROM reader_apple_challenges WHERE expires_at < ?", (now,))
         db.execute("DELETE FROM reader_apple_pending_links WHERE expires_at < ?", (now,))
         flow = secrets.token_urlsafe(32)
@@ -90,7 +93,22 @@ def register_reader_apple_auth(app, get_db, user_dir):
                    (state, _hash(nonce), _hash(flow), session.get("user_id"), now + 600))
         db.commit()
         return jsonify(ok=True, nonce=nonce, state=state,
-                       linking=bool(session.get("user_id")), expires_at=now + 600)
+                       linking=bool(account), username=account["username"] if account else "",
+                       apple_linked=bool(account and db.execute("SELECT 1 FROM reader_apple_identities WHERE user_id=?", (session["user_id"],)).fetchone()),
+                       expires_at=now + 600)
+
+    @app.post("/login/apple/logout")
+    def reader_apple_logout():
+        if request_body() is None:
+            return response_error("退出请求无效")
+        flow = session.get("reader_apple_flow", "")
+        if flow:
+            db = get_db()
+            db.execute("DELETE FROM reader_apple_challenges WHERE flow_hash=?", (_hash(flow),))
+            db.execute("DELETE FROM reader_apple_pending_links WHERE flow_hash=?", (_hash(flow),))
+            db.commit()
+        session.clear()
+        return jsonify(ok=True)
 
     @app.post("/login/apple/complete")
     def reader_apple_complete():

@@ -34,11 +34,11 @@ struct ReaderNativeReviewView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         if state["showingAnswer"] as? Bool != true || current["reveal_mode"] as? String != "replace" {
-                            ReaderNativeRichText(content: current["front"] as? String ?? "", format: "html")
+                            ReaderNativeRichDocument(content: current["front"] as? String ?? "", format: "html")
                         }
                         if state["showingAnswer"] as? Bool == true {
                             if current["reveal_mode"] as? String != "replace" { Divider() }
-                            ReaderNativeRichText(content: current["back"] as? String ?? "", format: "html")
+                            ReaderNativeRichDocument(content: current["back"] as? String ?? "", format: "html")
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
                 }
@@ -181,13 +181,13 @@ struct ReaderNativeReviewView: View {
                 Section("草稿预览 · 尚未写入") {
                     ForEach(cards.indices, id: \.self) { index in
                         VStack(alignment: .leading, spacing: 8) {
-                            ReaderNativeRichText(content: cards[index]["front"] as? String ?? "", format: "html")
+                            ReaderNativeRichDocument(content: cards[index]["front"] as? String ?? "", format: "html")
                             Divider()
-                            ReaderNativeRichText(content: cards[index]["back"] as? String ?? "", format: "html")
+                            ReaderNativeRichDocument(content: cards[index]["back"] as? String ?? "", format: "html")
                         }.padding(.vertical, 6)
                     }
                     if let note = drafts["note"] as? [String: Any] {
-                        ReaderNativeRichText(content: note["content"] as? String ?? "")
+                        ReaderNativeRichDocument(content: note["content"] as? String ?? "")
                     }
                 }
                 Section("确认写入") {

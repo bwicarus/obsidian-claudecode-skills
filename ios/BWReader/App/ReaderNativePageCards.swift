@@ -15,6 +15,7 @@ struct ReaderNativePagePlacement: Identifiable {
     let ink: [ReaderNativeCardStroke]
     let inkAspectRatio: CGFloat
     let inkGeometry: String
+    let size: CGSize?
 
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String,
@@ -37,6 +38,10 @@ struct ReaderNativePagePlacement: Identifiable {
         ink = (drawing["strokes"] as? [[String: Any]] ?? []).compactMap(ReaderNativeCardStroke.init)
         inkAspectRatio = (drawing["aspectRatio"] as? NSNumber).map { CGFloat(truncating: $0) } ?? 0
         inkGeometry = drawing["geometry"] as? String ?? ""
+        if let size = value["size"] as? [String: NSNumber], let w = size["width"]?.doubleValue,
+           let h = size["height"]?.doubleValue, w.isFinite, h.isFinite, w > 0, h > 0 {
+            self.size = CGSize(width: w, height: h)
+        } else { self.size = nil }
     }
 }
 
@@ -116,8 +121,16 @@ private struct ReaderNativePlacedCard: View {
     @State private var confirmRemoval = false
     @State private var operationError: String?
     @State private var lastTouch = Date.distantPast
+    @State private var resizing: CGSize?
+    @State private var resizeStart: CGSize?
 
-    private var width: CGFloat { item.collapsed ? 44 : min(max(240, rect.width), max(44, available.width)) }
+    private var savedSize: CGSize? {
+        item.size.map { reader.nativePageCardRect(CGRect(origin: .zero, size: $0), in: .zero).size }
+    }
+    private var width: CGFloat { item.collapsed ? 44 : min(max(180, (resizing ?? savedSize)?.width ?? rect.width), max(44, available.width)) }
+    private var bodyHeight: CGFloat? {
+        (resizing ?? savedSize).map { max(64, min($0.height, available.height) - 36) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -151,7 +164,8 @@ private struct ReaderNativePlacedCard: View {
                 ScrollView {
                     ReaderNativeConversationArtifacts(parts: item.parts, model: model).padding(8)
                 }
-                .frame(maxHeight: max(120, min(460, min(rect.height, available.height - 40))))
+                .frame(height: bodyHeight)
+                .frame(maxHeight: bodyHeight ?? max(120, min(460, min(rect.height, available.height - 40))))
                 .overlay {
                     if let inkID = item.controls["ink"] {
                         ReaderNativeCardInkLayer(item: item, reader: reader, actionID: inkID)
@@ -162,6 +176,21 @@ private struct ReaderNativePlacedCard: View {
         .frame(width: width)
         .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14))
         .overlay(RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14).stroke(ReaderNativeTheme.accent.opacity(0.2)))
+        .overlay(alignment: .bottomTrailing) {
+            if !item.collapsed, item.controls["resize"] != nil {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
+                    .frame(width: 36, height: 36)
+                    .background(ReaderNativeTheme.card.opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
+                    .contentShape(Rectangle()).gesture(resizeGesture)
+                    .accessibilityLabel("调整卡片大小")
+                    .accessibilityAdjustableAction { direction in
+                        let current = savedSize ?? rect.size
+                        saveSize(CGSize(width: current.width + (direction == .increment ? 30 : -30),
+                                        height: current.height + (direction == .increment ? 30 : -30)))
+                    }
+            }
+        }
         .shadow(color: .black.opacity(0.12), radius: translation == .zero ? 8 : 16, y: 3)
         .offset(translation)
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
@@ -194,6 +223,37 @@ private struct ReaderNativePlacedCard: View {
                     if model.scope == scope { operationError = model.error }
                 }
             }
+    }
+
+    private var resizeGesture: some Gesture {
+        DragGesture(minimumDistance: 3)
+            .onChanged { value in
+                if resizeStart == nil { resizeStart = savedSize ?? rect.size }
+                let base = resizeStart ?? rect.size
+                resizing = boundedSize(CGSize(width: base.width + value.translation.width, height: base.height + value.translation.height))
+            }
+            .onEnded { _ in
+                if let resizing { saveSize(resizing) }
+                resizeStart = nil
+            }
+    }
+
+    private func boundedSize(_ size: CGSize) -> CGSize {
+        CGSize(width: min(max(180, size.width), min(720, available.width)),
+               height: min(max(100, size.height), min(720, available.height)))
+    }
+
+    private func saveSize(_ value: CGSize) {
+        guard let action = item.controls["resize"] else { return }
+        let scope = model.scope, value = boundedSize(value)
+        resizing = value
+        Task {
+            let saved = await reader.resizeNativeConversationCard(actionID: action, scope: scope, size: value)
+            if scope == model.scope {
+                resizing = nil
+                if !saved { operationError = model.error ?? "尺寸尚未保存，请重试。" }
+            }
+        }
     }
 
     private func run(_ key: String) {

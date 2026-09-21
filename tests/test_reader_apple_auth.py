@@ -124,6 +124,20 @@ class ReaderAppleAuthTests(unittest.TestCase):
         self.assertEqual(self.complete(challenge).status_code,409)
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM reader_apple_identities').fetchone()[0],0)
 
+    def test_account_status_and_logout_preserve_identity_but_discard_login_flow(self):
+        with self.client.session_transaction() as session: session['user_id']=1
+        first = self.challenge()
+        self.assertEqual(first['username'], 'original')
+        self.assertFalse(first['apple_linked'])
+        self.assertEqual(self.complete(first).status_code,200)
+        ready = self.challenge()
+        self.assertTrue(ready['apple_linked'])
+        self.assertEqual(self.client.post('/login/apple/logout',json={}).status_code,200)
+        with self.client.session_transaction() as session: self.assertNotIn('user_id', session)
+        self.assertEqual(self.complete(ready).status_code,400)
+        self.assertEqual(self.db.execute('SELECT user_id FROM reader_apple_identities').fetchone()[0],1)
+        self.assertFalse(self.challenge()['linking'])
+
 
 if __name__ == '__main__':
     unittest.main()
