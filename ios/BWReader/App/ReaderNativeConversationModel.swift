@@ -250,6 +250,31 @@ final class ReaderNativeConversationModel: ObservableObject {
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
         messages = nextMessages
         revision = nextRevision
+        noteSnapshotCost(payload["payloadBytes"] as? Int ?? 0)
+    }
+
+    /// 快照有多大、多久来一次。
+    ///
+    /// ⚠ 这两个数字是"用着用着就崩"这一类怀疑的**判据**：页面每次快照都要把整段
+    /// 对话序列化一遍，对话越长这份字符串越大。是不是大到能把渲染进程顶掉，只能
+    /// 量，不能猜 —— 我已经因为猜错返工过两轮。
+    private(set) var snapshotPeakBytes = 0
+    private(set) var snapshotCount = 0
+    private var snapshotWindowStart = Date()
+
+    private func noteSnapshotCost(_ bytes: Int) {
+        snapshotCount += 1
+        snapshotPeakBytes = max(snapshotPeakBytes, bytes)
+        // 大到值得记一笔就留个面包屑（1MB）。每条都记会把面包屑冲没。
+        if bytes >= 1_000_000, snapshotCount % 20 == 0 {
+            ReaderNativeFaultReporter.shared.note("snap", "\(bytes / 1024)KB×\(snapshotCount)")
+        }
+    }
+
+    /// 给故障报告用的一句话。
+    var snapshotCostSummary: String {
+        let seconds = max(1, Int(Date().timeIntervalSince(snapshotWindowStart)))
+        return "snapshots=\(snapshotCount) peak=\(snapshotPeakBytes / 1024)KB in \(seconds)s"
     }
 
     /// 最后一条发给页面的命令（动作名 + 时刻）。

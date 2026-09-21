@@ -541,6 +541,12 @@ enum ReaderNativeConversationScript {
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
+          // ⚠ 量一下这份快照有多大。理由很具体：这里每 60ms 就可能把**整段对话**
+          //   （所有消息 + 卡片的完整 HTML）序列化一遍 —— schedule() 挂在 scroll /
+          //   pointerup / resize 和四个 MutationObserver 上，而滚动时消息根本没变。
+          //   对话越长这份字符串越大，于是"用着用着就崩"和"点什么都崩"是同一件事。
+          //   是不是这样，不能靠猜：把字节数报上去，崩的时候跟着现场一起送出来。
+          payload.payloadBytes = signature.length;
           try { handler.postMessage(payload); } catch (_) {}
         }
       }

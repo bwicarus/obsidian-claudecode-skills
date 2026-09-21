@@ -5417,7 +5417,10 @@ extension ReaderWebViewModel: WKNavigationDelegate {
             message: "阅读页渲染进程被系统回收（第 \(webContentTerminationCount) 次）",
             detail: "last=" + nativeConversation.lastCommandAction
                 + " scope=" + nativeConversation.scope
-                + " footprintMB=" + String(Self.memoryFootprintMB()))
+                + " footprintMB=" + String(Self.memoryFootprintMB())
+                // 快照开销：怀疑"每 60ms 序列化整段对话"把渲染进程顶掉时，
+                // 这一句就是判据。没有它又只能靠猜。
+                + " " + nativeConversation.snapshotCostSummary)
         var line = "阅读页渲染进程被系统回收，已自动重载"
         if !nativeConversation.lastCommandAction.isEmpty {
             let formatter = DateFormatter()
