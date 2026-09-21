@@ -6,6 +6,22 @@
     python review_deck.py --limit 5
     python review_deck.py --json          # 机器可读，含正反面全文
     python review_deck.py --card <cid>    # 只看一张
+    python review_deck.py --book 料理师part2      # 只复习这本
+    python review_deck.py --page 10-30            # 只复习这几页上的卡
+    python review_deck.py --kind due              # 只做到期的，不碰新卡
+
+## 为什么可以不开着书（用户 2026-09-21）
+
+> 我在外连接语音想复习，这时候没有在看任何书页，我希望可以进行指定范围的复习
+
+出门戴耳机复习时**没有任何阅读器页面在前台**。在此之前 AI 只好临场去问阅读器，
+于是拿到 `BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE`（"来源不在线"），并把它
+当成"复习这件事做不了"。
+
+它从来就不需要阅读器：这一组卡读的是 Windows 上的**复制副本**
+（``replication-data/<repbookId>/document-notes.json``），是文件，不是页面。
+**能不能复习与在不在看书无关** —— 这句话要写进工具说明里，否则 AI 下次还会
+自己发明一条要页面在线的路（面向 AI 的说明写反比没写更糟，见 CLAUDE.md）。
 
 ## 为什么存在（用户 2026-09-09）
 
@@ -36,6 +52,10 @@ Windows 这边只有复制过来的副本。所以「Windows 直接评分」会�
   "他最可能忘的那张"是判断不是数据，交给 AI。
 - **评不了的卡照样列出来并标明**：藏起来会让 AI 以为总数不对；
   2026-09-09 就有 10 张卡因为没进 Anki 而评不了分，藏起来只会让人更晚发现。
+- **范围永远连同"有哪些范围"一起返回**（``scopes``）：AI 只有一次开口机会，
+  用户说"复习那本书"时它得当场报得出书名和张数，而不是再问一轮。
+- **范围筛空了要说清是筛空的**，不能和"没有到期卡"长成一个样 ——
+  后者让人以为复习完了，前者其实是书名写错了。
 """
 from __future__ import annotations
 
@@ -55,6 +75,45 @@ BRIEF_CHARS = 40
 
 def default_root() -> Path:
     return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "BWReader"
+
+
+def book_titles(root: Path | None = None) -> dict[str, str]:
+    """repbookId → 人看得懂的书名。
+
+    ⚠ **同一个书名会对应多个 repbookId**（实测：「料理师part1 · PDF 阅读器」
+    有三条）—— 同一本书从不同设备/不同副本配对过。所以按书名选范围是**并集**，
+    不是歧义；报出来的匹配数可能大于 1，那是对的。
+    """
+    root = root or default_root()
+    try:
+        value = json.loads(
+            (root / "replication-book-links.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    for link in value.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        rid = str(link.get("replicationBookId") or "")
+        name = str(link.get("displayName") or "").strip()
+        if rid and name:
+            out.setdefault(rid, name)
+    return out
+
+
+def _card_page(item: Any, card: Any) -> int | None:
+    """这张卡钉在第几页。
+
+    两处都可能有：``item.anchor.page``（便签自身的落点）与 ``card.bind.page``
+    （词锚）。取先有的那个；都没有（EPUB / 未锚定）就是 None —— 按页筛范围时
+    这类卡不参与，不能猜成第 1 页。
+    """
+    for holder, key in ((item, "anchor"), (card, "bind")):
+        node = holder.get(key) if isinstance(holder, dict) else None
+        page = node.get("page") if isinstance(node, dict) else None
+        if isinstance(page, int) and not isinstance(page, bool) and page > 0:
+            return page
+    return None
 
 
 def _now_ms() -> int:
@@ -105,6 +164,7 @@ def collect(root: Path | None = None) -> list[dict[str, Any]]:
     root = root or default_root()
     data_dir = root / "replication-data"
     now = _now_ms()
+    titles = book_titles(root)
     deck: list[dict[str, Any]] = []
     if not data_dir.is_dir():
         return deck
@@ -137,6 +197,11 @@ def collect(root: Path | None = None) -> list[dict[str, Any]]:
                     "cid": card.get("cid") or "",
                     "noteId": one.get("_nid"),
                     "book": book_dir.name,
+                    # 书名给人听（"复习料理师part2"），repbookId 给机器对齐。
+                    # 没配对过的书没有书名 —— 如实留空，不拿 id 冒充书名。
+                    "bookTitle": titles.get(book_dir.name, ""),
+                    # 页码给"复习第几页到第几页"用，也是卡片钉在哪的说明。
+                    "page": _card_page(item, card),
                     "itemId": item_id,
                     "kind": "due" if due_at is not None else "new",
                     "dueAtMs": due_at,
@@ -165,12 +230,110 @@ def collect(root: Path | None = None) -> list[dict[str, Any]]:
     return deck
 
 
-def take(root: Path | None = None, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
-    deck = collect(root)
+def parse_pages(value: Any) -> tuple[int, int] | None:
+    """``"10-30"`` / ``"12"`` → (lo, hi)。写不成样子就是 None（调用方出声）。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = text.split("-", 1)
+    try:
+        lo = int(parts[0])
+        hi = int(parts[1]) if len(parts) == 2 and parts[1].strip() else lo
+    except ValueError:
+        return None
+    if lo <= 0 or hi <= 0:
+        return None
+    return (lo, hi) if lo <= hi else (hi, lo)
+
+
+def scopes_of(deck: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """有哪些书可以选，各有多少张。
+
+    ⚠ 这份摘要**永远按未筛选的整副牌算**：用户说"换一本"时 AI 得知道还有哪些，
+    而不是只看得见自己刚筛出来的那一本。
+    """
+    by_book: dict[str, dict[str, Any]] = {}
+    for one in deck:
+        row = by_book.setdefault(one["book"], {
+            "book": one["book"], "title": one.get("bookTitle") or "",
+            "total": 0, "due": 0, "new": 0, "blocked": 0,
+            "pageLo": None, "pageHi": None,
+        })
+        row["total"] += 1
+        row["due" if one["kind"] == "due" else "new"] += 1
+        if not one["gradable"]:
+            row["blocked"] += 1
+        page = one.get("page")
+        if isinstance(page, int):
+            row["pageLo"] = page if row["pageLo"] is None else min(row["pageLo"], page)
+            row["pageHi"] = page if row["pageHi"] is None else max(row["pageHi"], page)
+    return sorted(by_book.values(), key=lambda row: (-row["due"], -row["total"]))
+
+
+def select(
+    deck: list[dict[str, Any]],
+    *,
+    book: str = "",
+    pages: tuple[int, int] | None = None,
+    kind: str = "all",
+) -> dict[str, Any]:
+    """按范围挑出要复习的那一组。返回选中的卡 + **这次范围实际命中了什么**。
+
+    ``book`` 匹配 repbookId 全等，或书名（不分大小写）含这段文字；同名多副本
+    取并集（见 :func:`book_titles`）。
+    """
+    book = str(book or "").strip()
+    kind = str(kind or "all").strip().lower() or "all"
+    matched_books: list[str] = []
+    picked: list[dict[str, Any]] = []
+    for one in deck:
+        if book:
+            needle = book.casefold()
+            if one["book"] != book and needle not in (one.get("bookTitle") or "").casefold():
+                continue
+        if pages is not None:
+            page = one.get("page")
+            if not isinstance(page, int) or not (pages[0] <= page <= pages[1]):
+                continue
+        if kind in ("due", "new") and one["kind"] != kind:
+            continue
+        picked.append(one)
+        if one["book"] not in matched_books:
+            matched_books.append(one["book"])
+    return {
+        "cards": picked,
+        "applied": {
+            "book": book, "kind": kind,
+            "pages": list(pages) if pages else None,
+        },
+        "matchedBooks": matched_books,
+        # 筛空了和"根本没有到期卡"是两回事：前者多半是书名写错了。
+        "narrowedToNothing": bool(picked == [] and deck and (book or pages or kind != "all")),
+    }
+
+
+def take(
+    root: Path | None = None,
+    limit: int = DEFAULT_LIMIT,
+    *,
+    book: str = "",
+    pages: tuple[int, int] | None = None,
+    kind: str = "all",
+) -> dict[str, Any]:
+    everything = collect(root)
+    chosen = select(everything, book=book, pages=pages, kind=kind)
+    deck = chosen["cards"]
     limit = max(1, min(int(limit), 50))
     return {
         "contract": CONTRACT,
         "atUtcMs": _now_ms(),
+        # ⚠ 复习不依赖任何阅读器页面 —— 这一条要跟着数据走到 AI 面前，
+        #   否则它看不到书就以为复习做不了（2026-09-21 实录）。
+        "needsReaderOpen": False,
+        "scope": chosen["applied"],
+        "matchedBooks": chosen["matchedBooks"],
+        "narrowedToNothing": chosen["narrowedToNothing"],
+        "scopes": scopes_of(everything),
         "total": len(deck),
         "due": sum(1 for one in deck if one["kind"] == "due"),
         "new": sum(1 for one in deck if one["kind"] == "new"),
@@ -186,12 +349,25 @@ def _brief(text: str) -> str:
 
 def render(payload: dict[str, Any]) -> str:
     """给人/AI 读的紧凑清单。念给用户听要用 --json 拿全文。"""
-    lines = ["待复习 %d 张（到期 %d，新卡 %d%s），下面列 %d 张：" % (
+    scope = payload.get("scope") or {}
+    bits = []
+    if scope.get("book"):
+        bits.append("书=%s（命中 %d 本副本）" % (
+            scope["book"], len(payload.get("matchedBooks") or [])))
+    if scope.get("pages"):
+        bits.append("第 %d–%d 页" % tuple(scope["pages"]))
+    if scope.get("kind") in ("due", "new"):
+        bits.append("只要%s" % ("到期的" if scope["kind"] == "due" else "新卡"))
+    lines = ["待复习 %d 张（到期 %d，新卡 %d%s）%s，下面列 %d 张：" % (
         payload["total"], payload["due"], payload["new"],
         "，其中 %d 张评不了分" % payload["blocked"] if payload["blocked"] else "",
+        "｜范围：" + "、".join(bits) if bits else "",
         len(payload["cards"]))]
     if not payload["cards"]:
-        lines.append("  （没有该复习的卡）")
+        # 筛空了和"复习完了"必须长得不一样 —— 后者让人放心，前者是写错了范围。
+        lines.append("  （这个范围里没有卡；别的范围还有）"
+                     if payload.get("narrowedToNothing")
+                     else "  （没有该复习的卡）")
     for order, card in enumerate(payload["cards"], 1):
         mark = "" if card["gradable"] else "  ⚠评不了分(%s)" % card["blockedReason"]
         when = ("逾期 %d 分钟" % card["overdueMinutes"]
@@ -199,8 +375,18 @@ def render(payload: dict[str, Any]) -> str:
         lines.append("  %d. [%s] %s%s" % (
             order, when, _brief(card["frontText"]), mark))
         lines.append("      背面：%s" % _brief(card["backText"]))
-        lines.append("      身份：gid=%s index=%d noteId=%s" % (
-            card["gid"][:16], card["index"], card["noteId"]))
+        lines.append("      身份：gid=%s index=%d noteId=%s%s" % (
+            card["gid"][:16], card["index"], card["noteId"],
+            "  第 %d 页" % card["page"] if card.get("page") else ""))
+    rows = payload.get("scopes") or []
+    if rows:
+        lines.append("")
+        lines.append("可选范围（他说「换一本」时直接报这些）：")
+        for row in rows[:12]:
+            span = ("，第 %d–%d 页" % (row["pageLo"], row["pageHi"])
+                    if row["pageLo"] else "")
+            lines.append("  · %s —— 到期 %d、新卡 %d%s" % (
+                row["title"] or row["book"], row["due"], row["new"], span))
     if payload["blocked"]:
         lines.append("")
         lines.append("⚠ 标着「评不了分」的卡还没进 Anki —— Reader 自己不排期，"
@@ -215,8 +401,20 @@ def main() -> int:
     parser.add_argument("--json", action="store_true",
                         help="机器可读，正反面**不截断**（语音复习要念全文）")
     parser.add_argument("--card", default=None, help="只看这个 cid")
+    parser.add_argument("--book", default="",
+                        help="只复习这本：repbookId 全等，或书名含这段文字"
+                             "（同名多副本取并集）")
+    parser.add_argument("--page", default="",
+                        help="只复习这几页上的卡，如 10-30 或 12"
+                             "（没有页码的卡不参与）")
+    parser.add_argument("--kind", default="all", choices=["all", "due", "new"],
+                        help="只做到期的 / 只做新卡")
     args = parser.parse_args()
-    payload = take(args.root, args.limit)
+    pages = parse_pages(args.page)
+    if args.page and pages is None:
+        parser.error("--page 要写成 10-30 或 12")
+    payload = take(args.root, args.limit,
+                   book=args.book, pages=pages, kind=args.kind)
     if args.card:
         payload["cards"] = [one for one in collect(args.root)
                             if one["cid"] == args.card]

@@ -150,5 +150,119 @@ class DeckTests(unittest.TestCase):
         self.assertEqual([one["frontText"] for one in deck], ["好的"])
 
 
+class ScopeTests(unittest.TestCase):
+    """指定范围的复习（用户 2026-09-21：出门戴耳机，手上没有任何书页）。
+
+    守三条：
+    ① **范围永远连同"有哪些范围"一起返回** —— AI 只有一次开口机会，
+       用户说"换一本"时它得当场报得出书名和张数。
+    ② **筛空了要能和"复习完了"分开** —— 后者让人放心，前者其实是书名说岔了。
+    ③ **同一个书名对应多个 repbookId 是常态**（同一本书从不同设备配对过），
+       按书名选是并集，不是歧义。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "replication-data").mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def book(self, repid, title, cards):
+        d = self.root / "replication-data" / repid
+        d.mkdir(exist_ok=True)
+        items = {}
+        for n, (front, page, one) in enumerate(cards):
+            items["i%d" % n] = {
+                "created": 1000 + n,
+                "anchor": {"kind": "pdf", "page": page} if page else None,
+                "card": {"gid": "g%d" % n, "cid": "c%d" % n,
+                         "cards": [dict(one, front=front, back="b")]},
+            }
+        (d / "document-notes.json").write_text(
+            json.dumps({"items": items}), encoding="utf-8")
+        if title:
+            path = self.root / "replication-book-links.json"
+            try:
+                value = json.loads(path.read_text(encoding="utf-8-sig"))
+            except OSError:
+                value = {"contract": "replication-book-links/1", "links": []}
+            value["links"].append(
+                {"replicationBookId": repid, "displayName": title})
+            path.write_text(json.dumps(value), encoding="utf-8")
+
+    def test_title_comes_from_the_link_table(self):
+        self.book("repbook-a", "料理师part2 · PDF 阅读器",
+                  [("f", 5, {"_st": "learn"})])
+        one = review_deck.collect(self.root)[0]
+        self.assertIn("料理师part2", one["bookTitle"])
+        self.assertEqual(one["page"], 5)
+
+    def test_unpaired_book_has_no_title_rather_than_a_fake_one(self):
+        # 没配对过的书没有书名。拿 repbookId 冒充书名会让 AI 念一串十六进制。
+        self.book("repbook-z", None, [("f", 3, {"_st": "learn"})])
+        self.assertEqual(review_deck.collect(self.root)[0]["bookTitle"], "")
+
+    def test_same_title_across_copies_is_a_union_not_a_conflict(self):
+        # ③ 实测「料理师part1」有三条 repbook 记录。
+        self.book("repbook-a", "料理师part1", [("甲", 1, {"_st": "learn"})])
+        self.book("repbook-b", "料理师part1", [("乙", 2, {"_st": "learn"})])
+        self.book("repbook-c", "别的书", [("丙", 3, {"_st": "learn"})])
+        payload = review_deck.take(self.root, book="料理师part1")
+        self.assertEqual(
+            sorted(one["frontText"] for one in payload["cards"]), ["乙", "甲"])
+        self.assertEqual(len(payload["matchedBooks"]), 2)
+
+    def test_page_range_excludes_cards_without_a_page(self):
+        # 没有页码的卡（EPUB / 未锚定）不能被猜成第 1 页。
+        self.book("repbook-a", "书", [("有页", 12, {"_st": "learn"}),
+                                      ("没页", None, {"_st": "learn"})])
+        payload = review_deck.take(self.root, pages=(10, 20))
+        self.assertEqual([one["frontText"] for one in payload["cards"]], ["有页"])
+
+    def test_kind_filter_separates_due_from_new(self):
+        now = int(time.time() * 1000)
+        self.book("repbook-a", "书", [("到期", 1, {"_next": now - 60_000}),
+                                      ("新", 2, {"_st": "learn"})])
+        self.assertEqual(
+            [one["frontText"] for one in
+             review_deck.take(self.root, kind="due")["cards"]], ["到期"])
+        self.assertEqual(
+            [one["frontText"] for one in
+             review_deck.take(self.root, kind="new")["cards"]], ["新"])
+
+    def test_scopes_cover_every_book_not_just_the_selected_one(self):
+        # ① 他说"换一本"时，AI 得看得见没被选中的那本。
+        self.book("repbook-a", "甲书", [("f", 1, {"_st": "learn"})])
+        self.book("repbook-b", "乙书", [("g", 2, {"_st": "learn"})])
+        payload = review_deck.take(self.root, book="甲书")
+        self.assertEqual(len(payload["cards"]), 1)
+        self.assertEqual(
+            sorted(row["title"] for row in payload["scopes"]), ["乙书", "甲书"])
+
+    def test_narrowed_to_nothing_is_not_the_same_as_nothing_to_review(self):
+        # ② 两种"0 张"必须分得开。
+        self.book("repbook-a", "甲书", [("f", 1, {"_st": "learn"})])
+        missed = review_deck.take(self.root, book="并不存在的书")
+        self.assertTrue(missed["narrowedToNothing"])
+        self.assertIn("这个范围里没有卡", review_deck.render(missed))
+        done = review_deck.take(Path(tempfile.mkdtemp(prefix="empty-")))
+        self.assertFalse(done["narrowedToNothing"])
+        self.assertIn("没有该复习的卡", review_deck.render(done))
+
+    def test_payload_states_that_no_reader_is_needed(self):
+        # 这句话要跟着数据走到 AI 面前 —— 它上一次就是因为看不到书而放弃了。
+        self.book("repbook-a", "甲书", [("f", 1, {"_st": "learn"})])
+        self.assertIs(review_deck.take(self.root)["needsReaderOpen"], False)
+
+    def test_page_spec_parsing(self):
+        self.assertEqual(review_deck.parse_pages("10-30"), (10, 30))
+        self.assertEqual(review_deck.parse_pages("12"), (12, 12))
+        self.assertEqual(review_deck.parse_pages("30-10"), (10, 30))
+        for bad in ("", "abc", "0-5", "-3", "1-x"):
+            self.assertIsNone(review_deck.parse_pages(bad), bad)
+
+
 if __name__ == "__main__":
     unittest.main()
