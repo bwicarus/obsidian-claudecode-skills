@@ -5,6 +5,7 @@ renderers and the existing transport are controlled fixtures; turn reconciliatio
 and the existing assistant's voice-routing branch run from repository sources.
 """
 import json
+import re
 from pathlib import Path
 import sys
 import unittest
@@ -17,6 +18,12 @@ from browser_exe import CHROME
 
 
 class NativeConversationBridgeBrowser(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        transport = (ROOT / 'ios/BWReader/App/ReaderWebView.swift').read_text(encoding='utf-8')
+        allowed = transport.split('let allowed: Set<String> = [', 1)[1].split(']', 1)[0]
+        cls.transport_actions = set(re.findall(r'"([A-Za-z]+)"', allowed))
+
     def test_native_page_navigation_preserves_offsets_volumes_and_return_anchor(self):
         bridge = (ROOT / 'ios/BWReader/App/ReaderNativeConversationScript.swift').read_text(encoding='utf-8').split('#"""', 1)[1].rsplit('"""#', 1)[0]
         source = (ROOT / '_server_deploy/static/pdf/reader.src/05-nav.js').read_text(encoding='utf-8')
@@ -44,6 +51,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             scope = page.evaluate('receipts.at(-1).scope')
             def command(key=None, value=None):
                 args = dict(action='navigationAction' if key else 'navigationRead',scope=scope)
+                self.assertIn(args['action'], self.transport_actions)
                 if key: args['text'] = key
                 if value is not None: args['value'] = value
                 return page.evaluate('(c)=>__bwNativeConversation.perform(c)', args)
@@ -104,6 +112,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.wait_for_function('receipts.at(-1)?.capabilities?.includes("nativeTOC")')
             scope = page.evaluate('receipts.at(-1).scope')
             def command(action, **values):
+                self.assertIn(action, self.transport_actions)
                 return page.evaluate('(c)=>__bwNativeConversation.perform(c)', dict(action=action,scope=scope,**values))
             entries = command('tocRead')['value']
             self.assertEqual(entries[0]['label'], 'P6')
