@@ -802,6 +802,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         // 布局一变就重推墨迹表面：滚动/缩放后页面的屏幕位置变了，不推的话
         // Pencil 会画在上一帧的位置上。挂载那次的 onGeometry 已在回调里自清。
+        document.onRecognize = { [weak self] page, rect in
+            Task { @MainActor [weak self] in self?.recognizeNativeSelection(page: page, rect: rect) }
+        }
         document.onEditHighlight = { [weak self] highlight in
             Task { @MainActor [weak self] in self?.openNativeHighlightEditor(highlight) }
         }
@@ -939,6 +942,31 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
+    /// 选区菜单里点了「OCR」：文字层坏掉时对这块重新识别。
+    ///
+    /// ⚠ 这不是"把服务端那套 OCR 接过来"：App 里 `/pdf/api/ocr-selection` 由本地
+    /// runtime 接管，跑的是 **App 自己的** OCR（NativeBookOCRBridge），写回的也是
+    /// App 自己的字符层 —— 识别完 `NativeBookOCRManager.lastUpdate` 会让这一页的
+    /// 字符层失效并重读，所以这里不需要自己去刷新。
+    private func recognizeNativeSelection(page: Int, rect: CGRect) {
+        guard page > 0, rect.width >= 0.5, rect.height >= 0.5 else { return }
+        let bbox: [Double] = [rect.minX, rect.minY, rect.maxX, rect.maxY]
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let receipt = await self.requestNativeConversationCommand([
+                "action": "nativeOcrSelection", "scope": self.nativeConversation.scope,
+                "value": ["page": page, "bbox": bbox],
+            ])
+            guard receipt["ok"] as? Bool == true,
+                  let text = (receipt["value"] as? [String: Any])?["text"] as? String, !text.isEmpty else {
+                self.nativeConversation.report(receipt["error"] as? String ?? "没有识别出文字。")
+                return
+            }
+            // 结果要看得见：识别完悄无声息的话，用户不知道该不该再选一次。
+            self.nativeConversation.report("已重新识别：" + String(text.prefix(120)))
+        }
+    }
+
     /// 点了已有划线 → 原生编辑面板（改色 / 备注 / 删除）。
     private func openNativeHighlightEditor(_ highlight: ReaderNativePDFDocument.Highlight) {
         let panel = ReaderNativeHighlightEditorModel(highlight: highlight) { [weak self] command in
@@ -1067,7 +1095,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
             "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach",
-            "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav", "nativeCreateNote"]
+            "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav", "nativeCreateNote",
+            "nativeOcrSelection"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {

@@ -11286,6 +11286,31 @@ function _selPageNum() {
 }
 window._selPageNum = _selPageNum;
 
+// ── 原生正文（PDFKit 接管）：对指定页的一块区域重新识别文字 ──
+// ⚠ 不是"接服务端那套 OCR"：App 里 /pdf/api/ocr-selection 由本地 runtime 接管，
+//   跑的就是 App 自己的 OCR（NativeBookOCRBridge 的 ocr-selection），写回的也是
+//   App 自己的字符层。下面这条 fetch 在 App 内根本不出网。
+//   这里只做一件网页那侧做不了的事：接管后 _charSel.pw.__charBoxes 不存在，
+//   选区的点坐标只有原生算得出，所以 bbox 由它给。
+window.__bwReaderOcrSelection = async function (request) {
+  request = request || {};
+  const page = Number(request.page) || 0;
+  const bbox = Array.isArray(request.bbox) ? request.bbox.map(Number) : [];
+  if (!page || bbox.length !== 4 || !bbox.every(Number.isFinite) ||
+      bbox[2] - bbox[0] < 0.5 || bbox[3] - bbox[1] < 0.5) throw new Error('BW_READER_OCR_BBOX');
+  const ov = (typeof _getAiOverrides === 'function') ? _getAiOverrides() : {};
+  const r = await __safeFetch('/pdf/api/ocr-selection', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({file: FILE_REL, page: page, bbox: bbox,
+                          model: ov.model || '', effort: ov.effort || ''}),
+  });
+  const j = await r.json();
+  if (!j || !j.ok || !j.text) throw new Error('BW_READER_OCR_FAILED');
+  // cv 是这一页字符层的版本号；存下来，网页那侧重渲时第一拉就命中新版。
+  if (j.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + page, j.cv); } catch (_) {} }
+  return {page: page, text: String(j.text).slice(0, 4000), cv: j.cv || ''};
+};
+
 window.onOcrSel = async () => {
   const pw = _charSel && _charSel.pw;
   if (!pw || !pw.__charBoxes || !lastSelText) { (typeof _toast === 'function') && _toast('先选中文字'); return; }

@@ -611,7 +611,7 @@ enum ReaderNativeConversationScript {
              'nativeCardMove', 'nativeCardResize', 'nativeVocabMark',
              'nativeFigureAttach', 'nativeGrammar',
              'nativeHighlightEdit', 'nativePhraseFav',
-             'nativeCreateNote'].includes(command.action)) parameterKeys.push('value');
+             'nativeCreateNote', 'nativeOcrSelection'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -762,6 +762,28 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
             if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
             return { ok: true, value: { id: value.id } };
+          } else if (action === 'nativeOcrSelection') {
+            // 文字层坏掉时对这块重新识别。⚠ App 里这条端点由本地 runtime 接管，
+            // 跑的是 App 自己的 OCR、写回 App 自己的字符层，**不出网**。
+            const value = command.value;
+            if (!value || !Number.isSafeInteger(value.page) || value.page < 1 ||
+                !Array.isArray(value.bbox) || value.bbox.length !== 4 ||
+                !value.bbox.every(n => Number.isFinite(n) && n >= 0)) {
+              return { ok: false, error: 'OCR 选区无效' };
+            }
+            if (typeof window.__bwReaderOcrSelection !== 'function') return { ok: false, error: '文字识别尚未就绪' };
+            const captured = scope;
+            let recognized;
+            try {
+              recognized = await window.__bwReaderOcrSelection({ page: value.page, bbox: value.bbox });
+            } catch (error) {
+              const code = String(error && error.message || error);
+              const said = { BW_READER_OCR_BBOX: '这块区域太小，识别不了',
+                             BW_READER_OCR_FAILED: '没有识别出文字' }[code];
+              return { ok: false, error: said || code.slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            return { ok: true, value: recognized };
           } else if (action === 'nativeCreateNote') {
             // 顶栏 🗒 在接管后是**彻底静默**的：createAtCenter → anchorFromPoint →
             // document.elementFromPoint，一页都不在 DOM 里，七个候选点全落空，

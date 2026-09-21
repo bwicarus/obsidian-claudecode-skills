@@ -287,6 +287,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     var onGrammar: ((Int, String, String) -> Void)?
     /// 点了已有划线。
     var onEditHighlight: ((Highlight) -> Void)?
+    /// 页码 + 要重新识别的点坐标矩形。
+    var onRecognize: ((Int, CGRect) -> Void)?
     private var access: ReaderLocalBookAccess?
     private var digest = ""
     private var generation = UUID()
@@ -373,12 +375,16 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                 guard let self, update.bookID == self.access?.record.id else { return }
                 self.clearSelection()
                 if let page = update.page {
+                    // ⚠ pageText 的缓存也要跟着失效：OCR 改的正是这一页的文字，
+                    //   不清的话助手拿到的还是识别前那版 —— 而且它是静默的。
+                    self.pageTexts[page] = nil
                     self.characterPages[page] = nil; self.unavailableCharacterPages.remove(page)
                     self.selectionCores[page] = nil; self.textOverlays[page]?.selectionCore = nil
                     self.characterReads[page]?.cancel(); self.characterReads[page] = nil
                     self.characterReadTickets[page] = nil
                     self.textOverlays[page]?.characters = nil
                 } else {
+                    self.pageTexts = [:]
                     self.characterPages = [:]; self.unavailableCharacterPages = []
                     self.selectionCores = [:]
                     self.textOverlays.values.forEach { $0.selectionCore = nil }
@@ -847,6 +853,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             guard let self, let highlight = self.highlights[number]?.first(where: { $0.id == id }) else { return }
             self.onEditHighlight?(highlight)
         }
+        overlay.onRecognize = { [weak self] rect in
+            self?.onRecognize?(number, rect)
+        }
         overlay.onGrammar = { [weak self] value in
             self?.onGrammar?(number, value.sentence, value.text)
         }
@@ -931,6 +940,8 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     /// 查词 / 整段翻译：(选中, "dict" | "translate")。取数在阅读器那侧，这里只发起。
     var onLookup: ((ReaderNativePDFSelection.Value, String) -> Void)?
     var onGrammar: ((ReaderNativePDFSelection.Value) -> Void)?
+    /// 重新识别这块区域（点坐标的并集矩形）。
+    var onRecognize: ((CGRect) -> Void)?
     private var start: Int?
     private var selected: ReaderNativePDFSelection.Value?
     private let leadingHandle = ReaderNativePDFSelectionHandle()
@@ -1078,6 +1089,15 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
             UIAction(title: "翻译", image: UIImage(systemName: "translate")) { [weak self] _ in
                 guard let self, self.selected?.indexes == value.indexes else { return }
                 self.onLookup?(value, "translate")
+            },
+            UIAction(title: "OCR", image: UIImage(systemName: "text.viewfinder")) { [weak self] _ in
+                guard let self, self.selected?.indexes == value.indexes else { return }
+                // 文字层坏掉（乱码/上标错/缺符号）时对这块重新识别。
+                // bbox 用选区各矩形的并集，点坐标 —— 接管后网页那侧算不出它。
+                var union = CGRect.null
+                for rect in value.rects { union = union.union(rect) }
+                guard !union.isNull, union.width >= 0.5, union.height >= 0.5 else { return }
+                self.onRecognize?(union)
             },
             UIAction(title: "词组", image: UIImage(systemName: "text.badge.star")) { [weak self] _ in
                 guard let self, self.selected?.indexes == value.indexes else { return }
