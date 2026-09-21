@@ -32,6 +32,10 @@ final class ReaderNativeFaultReporter {
         let startedAt: Double
         var clean: Bool
         var crumbs: [Crumb]
+        /// 还没送出去的报告。⚠ 没有它，"桥没开着/电脑睡了"这一种情况下报告就
+        /// 直接蒸发了 —— 而那恰恰是最需要报告的时候（用户在外面用 iPad）。
+        /// 发不出去就留着，下次启动再发。
+        var outbox: [[String: String]] = []
     }
 
     /// 上限存在的理由跟别处一样：没有上限的缓冲区在长会话里就是另一个内存问题。
@@ -40,6 +44,8 @@ final class ReaderNativeFaultReporter {
     private var startedAt = Date().timeIntervalSince1970
     private var pendingFlush: Task<Void, Never>?
     private var origin = ""
+    private var outbox: [[String: String]] = []
+    private var sending = false
 
     private lazy var stateURL: URL = {
         let base = (FileManager.default.urls(for: .applicationSupportDirectory,
@@ -59,12 +65,15 @@ final class ReaderNativeFaultReporter {
     /// ⚠ 先读上一条命再写这一条，顺序反了同样是覆盖证据。
     func beginSession(origin: String) {
         self.origin = origin
-        guard !began else { persist(clean: false); return }
+        guard !began else { persist(clean: false); flushOutbox(); return }
         began = true
         let previous = loadSession()
         startedAt = Date().timeIntervalSince1970
         crumbs = []
+        // 上次没发出去的接着发。⚠ 这是"电脑当时睡着了"那一整类情况的唯一出路。
+        outbox = previous?.outbox ?? []
         persist(clean: false)
+        flushOutbox()
         guard let previous, !previous.clean else { return }
         // 上次没走到 endSession：App 被系统杀了或自己崩了。把那次的现场补报出去。
         let tail = previous.crumbs.suffix(40).map(Self.line).joined(separator: " | ")
@@ -90,7 +99,7 @@ final class ReaderNativeFaultReporter {
     /// 就是再制造一个故障；但它会先落盘，所以即使这次没送出去，下次启动还能补。
     func report(code: String, message: String, detail: String) {
         let crumbTail = crumbs.suffix(30).map(Self.line).joined(separator: " | ")
-        let row: [String: Any] = [
+        let row: [String: String] = [
             "at": Self.stamp(Date().timeIntervalSince1970),
             "source": "app",
             "code": String(code.prefix(120)),
@@ -98,15 +107,42 @@ final class ReaderNativeFaultReporter {
             "detail": String((detail + (crumbTail.isEmpty ? "" : " ‖ " + crumbTail)).prefix(1800))
         ]
         note("fault", code)
+        outbox.append(row)
+        // 上限：发件箱本身不能变成第二个内存问题。满了丢**最旧**的 ——
+        // 同一类故障反复发生时，最近那几次才有诊断价值。
+        if outbox.count > 40 { outbox.removeFirst(outbox.count - 40) }
         persist(clean: false)
-        guard !origin.isEmpty, let url = URL(string: origin + "/reader-error-log") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 6
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(origin, forHTTPHeaderField: "Origin")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: row)
-        Task.detached { _ = try? await URLSession.shared.data(for: request) }
+        flushOutbox()
+    }
+
+    /// 把发件箱里的报告一条条送出去，送成了才划掉。
+    /// ⚠ 失败**不吵**也**不丢**：上报本身出问题时最不该做的是再制造一个故障，
+    ///   但更不该做的是假装发过了 —— 那就又回到"什么都没发生"。
+    private func flushOutbox() {
+        guard !sending, !outbox.isEmpty, !origin.isEmpty,
+              let url = URL(string: origin + "/reader-error-log") else { return }
+        sending = true
+        let batch = outbox
+        Task { @MainActor [weak self] in
+            var delivered = 0
+            for row in batch {
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 6
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue(self?.origin ?? "", forHTTPHeaderField: "Origin")
+                request.httpBody = try? JSONSerialization.data(withJSONObject: row)
+                guard let (_, reply) = try? await URLSession.shared.data(for: request),
+                      (200...299).contains((reply as? HTTPURLResponse)?.statusCode ?? 0) else { break }
+                delivered += 1
+            }
+            guard let self else { return }
+            self.sending = false
+            if delivered > 0 {
+                self.outbox.removeFirst(min(delivered, self.outbox.count))
+                self.persist(clean: false)
+            }
+        }
     }
 
     // MARK: - 落盘
@@ -123,7 +159,7 @@ final class ReaderNativeFaultReporter {
     }
 
     private func persist(clean: Bool) {
-        let session = Session(startedAt: startedAt, clean: clean, crumbs: crumbs)
+        let session = Session(startedAt: startedAt, clean: clean, crumbs: crumbs, outbox: outbox)
         guard let data = try? JSONEncoder().encode(session) else { return }
         try? data.write(to: stateURL, options: .atomic)
     }

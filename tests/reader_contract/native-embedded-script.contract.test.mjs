@@ -102,6 +102,11 @@ test("故障会自己送出去，而不是死在原地", () => {
   assert.match(reporter, /BW_APP_UNCLEAN_EXIT/, "App 自己崩没人补报");
   assert.match(reporter, /func persist\(clean: Bool\)/, "面包屑没落盘，App 一死就全没了");
   assert.match(reporter, /guard !began else/, "beginSession 不是一次性的，会覆盖上次的证据");
+  // ⚠ 发件箱：桥没开/电脑睡了时报告不能蒸发 —— 而那恰恰是最需要报告的
+  //   时候（用户在外面用 iPad）。发不出去就留着，下次启动再发。
+  assert.match(reporter, /var outbox/, "没有发件箱，一次发失败就永久丢了");
+  assert.match(reporter, /outbox = previous\?\.outbox \?\? \[\]/, "上次没发出去的没人接着发");
+  assert.match(reporter, /\(200\.\.\.299\)\.contains/, "没看响应码就当发成了");
 
   const view = readFileSync(new URL(
     "../../ios/BWReader/App/ReaderWebView.swift", import.meta.url), "utf8");
