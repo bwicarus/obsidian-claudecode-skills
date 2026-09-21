@@ -19,6 +19,7 @@ const PANEL = read("ios/BWReader/App/ReaderNativeLookupView.swift");
 const WEBVIEW = read("ios/BWReader/App/ReaderWebView.swift");
 const SCRIPT = read("ios/BWReader/App/ReaderNativeConversationScript.swift");
 const POLICY = read("_server_deploy/static/reader-runtime/interaction-policy.js");
+const SHARED = read("_server_deploy/static/pdf/rc-wordpop.js");
 
 const body = (source, from, to) => source.slice(source.indexOf(from), source.indexOf(to));
 const code = (source) =>
@@ -66,4 +67,45 @@ test("④ 发音用系统 TTS，且合成器要活到念完", () => {
   assert.match(PANEL, /final class ReaderNativeSpeech/);
   assert.match(PANEL, /static let shared = ReaderNativeSpeech\(\)/,
     "⚠ 每次新建合成器会让上一句还没念完就被回收 —— 表现是点了没声音");
+});
+
+test("⑤ 展开完整词典复用网页那条端点，不另开一个", () => {
+  const entry = WORDPOP.slice(WORDPOP.indexOf("window.__bwReaderLookupData = async function"));
+  assert.match(entry, /request\.mode === 'dict-full'/);
+  // ⚠ dict-full 必须排在 isJa 之前：反了的话日语词先被 dict-jp 接走，
+  // 「展开」什么都不多出来却把状态翻成已展开 —— 静默无效。
+  assert.ok(entry.indexOf("request.mode === 'dict-full'") < entry.indexOf("const isJa ="),
+    "dict-full 分支要在语言分流之前");
+  assert.match(entry, /BW_READER_LOOKUP_JP_FULL/, "日语走到这儿要出声，不要返回旧数据");
+  assert.match(PANEL, /if !model\.expanded, !model\.isJapanese \{/,
+    "面板对日语不出展开按钮");
+  assert.match(entry, /'\/pdf\/api\/dict\?word='/,
+    "跟网页小框「展开」同一条端点 —— 融合口径只该有一处");
+  assert.match(SHARED, /fetch\('\/pdf\/api\/dict\?'/, "网页那侧还在用它");
+  // 一次性 JSON 而不是 SSE：原生面板不需要分段到达。
+  assert.doesNotMatch(code(entry), /text\/event-stream/);
+  // 新 fetch 要有注册过的交互 id，否则门禁判成新增债务。
+  assert.match(entry, /@interaction dictionary\.full\.read/);
+  assert.match(POLICY, /'dictionary\.full\.read'/);
+  assert.match(READER, /dict-full/, "改完 reader.src 要拼合");
+});
+
+test("⑥ 展开是合并而不是替换", () => {
+  const expand = body(PANEL, "func expand() async", "private func string(");
+  // ⚠ 完整词条没有 mastered / reading / kanji 这些小框才有的键；直接 value = body
+  // 会让「已掌握」按钮和日语读音在点开展开后凭空消失。
+  assert.doesNotMatch(code(expand), /^\s*value = body\s*$/m);
+  assert.match(expand, /var merged = value/);
+  assert.match(expand, /for \(key, item\) in body where !\(item is NSNull\)/,
+    "服务端给 null 的键不能盖掉小框已有的值");
+  assert.match(expand, /"mode": "dict-full"/);
+  // 展开完按钮要消失，否则重复点。
+  assert.match(PANEL, /if !model\.expanded, !model\.isJapanese \{/);
+});
+
+test("⑦ 例句两种形状都收（英语字符串 / 日语 {ja,zh}）", () => {
+  const examples = body(PANEL, "var examples: [(String, String)]", "var synonyms");
+  assert.match(examples, /item as\? String/, "英语完整词条给的是字符串数组");
+  assert.match(examples, /pair\["ja"\] as\? String \?\? pair\["en"\] as\? String/,
+    "日语给的是对象，zh 缺了回退 en");
 });

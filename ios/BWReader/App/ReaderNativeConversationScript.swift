@@ -785,7 +785,7 @@ enum ReaderNativeConversationScript {
             const value = command.value;
             if (!value || typeof value.text !== 'string' || !value.text.trim() ||
                 value.text.length > 2000 ||
-                !['dict', 'translate'].includes(value.mode)) return { ok: false, error: '查询参数无效' };
+                !['dict', 'dict-full', 'translate'].includes(value.mode)) return { ok: false, error: '查询参数无效' };
             if (typeof window.__bwReaderLookupData !== 'function') return { ok: false, error: '词典尚未就绪' };
             const captured = scope;
             let data;

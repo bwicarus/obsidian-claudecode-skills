@@ -82,6 +82,33 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
         ReaderNativeSpeech.shared.speak(utterance)
     }
 
+    /// 「展开完整词典」—— 同一条端点的一次性 JSON（网页小框那边点展开走它的 SSE 版）。
+    /// 拿到后就地把 value 换成完整那份：headword/释义这些键名两版一致，所以视图里
+    /// 已有的部分不用改，只是多出例句/同反义。
+    @Published private(set) var expanded = false
+    @Published private(set) var expanding = false
+
+    func expand() async {
+        guard !expanding, !expanded else { return }
+        expanding = true
+        defer { expanding = false }
+        let receipt = await request([
+            "action": "nativeSelectionLookup",
+            "value": ["text": lemma.isEmpty ? headword : lemma, "mode": "dict-full",
+                      "page": page, "context": context],
+        ])
+        guard receipt["ok"] as? Bool == true, let body = receipt["value"] as? [String: Any] else {
+            error = receipt["error"] as? String ?? "展开失败，请重试。"
+            return
+        }
+        // ⚠ 合并而不是替换：完整那份没有 mastered / reading / kanji 这些小框才有的键，
+        // 直接换掉会让「已掌握」按钮和日语读音在展开后凭空消失。
+        var merged = value
+        for (key, item) in body where !(item is NSNull) { merged[key] = item }
+        value = merged
+        expanded = true
+    }
+
     private func string(_ key: String) -> String { value[key] as? String ?? "" }
 
     var isJapanese: Bool { value["jp"] as? Bool == true }
@@ -92,6 +119,20 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
     var chinese: String { string("zh").isEmpty ? string("translation") : string("zh") }
     var definition: String { string("definition") }
     var kanji: [String] { (value["kanji"] as? [Any] ?? []).compactMap { $0 as? String } }
+
+    /// 例句：英语完整词条给的是字符串数组，日语小框给的是 {ja, zh} 对象数组。
+    /// 两种都收进来，显示时一视同仁 —— 分成两个字段会让视图里多一处分叉。
+    var examples: [(String, String)] {
+        (value["examples"] as? [Any] ?? []).compactMap { item in
+            if let text = item as? String { return (text, "") }
+            guard let pair = item as? [String: Any] else { return nil }
+            let source = pair["ja"] as? String ?? pair["en"] as? String ?? ""
+            guard !source.isEmpty else { return nil }
+            return (source, pair["zh"] as? String ?? "")
+        }
+    }
+    var synonyms: [String] { (value["synonyms"] as? [Any] ?? []).compactMap { $0 as? String } }
+    var antonyms: [String] { (value["antonyms"] as? [Any] ?? []).compactMap { $0 as? String } }
 }
 
 struct ReaderNativeLookupView: View {
@@ -147,6 +188,39 @@ struct ReaderNativeLookupView: View {
                         }
                         if model.chinese.isEmpty && model.definition.isEmpty {
                             Text("词典里没有这个词。").foregroundStyle(ReaderNativeTheme.muted)
+                        }
+                        if !model.examples.isEmpty {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(Array(model.examples.enumerated()), id: \.offset) { _, pair in
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(pair.0).font(.callout)
+                                        if !pair.1.isEmpty {
+                                            Text(pair.1).font(.footnote)
+                                                .foregroundStyle(ReaderNativeTheme.muted)
+                                        }
+                                    }
+                                }
+                            }
+                            .textSelection(.enabled)
+                        }
+                        if !model.synonyms.isEmpty || !model.antonyms.isEmpty {
+                            let parts = [model.synonyms.isEmpty ? "" : "同 " + model.synonyms.prefix(5).joined(separator: ", "),
+                                         model.antonyms.isEmpty ? "" : "反 " + model.antonyms.prefix(5).joined(separator: ", ")]
+                            Text(parts.filter { !$0.isEmpty }.joined(separator: " · "))
+                                .font(.footnote).foregroundStyle(ReaderNativeTheme.muted)
+                        }
+                        // 日语不出这个按钮：日语的「展开」在网页上是另一条路（离线富内容
+                        // 小框已经给了 + 按需的 AI 深入讲解），不是同一个端点。
+                        if !model.expanded, !model.isJapanese {
+                            Button {
+                                Task { await model.expand() }
+                            } label: {
+                                Label(model.expanding ? "展开中…" : "展开完整词典",
+                                      systemImage: "chevron.down.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(model.expanding)
                         }
                         Divider()
                         Button {

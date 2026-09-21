@@ -699,6 +699,16 @@
       }
     ),
     networkRead(
+      'dictionary.full.read',
+      ['/pdf/api/dict'],
+      {
+        transport: { extensionBridge: true, serviceWorker: 'none' },
+        reason: '三源融合的完整词条（ECDICT+Free Dictionary+MW）。网页小框点「展开」走它的 '
+          + 'SSE 版边到边渲染；原生面板取同一条端点的一次性 JSON（不分段到达，不需要流）。'
+          + '⚠ 不要为原生另开端点 —— 例句/同反义的融合口径只应该有一处。'
+      }
+    ),
+    networkRead(
       'dictionary.jp.read',
       ['/pdf/api/dict-jp'],
       {

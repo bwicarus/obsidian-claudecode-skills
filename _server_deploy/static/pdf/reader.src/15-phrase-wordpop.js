@@ -1083,6 +1083,32 @@ window.__bwReaderLookupData = async function (request) {
     if (!r || r.ok !== true) throw new Error('BW_READER_TRANSLATE_FAILED');
     return {mode: 'translate', text, zh: r.zh || ''};
   }
+  if (request.mode === 'dict-full') {
+    // 「展开」：三源融合的完整词条（例句/同反义/音标两版）。网页小框那边点
+    // 「展开」走的是同一条端点的 SSE 版；原生面板不需要分段到达，取一次性 JSON。
+    //
+    // ⚠ 这个分支必须在 isJa 之前：放在后面的话，日语词会先被 dict-jp 接走，
+    // 于是「展开」什么新东西都没多出来 —— 面板那侧还把状态翻成"已展开"，
+    // 表现就是按钮消失、内容没变，一次彻底的静默无效。
+    if (_isJaWord(text)) {
+      // 日语的「展开」在网页上是 dictStreamJP：离线富内容（小框已经给了）+ 按需的
+      // AI 深入讲解（/api/dict-jp-ai，SSE 且烧额度）。那是另一件事，不混在这里；
+      // 面板那侧也因此对日语不出这个按钮。真走到这儿要出声，不要静默返回旧数据。
+      throw new Error('BW_READER_LOOKUP_JP_FULL');
+    }
+    // @interaction dictionary.full.read
+    const full = await (await fetch('/pdf/api/dict?word=' + encodeURIComponent(text) +
+      '&file=' + file + '&page=' + encodeURIComponent(page) +
+      '&context=' + encodeURIComponent(context))).json();
+    if (!full || full.ok !== true) throw new Error('BW_READER_LOOKUP_MISS');
+    return {mode: 'dict', full: true, jp: false, word: full.word || text,
+            lemma: full.lemma || '', phonetic: full.phonetic || '',
+            translation: full.translation || '',
+            definition: String(full.definition || '').slice(0, 4000),
+            examples: (full.examples || []).slice(0, 6),
+            synonyms: (full.synonyms || []).slice(0, 8),
+            antonyms: (full.antonyms || []).slice(0, 8)};
+  }
   const isJa = _isJaWord(text);
   if (isJa) {
     // @interaction dictionary.jp.read
