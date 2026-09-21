@@ -2424,6 +2424,15 @@ if (window.__bwPwaProviderOnly) return;
       //   · 其它（区间解析不出来 / 不是这页 / 异常）= 这页当前状态下就是不成
       //     → 立刻放回来，退化成普通浮层便签，用户至少还能看到内容。
       var _tmp = res && (res.why === 'page-not-rendered' || res.why === 'no-char-layer');
+      // ⚠ 原生正文接管时，那次「马上会来的重试」**永远不会来**：网页不再渲页、
+      //   __charBoxes 不会挂上，于是 repositionAll 也就不会被 08-charlayer 调起。
+      //   继续藏着就等于**永久隐身** —— 这正是「卡片插入要求目标页在显示」的
+      //   真实形态：卡存下来了、页没渲、它一直不出现。
+      //   原生那侧有自己的字符层，解得出这条词锚（noteGeometry → resolveBinding），
+      //   所以交给它：这里只要别把卡片按住不放。
+      try {
+        if (window.RC && RC.readerNavigation && RC.readerNavigation.nativeViewport) _tmp = false;
+      } catch (e3) {}
       if (!_tmp) ctl.root.style.display = '';
     }
   }

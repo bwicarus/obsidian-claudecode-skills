@@ -114,6 +114,28 @@ struct ReaderNativePageCards: View {
                         .accessibilityLabel((item.open ? "收起" : "展开") + item.title + "，标记 " + marker.number)
                         .offset(x: box.minX, y: box.minY)
                     }
+                    // ⚠ 词锚标记（.pgmark / 序号）是网页在 pgbind-layer 里画的，要
+                    //   __charBoxes 才画得出来 —— 接管后一个都没有，于是 item.markers
+                    //   是空的：**这张卡钉在正文哪一段，屏幕上完全看不出来**。
+                    //   原生自己解得出那几个框，就用它们补一个描边（没有序号，
+                    //   因为序号是网页排的，这里不去猜一个可能对不上的号）。
+                    if item.markers.isEmpty, item.bound, let boxes = nativeMarkers, !boxes.isEmpty {
+                        ForEach(Array(boxes.enumerated()), id: \.offset) { _, box in
+                            Button {
+                                if let id = item.controls["toggleBound"] {
+                                    Task { await model.perform("liveAction", parameters: ["actionId": id]) }
+                                }
+                            } label: {
+                                RoundedRectangle(cornerRadius: 3)
+                                    .stroke(ReaderNativeTheme.accent.opacity(item.open ? 1 : 0.65), lineWidth: 1.2)
+                                    .frame(width: box.width, height: box.height)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel((item.open ? "收起" : "展开") + item.title)
+                            .offset(x: box.minX, y: box.minY)
+                        }
+                    }
                     // 卡身同理：原生接管时用 PDFKit 解出来的位置和尺寸
                     // （noteGeometry 会按页宽/base_w 的比例缩放，并处理折叠态）。
                     let rect = reader.nativePageCardGeometry(
