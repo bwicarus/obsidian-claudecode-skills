@@ -610,7 +610,8 @@ enum ReaderNativeConversationScript {
         if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup',
              'nativeCardMove', 'nativeCardResize', 'nativeVocabMark',
              'nativeFigureAttach', 'nativeGrammar',
-             'nativeHighlightEdit', 'nativePhraseFav'].includes(command.action)) parameterKeys.push('value');
+             'nativeHighlightEdit', 'nativePhraseFav',
+             'nativeCreateNote'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -761,6 +762,25 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
             if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
             return { ok: true, value: { id: value.id } };
+          } else if (action === 'nativeCreateNote') {
+            // 顶栏 🗒 在接管后是**彻底静默**的：createAtCenter → anchorFromPoint →
+            // document.elementFromPoint，一页都不在 DOM 里，七个候选点全落空，
+            // 便签没建、连"放不了"的 toast 也看不见。位置此时只有 PDFKit 知道。
+            const value = command.value;
+            if (!value || !Number.isSafeInteger(value.page) || value.page < 1 ||
+                !(value.x >= 0 && value.x <= 1) || !(value.y >= 0 && value.y <= 1)) {
+              return { ok: false, error: '便签位置无效' };
+            }
+            if (typeof window.__bwReaderCreateNote !== 'function') return { ok: false, error: '便签尚未就绪' };
+            const captured = scope;
+            let made;
+            try {
+              made = window.__bwReaderCreateNote({ page: value.page, x: value.x, y: value.y });
+            } catch (error) {
+              return { ok: false, error: String(error && error.message || error).slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            return { ok: true, value: made };
           } else if (action === 'nativePhraseFav') {
             // 原生词组面板的「收藏为词组」。本地先翻、真分词重算、长下划线即时画、
             // outbox 兜底，四件事都挂在底座 _phraseFav 那一条路上，这里只转交。

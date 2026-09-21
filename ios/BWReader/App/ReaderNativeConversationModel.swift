@@ -137,6 +137,13 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var pendingActions = Set<String>()
     @Published private(set) var error: String?
     @Published var inspection: ReaderNativeArtifactInspection?
+
+    /// 原生那侧发起的操作失败了，借这块已有的出声位置说出来。
+    /// ⚠ 网页的 toast 在接管后是看不见的（它在被藏起来的那一层里），
+    /// 所以原生路径的失败必须自己出声，否则就是彻底静默。
+    func report(_ message: String) {
+        error = message.isEmpty ? "操作未完成。" : message
+    }
     @Published var settingsPanel: ReaderNativeSettingsModel?
     @Published var readingSettingsPanel: ReaderNativeReadingSettingsModel?
     @Published var searchPanel: ReaderNativeSearchModel?

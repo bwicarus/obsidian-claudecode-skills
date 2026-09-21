@@ -887,6 +887,32 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeLookup = panel
     }
 
+    /// 顶栏 🗒 新建便签。
+    ///
+    /// ⚠ 不能转给网页的 createAtCenter：它靠 document.elementFromPoint 找落点，
+    /// 接管后一页都不在 DOM 里，七个候选点全落空 —— 便签没建，连"放不了"的
+    /// toast 也看不见（toast 也在被藏的那层里）。页面位置此时只有 PDFKit 知道。
+    func createNativeStickyNote() {
+        guard let document = nativePDFDocument else { return }
+        // 落在视野中央那一页的正中。中央恰好在页缝时退到下一个可见页 ——
+        // 与网页那侧「中央落空就试附近候选」是同一个意思。
+        let pages = document.position.visiblePages
+        guard let page = pages.first(where: { document.characterPageSize($0) != nil }) ?? pages.first else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let receipt = await self.requestNativeConversationCommand([
+                "action": "nativeCreateNote", "scope": self.nativeConversation.scope,
+                "value": ["page": page, "x": 0.5, "y": 0.5],
+            ])
+            if receipt["ok"] as? Bool == true {
+                self.scheduleNativePDFProjectionRefresh()
+            } else {
+                // 出声：原来这条路是彻底静默的，什么都不说才是真正的坑。
+                self.nativeConversation.report(receipt["error"] as? String ?? "便签没有建成。")
+            }
+        }
+    }
+
     /// 点了已有划线 → 原生编辑面板（改色 / 备注 / 删除）。
     private func openNativeHighlightEditor(_ highlight: ReaderNativePDFDocument.Highlight) {
         let panel = ReaderNativeHighlightEditorModel(highlight: highlight) { [weak self] command in
@@ -1015,7 +1041,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
             "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach",
-            "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav"]
+            "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav", "nativeCreateNote"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {

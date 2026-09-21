@@ -156,6 +156,14 @@ struct ReaderNativeWorkspace<Document: View>: View {
                 Menu {
                     ForEach(conversation.readingTools.filter { $0.key != "page" }) { control in
                         Button(control.title) {
+                            // ⚠ 新建便签在原生接管时**必须**走原生那条路：网页的
+                            // createAtCenter 靠 document.elementFromPoint 找落点，
+                            // 接管后一页都不在 DOM 里，七个候选点全落空 —— 便签没建，
+                            // 连"放不了"的 toast 也看不见。
+                            if control.key == "note-new", reader.nativePDFDocument != nil {
+                                reader.createNativeStickyNote()
+                                return
+                            }
                             Task { await conversation.perform("liveAction", parameters: ["actionId": control.id]) }
                         }
                         .disabled(control.disabled)

@@ -1170,3 +1170,20 @@ window.__bwReaderPhraseFav = async function (request) {
   _phraseFav(null);
   return _phraseStateOf(text);
 };
+
+// ── 原生正文（PDFKit 接管）：在指定页的指定归一点新建便签 ──
+// ⚠ 顶栏那个 🗒 走的是 createAtCenter → anchorFromPoint → document.elementFromPoint，
+// 接管后一页都不在 DOM 里，七个候选点全落空，于是**什么都不发生**：便签没建，
+// 连"这里放不了便签"的 toast 也看不见（toast 也在被藏的那层里）。
+// 位置此时只有 PDFKit 知道，所以由原生算好页号与归一点递过来。
+// 落库仍走 RC.stickynote.createAt（锚定、代次校验、渲染、失败提示都在那条路上）。
+window.__bwReaderCreateNote = function (request) {
+  request = request || {};
+  const page = Number(request.page) || 0;
+  const x = Number(request.x), y = Number(request.y);
+  if (!page || !(x >= 0 && x <= 1) || !(y >= 0 && y <= 1)) throw new Error('BW_READER_NOTE_POINT');
+  const sticky = window.RC && RC.stickynote;
+  if (!sticky || typeof sticky.createAt !== 'function') throw new Error('BW_READER_NOTE_UNAVAILABLE');
+  sticky.createAt({ kind: 'pdf', page: page, x: x, y: y });
+  return { page: page, x: x, y: y };
+};
