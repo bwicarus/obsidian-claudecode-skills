@@ -59,3 +59,15 @@ test("③ 原生按同一口径找子串并按行合并", () => {
   assert.match(merge, /glyph\.sp == 0/, "跳过空白字符");
   assert.match(merge, /cur\.height \* 0\.6/, "同行判据与网页 _buildRectsFromCharRange 一致");
 });
+
+test("助手点引用跳页后，那段文字也走同一套「亮出来」", () => {
+  const ASSISTANT = read("_server_deploy/static/pdf/reader.src/25-assistant.js");
+  const flash = ASSISTANT.slice(ASSISTANT.indexOf("function _flashSelOnPage(page, text, tries)"),
+                                ASSISTANT.indexOf("var wrap = document.querySelector('[data-page-num=\"' + page + '\"]')"));
+  // ⚠ 原来这条重试等的是 dataset.loaded==='1' + __charBoxes，接管后重试 30 次
+  // （约 4.8s）后悄悄放弃：跳了页却什么都没亮，看起来就像点错了。
+  assert.match(flash, /RC\?\.readerNavigation\?\.nativeViewport/);
+  assert.match(flash, /window\._pendingSearchHighlight = \{ query: text, page: page \}/,
+    "复用搜索那套待办标记，不另造一条通道");
+  assert.match(flash, /return;/);
+});

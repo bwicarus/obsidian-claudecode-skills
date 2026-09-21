@@ -12651,6 +12651,17 @@ async function _connProbe() {
     page = parseInt(page, 10); text = String(text || '').trim();
     if (!page || !text) return;
     tries = tries || 0;
+    // ⚠ 原生正文接管时这条重试走不通：它等的是 dataset.loaded==='1' + __charBoxes，
+    //   而那时网页根本不渲页 —— 重试 30 次（约 4.8s）后悄悄放弃，点引用只跳页、
+    //   那段文字永远不闪。**跳了页却什么都没亮**，看起来就像点错了。
+    //   原生那侧已经有一套"亮出这段文字"的机制（搜索命中），复用它：把待办标记
+    //   留在原地，__bwReaderPageOverlay 的 searchQuery 会把它取走交给原生。
+    try {
+      if (window.RC?.readerNavigation?.nativeViewport) {
+        window._pendingSearchHighlight = { query: text, page: page };
+        return;
+      }
+    } catch (_) {}
     var wrap = document.querySelector('[data-page-num="' + page + '"]');
     if (!(wrap && wrap.dataset.loaded === '1' && wrap.__charBoxes && wrap.__charBoxes.length)) {
       if (tries < 30) setTimeout(function () { _flashSelOnPage(page, text, tries + 1); }, 160);   // 最多 ~4.8s(同搜索)
