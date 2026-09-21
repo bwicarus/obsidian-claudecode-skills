@@ -27,9 +27,19 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let sentence: String
         let rects: [CGRect]
     }
-    struct Highlight {
-        let rect: CGRect
+    /// 一条划线。
+    ///
+    /// ⚠ 以前这里只有 rect + color，每个矩形拆成独立一条 —— 于是**点上去不知道点的是
+    /// 哪一条**，改色/备注/删除全都做不了。身份（id）和备注必须跟着进来：接管后
+    /// .hl-layer 不存在，原生是唯一能点到划线的地方。
+    struct Highlight: Identifiable {
+        let id: String
+        let page: Int
+        let rects: [CGRect]          // 归一化
         let color: Color
+        let colorKey: String         // 原始色值；空 = 「无色」虚框（只有备注的那种）
+        let note: String
+        let text: String
     }
     struct NoteGeometry {
         let id: String
@@ -254,6 +264,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     var onLookup: ((Int, String, String) -> Void)?
     /// 页码、整句、焦点串。
     var onGrammar: ((Int, String, String) -> Void)?
+    /// 点了已有划线。
+    var onEditHighlight: ((Highlight) -> Void)?
     private var access: ReaderLocalBookAccess?
     private var digest = ""
     private var generation = UUID()
@@ -432,17 +444,25 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                     let width = (value["page_w"] as? NSNumber)?.doubleValue ?? Double(size.width)
                     let height = (value["page_h"] as? NSNumber)?.doubleValue ?? Double(size.height)
                     guard width.isFinite, height.isFinite, width > 0, height > 0 else { continue }
-                    let hex = value["color"] as? String ?? "#fff59d"
-                    let color = ReaderNativeCardStroke(["pts": [[0,0]], "c": hex])?.color ?? .yellow
+                    // 空 color 是「无色」划线（只有备注那种），网页画虚框。不要拿黄色兜底，
+                    // 那会把用户刻意取消掉的颜色又涂回去。
+                    let hex = value["color"] as? String ?? ""
+                    let color = ReaderNativeCardStroke(["pts": [[0,0]], "c": hex.isEmpty ? "#fff59d" : hex])?.color ?? .yellow
+                    var boxes: [CGRect] = []
                     for rect in value["rects"] as? [[NSNumber]] ?? [] {
                         guard rect.count == 4, rect.allSatisfy({ $0.doubleValue.isFinite }) else { continue }
                         let box = CGRect(x: rect[0].doubleValue / width, y: rect[1].doubleValue / height,
                                          width: (rect[2].doubleValue - rect[0].doubleValue) / width,
                                          height: (rect[3].doubleValue - rect[1].doubleValue) / height)
-                        if box.width > 0, box.height > 0 {
-                            nextHighlights[number, default: []].append(Highlight(rect: box, color: color))
-                        }
+                        if box.width > 0, box.height > 0 { boxes.append(box) }
                     }
+                    guard !boxes.isEmpty else { continue }
+                    let id = value["id"] as? String ?? ""
+                    nextHighlights[number, default: []].append(
+                        Highlight(id: id.isEmpty ? "\(number):\(boxes.count):\(hex)" : id,
+                                  page: number, rects: boxes, color: color, colorKey: hex,
+                                  note: value["note"] as? String ?? "",
+                                  text: value["text"] as? String ?? value["sentence"] as? String ?? ""))
                 }
             } else {
                 for (surface, strokes) in data["pdf"] as? [String: [[String: Any]]] ?? [:] {
@@ -793,6 +813,19 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                 page: number, text: value.text, sentence: value.sentence, color: color,
                 rects: rects, pageWidth: chars.pageWidth, pageHeight: chars.pageHeight))
         }
+        overlay.highlightAt = { [weak self] point in
+            guard let self, let canonical = overlay.canonicalPoint?(point),
+                  let size = self.characterPageSize(number), size.width > 0, size.height > 0 else { return nil }
+            let normalized = CGPoint(x: canonical.x / size.width, y: canonical.y / size.height)
+            // 后画的在上面 —— 重叠时取最后一条，与网页 z 顺序一致。
+            return self.highlights[number]?.last(where: { highlight in
+                highlight.rects.contains { $0.insetBy(dx: -0.002, dy: -0.002).contains(normalized) }
+            })?.id
+        }
+        overlay.onEditHighlight = { [weak self] id in
+            guard let self, let highlight = self.highlights[number]?.first(where: { $0.id == id }) else { return }
+            self.onEditHighlight?(highlight)
+        }
         overlay.onGrammar = { [weak self] value in
             self?.onGrammar?(number, value.sentence, value.text)
         }
@@ -933,8 +966,17 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         guard let p = canonicalPoint?(point) else { return nil }
         return selectionCore?.hit(p)
     }
+    /// 点到已有划线时返回它的 id。接管后 .hl-layer 不存在，原生是唯一能点到划线的地方。
+    var highlightAt: ((CGPoint) -> String?)?
+    var onEditHighlight: ((String) -> Void)?
+
     @objc private func tapText(_ gesture: UITapGestureRecognizer) {
-        guard let index = hit(gesture.location(in: self)) else { return }
+        let location = gesture.location(in: self)
+        // 点在已有划线上 → 开它的编辑面板（与网页「点划线弹浮层」同一个意思），
+        // 而不是把那一个字选起来。⚠ 顺序不能反：先 resolve 再判断的话，菜单已经
+        // 弹出来了，编辑面板会叠在它上面。
+        if let id = highlightAt?(location) { onEditHighlight?(id); return }
+        guard let index = hit(location) else { return }
         resolve(index, index); showMenu()
     }
     @objc private func selectText(_ gesture: UILongPressGestureRecognizer) {
@@ -1101,8 +1143,16 @@ struct ReaderNativePDFViewport: View {
                     let visible = document.view.convert(page.bounds(for: document.view.displayBox), from: page).standardized
                     pageContext.clip(to: Path(visible))
                     for highlight in document.highlights[number] ?? [] {
-                        if let rect = document.viewRect(normalized: highlight.rect, page: number) {
-                            pageContext.fill(Path(rect), with: .color(highlight.color.opacity(0.3)))
+                        for normalized in highlight.rects {
+                            guard let rect = document.viewRect(normalized: normalized, page: number) else { continue }
+                            if highlight.colorKey.isEmpty {
+                                // 「无色」划线：网页画虚框（只有备注、不涂色）。涂成黄色
+                                // 等于把用户刻意取消掉的颜色又加回去。
+                                pageContext.stroke(Path(rect), with: .color(ReaderNativeTheme.accent.opacity(0.7)),
+                                                   style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                            } else {
+                                pageContext.fill(Path(rect), with: .color(highlight.color.opacity(0.3)))
+                            }
                         }
                     }
                     // 生词句子：135° 排线 + 细边框，与网页那套排线同一个观感

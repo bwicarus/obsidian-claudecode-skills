@@ -9944,6 +9944,53 @@ async function _hlDelete(h, pw) {
   }
 }
 
+// ── 原生正文（PDFKit 接管）：点已有划线 → 原生编辑面板 ──
+// 接管后 .hl-layer 不存在，点不到任何划线 —— 划得上去、改不了也删不掉。
+// 这里只出数据与三个操作，落库仍走底座 _hlUpdate / _hlDelete（同一条 PATCH/DELETE、
+// 同一套「取消颜色」语义、同一份乐观更新），原生不复制其中任何一条。
+window.__bwReaderHighlightsOnPage = function (page) {
+  page = Number(page) || 0;
+  return (_hlByPage[page] || []).slice(0, 200).map(function (h) {
+    return {
+      id: String(h.id || ''), page: page,
+      // 与页尺寸一起交出去：矩形是点坐标，原生要按 page_w/page_h 归一化。
+      rects: (h.rects || []).slice(0, 64), page_w: h.page_w || 0, page_h: h.page_h || 0,
+      color: String(h.color || ''), note: String(h.note || ''),
+      text: String(h.text || h.sentence || '').slice(0, 400)
+    };
+  }).filter(function (h) { return h.id && h.rects.length; });
+};
+// op: 'color'（value=四支笔键名或 '' 取消颜色）| 'note'（value=备注文本）| 'delete'
+window.__bwReaderHighlightEdit = async function (request) {
+  request = request || {};
+  var id = String(request.id || '');
+  var h = _allHighlights.filter(function (x) { return x && x.id === id; })[0];
+  if (!h) throw new Error('BW_READER_HL_MISS');
+  // pw 传 null：renderHighlightsOnPage 会早返回（接管后没有页元素）。原生那侧
+  // 由 withNativePDFWriter 的投影重画，不靠这一步。
+  if (request.op === 'delete') {
+    if (await _hlDelete(h, null) !== true) throw new Error('BW_READER_HL_DELETE_FAILED');
+    return { deleted: true };
+  }
+  if (request.op === 'color') {
+    var c = String(request.value || '');
+    // 「点当前色 = 取消颜色」的语义照搬网页：有备注则留虚框条目，没备注就整条删掉。
+    if (!c && !String(h.note || '').trim()) {
+      if (await _hlDelete(h, null) !== true) throw new Error('BW_READER_HL_DELETE_FAILED');
+      return { deleted: true };
+    }
+    if (await _hlUpdate(h, null, { color: c }) !== true) throw new Error('BW_READER_HL_SAVE_FAILED');
+    return { color: String(h.color || ''), note: String(h.note || '') };
+  }
+  if (request.op === 'note') {
+    if (await _hlUpdate(h, null, { note: String(request.value || '') }) !== true) {
+      throw new Error('BW_READER_HL_SAVE_FAILED');
+    }
+    return { color: String(h.color || ''), note: String(h.note || '') };
+  }
+  throw new Error('BW_READER_HL_OP');
+};
+
 // 预览块的交互：
 //   - 单击文字内容 → 展开/收起全文
 //   - 右侧圆圈左滑（或整体触屏左滑） → 下方滑出删除栏（.swiped）

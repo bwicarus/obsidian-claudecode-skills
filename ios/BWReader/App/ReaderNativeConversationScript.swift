@@ -609,7 +609,8 @@ enum ReaderNativeConversationScript {
         if (command.action === 'settingsRead') parameterKeys.push('section');
         if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup',
              'nativeCardMove', 'nativeCardResize', 'nativeVocabMark',
-             'nativeFigureAttach', 'nativeGrammar'].includes(command.action)) parameterKeys.push('value');
+             'nativeFigureAttach', 'nativeGrammar',
+             'nativeHighlightEdit'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -760,6 +761,29 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
             if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
             return { ok: true, value: { id: value.id } };
+          } else if (action === 'nativeHighlightEdit') {
+            // 原生划线编辑面板：改色 / 备注 / 删除。落库全走底座 _hlUpdate / _hlDelete
+            // （同一条 PATCH/DELETE、同一套「点当前色＝取消颜色」语义），这里只转交。
+            const value = command.value;
+            if (!value || typeof value.id !== 'string' || !value.id ||
+                !['color', 'note', 'delete'].includes(value.op)) return { ok: false, error: '划线参数无效' };
+            if (typeof window.__bwReaderHighlightEdit !== 'function') return { ok: false, error: '划线尚未就绪' };
+            const captured = scope;
+            let done;
+            try {
+              done = await window.__bwReaderHighlightEdit({
+                id: value.id, op: value.op,
+                value: typeof value.value === 'string' ? value.value.slice(0, 2000) : ''
+              });
+            } catch (error) {
+              const code = String(error && error.message || error);
+              const said = { BW_READER_HL_MISS: '这条划线已经不在了',
+                             BW_READER_HL_DELETE_FAILED: '删除未确认，它可能还在',
+                             BW_READER_HL_SAVE_FAILED: '保存未确认，请重试' }[code];
+              return { ok: false, error: said || code.slice(0, 200) };
+            }
+            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
+            return { ok: true, value: done };
           } else if (action === 'nativeGrammar') {
             // 原生语法面板：只取**数据**。analyze() 把结果渲成 .grammar-block 塞进容器，
             // 接管后那个容器不在屏幕上，跑完也没人看得见。前置（哪些 KG 开着、有没有

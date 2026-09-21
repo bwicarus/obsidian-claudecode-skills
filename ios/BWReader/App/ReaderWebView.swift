@@ -351,6 +351,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     @Published var nativeLookup: ReaderNativeLookupModel?
     @Published var nativeFigure: ReaderNativeFigureModel?
     @Published var nativeGrammar: ReaderNativeGrammarModel?
+    @Published var nativeHighlightEditor: ReaderNativeHighlightEditorModel?
     private var nativePDFMountTask: Task<Void, Never>?
     var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
@@ -779,6 +780,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         // 布局一变就重推墨迹表面：滚动/缩放后页面的屏幕位置变了，不推的话
         // Pencil 会画在上一帧的位置上。挂载那次的 onGeometry 已在回调里自清。
+        document.onEditHighlight = { [weak self] highlight in
+            Task { @MainActor [weak self] in self?.openNativeHighlightEditor(highlight) }
+        }
         document.onGrammar = { [weak self] _, sentence, focus in
             Task { @MainActor [weak self] in
                 self?.openNativeGrammar(sentence: sentence, focus: focus)
@@ -881,6 +885,21 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // 标了掌握就重取一次叠加数据：否则这一页的下划线要翻页才消失。
         panel.onMarked = { [weak self] in self?.refreshNativePageOverlays() }
         nativeLookup = panel
+    }
+
+    /// 点了已有划线 → 原生编辑面板（改色 / 备注 / 删除）。
+    private func openNativeHighlightEditor(_ highlight: ReaderNativePDFDocument.Highlight) {
+        let panel = ReaderNativeHighlightEditorModel(highlight: highlight) { [weak self] command in
+            await self?.requestNativeConversationCommand(command)
+                ?? ["ok": false, "error": "阅读页已关闭"]
+        }
+        // 改完重取一次投影：颜色变了、虚框出现、整条消失，都要这一步才看得见。
+        // PATCH/DELETE 经本地 runtime 时本来也会 ping 回来（withNativePDFWriter 的
+        // 成功分支），这里再排一次是因为**面板是原生发起的**，不该指望那条回路。
+        panel.onChanged = { [weak self] in
+            self?.scheduleNativePDFProjectionRefresh()
+        }
+        nativeHighlightEditor = panel
     }
 
     /// 选区菜单里点了「语法」。分析对象是整句，焦点是选中那一段。
@@ -996,7 +1015,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
             "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach",
-            "nativeGrammar"]
+            "nativeGrammar", "nativeHighlightEdit"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {
