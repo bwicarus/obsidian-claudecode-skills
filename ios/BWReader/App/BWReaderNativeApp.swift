@@ -114,6 +114,9 @@ private struct ReaderRootView: View {
     @ObservedObject var voiceBridge: NativeVoiceBridge
     @ObservedObject var nativeCommandReceiver: ReaderNativeCommandReceiver
     @State private var showsDiagnostics = false
+    /// 故障现场。⚠ 用 @ObservedObject 观察单例，界面才会在新报告进来时亮起来。
+    @ObservedObject private var faultReporter = ReaderNativeFaultReporter.shared
+    @State private var showsFaultLog = false
     @State private var showsNativeTools = false
     @State private var showsLibrary = false
     // 设置面板「本机」tab 里的三个原生入口。它们各自弹**单一用途**的 UI ——
@@ -153,7 +156,8 @@ private struct ReaderRootView: View {
                 nativeToolsInitialAction = .openNativeTools
                 showsNativeTools = true
             },
-            openDiagnostics: { showsDiagnostics = true }
+            openDiagnostics: { showsDiagnostics = true },
+            openFaultLog: { showsFaultLog = true }
         ) {
         ZStack {
             ReaderNativeTheme.canvas.ignoresSafeArea()
@@ -217,6 +221,22 @@ private struct ReaderRootView: View {
                 ReaderLoadError(message: message) {
                     reader.reload()
                 }
+            }
+
+            // 故障现场入口。⚠ 它挂在**最顶层**，而不是藏在「阅读设置」里 ——
+            // 那个面板要先从网页层读本书设置，页面一死它就卡在"阅读页尚未准备好"，
+            // 于是最需要诊断的时候恰恰看不到诊断（2026-09-22 实际发生过）。
+            if faultReporter.pendingCount > 0 {
+                Button {
+                    showsFaultLog = true
+                } label: {
+                    Label("\(faultReporter.pendingCount) 条故障现场待发送·点此查看", systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                .padding(.top, 10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
 
             // 渲染进程被回收过。⚠ 页面此刻已经自己重载好了，这条提示**不是**
@@ -450,6 +470,9 @@ private struct ReaderRootView: View {
                     secondsUntilSnapshotRefresh = 12
                 }
             }
+        }
+        .sheet(isPresented: $showsFaultLog) {
+            ReaderNativeFaultLogView(reporter: faultReporter)
         }
         .sheet(isPresented: $showsDiagnostics) {
             NativeVoiceDiagnosticsView(bridge: voiceBridge)

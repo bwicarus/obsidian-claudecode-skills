@@ -11,6 +11,7 @@ struct ReaderNativeWorkspace<Document: View>: View {
     let openLibrary: () -> Void
     let openSettings: () -> Void
     let openDiagnostics: () -> Void
+    let openFaultLog: () -> Void
     @ViewBuilder let document: () -> Document
 
     @AppStorage("reader.navigationCollapsed") private var navigationCollapsed = false
@@ -206,6 +207,10 @@ struct ReaderNativeWorkspace<Document: View>: View {
                     }
                 }
                 Button("通话诊断", systemImage: "waveform.path.ecg", action: openDiagnostics)
+                // ⚠ 入口**总是在**，不只在"有待发送报告"时才出现。
+                //   最难的一类情况恰恰是"一条报告都没有" ——
+                //   那时候需要看的是面包屑和上报通道自己的状态。
+                Button("故障现场", systemImage: "stethoscope", action: openFaultLog)
                 if conversation.capabilities.contains("showLegacy") {
                     Button("完整阅读界面", systemImage: "rectangle.on.rectangle") {
                         Task { await conversation.perform("showLegacy") }

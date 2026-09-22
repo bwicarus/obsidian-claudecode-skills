@@ -18,8 +18,12 @@ import Foundation
 /// （`bridgeMirror` 已在用），落到 `%LOCALAPPDATA%\BWReader\error-log.jsonl`。
 /// 不新造通道，就是为了不引入"新管子自己也坏了"这一层。
 @MainActor
-final class ReaderNativeFaultReporter {
+final class ReaderNativeFaultReporter: ObservableObject {
     static let shared = ReaderNativeFaultReporter()
+
+    /// 界面靠它刷新。⚠ 用 `objectWillChange` 手动发，是因为这个类里绝大多数字段
+    /// 都不该是 `@Published`（它们每秒被写很多次，逐个发通知会把界面拖垮）。
+    private func announce() { objectWillChange.send() }
 
     /// 一条面包屑。只留"做了什么"，**不留内容**（选区正文/对话正文都不进来）。
     private struct Crumb: Codable {
@@ -51,9 +55,32 @@ final class ReaderNativeFaultReporter {
     /// 837 装上了、崩了，而 Windows 这边一条都没收到，没人说得出为什么。
     private(set) var lastDeliveryNote = "还没有需要上报的故障"
 
-    /// 给「阅读设置 → 诊断」显示的一行。
+    /// 一行状态。
     var statusLine: String {
         "发件箱 \(outbox.count) 条 · \(lastDeliveryNote)"
+    }
+
+    /// 还没送出去的报告数量 —— 决定要不要在界面上摆出来给人看。
+    var pendingCount: Int { outbox.count }
+
+    /// 摊开成人能读的文本（给「复制」用）。
+    ///
+    /// ⚠ 它必须**不依赖阅读页**。2026-09-22 我第一版把诊断放进「阅读设置」，
+    /// 而那个面板要先从网页层读本书设置 —— 页面一死它就卡在"阅读页尚未准备好"，
+    /// 于是**最需要诊断的时候恰恰看不到诊断**。这正是项目里那条
+    /// 「诊断通道不能穿过被测对象」。这里只读内存和本地文件，不碰页面。
+    var readableReport: String {
+        var lines = ["BWReader 故障现场", statusLine, ""]
+        if outbox.isEmpty { lines.append("（没有待发送的报告）") }
+        for row in outbox.suffix(6) {
+            lines.append("· " + (row["at"] ?? "") + " " + (row["code"] ?? ""))
+            lines.append("  " + (row["message"] ?? ""))
+            lines.append("  " + (row["detail"] ?? ""))
+        }
+        lines.append("")
+        lines.append("最近动作：")
+        lines.append(crumbs.suffix(30).map(Self.line).joined(separator: "\n"))
+        return lines.joined(separator: "\n")
     }
 
     private lazy var stateURL: URL = {
@@ -121,6 +148,7 @@ final class ReaderNativeFaultReporter {
         // 同一类故障反复发生时，最近那几次才有诊断价值。
         if outbox.count > 40 { outbox.removeFirst(outbox.count - 40) }
         persist(clean: false)
+        announce()
         flushOutbox()
     }
 
@@ -157,6 +185,7 @@ final class ReaderNativeFaultReporter {
             guard let self else { return }
             self.sending = false
             if delivered > 0 { self.lastDeliveryNote = "已送出 \(delivered) 条" }
+            self.announce()
             if delivered > 0 {
                 self.outbox.removeFirst(min(delivered, self.outbox.count))
                 self.persist(clean: false)
