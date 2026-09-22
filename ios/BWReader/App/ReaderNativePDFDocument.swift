@@ -661,6 +661,30 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         return (document.index(for: page) + 1, CGPoint(x: (local.x - box.minX) / box.width, y: (local.y - box.minY) / box.height))
     }
 
+    /// 拖卡时的落点预览：**与松手落点同源**。
+    ///
+    /// ⚠ 不要改走网页的 `anchorFromPoint`：那条路把落点当网页视口坐标，
+    ///   原生接管正文后视口里根本没有那一页 —— 会出现"预览说钉这儿、
+    ///   松手却钉别处"。这里跟 `moveNativeCard` 一样先 `canonicalPoint` 定页，
+    ///   再用**同一份** pdf-selection-core 认词，判据一字不差。
+    ///
+    /// 语义沿用网页那版（rc-stickynote #51）：认得出词就给词框（光带＝绑定内容），
+    /// 认不出就给一条横线（＝插入位置）。返回 `view` 自己的坐标系。
+    func dropPreview(_ local: CGPoint) -> ReaderNativeDropPreview? {
+        guard let placed = canonicalPoint(local, from: view) else { return nil }
+        if let core = selectionCores[placed.page], let index = core.hit(placed.point, exactOnly: false),
+           let value = try? core.exact([index]), !value.rects.isEmpty {
+            let rects = value.rects.compactMap { viewRect(normalized: $0, page: placed.page) }
+            if !rects.isEmpty { return ReaderNativeDropPreview(rects: rects, line: nil) }
+        }
+        // 字符层还没加载完的页也要有反馈 —— 否则拖过去就是一片什么都没有，
+        // 跟"这里钉不住"长得一模一样。
+        let y = max(0, min(1, placed.point.y))
+        guard let line = viewRect(normalized: CGRect(x: 0, y: y, width: 1, height: 0.0015),
+                                  page: placed.page) else { return nil }
+        return ReaderNativeDropPreview(rects: [], line: line)
+    }
+
     private func layoutChanged() {
         // Observe actual native scrolling; no timer polls or web scroll relay.
         func firstScroll(_ root: UIView) -> UIScrollView? {
@@ -1419,4 +1443,10 @@ struct ReaderNativeFigureBadge: View {
         let y = min(max(frame.minY + half, point.y), frame.maxY - half)
         return CGPoint(x: x, y: y)
     }
+}
+
+/// 拖卡落点预览的几何。坐标系由产出方说明（文档内是 `view`，模型层转成窗口坐标）。
+struct ReaderNativeDropPreview: Equatable {
+    var rects: [CGRect] = []
+    var line: CGRect?
 }

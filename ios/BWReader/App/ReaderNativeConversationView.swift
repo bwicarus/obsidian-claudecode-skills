@@ -142,7 +142,10 @@ struct ReaderNativeConversationView: View {
                     .buttonStyle(.bordered)
                     .disabled(!model.ready || model.isPerforming("newConversation"))
                 }
-                if model.supports("showLegacy") {
+                // ⚠ 旧界面的入口（“完整功能”）已删除，连带能力本身也不再上报。
+                //   菜单的出现条件改成"它自己有东西可点"，而不是"能不能召唤旧界面"。
+                if ["openReview", "openModels", "openSettings", "openSearch",
+                    "toggleVoice", "toggleComputerVoice"].contains(where: model.supports) {
                     Menu {
                         if model.supports("openReview") {
                             Button(isReview ? "结束复习" : "打开复习", systemImage: "rectangle.on.rectangle") {
@@ -175,9 +178,6 @@ struct ReaderNativeConversationView: View {
                                     Task { await model.perform("toggleComputerVoice") }
                                 }
                             }
-                        }
-                        Button("完整功能", systemImage: "arrow.up.forward.app") {
-                            Task { await model.perform("showLegacy") }
                         }
                     } label: {
                         Image(systemName: "ellipsis").padding(.vertical, 3)

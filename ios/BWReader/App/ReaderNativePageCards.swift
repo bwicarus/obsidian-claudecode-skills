@@ -102,6 +102,26 @@ struct ReaderNativePageCards: View {
     @ViewBuilder
     private func cards(in geometry: GeometryProxy) -> some View {
         ZStack(alignment: .topLeading) {
+                // 松手会锁在哪 —— 光带＝钉在这段内容上，横线＝钉在这个版面位置。
+                // 语义跟网页那版 (rc-stickynote #51) 一致；画在卡下面，拖着的卡不会被盖住。
+                if let preview = reader.cardDropPreview {
+                    let origin = geometry.frame(in: .global).origin
+                    ForEach(Array(preview.rects.enumerated()), id: \.offset) { _, box in
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(ReaderNativeTheme.accent.opacity(0.22))
+                            .overlay(RoundedRectangle(cornerRadius: 3)
+                                .stroke(ReaderNativeTheme.accent.opacity(0.75), lineWidth: 1))
+                            .frame(width: box.width, height: box.height)
+                            .offset(x: box.minX - origin.x, y: box.minY - origin.y)
+                            .allowsHitTesting(false)
+                    }
+                    if let line = preview.line {
+                        Capsule().fill(ReaderNativeTheme.accent.opacity(0.75))
+                            .frame(width: line.width, height: 2)
+                            .offset(x: line.minX - origin.x, y: line.minY - origin.y)
+                            .allowsHitTesting(false)
+                    }
+                }
                 ForEach(model.placements) { item in
                     // ⚠ 原生正文接管时坐标必须来自 PDFKit 解锚：网页那套 rect 是从
                     //   DOM 推的，而接管后网页不渲页、滚动也不同步，它已经不对应
@@ -180,6 +200,13 @@ private struct ReaderNativePlacedCard: View {
     let rect: CGRect
     let available: CGSize
     @GestureState private var translation: CGSize = .zero
+    /// 松手到新位置回来之间的**暂态位移**。
+    ///
+    /// ⚠ 没有它，`@GestureState` 在松手那一刻就归零，而写回是异步的 ——
+    /// 卡会先"弹回原位"再跳到新位置，看着就像拖动没生效（2026-09-22 实报）。
+    /// 网页那版同一处也是这么做的：拖拽期间的 transform 保留到 reanchor 落地
+    /// （rc-stickynote 开头那段注释）。新几何一到就清掉。
+    @State private var committed: CGSize?
     @State private var confirmRemoval = false
     @State private var operationError: String?
     @State private var lastTouch = Date.distantPast
@@ -254,7 +281,11 @@ private struct ReaderNativePlacedCard: View {
             }
         }
         .shadow(color: .black.opacity(0.12), radius: translation == .zero ? 8 : 16, y: 3)
-        .offset(translation)
+        .offset(translation == .zero ? (committed ?? .zero) : translation)
+        // 手势被打断时 GestureState 会自己归零，而 onEnded 不一定来 ——
+        // 不擦的话预览会留在屏幕上，看着像"钉在那儿了"。
+        .onChange(of: translation) { _, value in if value == .zero { reader.clearCardDropPreview() } }
+        .onChange(of: rect) { _, _ in committed = nil }
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
             if item.floating, Date().timeIntervalSince(lastTouch) > 2 {
                 lastTouch = Date()
@@ -272,21 +303,41 @@ private struct ReaderNativePlacedCard: View {
         } message: { Text(operationError ?? "") }
     }
 
+    private func dropPoint(_ translation: CGSize) -> CGPoint {
+        CGPoint(x: origin.x + rect.minX + translation.width + 1,
+                y: origin.y + rect.minY + translation.height + 1)
+    }
+
     private var moveGesture: some Gesture {
         DragGesture(minimumDistance: 6)
             .updating($translation) { value, state, _ in state = value.translation }
+            // ⚠ 探测点＝**卡左上角**（+1 避开自身边框），不是手指 —— 那才是钉入点。
+            //   跟下面 onEnded 用同一个式子：预览与落点必须是同一个点。
+            .onChanged { value in reader.previewCardDrop(windowPoint: dropPoint(value.translation)) }
             .onEnded { value in
+                reader.clearCardDropPreview()
                 let scope = model.scope
-                let point = CGPoint(x: origin.x + rect.minX + value.translation.width + 1,
-                                    y: origin.y + rect.minY + value.translation.height + 1)
+                let point = dropPoint(value.translation)
+                committed = value.translation
                 Task {
                     // 原生正文接管时走原生锚点：落点要换成**页内**归一化坐标。
                     // 网页那条路把它当网页视口坐标，而接管后视口里没有那一页 ——
                     // 卡会飞到别处。原生写失败才退回去。
                     if await reader.moveNativeCard(id: item.id, windowPoint: point) { return }
-                    guard let action = item.controls["move"] else { return }
+                    // ⚠ 这里以前是 `guard … else { return }`：拖了一下、卡弹回去、
+                    //   一个字都没有。用户看到的就是"拖不动"，而我们连它为什么
+                    //   没动都不知道。落点定不下来就说出来。
+                    guard let action = item.controls["move"] else {
+                        committed = nil
+                        reader.showTransientNotice("这张卡不能挪到这里。")
+                        return
+                    }
                     await reader.placeNativeConversationCard(actionID: action, scope: scope, windowPoint: point)
-                    if model.scope == scope { operationError = model.error }
+                    guard model.scope == scope else { return }
+                    if let failure = model.error {
+                        committed = nil
+                        operationError = failure
+                    }
                 }
             }
     }

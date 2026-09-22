@@ -320,6 +320,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ///   这个错今天已经犯过两次（build 845 的泛型 static、849 的 extension）。
     @Published private(set) var transientNotice: String?
     private var transientNoticeTicket = 0
+    /// 拖卡时画的落点预览（窗口坐标）。nil = 当前没在拖，或这个点钉不住。
+    @Published private(set) var cardDropPreview: ReaderNativeDropPreview?
+    private var dropPreviewStamp = Date.distantPast
+    private var dropPreviewBusy = false
     private var webContentTerminationCount = 0
     @Published private(set) var libraryPresentationRequestID: UUID?
     /// 顶栏「App 设置」请求打开原生工具 sheet。与书库那条同一套做法：
@@ -702,6 +706,62 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// ⚠ 不能沿用 `placeNativeConversationCard`：那条路把落点换成**网页视口**的
     /// 归一化坐标，交给网页的锚点解析器。原生接管后网页视口里根本没有那一页，
     /// 那个坐标不指向任何东西 —— 卡会飞到别处。
+    /// 拖卡时告诉用户"松手会锁在哪"。
+    ///
+    /// ⚠ 判据必须与 `moveNativeCard` **同源**，否则预览与落点会各说各话：
+    ///   有原生文档就走 PDFKit + pdf-selection-core（同步，跟手不掉帧）；
+    ///   没有（EPUB / 网页渲染的 PDF）才问网页那份 —— 那种情形下正文确实
+    ///   由网页渲染，视口坐标是对的。
+    func previewCardDrop(windowPoint: CGPoint) {
+        if let document = nativePDFDocument {
+            let local = document.view.convert(windowPoint, from: nil)
+            cardDropPreview = document.dropPreview(local).map {
+                ReaderNativeDropPreview(rects: $0.rects.map { document.view.convert($0, to: nil) },
+                                        line: $0.line.map { document.view.convert($0, to: nil) })
+            }
+            return
+        }
+        previewCardDropViaWeb(windowPoint)
+    }
+
+    func clearCardDropPreview() { cardDropPreview = nil }
+
+    private func previewCardDropViaWeb(_ windowPoint: CGPoint) {
+        // 过网页那一跳是异步的：不限流会堆成一串排队的请求，预览反而落在手指后面。
+        guard !dropPreviewBusy, Date().timeIntervalSince(dropPreviewStamp) > 0.06 else { return }
+        let size = webView.bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        let local = webView.convert(windowPoint, from: nil)
+        let x = local.x / size.width, y = local.y / size.height
+        guard (0...1).contains(x), (0...1).contains(y) else { cardDropPreview = nil; return }
+        dropPreviewBusy = true
+        dropPreviewStamp = Date()
+        Task { [weak self] in
+            guard let self else { return }
+            let receipt = await requestNativeConversationCommand(
+                ["action": "anchorPreview", "x": Double(x), "y": Double(y)])
+            dropPreviewBusy = false
+            guard receipt["ok"] as? Bool == true else { return }
+            guard let value = receipt["value"] as? [String: Any] else { cardDropPreview = nil; return }
+            func window(_ rect: CGRect) -> CGRect {
+                webView.convert(CGRect(x: rect.minX * size.width, y: rect.minY * size.height,
+                                       width: rect.width * size.width, height: rect.height * size.height), to: nil)
+            }
+            let rects = (value["rects"] as? [[String: NSNumber]] ?? []).compactMap { box -> CGRect? in
+                guard let x = box["x"]?.doubleValue, let y = box["y"]?.doubleValue,
+                      let w = box["width"]?.doubleValue, let h = box["height"]?.doubleValue,
+                      [x, y, w, h].allSatisfy({ $0.isFinite }), w > 0, h > 0 else { return nil }
+                return window(CGRect(x: x, y: y, width: w, height: h))
+            }
+            if !rects.isEmpty { cardDropPreview = ReaderNativeDropPreview(rects: rects, line: nil); return }
+            guard let lineY = (value["y"] as? NSNumber)?.doubleValue, lineY.isFinite else {
+                cardDropPreview = nil; return
+            }
+            cardDropPreview = ReaderNativeDropPreview(
+                rects: [], line: window(CGRect(x: 0, y: lineY, width: 1, height: 0.0015)))
+        }
+    }
+
     /// 返回 false = 没有原生几何或落点不在任何页上，调用方退回网页那条路。
     func moveNativeCard(id: String, windowPoint: CGPoint) async -> Bool {
         guard let document = nativePDFDocument else { return false }
@@ -741,11 +801,19 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // Convert the native drop into the same WKWebView viewport used by the
         // existing anchor resolver; safe-area/Pencil overlays add no offset.
         let point = webView.convert(windowPoint, from: nil)
-        await nativeConversation.perform("liveAction", parameters: [
+        var parameters: [String: Any] = [
             "actionId": actionID,
             "x": point.x / webView.bounds.width,
             "y": point.y / webView.bounds.height
-        ])
+        ]
+        // ⚠ 原生接管正文后上面那组视口坐标**解不出锚点** —— 网页视口里没有那一页。
+        //   跟 moveNativeCard 一样先用 PDFKit 定页，把页内坐标一并交过去；
+        //   网页那侧拿到就跳过自己的解析。拿不到（EPUB / 网页渲染）就照旧。
+        if let document = nativePDFDocument,
+           let placed = document.canonicalPoint(document.view.convert(windowPoint, from: nil), from: document.view) {
+            parameters["value"] = ["page": placed.page, "x": placed.point.x, "y": placed.point.y]
+        }
+        await nativeConversation.perform("liveAction", parameters: parameters)
     }
 
     func resizeNativeConversationCard(actionID: String, scope: String, size: CGSize) async -> Bool {
@@ -1222,14 +1290,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
-            "showLegacy", "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
+            // "showLegacy" 已删除：旧网页界面不再是一个可以被请求的目的地。
+            "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
             "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach",
             "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav", "nativeCreateNote",
-            "nativeOcrSelection", "nativeEpubHighlight", "nativeEpubHighlightColors"]
+            "nativeOcrSelection", "nativeEpubHighlight", "nativeEpubHighlightColors",
+            "anchorPreview"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {

@@ -9,6 +9,8 @@ struct ReaderNativeReviewView: View {
     @State private var confirmation: ReviewDraftConfirmation?
     @State private var deletion: [String: String]?
     @State private var panelHeight: CGFloat = 300
+    /// 卡片跟手的位移。滑到头时只给 1/5 位移当阻尼。
+    @State private var swipeOffset: CGFloat = 0
     @State private var heightAtDrag: CGFloat?
 
     private var state: [String: Any] { model.review }
@@ -31,28 +33,7 @@ struct ReaderNativeReviewView: View {
                      ? "当前内容暂无待复习卡，可以切换到全部。" : "当前这一批已完成。")
                     .font(.subheadline).foregroundStyle(.secondary).padding(.vertical, 12)
             } else if expanded {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        if state["showingAnswer"] as? Bool != true || current["reveal_mode"] as? String != "replace" {
-                            ReaderNativeRichDocument(content: current["front"] as? String ?? "", format: "html")
-                        }
-                        if state["showingAnswer"] as? Bool == true {
-                            if current["reveal_mode"] as? String != "replace" { Divider() }
-                            ReaderNativeRichDocument(content: current["back"] as? String ?? "", format: "html")
-                        }
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
-                }
-                .frame(height: panelHeight)
-                .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 14))
-                // ⚠ 卡片区左右滑即上/下一张（2026-09-22 用户：“卡片区域左右
-                //   滑动也无法进行”）。阀值给得大一点，否则跟卡内选文字打架。
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 44)
-                        .onEnded { value in
-                            guard !saving, abs(value.translation.width) > abs(value.translation.height) else { return }
-                            select(value.translation.width < 0 ? index + 1 : index - 1)
-                        }
-                )
+                pager
                 ratingControls
                 HStack {
                     Button { select(index - 1) } label: { Image(systemName: "chevron.left") }
@@ -123,6 +104,82 @@ struct ReaderNativeReviewView: View {
 
     /// 四个难度的颜色。⚠ 跟 Anki 自己的习惯一致（红/橙/绿/蓝）——
     /// 这是肌肉记忆，自己另配一套颜色只会让人点错。
+    /// 横滑翻卡。
+    ///
+    /// ⚠ 做法跟制卡批次那个「生成物」翻页器**同一套**（rc-flashcard 的 bindPager：
+    ///   一条横向轨道 + 吸附 + 圆点），用户点名要这个手感。关键是两侧放的是
+    ///   **真卡**（previous / next 由 rc-review 一并交出来），所以滑动中看到的
+    ///   就是下一张本身；上一版只给了个位移动画、内容还是原地刷新，
+    ///   于是"没有过渡效果直接是刷新"。
+    ///
+    /// 翻页提交后不要自己把 offset 动画回 0：新卡到位前那一帧会闪。
+    /// 等 `index` 真的变了再无动画归位（下面的 onChange）。
+    @ViewBuilder private var pager: some View {
+        GeometryReader { geometry in
+            let page = max(1, geometry.size.width)
+            HStack(spacing: 0) {
+                face(state["previous"] as? [String: Any]).frame(width: page)
+                face(current, live: true).frame(width: page)
+                face(state["next"] as? [String: Any]).frame(width: page)
+            }
+            .offset(x: -page + swipeOffset)
+            .animation(.interactiveSpring(response: 0.34, dampingFraction: 0.86), value: swipeOffset)
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 18)
+                    .onChanged { value in
+                        guard !saving, abs(value.translation.width) > abs(value.translation.height) else { return }
+                        let raw = value.translation.width
+                        // 头尾越界只给 1/5 位移当阻尼 —— 完全不动的话人会以为卡住了。
+                        let blocked = (raw < 0 && index + 1 >= count) || (raw > 0 && index <= 0)
+                        swipeOffset = blocked ? raw / 5 : max(-page, min(page, raw))
+                    }
+                    .onEnded { value in
+                        let raw = value.translation.width
+                        let far = abs(raw) > page * 0.28 || abs(value.predictedEndTranslation.width) > page * 0.6
+                        guard !saving, far, abs(raw) > abs(value.translation.height) else {
+                            swipeOffset = 0; return
+                        }
+                        let next = raw < 0 ? index + 1 : index - 1
+                        guard ids.indices.contains(next) else { swipeOffset = 0; return }
+                        swipeOffset = raw < 0 ? -page : page
+                        select(next)
+                    }
+            )
+            .onChange(of: index) { _, _ in
+                var instant = Transaction(); instant.disablesAnimations = true
+                withTransaction(instant) { swipeOffset = 0 }
+            }
+        }
+        .frame(height: panelHeight)
+        .clipped()
+    }
+
+    @ViewBuilder private func face(_ card: [String: Any]?, live: Bool = false) -> some View {
+        let card = card ?? [:]
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if card.isEmpty {
+                    Text("没有更多了").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    // 相邻卡一律只显示正面：答案是否揭晓是**当前这张**的状态，
+                    // 把它套到邻卡上会提前泄题。
+                    let showsAnswer = live && state["showingAnswer"] as? Bool == true
+                    if !showsAnswer || card["reveal_mode"] as? String != "replace" {
+                        ReaderNativeRichDocument(content: card["front"] as? String ?? "", format: "html")
+                    }
+                    if showsAnswer {
+                        if card["reveal_mode"] as? String != "replace" { Divider() }
+                        ReaderNativeRichDocument(content: card["back"] as? String ?? "", format: "html")
+                    }
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+        }
+        .frame(maxHeight: .infinity)
+        .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 14))
+        .disabled(!live)
+    }
+
     private static let ratingTints: [Color] = [.red, .orange, .green, .blue]
 
     @ViewBuilder private var ratingControls: some View {

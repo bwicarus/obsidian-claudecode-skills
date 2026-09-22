@@ -391,7 +391,7 @@ final class ReaderNativeConversationModel: ObservableObject {
             error = "当前页面尚未提供这项操作。"
             return false
         }
-        guard ready || ["refresh", "showLegacy", "hideLegacy", "toggleAssistant", "liveAction"].contains(action) else {
+        guard ready || ["refresh", "hideLegacy", "toggleAssistant", "liveAction"].contains(action) else {
             error = "助手仍在准备，请稍后重试。"
             return false
         }

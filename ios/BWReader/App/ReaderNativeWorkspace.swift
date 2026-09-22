@@ -83,16 +83,29 @@ struct ReaderNativeWorkspace<Document: View>: View {
                         document()
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .dropDestination(for: ReaderNativeCardTransfer.self) { values, location in
-                                guard let payload = values.first,
-                                      payload.scope == conversation.scope,
-                                      !payload.actionID.isEmpty,
-                                      page.size.width > 0, page.size.height > 0 else { return false }
+                                // ⚠ 这里以前一律 `return false` 就完事：拖过去、卡飞回侧栏、
+                                //   一个字都没有。放不下也要说是为什么。
+                                guard let payload = values.first, page.size.width > 0, page.size.height > 0 else {
+                                    reader.showTransientNotice("没能读出这张卡，请重试。")
+                                    return false
+                                }
+                                guard payload.scope == conversation.scope else {
+                                    reader.showTransientNotice("这张卡属于另一个会话，先切回去再拖。")
+                                    return false
+                                }
+                                guard !payload.actionID.isEmpty else {
+                                    reader.showTransientNotice("这张卡不支持放到书页上。")
+                                    return false
+                                }
                                 Task {
                                     let frame = page.frame(in: .global)
                                     await reader.placeNativeConversationCard(
                                         actionID: payload.actionID, scope: payload.scope,
                                         windowPoint: CGPoint(x: frame.minX + location.x, y: frame.minY + location.y)
                                     )
+                                    // 放置失败（落点不在正文、卡正文过大…）网页那侧会给理由，
+                                    // 但那条信息只写在 model.error 里，侧栏不一定开着。
+                                    if let failure = conversation.error { reader.showTransientNotice(failure) }
                                 }
                                 return true
                             } isTargeted: { dropTarget = $0 }
@@ -342,28 +355,28 @@ struct ReaderNativeSidebarGrip: View {
     }
 
     var body: some View {
-        Rectangle()
-            .fill(ReaderNativeTheme.muted.opacity(0.28))
-            .frame(width: 1)
-            .overlay {
-                // 命中区比视觉上那条线宽得多 —— 1pt 的线手指够不着。
-                Capsule()
-                    .fill(ReaderNativeTheme.muted.opacity(0.45))
-                    .frame(width: 4, height: 44)
-                    .frame(width: 22)
-                    .contentShape(Rectangle())
-            }
-            .gesture(
-                DragGesture(minimumDistance: 2)
-                    .onChanged { value in
-                        if startWidth == nil {
-                            startWidth = width > 0 ? width : Double(available) * 0.36
-                        }
-                        width = Double(Self.clamp((startWidth ?? 0) - Double(value.translation.width),
-                                                  available: available))
+        // ⚠ 把手必须有**真实宽度**。上一版是 1pt 的线 + overlay 里的胶囊，
+        //   结果是既看不清也点不到 —— overlay 画在父视图范围外，手势命中不了
+        //   （2026-09-22 用户：“侧栏把手始终没看见”）。
+        ZStack {
+            Rectangle().fill(ReaderNativeTheme.muted.opacity(0.18))
+            Capsule()
+                .fill(ReaderNativeTheme.muted.opacity(0.75))
+                .frame(width: 4, height: 46)
+        }
+        .frame(width: 14)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { value in
+                    if startWidth == nil {
+                        startWidth = width > 0 ? width : Double(available) * 0.36
                     }
-                    .onEnded { _ in startWidth = nil }
-            )
+                    width = Double(Self.clamp((startWidth ?? 0) - Double(value.translation.width),
+                                              available: available))
+                }
+                .onEnded { _ in startWidth = nil }
+        )
             .accessibilityLabel("调整侧栏宽度")
             .accessibilityAdjustableAction { direction in
                 let base = width > 0 ? width : Double(available) * 0.36

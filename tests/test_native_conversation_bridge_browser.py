@@ -773,7 +773,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.wait_for_timeout(420)
             self.assertTrue(page.evaluate('RC.voiceCard.sideOpen()'))
             self.assertFalse(page.locator('#asst-input').is_visible())
-            page.evaluate('__bwNativeConversation.perform({action:"showLegacy"})')
+            page.evaluate('__bwNativeConversation.setNativeMode(false)')
             page.wait_for_timeout(100)
             self.assertTrue(page.locator('#asst-input').is_visible())
             page.locator('#ep-side-handle').click()
@@ -783,7 +783,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             page.wait_for_timeout(420)
             self.assertTrue(page.evaluate('receipts[receipts.length-1].sidebarOpen'))
 
-            page.evaluate('__bwNativeConversation.perform({action:"showLegacy"})')
+            page.evaluate('__bwNativeConversation.setNativeMode(false)')
             page.wait_for_timeout(100)
 
             # The actual original focus chip remains above the actual composer.
@@ -929,7 +929,7 @@ class NativeConversationBridgeBrowser(unittest.TestCase):
             self.assertFalse(page.evaluate("testNativeSelectionHeld('原生书页选区')"))
             self.assertEqual(page.evaluate('__focusSel.text'), '原生书页选区')
             page.evaluate('__bwNativeConversation.perform({action:"clearSelection"})')
-            page.evaluate('__bwNativeConversation.perform({action:"showLegacy"})')
+            page.evaluate('__bwNativeConversation.setNativeMode(false)')
             page.wait_for_timeout(100)
             handle = page.locator('[data-learning-card-id="card_abc12345"] .vc-card-hd')
             rect = handle.bounding_box()

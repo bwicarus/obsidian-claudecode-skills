@@ -3818,11 +3818,19 @@ if (window.__bwPwaProviderOnly) return;
   function _presentationState() {
     var card = _current();
     var current = card ? Object.assign({ id: _stableCardId(card) }, _cardForAssistant(card)) : null;
+    // 相邻两张的正文。原生那边横滑翻卡要跟手,两侧必须是**真内容**——
+    // 只给 id 的话滑出来是一片空白,看着就像卡坏了。队列判断仍在这里,
+    // 原生只负责画(2026-09-22:"左右滑动没有过渡效果直接是刷新")。
+    function _neighbour(offset) {
+      var item = _queue[_idx + offset];
+      return item ? Object.assign({ id: _stableCardId(item) }, _cardForAssistant(item)) : null;
+    }
     return JSON.parse(JSON.stringify({
       active: _mode, contextKey: _contextCacheKey, scope: _scopeMode,
       loading: _queueBusy, index: _idx, count: _queue.length,
       dueTotal: _dueTotal, relatedTotal: _relatedTotal,
       queueIds: _queue.map(_stableCardId), current: current,
+      previous: _neighbour(-1), next: _neighbour(1),
       deleteKind: card && card._localReview ? 'reader-card' : _legacyReviewNoteId(card) ? 'anki-note' : '',
       showingAnswer: _showingAnswer, expanded: _cardExpanded,
       canUndo: !!_stagedRating, ratingSaving: _ratingCommitBusy > 0,

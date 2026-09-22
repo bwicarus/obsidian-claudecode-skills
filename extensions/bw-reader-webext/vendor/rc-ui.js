@@ -448,6 +448,14 @@ body.fs-mode .rc-topbar-pill{display:none!important}
   inject();
   function autoTopbars() {
     ['sel-toolbar','ep-sel','html-sel'].forEach(function (id) { var tb = document.getElementById(id); if (tb) tb.classList.add('rc-selection-toolbar'); });
+    // ⚠ App 里**根本不挂**这套收起把手：它服务的那条网页顶栏在 App 上
+    //   已经不存在（原生顶栏接管），把手却挂在顶栏**外面**，于是变成
+    //   屏幕中间一个孤零零的小药丸（2026-09-22 用户连报两次）。
+    //   先前用 CSS 藏过，但“藏”总有漏网之鱼 —— 不建就不会有。
+    //   判据取 documentStart 就打好的 `bw-native-shell`，比任何脚本都早。
+    var nativeShell = false;
+    try { nativeShell = document.documentElement.classList.contains('bw-native-shell'); } catch (e) {}
+    if (nativeShell) return;
     [['header','pdf'],['ep-top','epub'],['html-top','html']].forEach(function (it) {
       var el = document.getElementById(it[0]); if (!el || el.__rcTopbar) return;
       mountCollapsibleTopbar({ bar: el, mount: el.parentNode, storageKey: 'rc-topbar-collapsed:' + it[1], label: '伴读', defaultCollapsed: false, nativePill: true });

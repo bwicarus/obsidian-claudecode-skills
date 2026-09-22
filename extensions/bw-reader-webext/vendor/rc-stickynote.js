@@ -3320,8 +3320,11 @@ if (window.__bwPwaProviderOnly) return;
     }
     return bind;
   }
-  function createCardAt(clientX, clientY, cards, gid, waitForSave) {
-    if (!O || !O.anchorFromPoint || !cards || !cards.length) return false;
+  // anchorOverride:调用方已经算好的锚点(原生正文接管时由 PDFKit 给,形状同
+  //   noteAnchorFromPoint 的 {kind:'pdf',page,x,y})。给了就不再问 anchorFromPoint ——
+  //   接管后网页视口里没有那一页,问它只会得到 null,表现就是"侧栏卡拖不到页面上"。
+  function createCardAt(clientX, clientY, cards, gid, waitForSave, anchorOverride) {
+    if (!O || (!O.anchorFromPoint && !anchorOverride) || !cards || !cards.length) return false;
     var oversized = cards.some(function (card) {
       if (!card || typeof card !== 'object') return true;
       if (card.type === 'cloze') {
@@ -3337,7 +3340,7 @@ if (window.__bwPwaProviderOnly) return;
       return false;
     }
     var cands = [[clientX, clientY], [clientX, clientY - 22], [clientX, clientY + 22], [clientX - 30, clientY], [clientX + 30, clientY]];
-    var anchor = null;
+    var anchor = anchorOverride || null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
     // 手动从原卡拖进书页时保持旧的“自由卡片”语义：这里只保存页面 placement，
@@ -3358,15 +3361,15 @@ if (window.__bwPwaProviderOnly) return;
 
   // 通用卡便签:天气/搜索/图/文字等 vc-card 的 HTML 快照 → 钉页。
   // 允许的交互由共享模块按自描述 data-* 属性做全局委托；便签不持久化闭包。
-  function createHtmlAt(clientX, clientY, htmlObj, waitForSave) {
-    if (!O || !O.anchorFromPoint || !htmlObj || !htmlObj.content) return false;
+  function createHtmlAt(clientX, clientY, htmlObj, waitForSave, anchorOverride) {
+    if (!O || (!O.anchorFromPoint && !anchorOverride) || !htmlObj || !htmlObj.content) return false;
     var rawContent = normalizeHtmlCardImageAssets(htmlObj.content);
     if (rawContent.length > PAGE_CARD_CONTENT_LIMIT) {
       toastMsg('卡片正文异常过大，未放入书页');
       return false;
     }
     var cands = [[clientX, clientY], [clientX, clientY - 22], [clientX, clientY + 22], [clientX - 30, clientY], [clientX + 30, clientY]];
-    var anchor = null;
+    var anchor = anchorOverride || null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
     var cid1 = htmlObj.cid || ((window.RC && RC.voiceCard && RC.voiceCard.mkCid) ? RC.voiceCard.mkCid() : ('c' + Date.now().toString(36)));
@@ -3688,6 +3691,48 @@ if (window.__bwPwaProviderOnly) return;
     _afx.style.top = Math.max(0, m.top - 1) + 'px';
     _afx.style.display = 'block';
   }
+  /** 拖动落点预览 —— **只回数据，不画任何 DOM**。
+   *
+   * ⚠ 判据跟 `anchorFxShow` 是**同一套**（noteWordRect / anchorFromPoint、
+   *   同一个 48px 阈值）—— 故意不另写一份。另写一份就会出现
+   *   “预览说钉到这个词、松手却钉到别处”，而那种不一致最难查。
+   *
+   * ⚠ 为什么要数据版：原生正文接管后网页那层不可见，
+   *   `anchorFxShow` 画的 DOM 用户根本看不到 —— 于是拖卡时“看不到松手后会锁定哪里”
+   *   （2026-09-22 用户实报）。判据留在这里，**画交给原生**。
+   *
+   * 返回：{ kind:'word', rects:[{x,y,width,height}…] }  或
+   *       { kind:'line', y }  或  null（这个点落不了）。坐标均为**视口像素**。
+   */
+  function nativeAnchorPreview(x, y) {
+    if (!O || !isFinite(x) || !isFinite(y)) return null;
+    var wr = null, aa = null;
+    try {
+      _probeHidden(null, function () {
+        try { wr = O.noteWordRect ? O.noteWordRect(x, y) : null; } catch (e) {}
+        if (!wr) { try { aa = O.anchorFromPoint ? O.anchorFromPoint(x, y) : null; } catch (e) {} }
+      });
+    } catch (e) {}
+    if (wr && wr.el && (wr.dist == null || wr.dist <= 48)) {
+      var segs = (Array.isArray(wr.rects) && wr.rects.length)
+        ? wr.rects
+        : [{ left: wr.left, top: wr.top, width: wr.width, height: wr.height }];
+      var host = null;
+      try { host = wr.el.getBoundingClientRect(); } catch (e) {}
+      if (!host) return null;
+      return { kind: 'word', rects: segs.map(function (seg) {
+        return { x: host.left + (seg.left || 0), y: host.top + (seg.top || 0),
+                 width: seg.width || 0, height: seg.height || 0 };
+      }) };
+    }
+    if (!aa) return null;
+    var m = null; try { m = O.mount(aa); } catch (e) {}
+    if (!m || !m.el || typeof m.top !== 'number') return null;
+    var box = null; try { box = m.el.getBoundingClientRect(); } catch (e) {}
+    if (!box) return null;
+    return { kind: 'line', y: box.top + Math.max(0, m.top - 1) };
+  }
+
   function anchorFxHide() {
     if (_afx) _afx.style.display = 'none';
     for (var i = 0; i < _afxExtra.length; i++) {
@@ -4051,8 +4096,8 @@ if (window.__bwPwaProviderOnly) return;
     createVideoAt: createVideoAt,
     createCardAt: createCardAt,   // 卡片便签(制卡卡 📌 钉页 / 真机拖出复用)
     createHtmlAt: createHtmlAt,   // 通用卡便签(天气/搜索/图等 vc-card 钉页)
-    placeCardAt: function (x, y, cards, gid) { return Promise.resolve(createCardAt(x, y, cards, gid, true)); },
-    placeHtmlAt: function (x, y, card) { return Promise.resolve(createHtmlAt(x, y, card, true)); },
+    placeCardAt: function (x, y, cards, gid, anchor) { return Promise.resolve(createCardAt(x, y, cards, gid, true, anchor)); },
+    placeHtmlAt: function (x, y, card, anchor) { return Promise.resolve(createHtmlAt(x, y, card, true, anchor)); },
     nativePlacementState: nativePlacementState,
     nativePlacementAction: nativePlacementAction,
     nativeInkAction: nativeInkAction,
@@ -4060,7 +4105,8 @@ if (window.__bwPwaProviderOnly) return;
     cardContextText: cardContextText,   // 收藏/上下文共用正面+背面可读投影；raw/meta 仍保留完整卡记录
     bindCardSelection: bindCardSelection,   // 固定学习卡整卡长按：PWA/普通网页共用同一语义与完整快照
     bindHtmlCardSelection: bindHtmlCardSelection,   // 固定工具/HTML 卡正文长按：同 cid 处处同步，不占用卡头拖拽
-    anchorFx: { show: anchorFxShow, hide: anchorFxHide },   // 拖动锚定反馈(#51:光带=绑定内容/横线=插入位置)
+    anchorFx: { show: anchorFxShow, hide: anchorFxHide },
+    nativeAnchorPreview: nativeAnchorPreview,   // 拖动落点预览的**数据版**（原生自己画；判据与 anchorFx 共用）   // 拖动锚定反馈(#51:光带=绑定内容/横线=插入位置)
     // ── 笔路由接口(页面 ink 层用,跨界三段切割;见上「编程式笔路由 API」注释)──
     penRoute: penRoute,     // (x,y|event) -> noteId|null  笔尖是否在某展开便签 body 上
     penBegin: penBegin,     // (event, {eraser?}) -> bool  在命中便签开一段(坐标归一化/PATCH 内部管理)

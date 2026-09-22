@@ -286,15 +286,27 @@ enum ReaderNativeConversationScript {
             part.data.dragId = registerAction(part.id + '-place', node, async command => {
               if (![command.x, command.y].every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
               const x = command.x * innerWidth, y = command.y * innerHeight;
+              // 原生正文接管时落点已由 PDFKit 解成页内坐标（command.value）。
+              // ⚠ 不能再让网页去解：接管后视口里没有那一页，anchorFromPoint 恒为 null，
+              //   表现就是"侧栏生成物拖到页面上放不了"（2026-09-22 实报）。
+              let anchor = null;
+              const native = command.value;
+              if (native) {
+                if (!Number.isSafeInteger(native.page) || native.page < 1 ||
+                    ![native.x, native.y].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) {
+                  throw new Error('落点无效');
+                }
+                anchor = { kind: 'pdf', page: native.page, x: native.x, y: native.y };
+              }
               let accepted = false;
               if (group && rc().flashcard?.snapshot && rc().stickynote.placeCardAt) {
                 const cards = rc().flashcard.snapshot(group);
-                accepted = await rc().stickynote.placeCardAt(x, y, cards, group.__fc.gid);
+                accepted = await rc().stickynote.placeCardAt(x, y, cards, group.__fc.gid, anchor);
               } else if (body && rc().stickynote.placeHtmlAt) {
                 accepted = await rc().stickynote.placeHtmlAt(x, y, {
                   content: body.innerHTML, contextText: body.textContent || '', isHtml: true,
                   cid: cardElement?.dataset.vcCid || cardElement?.__vcCard?.cid || '', label: part.title
-                });
+                }, anchor);
               }
               if (!accepted) throw new Error('卡片位置未保存，请检查落点后重试');
             });
@@ -457,7 +469,11 @@ enum ReaderNativeConversationScript {
         return [navigationID, location.pathname, location.search, identity].join('|');
       }
       function capabilities() {
-        const out = ['refresh', 'showLegacy', 'hideLegacy', 'liveAction'];
+        // ⚠ 没有 'showLegacy'。旧网页界面不再是用户能主动进去的地方
+        //   （2026-09-22 用户："我要的是把旧的内容用原生功能直接代替后把原版删除"）。
+        //   'hideLegacy' 留着：还没原生化的那几个面（下面几处 setLegacy(true) 的
+        //   fallback）掉进去以后，得有路回来。
+        const out = ['refresh', 'hideLegacy', 'liveAction'];
         if (typeof window.__clearFocusSel === 'function') out.push('clearSelection');
         if (typeof drawer()?.setTab === 'function') out.push('toggleAssistant');
         if (typeof window.__asstSend === 'function') out.push('send');
@@ -745,6 +761,24 @@ enum ReaderNativeConversationScript {
             //   这里传 true 是因为此刻 DOM 里的 activeTab 还没切到 asst
             //   （setTab 在 open() 内部才跑）。
             else { applyVisualMode(true); drawer().open('asst'); }
+          } else if (action === 'anchorPreview') {
+            // 拖卡时问网页层：这个点会锁到哪里。
+            // ⚠ 只取**数据**，画由原生做 —— 原生正文接管后网页那层不可见，
+            //   网页自己画的锁定反馈用户根本看不到。判据仍然走网页那一份
+            //   （与 anchorFx 共用），否则会出现“预览说钉这儿、松手却钉别处”。
+            const owner = rc().stickynote;
+            if (!owner?.nativeAnchorPreview) return { ok: false, error: '锁定预览尚未就绪' };
+            if (![command.x, command.y].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) {
+              return { ok: false, error: '落点无效' };
+            }
+            const preview = owner.nativeAnchorPreview(command.x * innerWidth, command.y * innerHeight);
+            return { ok: true, value: preview ? {
+              kind: preview.kind,
+              y: typeof preview.y === 'number' ? preview.y / innerHeight : null,
+              rects: (preview.rects || []).map(rect => ({
+                x: rect.x / innerWidth, y: rect.y / innerHeight,
+                width: rect.width / innerWidth, height: rect.height / innerHeight }))
+            } : null };
           } else if (action === 'clearSelection') {
             if (typeof window.__clearFocusSel !== 'function') return { ok: false, error: '选区尚未准备好' };
             window.__clearFocusSel();
@@ -765,8 +799,8 @@ enum ReaderNativeConversationScript {
             const button = document.getElementById(action === 'toggleVoice' ? 'asst-call' : 'asst-computer');
             if (!button || button.disabled || button.classList.contains('vc-review-disabled')) return { ok: false, error: '当前无法使用这项语音功能' };
             button.click();
-          } else if (action === 'showLegacy' || action === 'hideLegacy') {
-            setLegacy(action === 'showLegacy');
+          } else if (action === 'hideLegacy') {
+            setLegacy(false);
           } else if (action === 'refresh') {
             rc().assistant?.reloadHistory?.();
           } else if (action === 'nativePageSelection') {
@@ -1173,7 +1207,21 @@ enum ReaderNativeConversationScript {
            (bw-native-shell)。写在这里就要等本脚本跑完再等 setNativeMode 送到,
            而原生顶栏是 SwiftUI 画的、不等任何人。bw-native-navigation 这个类保留,
            因为 epub-html.js 和原生选区条还拿它判断"现在是原生导航"。 */
-        .bw-native-page-cards [data-bw-native-placement] {opacity:0!important;pointer-events:none!important}
+        /* ⚠ content-visibility 而不是 opacity:0。原生自己画这批卡时，网页那份
+           只剩"数据来源"一个职责，可它照旧在**布局、绘制、合成**整棵子树
+           （富文本、公式、图片），等于同一批卡片画两遍
+           —— 2026-09-22 用户："后台如果在运行那些代码会很消耗性能"。
+           也不能 display:none：那样 getBoundingClientRect 全是 0，
+           而 EPUB 那条路的页卡位置正是从这个矩形来的，会导致一张都画不出来。
+           content-visibility:hidden 恰好两头都满足：盒子照常参与布局（几何还准），
+           里面整棵跳过渲染。 */
+        .bw-native-page-cards [data-bw-native-placement] {content-visibility:hidden!important;pointer-events:none!important}
+        /* 对话正文同理：原生侧栏接管后，网页那条消息流谁也看不见，却还在为
+           每条回答排版、绘制（富文本 + 公式 + 图片），历史越长越贵。
+           ⚠ 这里**不能**删 DOM：原生侧栏的内容目前正是从这些节点读出来的
+           （真要删得先把对话做成数据模型）。content-visibility 只停渲染、
+           不动 DOM，是眼下唯一两头都成立的做法。 */
+        .bw-native-conversation-active #asst-thread {content-visibility:hidden!important}
         .bw-native-conversation-active #ep-side,.bw-native-conversation-active #grammar-panel,
         .bw-native-conversation-active #side-handle,.bw-native-conversation-active #ep-side-handle {visibility:hidden!important;pointer-events:none!important}
         .bw-native-conversation-active body.grammar-open #main,.bw-native-conversation-active body.grammar-open #header {padding-right:0!important}

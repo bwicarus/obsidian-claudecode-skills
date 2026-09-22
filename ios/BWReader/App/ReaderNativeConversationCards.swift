@@ -203,7 +203,17 @@ private struct ReaderNativeConversationArtifactCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if isDraft { Text("待确认").font(.caption2).foregroundStyle(ReaderNativeTheme.muted) }
             }
-            .draggable(dragPayload)
+            // 拖出去时给一个像"卡片副本"的影子 —— 网页那版拖的就是卡的克隆
+            // （rc-voicecall `_dragToDock` 的 ghost）。默认快照拖的是这一行标题，
+            // 看着不像在搬一张卡。
+            .draggable(dragPayload) {
+                Label(heading, systemImage: icon)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1).padding(.horizontal, 14).padding(.vertical, 10)
+                    .frame(minWidth: 180, alignment: .leading)
+                    .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(ReaderNativeTheme.accent.opacity(0.45)))
+            }
             .accessibilityHint("长按卡片标题，拖到书页正文放置")
             if !part.string("pinId").isEmpty {
                 Button {
