@@ -1543,6 +1543,15 @@ struct ReaderNativeDropPreview: Equatable {
     var line: CGRect?
 }
 
+/// 只为落点预览存在的小模型。
+///
+/// ⚠ 它单独存在的理由就一条：预览在拖动期间每秒要发十来次，而阅读器主模型
+/// 被工作区、视口、页卡层一起观察 —— 挂在那上面等于每秒把**每一张卡**重算十来遍。
+@MainActor
+final class ReaderNativeDropPreviewModel: ObservableObject {
+    @Published var preview: ReaderNativeDropPreview?
+}
+
 /// 卡片锁定框的观感。⚠ 单独拎出来是因为它被用户否过一次：
 /// "颜色太浅线太细"。这是唯一来源，两处（绘制与将来可能的别处）都从这里取。
 enum ReaderNativeMarkerStyle {

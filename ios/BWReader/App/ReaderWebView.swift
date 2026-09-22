@@ -320,8 +320,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ///   这个错今天已经犯过两次（build 845 的泛型 static、849 的 extension）。
     @Published private(set) var transientNotice: String?
     private var transientNoticeTicket = 0
-    /// 拖卡时画的落点预览（窗口坐标）。nil = 当前没在拖，或这个点钉不住。
-    @Published private(set) var cardDropPreview: ReaderNativeDropPreview?
+    /// 拖卡时画的落点预览（窗口坐标）。
+    ///
+    /// ⚠ 它**不能**是本对象的 @Published。这个模型被工作区、视口、页卡层一起观察，
+    /// 发布一次就让**每一张卡**重算一遍 body —— 而拖动期间它每秒要发十来次。
+    /// 单独一个小对象，只有画预览的那一层观察它。
+    let cardDropPreviews = ReaderNativeDropPreviewModel()
     private var dropPreviewStamp = Date.distantPast
     private var dropPreviewPoint = CGPoint(x: -10_000, y: -10_000)
     private var dropPreviewBusy = false
@@ -746,7 +750,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         dropPreviewStamp = Date()
         if let document = nativePDFDocument {
             let local = document.view.convert(windowPoint, from: nil)
-            cardDropPreview = document.dropPreview(local).map {
+            cardDropPreviews.preview = document.dropPreview(local).map {
                 ReaderNativeDropPreview(rects: $0.rects.map { document.view.convert($0, to: nil) },
                                         line: $0.line.map { document.view.convert($0, to: nil) })
             }
@@ -756,7 +760,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     func clearCardDropPreview() {
-        cardDropPreview = nil
+        cardDropPreviews.preview = nil
         dropPreviewPoint = CGPoint(x: -10_000, y: -10_000)
         dropPreviewStamp = .distantPast
     }
@@ -769,7 +773,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         guard size.width > 0, size.height > 0 else { return }
         let local = webView.convert(windowPoint, from: nil)
         let x = local.x / size.width, y = local.y / size.height
-        guard (0...1).contains(x), (0...1).contains(y) else { cardDropPreview = nil; return }
+        guard (0...1).contains(x), (0...1).contains(y) else { cardDropPreviews.preview = nil; return }
         dropPreviewBusy = true
         Task { [weak self] in
             guard let self else { return }
@@ -777,7 +781,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 ["action": "anchorPreview", "x": Double(x), "y": Double(y)])
             dropPreviewBusy = false
             guard receipt["ok"] as? Bool == true else { return }
-            guard let value = receipt["value"] as? [String: Any] else { cardDropPreview = nil; return }
+            guard let value = receipt["value"] as? [String: Any] else { cardDropPreviews.preview = nil; return }
             func window(_ rect: CGRect) -> CGRect {
                 webView.convert(CGRect(x: rect.minX * size.width, y: rect.minY * size.height,
                                        width: rect.width * size.width, height: rect.height * size.height), to: nil)
@@ -788,11 +792,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                       [x, y, w, h].allSatisfy({ $0.isFinite }), w > 0, h > 0 else { return nil }
                 return window(CGRect(x: x, y: y, width: w, height: h))
             }
-            if !rects.isEmpty { cardDropPreview = ReaderNativeDropPreview(rects: rects, line: nil); return }
+            if !rects.isEmpty { cardDropPreviews.preview = ReaderNativeDropPreview(rects: rects, line: nil); return }
             guard let lineY = (value["y"] as? NSNumber)?.doubleValue, lineY.isFinite else {
-                cardDropPreview = nil; return
+                cardDropPreviews.preview = nil; return
             }
-            cardDropPreview = ReaderNativeDropPreview(
+            cardDropPreviews.preview = ReaderNativeDropPreview(
                 rects: [], line: window(CGRect(x: 0, y: lineY, width: 1, height: 0.0015)))
         }
     }

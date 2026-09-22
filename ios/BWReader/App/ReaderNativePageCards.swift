@@ -103,25 +103,9 @@ struct ReaderNativePageCards: View {
     private func cards(in geometry: GeometryProxy) -> some View {
         ZStack(alignment: .topLeading) {
                 // 松手会锁在哪 —— 光带＝钉在这段内容上，横线＝钉在这个版面位置。
-                // 语义跟网页那版 (rc-stickynote #51) 一致；画在卡下面，拖着的卡不会被盖住。
-                if let preview = reader.cardDropPreview {
-                    let origin = geometry.frame(in: .global).origin
-                    ForEach(Array(preview.rects.enumerated()), id: \.offset) { _, box in
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(ReaderNativeTheme.accent.opacity(0.22))
-                            .overlay(RoundedRectangle(cornerRadius: 3)
-                                .stroke(ReaderNativeTheme.accent.opacity(0.75), lineWidth: 1))
-                            .frame(width: box.width, height: box.height)
-                            .offset(x: box.minX - origin.x, y: box.minY - origin.y)
-                            .allowsHitTesting(false)
-                    }
-                    if let line = preview.line {
-                        Capsule().fill(ReaderNativeTheme.accent.opacity(0.75))
-                            .frame(width: line.width, height: 2)
-                            .offset(x: line.minX - origin.x, y: line.minY - origin.y)
-                            .allowsHitTesting(false)
-                    }
-                }
+                // ⚠ 自成一层：它每秒更新十来次，混在这一层里就会把每张卡一起重算。
+                ReaderNativeDropPreviewLayer(model: reader.cardDropPreviews,
+                                             origin: geometry.frame(in: .global).origin)
                 ForEach(model.placements) { item in
                     // ⚠ 原生正文接管时坐标必须来自 PDFKit 解锚：网页那套 rect 是从
                     //   DOM 推的，而接管后网页不渲页、滚动也不同步，它已经不对应
@@ -226,7 +210,41 @@ private struct ReaderNativePlacedCard: View {
         (resizing ?? savedSize).map { max(64, min($0.height, available.height) - 36) }
     }
 
+    /// 正在拖。⚠ 这一刻**不要搬活卡片**：它里面有富文本（UITextView + SwiftSoup）、
+    /// 墨迹层，外面还套着 Liquid Glass（实时背景重采样）。每帧搬一次就是每帧
+    /// 重算这些东西 —— 2026-09-22 用户："手指拖动移动距离 10，他实际移动 3"。
+    ///
+    /// 系统自己的拖动（UIDragInteraction，股票/文件那种）搬的是**事先截好的快照**，
+    /// 跟视图多贵无关。我们这里做同一件事的最省办法：拖动期间换成一张影子
+    /// —— 跟网页那版 `vc-drag-ghost`（克隆 + 源卡淡到 .22）是同一个设计。
+    private var dragging: Bool { translation != .zero }
+
+    @ViewBuilder private var ghost: some View {
+        Label(item.title, systemImage: item.bound ? "pin.fill" : "line.3.horizontal")
+            .font(.caption.weight(.medium)).lineLimit(1)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .frame(width: width, alignment: .leading)
+            .background(ReaderNativeTheme.card.opacity(0.96),
+                        in: RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14))
+            .overlay(RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14)
+                .stroke(ReaderNativeTheme.accent.opacity(0.55), lineWidth: 1.5))
+    }
+
     var body: some View {
+        // ⚠ 用 ZStack 而不是两条并列语句：后者在 ViewBuilder 里会成为 TupleView，
+        //   而 TupleView 自己不负责布局。
+        //   `.offset` 不参与布局，所以影子拖多远都不会把这个 ZStack 撑大。
+        ZStack(alignment: .topLeading) {
+            card.opacity(dragging ? 0.22 : 1)
+            if dragging {
+                ghost.offset(translation)
+                    .shadow(color: .black.opacity(0.18), radius: 16, y: 4)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private var card: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if item.collapsed {
@@ -288,8 +306,9 @@ private struct ReaderNativePlacedCard: View {
                     }
             }
         }
-        .shadow(color: .black.opacity(0.12), radius: translation == .zero ? 8 : 16, y: 3)
-        .offset(translation == .zero ? (committed ?? .zero) : translation)
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+        // 拖动中位移加在**影子**上（见 body），这里只保留松手到新几何之间的暂态位移。
+        .offset(committed ?? .zero)
         // 手势被打断时 GestureState 会自己归零，而 onEnded 不一定来 ——
         // 不擦的话预览会留在屏幕上，看着像"钉在那儿了"。
         .onChange(of: translation) { _, value in if value == .zero { reader.clearCardDropPreview() } }
@@ -402,6 +421,33 @@ private struct ReaderNativePlacedCard: View {
         Task {
             if !(await model.perform("liveAction", parameters: ["actionId": id])) {
                 operationError = model.error ?? "操作未确认，请重试。"
+            }
+        }
+    }
+}
+
+/// 落点预览。单独一层、单独一个模型 —— 见 ReaderNativeDropPreviewModel 的说明。
+@MainActor
+private struct ReaderNativeDropPreviewLayer: View {
+    @ObservedObject var model: ReaderNativeDropPreviewModel
+    let origin: CGPoint
+
+    var body: some View {
+        if let preview = model.preview {
+            ForEach(Array(preview.rects.enumerated()), id: \.offset) { _, box in
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(ReaderNativeTheme.accent.opacity(0.22))
+                    .overlay(RoundedRectangle(cornerRadius: 3)
+                        .stroke(ReaderNativeTheme.accent.opacity(0.75), lineWidth: 1))
+                    .frame(width: box.width, height: box.height)
+                    .offset(x: box.minX - origin.x, y: box.minY - origin.y)
+                    .allowsHitTesting(false)
+            }
+            if let line = preview.line {
+                Capsule().fill(ReaderNativeTheme.accent.opacity(0.75))
+                    .frame(width: line.width, height: 2)
+                    .offset(x: line.minX - origin.x, y: line.minY - origin.y)
+                    .allowsHitTesting(false)
             }
         }
     }
