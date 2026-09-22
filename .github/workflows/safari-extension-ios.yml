@@ -1010,6 +1010,7 @@ jobs:
             ${{ runner.temp }}/xcodegen-version.txt
             ios/BWReader/Generated/ReaderBundle/bundle-manifest.json
             ios/BWReader/BWReader.xcodeproj/
+            ${{ runner.temp }}/app.xcarchive/dSYMs/
           if-no-files-found: warn
 
       - name: Clean up signing material
