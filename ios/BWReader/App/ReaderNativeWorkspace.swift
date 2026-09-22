@@ -362,7 +362,7 @@ struct ReaderNativeSidebarGrip: View {
         Capsule()
             .fill(ReaderNativeTheme.muted.opacity(0.75))
             .frame(width: 4, height: 46)
-            .frame(width: 14, maxHeight: .infinity)
+            .frame(width: 14).frame(maxHeight: .infinity)
             .readerGlass(in: RoundedRectangle(cornerRadius: 7),
                          fallback: ReaderNativeTheme.muted.opacity(0.18))
         .contentShape(Rectangle())
