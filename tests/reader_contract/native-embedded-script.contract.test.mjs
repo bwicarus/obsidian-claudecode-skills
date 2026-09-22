@@ -185,3 +185,33 @@ test("App 里根本不建那套网页侧栏外壳", () => {
   // 逃生出口不能丢：真要看旧界面时按需补建。
   assert.match(drawer, /if \(!_headless && shelllessDrawer\(\)\) ensureChrome\(\);/);
 });
+
+test("富文本的振假名重建不许在布局里重入", () => {
+  // ⚠ 2026-09-22 那个崩溃就在这里（dSYM 符号化确认：
+  //   ReaderNativeTextView.layoutSubviews +108，出错指令 ldr x21,[x8,#16]，x8=0，
+  //   即读一个空的 Swift 数组缓冲区）。
+  //   成因：在 enumerateAttribute 回调里 addSubview + rubyLabels.append。
+  //   addSubview 让布局失效 → UIKit 同步重入 layoutSubviews → 那一轮开头
+  //   removeAll(keepingCapacity:) → 同一个数组被两层同时改。
+  //   表现跟"做了什么"无关，只跟"有没有触发一次布局"有关，所以三个毫不相干的
+  //   操作崩在同一行 —— 极难从现象反推。
+  const rich = readFileSync(new URL(
+    "../../ios/BWReader/App/ReaderNativeRichText.swift", import.meta.url), "utf8");
+  // ⚠ 结束锚点要从起点往后找：文件开头还有一个
+  //   `private extension NSAttributedString.Key`，直接 indexOf 会落在起点**之前**，
+  //   切出一个空串 —— 然后所有断言都"失败"得莫名其妙。
+  const fnStart = rich.indexOf("override func layoutSubviews()");
+  const fn = rich.slice(fnStart, rich.indexOf("private extension NSAttributedString {", fnStart));
+  assert.match(fn, /guard !rebuildingRuby else \{ return \}/, "没有重入闸");
+  assert.match(fn, /rebuildingRuby = true\s*\n\s*defer \{ rebuildingRuby = false \}/);
+  // 回调里只许往局部数组塞，不许改属性、不许挂视图。
+  // ⚠ 锚到**真正的调用**（带接收者），不能只写 enumerateAttribute ——
+  //   上面那段注释里就提到了它，也提到了 addSubview，于是断言被自己写的
+  //   注释绐倒（今天第三次犯）。
+  const callback = fn.slice(fn.indexOf("attributedText.enumerateAttribute("));
+  assert.doesNotMatch(callback.slice(0, callback.indexOf("built.forEach")),
+                      /addSubview|rubyLabels\.append/,
+                      "又在 enumerate 回调里挂视图/改属性了");
+  assert.match(fn, /var built: \[UILabel\] = \[\]/);
+  assert.match(fn, /rubyLabels = built/);
+});

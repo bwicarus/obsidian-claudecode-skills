@@ -106,13 +106,37 @@ struct ReaderNativeRichText: UIViewRepresentable {
 @MainActor
 final class ReaderNativeTextView: UITextView {
     private var rubyLabels: [UILabel] = []
+    /// 重入闸。没有它就是 2026-09-22 那个崩溃 —— 见下面 layoutSubviews。
+    private var rebuildingRuby = false
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        rubyLabels.forEach { $0.removeFromSuperview() }
-        rubyLabels.removeAll(keepingCapacity: true)
+        // ⚠⚠ **绝不能在这里重入**（2026-09-22 崩溃实录，dSYM 符号化后确认就是本函数）。
+        //
+        //   原来在 `enumerateAttribute` 的回调里 `addSubview` + `rubyLabels.append`。
+        //   `addSubview` 会让布局失效，UIKit 可能**同步**再调进本函数；重入那一轮
+        //   开头就 `rubyLabels.removeAll(keepingCapacity: true)` —— 于是**同一个数组
+        //   被两层同时改**，外层再去读缓冲区就读到空指针。崩溃报告里的出错指令正是
+        //   `ldr x21, [x8, #16]`（读数组的 count），x8 = 0。
+        //
+        //   ⚠ 它的表现极具迷惑性：跟"做了什么"无关，只跟"有没有触发一次布局"有关 ——
+        //   启动闲置几秒、开关侧栏、点复习模式，三个毫不相干的操作崩在同一行。
+        //   我为此连查三轮、改错两版，最后靠 dSYM 才定位到。
+        guard !rebuildingRuby else { return }
+        rebuildingRuby = true
+        defer { rebuildingRuby = false }
+
+        // ⚠ 先把旧的从属性里摘出来再动手：哪怕 removeFromSuperview 又触发一次布局，
+        //   那一轮也被上面的闸挡住，不会再碰 rubyLabels。
+        let previous = rubyLabels
+        rubyLabels = []
+        previous.forEach { $0.removeFromSuperview() }
+
         guard let attributedText, attributedText.length > 0 else { return }
         layoutManager.ensureLayout(for: textContainer)
+        // ⚠ 先全算进**局部**数组，最后一次性挂上去并赋值给属性。
+        //   在回调里边建边挂边 append，就是上面那个重入。
+        var built: [UILabel] = []
         attributedText.enumerateAttribute(.readerRuby, in: NSRange(location: 0, length: attributedText.length)) { reading, range, _ in
             guard let reading = reading as? String, !reading.isEmpty else { return }
             let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
@@ -131,9 +155,10 @@ final class ReaderNativeTextView: UITextView {
             label.frame = CGRect(x: rect.minX + textContainerInset.left,
                                  y: rect.minY + textContainerInset.top - font.pointSize * 0.55,
                                  width: max(rect.width, font.pointSize), height: font.pointSize * 0.6)
-            addSubview(label)
-            rubyLabels.append(label)
+            built.append(label)
         }
+        built.forEach { addSubview($0) }
+        rubyLabels = built
     }
 }
 
