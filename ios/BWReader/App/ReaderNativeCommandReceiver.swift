@@ -5,8 +5,10 @@ import WebKit
 
 @MainActor
 final class ReaderNativeCommandReceiver: ObservableObject {
+    // ⚠ 原来还有一个 `.computerVoice`：Safari 上点「电脑语音」→ 拉起 App →
+    //   把音频接到 Windows 上某个桌面聊天应用。该功能整个删除了
+    //   （2026-09-22 用户拍板），于是这里只剩 Realtime 语音这一种。
     private enum CommandKind: Equatable {
-        case computerVoice
         case agentVoice
     }
 
@@ -32,7 +34,7 @@ final class ReaderNativeCommandReceiver: ObservableObject {
 
     func receive(_ url: URL) {
         guard let received = validatedRequest(from: url) else {
-            notice = "已拒绝无匹配凭据的电脑语音链接"
+            notice = "已拒绝无匹配凭据的语音链接"
             return
         }
         let requestID = received.requestID
@@ -44,9 +46,7 @@ final class ReaderNativeCommandReceiver: ObservableObject {
         }
         queuedRequestID = requestID
         queuedKind = received.kind
-        notice = received.kind == .computerVoice
-            ? "正在接收 Safari 的电脑语音请求…"
-            : "正在接收 Safari 的 Realtime 语音请求…"
+        notice = "正在接收 Safari 的 Realtime 语音请求…"
         scheduleIfPossible()
     }
 
@@ -61,7 +61,7 @@ final class ReaderNativeCommandReceiver: ObservableObject {
         guard
             url.scheme?.lowercased()
                 == ReaderNativeBridgeContract.launchScheme,
-            host == "native-voice" || host == "native-agent",
+            host == "native-agent",
             url.user == nil,
             url.password == nil,
             url.port == nil,
@@ -79,10 +79,7 @@ final class ReaderNativeCommandReceiver: ObservableObject {
         else {
             return nil
         }
-        return (
-            requestID,
-            host == "native-agent" ? .agentVoice : .computerVoice
-        )
+        return (requestID, .agentVoice)
     }
 
     private func scheduleIfPossible() {
@@ -111,70 +108,7 @@ final class ReaderNativeCommandReceiver: ObservableObject {
         requestID: String,
         kind: CommandKind
     ) async {
-        if kind == .agentVoice {
-            await processAgent(requestID: requestID)
-            return
-        }
-        guard
-            let command = await consumeCommandWithBoundedRetry(
-                requestID: requestID
-            )
-        else {
-            notice = "Safari 请求未到达或已经过期，请返回 Safari 再点一次"
-            return
-        }
-        consumedRequestIDs.insert(requestID)
-        if consumedRequestIDs.count > 64 {
-            consumedRequestIDs.removeAll(keepingCapacity: true)
-            consumedRequestIDs.insert(requestID)
-        }
-
-        guard
-            command.contract == ReaderNativeBridgeContract.name,
-            command.action == "voice.toggle",
-            ReaderNativeBridgeContract.supportedAppKinds.contains(
-                command.appKind
-            ),
-            let appKind = DirectVoiceTargetApp(rawValue: command.appKind),
-            let voiceBridge
-        else {
-            notice = "Safari 电脑语音请求内容无效"
-            return
-        }
-
-        switch voiceBridge.state.phase {
-        case .idle, .failed:
-            guard let webContext = command.webContext,
-                  webContext.isValid else {
-                notice = "Safari 网页上下文无效，请返回 Safari 再点一次"
-                return
-            }
-            notice = "正在启动电脑语音并交接当前 Safari 网页…"
-            try? store.writeStatus(ReaderNativeVoiceStatus(
-                phase: "preparing",
-                active: false,
-                busy: true,
-                sessionID: nil,
-                appKind: appKind.rawValue,
-                detail: notice
-            ))
-            notice = nil
-            await voiceBridge.start(
-                appKind: appKind,
-                safariWebContext: webContext
-            )
-            if voiceBridge.state.isActive {
-                await returnToSafari(webContext.url)
-            }
-
-        case .active, .suspended:
-            notice = "正在结束电脑语音…"
-            await voiceBridge.stop()
-            notice = nil
-
-        case .preparing, .connecting, .starting, .stopping:
-            notice = "电脑语音正在切换状态，请稍后再点一次"
-        }
+        await processAgent(requestID: requestID)
     }
 
     private func processAgent(requestID: String) async {
@@ -207,31 +141,6 @@ final class ReaderNativeCommandReceiver: ObservableObject {
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else { return }
         _ = await UIApplication.shared.open(url)
-    }
-
-    private func consumeCommandWithBoundedRetry(
-        requestID: String
-    ) async -> ReaderNativePendingVoiceCommand? {
-        // The URL is opened synchronously from the Safari click while native
-        // messaging is asynchronous, so the app may arrive first.
-        let deadline = Date().addingTimeInterval(5)
-        repeat {
-            do {
-                if let command = try store.consumePending(
-                    requestID: requestID
-                ) {
-                    return command
-                }
-            } catch ReaderNativeBridgeStoreError.appGroupUnavailable {
-                notice = "BWReader 共享容器不可用"
-                return nil
-            } catch {
-                notice = error.localizedDescription
-                return nil
-            }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        } while !Task.isCancelled && Date() < deadline
-        return nil
     }
 
     private func consumeAgentCommandWithBoundedRetry(

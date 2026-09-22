@@ -554,26 +554,24 @@
     const CONTRACT = 'bw-reader-native/1';
     const ACTIONS = new Set([
       'capabilities',
+      // ⚠ 没有 'voice.toggle'：随「电脑语音」整个下线。
+      //   voice.status / voice.context 留着 —— CLI 语音通话要用它们报状态、
+      //   要当前页上下文（通话里 AI"看得见你在读哪一页"靠的就是这条）。
       'voice.status',
-      'voice.toggle',
       'voice.context'
     ]);
-    const APP_KINDS = new Set(['codex-desktop', 'chatgpt-classic']);
     const encoder = new TextEncoder();
     let available = false;
     let launchScheme = '';
-    let supportedAppKinds = new Set();
     let latestState = {
       phase: 'unavailable',
       active: false,
       busy: false,
       sessionId: null,
-      appKind: null,
       updatedAt: ''
     };
     let pollTimer = null;
     let statusInFlight = null;
-    let toggleInFlight = null;
     let contextInFlight = null;
     let lastContextRevision = '';
     let contextRefreshTimer = null;
@@ -643,14 +641,12 @@
         active: value.active === true,
         busy: value.busy === true,
         sessionId: typeof value.sessionId === 'string' ? value.sessionId : null,
-        appKind: APP_KINDS.has(value.appKind) ? value.appKind : null,
         updatedAt: String(value.updatedAt || '')
       };
       window.__BW_NATIVE_COMPUTER_VOICE_STATE__ = {
         active: latestState.active,
         busy: latestState.busy,
         sessionId: latestState.sessionId,
-        appKind: latestState.appKind,
         phase: latestState.phase,
         title: titleFor(latestState)
       };
@@ -663,7 +659,7 @@
     const publishCapability = () => {
       window.dispatchEvent(new CustomEvent(
         'bw-native-computer-voice-capability',
-        { detail: { available, appKinds: Array.from(supportedAppKinds) } }
+        { detail: { available } }
       ));
     };
     const scheduleStatusPoll = () => {
@@ -722,21 +718,17 @@
     };
     const initialize = () => call('capabilities').then((value) => {
       const actions = new Set(value.actions || []);
-      const appKinds = new Set(value.appKinds || []);
       if (
         !actions.has('voice.status') ||
-        !actions.has('voice.toggle') ||
         !actions.has('voice.context') ||
-        value.launchScheme !== 'bwreader' ||
-        !appKinds.has('codex-desktop')
+        value.launchScheme !== 'bwreader'
       ) {
-        throw Object.assign(new Error('BWReader App 电脑语音能力不完整'), {
+        throw Object.assign(new Error('BWReader App 能力不完整'), {
           code: 'BW_NATIVE_APP_CAPABILITY_MISSING'
         });
       }
       available = true;
       launchScheme = value.launchScheme;
-      supportedAppKinds = appKinds;
       // This is only the optional containing-App command bridge.  Do not set
       // __BW_NATIVE_COMPUTER_VOICE__: that flag is reserved for the App's own
       // WKWebView, where Swift truly owns microphone/audio/WSS.  Setting it in
@@ -748,62 +740,12 @@
     }).catch((error) => {
       available = false;
       launchScheme = '';
-      supportedAppKinds = new Set();
       window.__BW_NATIVE_APP_COMPUTER_VOICE__ = false;
       publishCapability();
       throw error;
     });
-    const toggle = (appKind) => {
-      const target = appKind === 'chatgpt-classic'
-        ? 'chatgpt-classic'
-        : 'codex-desktop';
-      if (!available || !supportedAppKinds.has(target) || launchScheme !== 'bwreader') {
-        return Promise.reject(Object.assign(new Error('请先安装或更新 BWReader App'), {
-          code: 'BW_NATIVE_APP_NOT_SUPPORTED'
-        }));
-      }
-      if (toggleInFlight) return toggleInFlight;
-      const id = requestId();
-      const webContext = nativeBridgeWebContext();
-      const shouldLaunch = !latestState.active && !latestState.busy;
-      publishState(Object.assign({}, latestState, {
-        phase: latestState.active ? 'stopping' : 'launching',
-        busy: true,
-        appKind: target,
-        updatedAt: new Date().toISOString()
-      }));
-      toggleInFlight = call('voice.toggle', {
-        requestId: id,
-        appKind: target,
-        webContext
-      }).then((value) => {
-        lastContextRevision = webContext.revision;
-        publishState(value.state);
-        return value;
-      }).catch((error) => {
-        publishState({
-          phase: 'failed',
-          active: false,
-          busy: false,
-          sessionId: null,
-          appKind: target,
-          updatedAt: new Date().toISOString()
-        });
-        throw error;
-      }).finally(() => {
-        toggleInFlight = null;
-      });
-
-      // Keep the custom-scheme navigation in the original trusted click.  The
-      // native handler writes the same one-time request id into the App Group;
-      // the App waits briefly if URL delivery wins that race.
-      if (shouldLaunch) {
-        const launchURL = `${launchScheme}://native-voice?requestId=${encodeURIComponent(id)}`;
-        try { window.location.assign(launchURL); } catch (_) {}
-      }
-      return toggleInFlight;
-    };
-
+    // ⚠ `toggle` 已删除：它是"点一下 → 写 App Group → bwreader://native-voice
+    //   拉起 App → 把 iPad 音频接到桌面聊天应用"，随「电脑语音」整个下线。
     window.addEventListener('pageshow', () => {
       if (available) refreshStatus().catch(() => {});
     });
@@ -823,8 +765,7 @@
       available: () => available,
       state: () => Object.assign({}, latestState),
       refreshStatus,
-      pushContextIfChanged,
-      toggle
+      pushContextIfChanged
     });
   })();
   window.__bwNativeComputerVoiceExtensionBridge = nativeComputerVoiceBridge;

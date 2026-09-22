@@ -67,7 +67,6 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 requestID: requestID
             )
             response["actions"] = ReaderNativeBridgeContract.supportedActions
-            response["appKinds"] = ReaderNativeBridgeContract.supportedAppKinds
             response["launchScheme"] = ReaderNativeBridgeContract.launchScheme
             response["containingApp"] =
                 ReaderNativeBridgeContract.containingAppIdentifier
@@ -108,14 +107,6 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                     )
                 )
             }
-
-        case "voice.toggle":
-            handleVoiceToggle(
-                message,
-                action: action,
-                requestID: requestID,
-                context: context
-            )
 
         case "voice.context":
             guard exactKeys(
@@ -662,68 +653,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         }
     }
 
-    private func handleVoiceToggle(
-        _ message: [String: Any],
-        action: String,
-        requestID: String,
-        context: NSExtensionContext
-    ) {
-        guard exactKeys(
-            message,
-            required: [
-                "contract", "action", "requestId", "appKind", "webContext",
-            ]
-        ),
-        let appKind = message["appKind"] as? String,
-        ReaderNativeBridgeContract.supportedAppKinds.contains(appKind),
-        let webContext = decodeWebContext(message["webContext"]),
-        let launchURL = ReaderNativeBridgeContract.launchURL(
-            requestID: requestID
-        )
-        else {
-            complete(
-                context,
-                response: schemaFailure(
-                    action: action,
-                    requestID: requestID
-                )
-            )
-            return
-        }
-
-        do {
-            let command = ReaderNativePendingVoiceCommand(
-                requestID: requestID,
-                appKind: appKind,
-                sourceURL: webContext.url,
-                selectionText: webContext.selection,
-                webContext: webContext
-            )
-            try store.writePending(command)
-            try store.writeLatestWebContext(webContext)
-            let status = try store.readStatus() ?? .idle
-            var response = baseResponse(
-                action: action,
-                requestID: requestID
-            )
-            response["launchURL"] = launchURL.absoluteString
-            response["opened"] = false
-            response["state"] = status.responseDictionary
-            complete(context, response: response)
-        } catch {
-            complete(
-                context,
-                response: failure(
-                    action: action,
-                    requestID: requestID,
-                    code: "BW_NATIVE_COMMAND_STORE_FAILED",
-                    message: error.localizedDescription,
-                    retryable: true
-                )
-            )
-        }
-    }
-
+    // ⚠ `handleVoiceToggle` 已删除：它把「电脑语音」的 appKind 与网页上下文写进
+    //   App Group，再用 bwreader://native-voice 拉起 App。该功能整个去掉了。
     private func handleAgentToggle(
         _ message: [String: Any],
         action: String,

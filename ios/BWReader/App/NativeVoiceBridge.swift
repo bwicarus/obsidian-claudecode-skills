@@ -141,7 +141,6 @@ final class NativeVoiceBridge: ObservableObject {
     private var operationGeneration: UInt64 = 0
     private var cleanupInProgress = false
     private var desiredActive = false
-    private var activeAppKind: DirectVoiceTargetApp = .codexDesktop
     private var intentGeneration: UInt64 = 0
     private var resumeArmed = false
     private var reconnectTask: Task<Void, Never>?
@@ -218,9 +217,9 @@ final class NativeVoiceBridge: ObservableObject {
         publishSharedStatus()
     }
 
-    var activeTargetName: String {
-        activeAppKind.displayName
-    }
+    /// 通话对方的名字。⚠ 以前它是"目标桌面应用"（Codex / GPT Classic），
+    /// 那个概念随「电脑语音」一起删了；现在这条通道只服务 CLI 语音通话。
+    var activeTargetName: String { "电脑通话" }
 
     func bind(reader: ReaderWebViewModel) {
         self.reader = reader
@@ -283,13 +282,12 @@ final class NativeVoiceBridge: ObservableObject {
             active: state.isActive,
             busy: state.isBusy,
             sessionID: state.sessionId,
-            appKind: activeAppKind.rawValue,
+            appKind: nil,
             detail: state.detail
         ))
     }
 
     func start(
-        appKind: DirectVoiceTargetApp = .codexDesktop,
         safariWebContext: ReaderNativeWebContext? = nil
     ) async {
         guard !state.isActive, !state.isBusy else {
@@ -311,7 +309,6 @@ final class NativeVoiceBridge: ObservableObject {
         reconnectAttempt = 0
         desiredActive = true
         resumeArmed = false
-        activeAppKind = appKind
         audioInterrupted = false
         localAudioSuspended = false
         self.safariWebContext = safariWebContext
@@ -324,7 +321,7 @@ final class NativeVoiceBridge: ObservableObject {
         setMicrophoneMuted(false)
         recordDiagnostic(
             category: "control",
-            message: "用户启动 \(appKind.displayName)"
+            message: "用户启动电脑通话"
         )
         state = NativeVoiceBridgeState(
             phase: .preparing,
@@ -363,16 +360,13 @@ final class NativeVoiceBridge: ObservableObject {
 
             state = NativeVoiceBridgeState(
                 phase: .starting,
-                detail: "正在等待 Windows 启动 \(appKind.displayName) 语音…"
+                detail: "正在等待 Windows 启动语音…"
             )
             recordDiagnostic(
                 category: "protocol",
-                message: "→ START \(appKind.rawValue)"
+                message: "→ START"
             )
-            let session = try await socket.start(
-                appKind: appKind,
-                takeover: true
-            )
+            let session = try await socket.start(takeover: true)
             try requireCurrent(generation)
 
             try startMicrophonePipeline(
@@ -400,20 +394,6 @@ final class NativeVoiceBridge: ObservableObject {
                 return
             }
             await failStart(error, generation: generation)
-        }
-    }
-
-    /// 把用户打字的内容送进正在进行的那通语音。没有连接就当没发出去。
-    ///
-    /// ⚠ 不抛：这条是"顺手补一句话"，失败不该把阅读器的输入流程弄断。
-    /// 成没成由返回值说，调用方据此决定要不要退回文字助手。
-    func sendTyped(_ text: String) async -> Bool {
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty, let socket else { return false }
-        do {
-            return try await socket.codexType(text: body)
-        } catch {
-            return false
         }
     }
 
@@ -1335,7 +1315,7 @@ final class NativeVoiceBridge: ObservableObject {
 
             state = NativeVoiceBridgeState(
                 phase: .starting,
-                detail: "正在续接 \(activeAppKind.displayName) 语音…"
+                detail: "正在续接语音…"
             )
             // From this point a new START has been sent. Never loop another
             // automatic START if its result becomes unknown. Explicit
@@ -1345,9 +1325,9 @@ final class NativeVoiceBridge: ObservableObject {
             startRequestSent = true
             recordDiagnostic(
                 category: "protocol",
-                message: "→ START \(activeAppKind.rawValue) (recovery)"
+                message: "→ START (recovery)"
             )
-            let session = try await newSocket.start(appKind: activeAppKind)
+            let session = try await newSocket.start()
             try requireRecoveryCurrent(
                 intent: intent,
                 generation: generation
@@ -1468,7 +1448,6 @@ final class NativeVoiceBridge: ObservableObject {
             "BWReaderNative \(nativeAppBuildVersion)",
             "phase=\(state.phase)",
             "socket=\(socketState.rawValue)",
-            "target=\(activeAppKind.rawValue)",
             "muted=\(microphoneMuted)",
             "network=\(networkSummary)",
             "detail=\(state.detail ?? "-")",
@@ -1503,7 +1482,7 @@ final class NativeVoiceBridge: ObservableObject {
         remoteControls.update(
             enabled: enabled,
             muted: microphoneMuted,
-            targetName: activeAppKind.displayName,
+            targetName: activeTargetName,
             status: state.title
         )
     }

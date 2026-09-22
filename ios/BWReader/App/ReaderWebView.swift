@@ -4,7 +4,6 @@ import SwiftUI
 import UIKit
 import WebKit
 
-private let nativeComputerVoiceMessageName = "bwNativeComputerVoice"
 private let nativeComputerContextMessageName = "bwNativeComputerContext"
 private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
 private let nativePencilInkMessageName = "bwNativePencilInk"
@@ -334,7 +333,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     @Published private(set) var vaultPickerPresentationRequestID: UUID?
     @Published private(set) var realtimeKeyPresentationRequestID: UUID?
     @Published private(set) var piLoginPresentationRequestID: UUID?
-    private var nativeComputerVoiceMessageProxy: WeakScriptMessageHandler?
+    /// 语音通道（CLI 通话的音频与**通话中读页上下文**都走它）。
+    /// ⚠ 它不再驱动任何「电脑语音」按钮 —— 那个功能已删。
+    private weak var nativeVoiceBridge: NativeVoiceBridge?
     private var nativeConversationMessageProxy: WeakScriptMessageHandler?
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
@@ -404,7 +405,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ]()
     private var waitsForInitialBookDecision = true
     private var deferredBookUserStateMessage: (text: String, isError: Bool)?
-    private weak var nativeVoiceBridge: NativeVoiceBridge?
     /// 键盘通知的观察者句柄（重建 webView 时要先撤掉旧的）。
     private var keyboardInsetObservers: [NSObjectProtocol] = []
     private let nativeAgentVoice = NativeAgentVoiceSession()
@@ -1315,7 +1315,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // "openArtifact" / "action" 一并删除：它们唯一的实现是把旧网页界面
             // 端出来（reveal→setLegacy），而原生界面从来没有地方会去点它们。
             "hideLegacy", "refresh", "openTOC", "openSearch",
-            "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
+            "toggleVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
@@ -1470,14 +1470,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard scope == self.nativeConversation.scope, referer == self.webView.url else { throw CancellationError() }
             return bytes
         }
-        let nativeComputerVoiceMessageProxy =
-            WeakScriptMessageHandler(delegate: self)
-        self.nativeComputerVoiceMessageProxy =
-            nativeComputerVoiceMessageProxy
-        contentController.add(
-            nativeComputerVoiceMessageProxy,
-            name: nativeComputerVoiceMessageName
-        )
         let nativeComputerContextMessageProxy =
             WeakScriptMessageHandler(delegate: self)
         self.nativeComputerContextMessageProxy =
@@ -1755,68 +1747,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               window.__BW_NATIVE_COMPUTER_VOICE_APP_VERSION__ =
                 "\(nativeAppBuildVersion)";
 
-              const selector = "#asst-computer, #vc-top-computer";
-              let latest = {
-                active: false,
-                busy: false,
-                sessionId: null,
-                title: "电脑语音未连接"
-              };
-              const applyButton = (button) => {
-                button.classList.toggle("on", latest.active === true);
-                button.classList.toggle(
-                  "connecting",
-                  latest.busy === true && latest.active !== true
-                );
-                button.classList.remove("speaking");
-                button.title = latest.title;
-                button.setAttribute("aria-label", latest.title);
-                button.setAttribute(
-                  "aria-pressed",
-                  latest.active === true ? "true" : "false"
-                );
-                button.setAttribute(
-                  "aria-busy",
-                  latest.busy === true ? "true" : "false"
-                );
-                button.disabled = latest.busy === true;
-              };
-              const applyAll = () => {
-                document.querySelectorAll(selector).forEach(applyButton);
-              };
-              window.__bwNativeComputerVoiceApplyState = (value) => {
-                const state = value && typeof value === "object" ? value : {};
-                latest = {
-                  active: state.active === true,
-                  busy: state.busy === true,
-                  sessionId: typeof state.sessionId === "string"
-                    ? state.sessionId
-                    : null,
-                  title: String(state.title || "电脑语音未连接")
-                };
-                window.__BW_NATIVE_COMPUTER_VOICE_STATE__ = {
-                  active: latest.active,
-                  busy: latest.busy,
-                  sessionId: latest.sessionId
-                };
-                window.dispatchEvent(new CustomEvent(
-                  "bw-native-computer-voice-state",
-                  { detail: window.__BW_NATIVE_COMPUTER_VOICE_STATE__ }
-                ));
-                applyAll();
-              };
-
-              new MutationObserver((records) => {
-                const addedButton = records.some((record) =>
-                  Array.from(record.addedNodes || []).some((node) =>
-                    node?.nodeType === 1 && (
-                      node.matches?.(selector) ||
-                      node.querySelector?.(selector)
-                    )
-                  )
-                );
-                if (addedButton) applyAll();
-              }).observe(document, { childList: true, subtree: true });
+              // ⚠ 这里原来有一整套「电脑语音」按钮（#asst-computer /
+              //   #vc-top-computer）的状态机，随该功能一起删除。
+              //   上面三个全局**留着**：名字带 COMPUTER_VOICE 只是历史，
+              //   它们实际是"我跑在 App 里"的标记 —— rc-core 的
+              //   _ctxServerOwned() 和本地 runtime 的 build 号都靠它。
             })();
             """,
             injectionTime: .atDocumentStart,
@@ -3495,18 +3430,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
     }
 
-    func bind(nativeVoiceBridge: NativeVoiceBridge) {
-        self.nativeVoiceBridge = nativeVoiceBridge
-        updateNativeVoiceButton(state: nativeVoiceBridge.state)
-    }
-
     func startExternalNativeAgentVoice(
         webContext: ReaderNativeWebContext
     ) async {
         guard webContext.isValid else { return }
-        if let bridge = nativeVoiceBridge, bridge.state.phase != .idle {
-            await bridge.stop()
-        }
         await nativeAgentVoice.stop()
         externalNativeAgentControlTask?.cancel()
         externalNativeAgentVoice = true
@@ -4063,33 +3990,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         webView.reload()
     }
 
-    func updateNativeVoiceButton(state: NativeVoiceBridgeState) {
-        guard webView.url != nil else {
-            return
-        }
-        let detail = state.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title: String
-        if let detail, !detail.isEmpty {
-            title = "\(state.title)：\(detail)"
-        } else {
-            title = state.title
-        }
-        let value: [String: Any] = [
-            "active": state.isActive,
-            "busy": state.isBusy,
-            "sessionId": state.sessionId ?? NSNull(),
-            "title": title,
-        ]
-        guard
-            JSONSerialization.isValidJSONObject(value),
-            let data = try? JSONSerialization.data(withJSONObject: value),
-            let literal = String(data: data, encoding: .utf8)
-        else {
-            return
-        }
-        webView.evaluateJavaScript(
-            "window.__bwNativeComputerVoiceApplyState?.(\(literal))"
-        )
+    // ⚠ `updateNativeVoiceButton` 已删除：它同步的是网页那个「电脑语音」按钮
+    //   （#asst-computer / #vc-top-computer）的状态，而那个功能整个去掉了。
+
+    func bind(nativeVoiceBridge: NativeVoiceBridge) {
+        self.nativeVoiceBridge = nativeVoiceBridge
     }
 
     func nativeTouchDoubleTapAction() async throws -> String {
@@ -4134,42 +4039,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
     }
 
-    /// 把网页输入框里打的字交给原生桥，送进正在进行的那通语音。
-    private func sendNativeComputerVoiceTyped(_ text: String) {
-        guard let bridge = nativeVoiceBridge else { return }
-        Task { @MainActor [weak bridge] in
-            guard let bridge else { return }
-            _ = await bridge.sendTyped(text)
-        }
-    }
-
-    private func toggleNativeComputerVoice(
-        appKind: DirectVoiceTargetApp
-    ) {
-        guard let bridge = nativeVoiceBridge else {
-            return
-        }
-        Task { @MainActor [weak bridge] in
-            guard let bridge else {
-                return
-            }
-            self.externalNativeAgentVoice = false
-            self.externalNativeAgentControlTask?.cancel()
-            self.externalNativeAgentControlTask = nil
-            if self.nativeAgentVoice.state != .idle {
-                await self.nativeAgentVoice.stop()
-            }
-            _ = try? ReaderNativeBridgeStore().consumeAgentControls()
-            switch bridge.state.phase {
-            case .idle, .failed:
-                await bridge.start(appKind: appKind)
-            case .active, .suspended:
-                await bridge.stop()
-            case .preparing, .connecting, .starting, .stopping:
-                return
-            }
-        }
-    }
+    // ⚠ `sendNativeComputerVoiceTyped` / `toggleNativeComputerVoice` 已删除：
+    //   前者往桌面聊天应用的输入框里打字，后者开关「电脑语音」—— 整个功能去掉了。
 
     private func handleNativeAgentVoice(
         _ body: [String: Any]
@@ -5029,63 +4900,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
 }
 
-extension ReaderWebViewModel {
-    /// 把 toggle 被拒的原因回传给网页。
-    ///
-    /// 之前这条路径上的八个前置条件共用一个 `else { return }`,任何一条不满足都静默返回:
-    /// 网页端只知道 postMessage 没抛异常,按钮不变色时无法区分是 App 没更新、URL 不匹配,
-    /// 还是消息压根没到。这里只做上报,不改变任何控制流。
-    fileprivate func reportNativeVoiceToggleRejected(_ info: [String: Any]) {
-        var payload = info
-        payload["appVersion"] = nativeAppBuildVersion
-        guard
-            let data = try? JSONSerialization.data(withJSONObject: payload),
-            let json = String(data: data, encoding: .utf8)
-        else {
-            return
-        }
-        let script = """
-        (() => {
-          const info = \(json);
-          window.__BW_NATIVE_COMPUTER_VOICE_LAST_REJECT__ = info;
-          try {
-            console.warn("[BWReader] native voice toggle rejected", info);
-          } catch (error) {}
-          try {
-            window.dispatchEvent(new CustomEvent(
-              "bw-native-computer-voice-reject",
-              { detail: info }
-            ));
-          } catch (error) {}
-          // iPad 上看不到 console,诊断必须直接显示在屏幕上,否则等于没加。
-          // 只在被拒时出现,正常路径完全不触发。
-          try {
-            const failed = Object.keys(info).filter((key) => info[key] === false);
-            const banner = document.createElement("div");
-            banner.textContent = "语音按钮被 App 拒绝｜v" + info.appVersion +
-              "｜未满足: " + (failed.length ? failed.join(", ") : "字段校验") +
-              "｜count=" + info.bodyFieldCount +
-              " action=" + info.action + " appKind=" + info.appKind;
-            banner.setAttribute("style", [
-              "position:fixed", "left:8px", "right:8px", "top:8px",
-              "z-index:2147483647", "padding:10px 12px", "border-radius:10px",
-              "background:rgba(176,0,32,.95)", "color:#fff",
-              "font:13px/1.5 -apple-system,system-ui,sans-serif",
-              "white-space:pre-wrap", "word-break:break-all",
-              "box-shadow:0 2px 12px rgba(0,0,0,.35)"
-            ].join(";"));
-            banner.addEventListener("click", () => banner.remove());
-            document.body.appendChild(banner);
-            setTimeout(() => banner.remove(), 12000);
-          } catch (error) {}
-        })();
-        """
-        DispatchQueue.main.async { [weak self] in
-            self?.webView.evaluateJavaScript(script, completionHandler: nil)
-        }
-    }
-}
-
 extension ReaderWebViewModel: NativeAgentVoiceSessionDelegate {
     func nativeAgentVoiceSession(
         _ session: NativeAgentVoiceSession,
@@ -5193,74 +5007,6 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                   let body = message.body as? [String: Any],
                   body["version"] as? Int == 1 else { return }
             nativeConversation.receive(body)
-        } else if message.name == nativeComputerVoiceMessageName {
-            // 只读采样,不影响下面 guard 的判定;仅用于 guard 失败时说明是哪一条。
-            let sampledBody = message.body as? [String: Any]
-            let rejection: [String: Any] = [
-                "isMainFrame": message.frameInfo.isMainFrame,
-                "sameWebView": message.webView === webView,
-                "trustedReader": isTrustedReaderURL(webView.url),
-                "bodyIsDictionary": sampledBody != nil,
-                "bodyFieldCount": sampledBody?.count ?? -1,
-                "action": (sampledBody?["action"] as? String) ?? "<missing>",
-                "appKind": (sampledBody?["appKind"] as? String) ?? "<missing>",
-                "currentURL": isLocalRuntimeURL(webView.url)
-                    ? "native-local://<capability-redacted>"
-                    : (webView.url?.absoluteString ?? "<nil>"),
-                "expectedURL": localRuntimeServer == nil
-                    ? "<local-runtime-unavailable>"
-                    : "native-local://<capability-redacted>",
-            ]
-            // 打字直达通话（用户 2026-09-11）：与 toggle 同一条消息通道，
-            // 但**字段集各自精确**——沿用这里原有的"数清字段个数"风格，
-            // 多一个少一个都不受理。
-            //
-            // ⚠ App 上这条必须走原生：网页那套 DirectSocket 在 App 里没有
-            // session（状态是原生推进去的），JS 直接发会静静失败，表现是
-            // "输入框绿了、回答却来自文字助手"。
-            if
-                message.frameInfo.isMainFrame,
-                message.webView === webView,
-                isTrustedReaderURL(webView.url),
-                isTrustedReaderURL(message.frameInfo.request.url),
-                let typedBody = message.body as? [String: Any],
-                typedBody["action"] as? String == "type",
-                typedBody.count == 2,
-                let typedText = typedBody["text"] as? String,
-                !typedText.isEmpty,
-                typedText.count <= 4000
-            {
-                sendNativeComputerVoiceTyped(typedText)
-                return
-            }
-            guard
-                message.frameInfo.isMainFrame,
-                message.webView === webView,
-                isTrustedReaderURL(webView.url),
-                isTrustedReaderURL(message.frameInfo.request.url),
-                let body = message.body as? [String: Any],
-                body["action"] as? String == "toggle"
-            else {
-                reportNativeVoiceToggleRejected(rejection)
-                return
-            }
-            let appKind: DirectVoiceTargetApp
-            if body.count == 1, body["appKind"] == nil {
-                // A cached Reader bundle may still send the original
-                // one-field message. It can safely mean Codex only; selecting
-                // Classic continues to require the explicit second field.
-                appKind = .codexDesktop
-            } else if
-                body.count == 2,
-                let rawAppKind = body["appKind"] as? String,
-                let parsed = DirectVoiceTargetApp(rawValue: rawAppKind)
-            {
-                appKind = parsed
-            } else {
-                reportNativeVoiceToggleRejected(rejection)
-                return
-            }
-            toggleNativeComputerVoice(appKind: appKind)
         } else if message.name == nativeComputerContextMessageName {
             guard
                 message.frameInfo.isMainFrame,
@@ -5662,9 +5408,6 @@ extension ReaderWebViewModel: WKNavigationDelegate {
             if let token = pending.restorationToken {
                 finishLocalBookRestore(token: token, succeeded: succeeded)
             }
-        }
-        if let nativeVoiceBridge {
-            updateNativeVoiceButton(state: nativeVoiceBridge.state)
         }
         setReaderForeground(readerForeground)
         updateNativeAgentVoiceState()

@@ -17,6 +17,15 @@ const contentScript = read("extensions/bw-reader-webext/content.js");
 const safariPackager = read("extensions/bw-reader-webext/package_safari.py");
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
 const readerWebView = read("ios/BWReader/App/ReaderWebView.swift");
+const bridgeContract = read("ios/BWReader/Shared/ReaderNativeBridgeContract.swift");
+
+// ⚠ 剥掉注释再做 doesNotMatch。"某某已删除"这句说明里必然出现被删符号的名字，
+// 不剥的话断言会被自己的注释绊倒 —— 这个坑 2026-09-22 一天踩了五次。
+const codeOnly = (source) => source
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .split(String.fromCharCode(10))
+  .filter((line) => !/^\s*\/\//.test(line))
+  .join(String.fromCharCode(10));
 const nativeVoiceSystem = read(
   "ios/BWReader/App/NativeVoiceSystemIntegration.swift",
 );
@@ -912,15 +921,9 @@ test("App 原生语音零等待启动，Reader 上下文使用独立 WSS", () =>
     readerWebView,
     /prepareForNativeVoice|NativeVoiceHandoffError|prepareNativeContextHandoff/,
   );
-  const nativeToggle = readerWebView.slice(
-    readerWebView.indexOf("private func toggleNativeComputerVoice"),
-    readerWebView.indexOf("private func handleNativeAgentVoice"),
-  );
-  assert.match(nativeToggle, /await bridge\.start\(appKind: appKind\)/);
-  assert.doesNotMatch(
-    nativeToggle,
-    /callAsyncJavaScript|context|snapshot|handoff/i,
-  );
+  // ⚠ `toggleNativeComputerVoice` 已随「电脑语音」删除（2026-09-22 用户拍板）。
+  // 这里改成钉住"它不该回来"：App 里不再有开关桌面聊天应用语音的入口。
+  assert.doesNotMatch(codeOnly(readerWebView), /toggleNativeComputerVoice|DirectVoiceTargetApp/);
 });
 
 test("旧上下文开关只属于 legacy，原生 App 隐藏且 snapshot 不受其控制", () => {
@@ -1056,15 +1059,18 @@ test("普通网页上下文经后台一次 POST，通话页只认领同标签视
   );
 });
 
-test("App 电脑按钮兼容缓存的一字段 Codex 消息，版本号取自安装包", () => {
-  assert.match(
-    readerWebView,
-    /if body\.count == 1, body\["appKind"\] == nil[\s\S]*appKind = \.codexDesktop/,
-  );
-  assert.match(
-    readerWebView,
-    /body\.count == 2[\s\S]*DirectVoiceTargetApp\(rawValue: rawAppKind\)/,
-  );
+test("「电脑语音」已整体删除，只留 CLI 通话用的那条音频通道", () => {
+  // 2026-09-22 用户拍板：把 iPad 音频接到 Windows 上某个桌面聊天应用
+  // （Codex / GPT Classic）、再往它输入框里打字，这个功能整个去掉。
+  //
+  // ⚠ 但 DirectVoiceSocket / NativeVoiceBridge **不能删**：CLI 语音通话
+  // （语音核心推 VoIP → CallKit 接通 → onCallAudioReady）用的就是它当音频通道。
+  // 当初差点按字面把这几个文件一起删掉，那会把要保留的那条一并删掉。
+  assert.doesNotMatch(codeOnly(readerWebView), /bwNativeComputerVoice|codexDesktop|chatgpt-classic/);
+  assert.doesNotMatch(codeOnly(bridgeContract), /supportedAppKinds|"voice\.toggle"/);
+  assert.doesNotMatch(codeOnly(background), /"voice\.toggle"/);
+  // 留下来的那条：状态与通话中读页上下文。
+  assert.match(bridgeContract, /"voice\.status"[\s\S]*"voice\.context"/);
   assert.match(
     nativeVoiceSystem,
     /CFBundleShortVersionString/,

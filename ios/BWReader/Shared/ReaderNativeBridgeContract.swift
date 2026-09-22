@@ -11,8 +11,12 @@ enum ReaderNativeBridgeContract {
 
     static let supportedActions = [
         "capabilities",
+        // ⚠ 没有 "voice.toggle"。它是"在 Safari 里点一下 → 拉起 App → 把 iPad
+        //   音频接到 Windows 上某个桌面聊天应用"，也就是「电脑语音」的入口 ——
+        //   整个功能已删除（2026-09-22 用户拍板）。
+        //   voice.status / voice.context **保留**：CLI 语音通话要用它们报状态、
+        //   要页面上下文，那条链不经过任何桌面聊天应用。
         "voice.status",
-        "voice.toggle",
         "voice.context",
         "agent.status",
         "agent.toggle",
@@ -33,11 +37,6 @@ enum ReaderNativeBridgeContract {
         //   native handler 跑在扩展进程里，App 在不在前台都不影响。
         "dict.status",
     ]
-    static let supportedAppKinds = [
-        "codex-desktop",
-        "chatgpt-classic",
-    ]
-
     static func isSafeRequestID(_ value: String) -> Bool {
         guard (8...128).contains(value.utf8.count) else {
             return false
@@ -100,43 +99,9 @@ struct ReaderNativeWebContext: Codable, Equatable {
     }
 }
 
-struct ReaderNativePendingVoiceCommand: Codable, Equatable {
-    let contract: String
-    let action: String
-    let requestID: String
-    let appKind: String
-    let createdAtMilliseconds: Int64
-    let sourceURL: String?
-    let selectionText: String?
-    let webContext: ReaderNativeWebContext?
-
-    init(
-        requestID: String,
-        appKind: String,
-        sourceURL: String?,
-        selectionText: String?,
-        webContext: ReaderNativeWebContext? = nil,
-        now: Date = Date()
-    ) {
-        contract = ReaderNativeBridgeContract.name
-        action = "voice.toggle"
-        self.requestID = requestID
-        self.appKind = appKind
-        createdAtMilliseconds = Int64(now.timeIntervalSince1970 * 1_000)
-        self.sourceURL = sourceURL
-        self.selectionText = selectionText
-        self.webContext = webContext
-    }
-
-    func isFresh(at date: Date = Date()) -> Bool {
-        let createdAt = Date(
-            timeIntervalSince1970: TimeInterval(createdAtMilliseconds) / 1_000
-        )
-        let age = date.timeIntervalSince(createdAt)
-        return age >= -2 && age <= ReaderNativeBridgeContract.pendingCommandLifetime
-    }
-}
-
+// ⚠ `ReaderNativePendingVoiceCommand` 已删除：它是 Safari 那一跳的载体
+// （appKind + 网页上下文 → App Group → bwreader://native-voice 拉起 App），
+// 随「电脑语音」整个下线。CLI 语音通话不经过 App Group 这条路。
 struct ReaderNativePendingAgentToggle: Codable, Equatable {
     let contract: String
     let action: String
@@ -379,63 +344,6 @@ struct ReaderNativeBridgeStore {
 
     private func fileURL(named name: String) throws -> URL {
         try requireDirectory().appendingPathComponent(name, isDirectory: false)
-    }
-
-    func writePending(_ command: ReaderNativePendingVoiceCommand) throws {
-        let data = try JSONEncoder().encode(command)
-        try data.write(
-            to: fileURL(named: "voice-pending.json"),
-            options: [.atomic]
-        )
-    }
-
-    func readPending() throws -> ReaderNativePendingVoiceCommand? {
-        let url = try fileURL(named: "voice-pending.json")
-        guard fileManager.fileExists(atPath: url.path) else {
-            return nil
-        }
-        do {
-            return try JSONDecoder().decode(
-                ReaderNativePendingVoiceCommand.self,
-                from: Data(contentsOf: url)
-            )
-        } catch {
-            throw ReaderNativeBridgeStoreError.malformedPendingCommand
-        }
-    }
-
-    /// Reads and removes one exact, fresh command before any voice side effect.
-    /// A repeated deep link therefore cannot toggle the session twice.
-    func consumePending(
-        requestID: String,
-        now: Date = Date()
-    ) throws -> ReaderNativePendingVoiceCommand? {
-        guard let command = try readPending() else {
-            return nil
-        }
-        guard command.requestID == requestID else {
-            return nil
-        }
-        let url = try fileURL(named: "voice-pending.json")
-        guard command.isFresh(at: now) else {
-            try? fileManager.removeItem(at: url)
-            return nil
-        }
-        try fileManager.removeItem(at: url)
-        return command
-    }
-
-    func consumeAnyPendingVoice(
-        now: Date = Date()
-    ) throws -> ReaderNativePendingVoiceCommand? {
-        guard let command = try readPending() else { return nil }
-        let url = try fileURL(named: "voice-pending.json")
-        guard command.isFresh(at: now) else {
-            try? fileManager.removeItem(at: url)
-            return nil
-        }
-        try fileManager.removeItem(at: url)
-        return command
     }
 
     func writeStatus(_ status: ReaderNativeVoiceStatus) throws {
