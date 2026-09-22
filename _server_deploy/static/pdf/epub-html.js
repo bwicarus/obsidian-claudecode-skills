@@ -1527,6 +1527,12 @@
   // 助手没开 → 不钉焦点入对话(选中本身仍能查词/翻译/高亮/带入 AI 结果框);开了才把选中当「现在问这个」的显式上下文
   window.__asstOpen = function () {
     try {
+      // ⚠ 原生侧栏接管时，“开没开”的答案在原生那边（网页抽屉永远不再被打开）。
+      //   不认它的话本函数恒为 false → __setFocusSel 恒短路 → **选中永远钉不进对话，
+      //   AI 看不到用户选了什么**（2026-09-22 用户实报，是“不再开网页抽屉”带出的回归）。
+      //   三态：true/false 都是原生给的权威答案；未定义才回落网页判断。
+      if (window.__bwNativeAssistantOpen === true) return true;
+      if (window.__bwNativeAssistantOpen === false) return false;
       var s = document.getElementById('ep-side');
       var a = document.getElementById('ep-side-asst') || document.getElementById('side-pane-asst');   // ③-4b:共享侧栏 pane(内联 pane 已摘)也认,否则 __setFocusSel 恒短路=选中 chip 永不钉
       return !!(s && s.classList.contains('open') && a && a.classList.contains('active'));

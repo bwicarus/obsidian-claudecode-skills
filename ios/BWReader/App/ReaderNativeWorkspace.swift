@@ -23,6 +23,10 @@ struct ReaderNativeWorkspace<Document: View>: View {
 
     @AppStorage("reader.navigationCollapsed") private var navigationCollapsed = false
     @State private var dropTarget = false
+    /// 侧栏宽度（点）。0 = 还没调过，按屏幕比例给默认值。
+    /// ⚠ 存起来而不是每次重算：调过一次就该一直是那个宽度，
+    ///   否则每次开侧栏都要重新拖一遍。
+    @AppStorage("reader.sidebarWidth") private var sidebarWidth: Double = 0
     /// 钉在顶栏的阅读工具。存的是换行分隔的身份串。
     /// ⚠ 身份优先用网页按钮的 id（稳定）；没 id 的才退回标题 ——
     ///   不能用 actionId，它带着 scope，**换一本书就变**，固定会自己掉。
@@ -112,17 +116,29 @@ struct ReaderNativeWorkspace<Document: View>: View {
                             }
                     }
                     if nativeSidebarVisible {
-                        Divider()
+                        // 侧栏宽度拖杆。⚠ 网页那个把手本来就能拖宽，原生接管后这个
+                        //   能力没人补上（2026-09-22 用户：“无法拖动侧边栏改变宽度”）。
+                        //   接管一个能力就要把它原来会的事一并接过来，否则就是“新的替代了旧的，
+                        //   但比旧的少一截”。
+                        ReaderNativeSidebarGrip(
+                            width: $sidebarWidth,
+                            available: geometry.size.width
+                        )
                         ReaderNativeConversationView(
                             model: conversation, voiceBridge: voiceBridge,
                             onClose: { Task { await conversation.perform("toggleAssistant") } },
                             onDiagnostics: openDiagnostics,
                             onSettings: { Task { await conversation.perform("openModels") } }
                         )
-                        .frame(width: min(420, max(300, geometry.size.width * 0.36)))
+                        .frame(width: ReaderNativeSidebarGrip.clamp(
+                            sidebarWidth > 0 ? sidebarWidth : geometry.size.width * 0.36,
+                            available: geometry.size.width))
                     }
                 }
-                .overlay(alignment: .topLeading) {
+                // ⚠ 展开把手跟收起按钮**同一个位置**（顶部居中）。
+                //   原来收起在右、展开在左，用户得满屏找它去了哪里
+                //   （2026-09-22 用户：“打开在右边关闭在左边很蠢”）。
+                .overlay(alignment: .top) {
                     if navigationCollapsed {
                         Button { navigationCollapsed = false } label: {
                             Image(systemName: "chevron.down")
@@ -272,11 +288,10 @@ struct ReaderNativeWorkspace<Document: View>: View {
                 //   最难的一类情况恰恰是"一条报告都没有" ——
                 //   那时候需要看的是面包屑和上报通道自己的状态。
                 Button("故障现场", systemImage: "stethoscope", action: openFaultLog)
-                if conversation.capabilities.contains("showLegacy") {
-                    Button("完整阅读界面", systemImage: "rectangle.on.rectangle") {
-                        Task { await conversation.perform("showLegacy") }
-                    }
-                }
+                // ⚠ “完整阅读界面”（showLegacy）入口已移除（2026-09-22 用户：
+                //   “点击完整功能按钮后旧的侧边栏又出现了，不是说删除了么”）。
+                //   旧界面在 App 上不再是一个用户可以主动进去的地方。
+                //   底层 setLegacy 仍保留，因为搜索/复习那几个还没原生化的面要用它。
                 Divider()
                 Toggle("原生界面", isOn: $enabled)
             } label: {
@@ -306,5 +321,53 @@ struct ReaderNativeWorkspace<Document: View>: View {
         .padding(.horizontal, 14)
         .frame(height: 40)
         .background(ReaderNativeTheme.card)
+    }
+}
+
+/// 侧栏与正文之间的拖杆。
+///
+/// ⚠ 它替代的是网页抽屉把手「长按后左右拖动调整宽度」那个能力。原生接管侧栏之后
+/// 那条路没了，而宽度是用户每天都在调的东西 —— 接管一个能力就要把它原来会的事
+/// 一并接过来，否则就是"新的替代了旧的，但比旧的少一截"。
+@MainActor
+struct ReaderNativeSidebarGrip: View {
+    @Binding var width: Double
+    let available: CGFloat
+    @State private var startWidth: Double?
+
+    /// ⚠ 上下界跟着屏幕走：写死的最小值在窄屏上会把正文挤没。
+    static func clamp(_ value: Double, available: CGFloat) -> CGFloat {
+        let maximum = max(280, Double(available) - 320)
+        return CGFloat(min(max(value, 280), maximum))
+    }
+
+    var body: some View {
+        Rectangle()
+            .fill(ReaderNativeTheme.muted.opacity(0.28))
+            .frame(width: 1)
+            .overlay {
+                // 命中区比视觉上那条线宽得多 —— 1pt 的线手指够不着。
+                Capsule()
+                    .fill(ReaderNativeTheme.muted.opacity(0.45))
+                    .frame(width: 4, height: 44)
+                    .frame(width: 22)
+                    .contentShape(Rectangle())
+            }
+            .gesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { value in
+                        if startWidth == nil {
+                            startWidth = width > 0 ? width : Double(available) * 0.36
+                        }
+                        width = Double(Self.clamp((startWidth ?? 0) - Double(value.translation.width),
+                                                  available: available))
+                    }
+                    .onEnded { _ in startWidth = nil }
+            )
+            .accessibilityLabel("调整侧栏宽度")
+            .accessibilityAdjustableAction { direction in
+                let base = width > 0 ? width : Double(available) * 0.36
+                width = Double(Self.clamp(base + (direction == .increment ? 40 : -40), available: available))
+            }
     }
 }

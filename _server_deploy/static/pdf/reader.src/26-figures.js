@@ -462,6 +462,12 @@
   // (用户要求:没开 AI 栏时点选/多选只做查词/翻译/高亮,别悄悄往对话塞焦点/带入图)
   window.__asstOpen = function () {
     try {
+      // ⚠ 原生侧栏接管时，“开没开”的答案在原生那边（网页抽屉永远不再被打开）。
+      //   不认它的话本函数恒为 false → __setFocusSel 恒短路 → **选中永远钉不进对话，
+      //   AI 看不到用户选了什么**（2026-09-22 用户实报，是“不再开网页抽屉”带出的回归）。
+      //   三态：true/false 都是原生给的权威答案；未定义才回落网页判断。
+      if (window.__bwNativeAssistantOpen === true) return true;
+      if (window.__bwNativeAssistantOpen === false) return false;
       // drawer=shared(已翻默认)把 #grammar-panel 改名 #ep-side;不认它 → p 恒 null → __setFocusSel 恒短路
       //   = PDF 选中的焦点 chip 永不显示(EPUB 那份本就查 #ep-side 所以正常)。两名都认,legacy 逃生舱不受影响。
       var p = document.getElementById('grammar-panel') || document.getElementById('ep-side');

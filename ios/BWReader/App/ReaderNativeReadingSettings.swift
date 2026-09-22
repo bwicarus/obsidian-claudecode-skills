@@ -130,7 +130,7 @@ struct ReaderNativeReadingSettingsView: View {
                                 .font(.footnote).foregroundStyle(.orange)
                         }
                     } header: {
-                        Text("原生阅读区（迁移中）")
+                        Text("原生阅读区（PDF 已接 · EPUB 未接）")
                     } footer: {
                         // ⚠ 这段话是给人做决定用的，不是装饰：接齐一项就删一项。
                         //   写着"尚未接"而其实已经接了的话，用户会为了一个不存在的
@@ -156,7 +156,7 @@ struct ReaderNativeReadingSettingsView: View {
                              + "没登录 iCloud 时它安静地不工作，本地照常用。")
                     }
                     Section {
-                        Toggle("本机数据库（迁移中）", isOn: $nativeDataStore)
+                        Toggle("本机数据库", isOn: $nativeDataStore)
                     } header: {
                         Text("存储")
                     } footer: {

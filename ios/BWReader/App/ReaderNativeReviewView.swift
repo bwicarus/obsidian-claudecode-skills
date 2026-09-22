@@ -44,6 +44,15 @@ struct ReaderNativeReviewView: View {
                 }
                 .frame(height: panelHeight)
                 .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 14))
+                // ⚠ 卡片区左右滑即上/下一张（2026-09-22 用户：“卡片区域左右
+                //   滑动也无法进行”）。阀值给得大一点，否则跟卡内选文字打架。
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 44)
+                        .onEnded { value in
+                            guard !saving, abs(value.translation.width) > abs(value.translation.height) else { return }
+                            select(value.translation.width < 0 ? index + 1 : index - 1)
+                        }
+                )
                 ratingControls
                 HStack {
                     Button { select(index - 1) } label: { Image(systemName: "chevron.left") }
@@ -112,17 +121,33 @@ struct ReaderNativeReviewView: View {
         }.buttonStyle(.borderless).disabled(model.isPerforming("reviewAction"))
     }
 
+    /// 四个难度的颜色。⚠ 跟 Anki 自己的习惯一致（红/橙/绿/蓝）——
+    /// 这是肌肉记忆，自己另配一套颜色只会让人点错。
+    private static let ratingTints: [Color] = [.red, .orange, .green, .blue]
+
     @ViewBuilder private var ratingControls: some View {
         if state["showingAnswer"] as? Bool == true {
-            HStack(spacing: 6) {
+            // ⚠ 撑满宽度 + 每个带颜色（2026-09-22 用户：“没有利用好空间
+            //   也没有用颜色标识”）。复习时这四个键是按得最多的，
+            //   小而同色既难点又容易点错。
+            HStack(spacing: 8) {
                 ForEach(Array(["重来", "困难", "良好", "简单"].enumerated()), id: \.offset) { entry in
-                    Button(entry.element) { Task { await model.performReview("rate", values: ["ease": entry.offset + 1]) } }
-                        .font(.caption.weight(.medium)).frame(maxWidth: .infinity)
+                    Button {
+                        Task { await model.performReview("rate", values: ["ease": entry.offset + 1]) }
+                    } label: {
+                        Text(entry.element)
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Self.ratingTints[entry.offset])
                 }
-            }.buttonStyle(.bordered).disabled(saving)
+            }.disabled(saving)
         } else {
             Button("显示答案") { Task { await model.performReview("reveal") } }
-                .buttonStyle(.borderedProminent).frame(maxWidth: .infinity).disabled(saving)
+                .buttonStyle(.borderedProminent)
+                .frame(maxWidth: .infinity).frame(height: 44).disabled(saving)
         }
     }
 

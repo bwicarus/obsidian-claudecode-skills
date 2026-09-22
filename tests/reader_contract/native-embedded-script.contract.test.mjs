@@ -161,7 +161,9 @@ test("网页外壳的隐藏在 documentStart 落地，不靠消息送达", () =>
     "../../ios/BWReader/App/ReaderWebView.swift", import.meta.url), "utf8");
   const start = view.indexOf("bw-native-shell-style");
   assert.ok(start > 0, "没有 documentStart 那条外壳样式");
-  const after = view.slice(start, start + 800);
+  // ⚠ 片段要够长：这段注释会随着多藏一个元素就变长，写死 800
+  //   会把 injectionTime 挤出片段外，断言就莫名其妙地红。
+  const after = view.slice(start, start + 2600);
   assert.match(after, /injectionTime: \.atDocumentStart/, "外壳样式必须在 documentStart");
   // 默认方向必须是"没有网页外壳"，关掉原生界面才放回来 ——
   // 失败时的结果就从"两套都在"变成"只有原生"。

@@ -1294,7 +1294,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               style.textContent =
                 '.bw-native-shell:not(.bw-native-legacy-chrome) #header,' +
                 '.bw-native-shell:not(.bw-native-legacy-chrome) #ep-top,' +
-                '.bw-native-shell:not(.bw-native-legacy-chrome) #fs-restore{display:none!important}';
+                '.bw-native-shell:not(.bw-native-legacy-chrome) #fs-restore,' +
+                // ⚠ 网页顶栏的收起把手（rc-ui.js 的 mountCollapsibleTopbar）挂在顶栏
+                //   **外面**（el.parentNode），所以只藏顶栏它还在 —— 屏幕中间那个
+                //   孤零零的小药丸就是它（2026-09-22 用户：“旧的上边栏把手没有清除”）。
+                '.bw-native-shell:not(.bw-native-legacy-chrome) .rc-topbar-pill,' +
+                // ⚠ rc-voicecall 把两个语音按钮插在 #fs-toggle 旁边当顶栏入口，
+                //   它们不在被藏的容器里 —— EPUB 上就成了正文上方一条孤零零的条
+                //   （2026-09-22 用户：“epub 上方不知为何有个这东西”）。
+                //   原生侧栏里有同款的电脑语音/通话，这两个是多余的。
+                '.bw-native-shell:not(.bw-native-legacy-chrome) #vc-top-computer,' +
+                '.bw-native-shell:not(.bw-native-legacy-chrome) #vc-top-call{display:none!important}';
               root.appendChild(style);
             })();
             """,

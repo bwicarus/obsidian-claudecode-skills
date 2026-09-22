@@ -500,6 +500,15 @@ enum ReaderNativeConversationScript {
         //   不加 body 类、不挤压正文、不重排、不滑入。CSS 盖住只解决"看不看得见"，
         //   解决不了"开一次抽屉整本书重排两轮"——那才是把渲染进程顶掉的东西。
         try { drawer()?.setHeadless?.(nativeMode && !legacyVisible, 'asst'); } catch (_) {}
+        // 告诉网页层“助手开没开”。
+        // ⚠ 网页那边的 `__asstOpen()` 原本看的是抽屉有没有 open 类，
+        //   而原生接管后抽屉永远不再被打开 → 它恒为 false →
+        //   `__setFocusSel` 恒短路 → **选中永远钉不进对话，AI 看不到用户选了什么**。
+        //   没接管时置 undefined，让网页自己判 —— 不拿原生的“没开”去盖网页的“开了”。
+        try {
+          if (nativeOwnsAssistant()) root.__bwNativeAssistantOpen = nativeAssistantOpen;
+          else delete root.__bwNativeAssistantOpen;
+        } catch (_) {}
       }
       function setLegacy(visible) {
         legacyVisible = !!visible;
@@ -705,6 +714,8 @@ enum ReaderNativeConversationScript {
             if (nativeOwnsAssistant()) {
               nativeAssistantOpen = !nativeAssistantOpen;
               if (nativeAssistantOpen) { try { drawer().setTab('asst'); } catch (_) {} }
+              // 立刻同步，不等下一次快照 —— 用户开完侧栏马上选词是常态。
+              applyVisualMode();
               schedule();
               return { ok: true };
             }
