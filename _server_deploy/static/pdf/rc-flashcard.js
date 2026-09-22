@@ -2139,6 +2139,21 @@
     });
   }
   RC.flashcard = {
+    // 按 gid 取这一组当前挂着的容器。
+    //
+    // ⚠ 存在的理由：原生侧此前只能从"动作锚点那个 DOM 节点"往下爬找 __fc
+    // （flashGroup）。爬不到时整张卡就卡在"学习卡正在同步…"，而卡组其实好好地
+    // 在 _groups[gid] 里 —— 2026-09-22 实报。gid 是这组卡的身份，比"它此刻
+    // 挂在哪个节点下"稳得多；这也是把判断从 DOM 上摘下来的第一步。
+    containerOf: function (gid) {
+      var g = gid && _groups[gid];
+      if (!g) return null;
+      for (var i = 0; i < g.conts.length; i++) {
+        var c = g.conts[i];
+        if (c && c.isConnected && c.__fc) return c;
+      }
+      return null;
+    },
     interactionState: interactionState,
     performInteraction: performInteraction,
     mountDrafts: mountDrafts,

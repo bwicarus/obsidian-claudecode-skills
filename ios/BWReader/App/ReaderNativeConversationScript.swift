@@ -131,7 +131,8 @@ enum ReaderNativeConversationScript {
             result.kind = 'anki'; result.status = part.draft ? 'draft' : 'saved';
             result.actionId = registerAction(result.id, node, () => {});
             actions.get(result.actionId).inspect = () => ({ kind: 'anki', title: result.title,
-              content: { gid: part.gid, cardIndex: index, card: flashGroup(node)?.__fc.cards[index] || card } });
+              content: { gid: part.gid, cardIndex: index,
+                card: flashGroup(node, part.gid)?.__fc.cards[index] || card } });
             result.data = { ...safeFields(card, ['front', 'back', 'question', 'answer', 'type', 'cloze', 'text', 'explanation']), draft: !!part.draft, gid: text(part.gid, 160) };
             result.data.front = result.data.front ?? result.data.question ?? result.data.cloze ?? result.data.text ?? '';
             result.data.back = result.data.back ?? result.data.answer ?? '';
@@ -207,8 +208,19 @@ enum ReaderNativeConversationScript {
         }
         return body || parts.length || streaming ? { id, role, text: text(body), streaming, parts } : null;
       }
-      function flashGroup(node) {
-        return [node, ...node.querySelectorAll('*')].find(el => el.__fc && Array.isArray(el.__fc.cards));
+      // 找这组学习卡当前挂着的容器。
+      //
+      // ⚠ 先按节点爬（老路，命中率最高），爬不到再**按 gid 取**。
+      //   只爬节点的后果实测过：卡组明明在 _groups[gid] 里，只因为此刻不挂在
+      //   这个动作锚点下面，整张卡就卡在"学习卡正在同步…"（2026-09-22 实报）。
+      //   gid 是这组卡的身份，比"它此刻挂在哪儿"稳得多 —— 这也是把判断从 DOM
+      //   上摘下来的第一步。
+      function flashGroup(node, gid) {
+        const found = node
+          ? [node, ...node.querySelectorAll('*')].find(el => el.__fc && Array.isArray(el.__fc.cards))
+          : null;
+        if (found) return found;
+        try { return rc().flashcard?.containerOf?.(gid) || null; } catch (_) { return null; }
       }
       function inlineImageSources(values) {
         const sources = new Set();
@@ -233,7 +245,7 @@ enum ReaderNativeConversationScript {
             if (part.kind === 'anki') part.data.liveReason = 'node-gone';
             continue;
           }
-          const group = flashGroup(node);
+          const group = flashGroup(node, part.data?.gid);
           const cardIndex = Number(part.id.match(/-c-(\d+)$/)?.[1] || 0);
           const pinOwner = [node, ...node.querySelectorAll('*')].find(el => el.__bwPinHoldBindings?.length);
           const pin = pinOwner && rc().voiceCard?.contextControl?.(pinOwner);

@@ -28,9 +28,11 @@ struct ReaderNativeFaultLogView: View {
                     //   最需要看数字的时候（页面卡死/内存吃紧），阅读设置恰恰打不开。
                     Text("启动与内存")
                         .font(.footnote.weight(.semibold))
-                    Text(profile.readable + String(format: "
-当前占用 %dMB",
-                                                   ReaderNativeStartupProfile.footprintMB()))
+                    Text(profile.readable)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("当前占用 \(ReaderNativeStartupProfile.footprintMB())MB")
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -48,12 +50,8 @@ struct ReaderNativeFaultLogView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(copied ? "已复制" : "复制") {
-                        UIPasteboard.general.string =
-                            profile.readable + String(format: "
-当前占用 %dMB
-
-",
-                                                      ReaderNativeStartupProfile.footprintMB())
+                        UIPasteboard.general.string = profile.readable
+                            + "  当前占用 \(ReaderNativeStartupProfile.footprintMB())MB  "
                             + reporter.readableReport
                         copied = true
                     }
