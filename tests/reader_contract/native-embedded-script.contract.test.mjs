@@ -166,3 +166,22 @@ test("网页外壳的隐藏在 documentStart 落地，不靠消息送达", () =>
   const fn = js.slice(js.indexOf("function applyVisualMode("), js.indexOf("function setLegacy("));
   assert.match(fn, /bw-native-legacy-chrome', !nativeMode \|\| legacyVisible/);
 });
+
+test("App 里根本不建那套网页侧栏外壳", () => {
+  // 用户 2026-09-22 连问三次「就不能把旧的页面删掉么」。能删的就是这些纯界面：
+  // 把手、tab 条、外观设置面板、点空白关闭。剩下的 #ep-side 只当内容宿主 ——
+  // 原生侧栏从同一棵 DOM 读内容，再往下删掉的就是对话引擎本身。
+  const drawer = readFileSync(new URL(
+    "../../_server_deploy/static/pdf/rc-sidedrawer.js", import.meta.url), "utf8");
+  const build = drawer.slice(drawer.indexOf("function buildChrome(force)"),
+                             drawer.indexOf("function _syncSettingsUI"));
+  // ⚠ 提前返回必须在把手/tab 条之前 —— 排在后面等于白做。
+  const guard = build.indexOf("shelllessDrawer() && force !== true");
+  assert.ok(guard > 0, "没有无壳分支");
+  assert.ok(guard < build.indexOf("ep-side-handle"), "无壳分支排在把手之后了");
+  assert.ok(guard < build.indexOf("ep-side-tabs"), "无壳分支排在 tab 条之后了");
+  // ⚠ 判据必须取 documentStart 打的那个类，不能再依赖一条要送达的消息。
+  assert.match(drawer, /classList\.contains\('bw-native-shell'\)/);
+  // 逃生出口不能丢：真要看旧界面时按需补建。
+  assert.match(drawer, /if \(!_headless && shelllessDrawer\(\)\) ensureChrome\(\);/);
+});

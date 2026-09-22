@@ -566,7 +566,26 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   }
 
   // 建抽屉本体(模板没给则兜底创建空壳)+ 把手 + tab 栏(prepend 进抽屉)
-  function buildChrome() {
+  // 无壳模式：App 里**不建**这套网页外壳（把手 / tab 条 / 外观设置面板 / 点空白关闭）。
+  //
+  // ⚠ 用户 2026-09-22 连问三次「就不能把旧的页面删掉么」。能删的就是这些 ——
+  //   它们是纯界面。剩下的 `#ep-side` 只当**内容宿主**：助手那些 pane 仍然挂在
+  //   里面，原生侧栏从同一棵 DOM 读内容。删到这一步是这个表面上的极限，
+  //   再往下删掉的就是对话引擎本身。
+  // ⚠ 判据取 `bw-native-shell` —— 那个类是 App 在 **documentStart** 打的，
+  //   比任何脚本都早，所以不存在"消息没送到就退回旧界面"这种窗口。
+  // ⚠ 真要看旧界面（setLegacy）时按需补建：见 open() 里的 ensureChrome()。
+  function shelllessDrawer() {
+    try { return document.documentElement.classList.contains('bw-native-shell'); }
+    catch (_) { return false; }
+  }
+  function ensureChrome() {
+    if (_built && _shellBuilt) return;
+    _built = false; buildChrome(true);
+  }
+  var _shellBuilt = false;
+
+  function buildChrome(force) {
     if (_built) return; _built = true;
 
     var side = document.getElementById('ep-side');
@@ -574,6 +593,21 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       side = document.createElement('aside'); side.id = 'ep-side';
       document.body.appendChild(side);
     }
+    if (shelllessDrawer() && force !== true) {
+      // 只留内容宿主：不可见、不接触摸、不合成毛玻璃、不做过渡。
+      // 它仍然参与布局（visibility 而不是 display），这样 pane 里要量尺寸的代码照常工作。
+      side.classList.add('rc-side-shellless');
+      if (!document.getElementById('rc-side-shellless-style')) {
+        var st = document.createElement('style'); st.id = 'rc-side-shellless-style';
+        st.textContent = '#ep-side.rc-side-shellless{visibility:hidden!important;pointer-events:none!important;'
+          + 'backdrop-filter:none!important;-webkit-backdrop-filter:none!important;'
+          + 'transition:none!important;animation:none!important}';
+        document.head.appendChild(st);
+      }
+      return;
+    }
+    side.classList.remove('rc-side-shellless');
+    _shellBuilt = true;
     _bindSideBlankDismiss(side);
 
     // 把手(竖排 grip pill):点击 toggle；长按后横拖调整侧栏宽度
@@ -815,6 +849,10 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   }
   function open(tab) {
     var s = document.getElementById('ep-side'); if (!s) return;
+    // 真要看旧界面（setLegacy）时才把外壳补建出来。
+    // ⚠ 默认不建、用到才建 —— 这样"App 里没有旧侧栏"是结构事实，
+    //   而不是“有人记得去藏它”。逃生出口也没丢。
+    if (!_headless && shelllessDrawer()) ensureChrome();
     // 无头:只记状态 + 切 tab(内容要按 tab 挂载,原生才读得到),**一律不碰布局**。
     // 只对原生接管的那个 tab 生效;开到别的 tab 仍按界面开,否则那些面就成了黑洞。
     if (_headless && (tab || _lastTab()) === _headlessOwned) {

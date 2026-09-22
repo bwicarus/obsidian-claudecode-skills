@@ -79,11 +79,20 @@ test("passive sidebar content dismisses reader transients without stealing contr
   );
   assert.match(contract, /adapter\.clearSelection\(\)/);
   assert.match(contract, /CustomEvent\('rc:dismiss-transients'/);
+  // buildChrome 现在收 force 参数（2026-09-22 无壳模式：App 里默认不建这套
+  // 网页外壳，真要看旧界面时才补建）。约定本身没变：**只要把外壳建了出来，
+  // 就必须绑上点空白关闭**（模板自带的和兑底新建的都算）。
   assert.match(
     SIDEDRAWER,
-    /function buildChrome\(\)[\s\S]*?_bindSideBlankDismiss\(side\)/,
+    /function buildChrome\(force\)[\s\S]*?_bindSideBlankDismiss\(side\)/,
     "the blank-dismiss contract must be bound for both existing and fallback drawers",
   );
+  // 无壳分支跳过绑定是故意的：那时根本没有可点的外壳。
+  // 但它必须在绑定**之前**返回，否则就又变成"建了再藏"。
+  const shelllessAt = SIDEDRAWER.indexOf("shelllessDrawer() && force !== true");
+  assert.ok(shelllessAt > 0 &&
+            shelllessAt < SIDEDRAWER.indexOf("_bindSideBlankDismiss(side);"),
+            "shell-less branch must return before the chrome is bound");
 });
 
 test("sidebar pane and message bodies dismiss, while real controls remain interactive", () => {
