@@ -203,7 +203,7 @@ private struct ReaderRootView: View {
                 ProgressView()
                     .tint(ReaderNativeTheme.accent)
                     .padding(12)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .readerGlass(in: Capsule(), fallback: .ultraThinMaterial)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 8)
                     .allowsHitTesting(false)
@@ -213,7 +213,7 @@ private struct ReaderRootView: View {
                 ProgressView("正在恢复上次阅读")
                     .tint(ReaderNativeTheme.accent)
                     .padding(14)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .readerGlass(in: Capsule(), fallback: .ultraThinMaterial)
                     .allowsHitTesting(false)
             }
 
@@ -233,7 +233,7 @@ private struct ReaderRootView: View {
                     Label("\(faultReporter.pendingCount) 条故障现场待发送·点此查看", systemImage: "exclamationmark.triangle")
                         .font(.footnote)
                         .padding(.horizontal, 14).padding(.vertical, 10)
-                        .background(.ultraThinMaterial, in: Capsule())
+                        .readerGlass(in: Capsule(), fallback: .ultraThinMaterial)
                 }
                 .padding(.top, 10)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -247,7 +247,7 @@ private struct ReaderRootView: View {
                     .font(.footnote)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .readerGlass(in: Capsule(), fallback: .ultraThinMaterial)
                     .padding(.top, 10)
                     .onTapGesture { reader.dismissTransientNotice() }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -259,7 +259,7 @@ private struct ReaderRootView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .readerGlass(in: Capsule(), fallback: .ultraThinMaterial)
                     .padding(.top, 10)
                     .onTapGesture { reader.dismissWebContentRecoveryNotice() }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -271,7 +271,7 @@ private struct ReaderRootView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .readerGlass(in: Capsule(), fallback: .ultraThinMaterial)
                     .padding(.top, 10)
                     .onTapGesture {
                         nativeCommandReceiver.dismissNotice()
@@ -290,7 +290,7 @@ private struct ReaderRootView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .readerGlass(in: Capsule(), fallback: .ultraThinMaterial)
                     .padding(.bottom, 14)
                     .onTapGesture {
                         reader.nativePencilInk.retry()

@@ -72,7 +72,7 @@ struct ReaderNativeEPUBSelectionBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .readerGlass(in: RoundedRectangle(cornerRadius: 14), fallback: .regularMaterial)
         .padding(.horizontal, 12)
         .padding(.bottom, 10)
         .transition(.move(edge: .bottom).combined(with: .opacity))

@@ -157,7 +157,7 @@ struct ReaderNativeWorkspace<Document: View>: View {
                             Image(systemName: "chevron.down")
                                 .font(.caption.weight(.semibold))
                                 .frame(width: 44, height: 26)
-                                .background(.regularMaterial, in: Capsule())
+                                .readerGlass(in: Capsule(), fallback: .regularMaterial)
                         }
                         .accessibilityLabel("展开阅读顶栏")
                         .padding(6)
@@ -253,7 +253,8 @@ struct ReaderNativeWorkspace<Document: View>: View {
                     Button(control.title) { runReadingTool(control) }
                         .font(.caption.weight(.medium))
                         .padding(.horizontal, 8).frame(height: 30)
-                        .background(ReaderNativeTheme.accentWash, in: RoundedRectangle(cornerRadius: 9))
+                        .readerGlass(in: RoundedRectangle(cornerRadius: 9),
+                                     fallback: ReaderNativeTheme.accentWash)
                         .disabled(control.disabled)
                         .accessibilityLabel(control.title)
                 }
@@ -358,13 +359,12 @@ struct ReaderNativeSidebarGrip: View {
         // ⚠ 把手必须有**真实宽度**。上一版是 1pt 的线 + overlay 里的胶囊，
         //   结果是既看不清也点不到 —— overlay 画在父视图范围外，手势命中不了
         //   （2026-09-22 用户：“侧栏把手始终没看见”）。
-        ZStack {
-            Rectangle().fill(ReaderNativeTheme.muted.opacity(0.18))
-            Capsule()
-                .fill(ReaderNativeTheme.muted.opacity(0.75))
-                .frame(width: 4, height: 46)
-        }
-        .frame(width: 14)
+        Capsule()
+            .fill(ReaderNativeTheme.muted.opacity(0.75))
+            .frame(width: 4, height: 46)
+            .frame(width: 14, maxHeight: .infinity)
+            .readerGlass(in: RoundedRectangle(cornerRadius: 7),
+                         fallback: ReaderNativeTheme.muted.opacity(0.18))
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 2)

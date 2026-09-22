@@ -263,7 +263,10 @@ private struct ReaderNativePlacedCard: View {
             }
         }
         .frame(width: width)
-        .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14))
+        // 页卡是**浮在正文上**的，正是 Liquid Glass 该用的地方：下面的字要透出来，
+        // 才看得出这张卡钉在哪一段。iOS 26 以下原样用回不透明卡片色。
+        .readerGlass(in: RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14),
+                     fallback: ReaderNativeTheme.card)
         .overlay(RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14).stroke(ReaderNativeTheme.accent.opacity(0.2)))
         .overlay(alignment: .bottomTrailing) {
             if !item.collapsed, item.controls["resize"] != nil {
