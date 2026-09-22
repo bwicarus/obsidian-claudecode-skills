@@ -5943,9 +5943,13 @@ internal static class DirectBridgeSelfTest
                 events,
                 frames).ConfigureAwait(false),
             "codex-type");
+        // ⚠ 理由从 "not-in-call" 换成 "no-voice-core"（2026-09-22）：打字只有
+        //   语音核心一个归宿，"有没有桌面通话在跑"不再是判据 —— 那条链已删除。
+        //   钉住的仍是同一件事：**不能默默发到别处去**，而且不许顺手拉起任何应用
+        //   （EnsureRunningCount == 0）。
         Require(
             !typedIdle.GetProperty("ok").GetBoolean()
-            && typedIdle.GetProperty("reason").GetString() == "not-in-call"
+            && typedIdle.GetProperty("reason").GetString() == "no-voice-core"
             && transitionCount == 0
             && app.EnsureRunningCount == 0,
             "codex-type-refuses-to-send-when-no-call-is-live",

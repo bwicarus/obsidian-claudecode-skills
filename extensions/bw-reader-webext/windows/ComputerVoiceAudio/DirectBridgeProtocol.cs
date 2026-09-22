@@ -3078,30 +3078,13 @@ internal sealed class DirectBridgeProtocolSession
                     : "语音核心没接住这句（它在跑吗？）",
             };
         }
-        bool inCall = false;
-        try
-        {
-            inCall = _codexVoiceControl.ReadState().Active == true;
-        }
-        catch (Exception)
-        {
-            inCall = false;
-        }
-        if (!inCall)
-        {
-            return new
-            {
-                ok = false,
-                reason = "not-in-call",
-                detail = "现在没有正在进行的通话，打字内容没有归宿",
-            };
-        }
-        bool sent = await ReaderCodexPush.SendTypedAsync(
-            text, requestId, cancellationToken).ConfigureAwait(false);
+        // ⚠ 桌面端那条（查 Codex 台账在不在通话 → 往它输入框里打字）已删除
+        //   （2026-09-22 用户拍板）。打字只有一个归宿：语音核心。
         return new
         {
-            ok = sent,
-            reason = sent ? "sent" : "not-sent",
+            ok = false,
+            reason = "no-voice-core",
+            detail = "语音核心不在，打字内容没有归宿；请先在 ReaderPC 里启动语音核心。",
         };
     }
 
@@ -3959,50 +3942,18 @@ internal sealed class DirectBridgeProtocolSession
         }
     }
 
-    /// 同一条入口请求的最小间隔。活动连接上的 START 允许幂等重复，
-    /// 不设这个门就会对同一次"开语音"反复催对面。
-    ///
-    /// ⚠ **按会话计，不是按时钟计**（2026-09-10 用户实测：「我再次点击后…
-    /// 并没有发送内容到 codex 让他启动语音」）。原来是一个全局时间戳，于是用户
-    /// 第一次按失败、隔十几秒再按时被这个门当成"重复的幂等 START"挡掉 ——
-    /// 而那是一次**新的用户意图**，恰恰最该发。幂等重复的特征是 sessionId 相同；
-    /// 换了 sessionId 就是新按了一次。
-    private static readonly TimeSpan VoiceEntryRequestCooldown =
-        TimeSpan.FromSeconds(45);
+    /// ⚠ 只剩这一个锁：RequestChannelRelock 的去重还在用它。
+    /// 起语音入口的冷却/会话去重随桌面端那条链一起删了。
     private static readonly object VoiceEntryGate = new();
-    private static long _lastVoiceEntryRequestTicksUtc;
-    private static string _lastVoiceEntrySessionId = string.Empty;
-
-    /// <summary>
-    /// 同一时刻只允许**一个**入口任务在跑（2026-09-10 实测事故）。
-    /// </summary>
-    /// <remarks>
-    /// 上面那个冷却是**按 sessionId 算**的（2026-09-10 早些时候改的，因为
-    /// 全局时间戳会把用户真正的第二次点击当成幂等重复挡掉）。那个改动是对的，
-    /// 但它顺手把唯一的全局刹车也拆了：**换个 sessionId 就绕过一切**。
-    ///
-    /// 实录：19:47–20:23 的 35 分钟里，对面收到 **432 条**「指定操作」，
-    /// 来自 **191 个不同的 requestId** —— 平均每 11 秒诞生一个新任务。
-    /// 每个 START 都带一个新 sessionId，而 App 那阵在反复重连。
-    ///
-    /// 这个闸不看时间也不看会话，只问一句"上一个还在跑吗"：在跑就不再开第二个。
-    /// 正在跑的那个每一轮都读台账，语音一起来它自己收手 —— 多开一个不会更快，
-    /// 只会让对面多跑一轮。
-    /// </remarks>
-    private static int _voiceEntryInFlight;
 
     /// 起语音是不是正在进行中。推送侧据此判断「这次登记是不是中转」。
-    internal static bool VoiceEntryInFlight =>
-        Volatile.Read(ref _voiceEntryInFlight) == 1;
+    ///
+    /// ⚠ 恒为 false（2026-09-22）：会把它置真的只有"去拉桌面 Codex 的语音"
+    /// 那条链，而那条链已删除。语音核心那条是一次 HTTP 调用，没有"进行中"这个
+    /// 中间态，也就不存在需要等它锁定的临时绑定。
+    /// 留着这个常量是为了让上面那段推送逻辑仍然读得通，而不是悄悄把它删掉。
+    internal static bool VoiceEntryInFlight => false;
 
-    /// 请求发出后还要盯多久。**Codex 往前几秒才刚被我们拉起来**
-    /// （同一次 START 里 EnsureRunningAsync 干的），它的推送绑定要等自己的会话
-    /// 钩子跑完才登记 —— 在那之前管道对面没人。只发一次正好落在最差的时刻：
-    /// 请求失败，而失败原因只写进 lastNote，用户看到的是"什么都没发生"。
-    private static readonly TimeSpan VoiceEntryRetryWindow =
-        TimeSpan.FromSeconds(90);
-    private static readonly TimeSpan VoiceEntryRetryInterval =
-        TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// 送达之后再等多久才认为"这一次没生效"（2026-09-10 用户：「在 app 中开启
@@ -4161,294 +4112,21 @@ internal sealed class DirectBridgeProtocolSession
                 "voice-core-start");
             return;
         }
-        if (_codexVoiceControl.KeepActive)
-        {
-            return;
-        }
-        try
-        {
-            if (_codexVoiceControl.ReadState().Active == true)
-            {
-                return;
-            }
-        }
-        catch (Exception)
-        {
-            // 读不到就当"不知道" —— 继续发。见 remarks。
-        }
-        long now = DateTime.UtcNow.Ticks;
-        lock (VoiceEntryGate)
-        {
-            bool sameSession = string.Equals(
-                _lastVoiceEntrySessionId,
-                sessionId,
-                StringComparison.Ordinal);
-            long previous = _lastVoiceEntryRequestTicksUtc;
-            // 只挡"同一次开语音里重复的幂等 START"。换了 sessionId 说明用户
-            // 又按了一次 —— 那是新意图，必须放过去。
-            if (
-                sameSession
-                && previous != 0
-                && now - previous < VoiceEntryRequestCooldown.Ticks
-            )
-            {
-                return;
-            }
-            _lastVoiceEntryRequestTicksUtc = now;
-            _lastVoiceEntrySessionId = sessionId;
-        }
-        string requestId = "voice-entry-"
-            + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-                .ToString(System.Globalization.CultureInfo.InvariantCulture);
-        IDirectCodexVoiceControl control = _codexVoiceControl;
-        // 已经有一个在跑就不再开 —— 见 _voiceEntryInFlight 的说明。
-        // ⚠ 例外（2026-09-13 15:53 实录）：正在跑的那个 30 秒里一条都没送成
-        //   （Codex 刚重启、推送连连超时），新的 START 再被挡就是让用户
-        //   白等它把 90 秒窗口耗完。这种"卡住的任务"直接接管：取消它、
-        //   自己上。判据只看"送成过没有"，不看时钟以外的任何猜测。
-        if (Interlocked.Exchange(ref _voiceEntryInFlight, 1) == 1)
-        {
-            long startedTicks = Interlocked.Read(ref _voiceEntryRunningStartedTicks);
-            bool stuck =
-                Volatile.Read(ref _voiceEntryRunningSent) == 0
-                && startedTicks != 0
-                && DateTime.UtcNow.Ticks - startedTicks >= VoiceEntryTakeoverAfter.Ticks;
-            if (!stuck)
-            {
-                ReaderCodexPush.NoteVoiceEntryOutcome(
-                    requestId, true,
-                    "已有一个入口任务在跑，这一次不另开（防重连风暴）");
-                return;
-            }
-            try
-            {
-                _voiceEntryCts?.Cancel();
-            }
-            catch (Exception)
-            {
-                // 旧任务可能刚好自己结束了；取消失败不影响接管。
-            }
-            ReaderCodexPush.NoteVoiceEntryOutcome(
-                requestId, true,
-                "上一个入口任务 "
-                + ((int)TimeSpan.FromTicks(DateTime.UtcNow.Ticks - startedTicks).TotalSeconds)
-                    .ToString(CultureInfo.InvariantCulture)
-                + " 秒一条都没送成，这一次接管");
-        }
-        int myGeneration = Interlocked.Increment(ref _voiceEntryGeneration);
-        Interlocked.Exchange(ref _voiceEntryRunningStartedTicks, DateTime.UtcNow.Ticks);
-        Volatile.Write(ref _voiceEntryRunningSent, 0);
-        CancellationTokenSource entryLifetime = new(
-            VoiceEntryRetryWindow + VoiceEntryRetryInterval);
-        _voiceEntryCts = entryLifetime;
-        _ = Task.Run(async () =>
-        {
-          try
-          {
-            using CancellationTokenSource lifetime = entryLifetime;
-            DateTime deadline = DateTime.UtcNow + VoiceEntryRetryWindow;
-            // 送出去几次、上一次是什么时候 —— 用来决定这一轮该不该再送。
-            int sentCount = 0;
-            int round = -1;
-            DateTime lastSentAt = DateTime.MinValue;
-            // 连着几次整条链都没起来，先重启一次 Codex 再谈（见
-            // RestartCodexIfWedgedAsync；它自己判在不在通话、自己清零）。
-            await RestartCodexIfWedgedAsync(requestId, lifetime.Token)
-                .ConfigureAwait(false);
-            while (true)
-            {
-                round++;
-                try
-                {
-                    // 中途语音自己起来了(或别人起了)就收手 —— 再催一遍会让对面
-                    // 多按一次 F24,而那是**挂断**。
-                    if (control.ReadState().Active == true)
-                    {
-                        // 起来了 = 这一串失败到此为止。
-                        WriteVoiceEntryStreak(0);
-                        // ⚠ **把通道锁到刚起来的那条对话**（用户 2026-09-11
-                        // 定的顺序：「先通知某个对话让他打开语音，然后锁定打开
-                        // 语音的对话，然后通知建立通道」）。
-                        //
-                        // 事先猜一条绑上去是不可能猜准的 —— Codex 每次可能新开
-                        // 一条，而语音起来**之后**它是谁是确定的。绑定于是从
-                        // 一次猜测变成一次观测。
-                        await LockChannelToLiveCallAsync(lifetime.Token)
-                            .ConfigureAwait(false);
-                        return;
-                    }
-                }
-                catch (Exception)
-                {
-                    // 读不到就当不知道,继续按原计划催。
-                }
-                // ⚠ **没有绑定时先自己去建通道**（2026-09-10 用户点出的顺序）：
-                //
-                //   「顺序必须是冷启动后尝试刷新列表，等刷新成功时就证明 codex
-                //     加载成功，然后选择记录中的那个对话然后建立通道」
-                //
-                // 原来这里只会干等 —— 等 ReaderPC 那个 30 秒的自愈 tick，或者
-                // 等 Codex 自己的会话钩子登记。可**冷启动时两者都还没发生**：
-                // 钩子要等会话建起来，而会话要等语音起来，正是那个闭环。
-                // 于是按钮按下、Codex 被拉起来了，通道却始终是空的。
-                //
-                // ensure_channel 那四步（枚举管道 → tools/list 自证 →
-                // list_threads → 按记录选 → 登记）任何一步不成就整体失败，
-                // 所以"重试到成功"天然等价于"等 Codex 真的加载完"。
-                // ⚠ 它比窗口句柄可靠：句柄出现得比 app-tools 管道早得多，
-                // 而我们要的是后者。
-                if (ReaderCodexEndpoint.Current() is not { } live
-                    || !PipeStillExists(live.PipeName))
-                {
-                    await TryEnsureChannelAsync(requestId, lifetime.Token)
-                        .ConfigureAwait(false);
-                }
-                // 这一轮该不该送：
-                //   · 一次都没送成 → 一直试（送不出去不烧对面的额度）
-                //   · 送成过 → 等满宽限期，且还有补发预算才再送一次
-                bool maySend =
-                    sentCount == 0
-                    || (sentCount < VoiceEntrySendBudget
-                        && DateTime.UtcNow - lastSentAt >= VoiceEntrySentGrace);
-                if (maySend)
-                {
-                    // 发送前手上有没有绑定 —— 决定失败之后要不要立刻重建。
-                    bool hadBinding = ReaderCodexEndpoint.Current() is not null;
-                    bool sentNow = false;
-                    // ⚠ **这一轮为什么发**，一路带到账本（用户 2026-09-11：
-                    // 「每个动作都该带上触发的原因和记录，我们不记录无法分析
-                    // 多次发送指令的原因」）。那一夜 02:19–02:28 对面收到 6 条
-                    // 入口指令而账本一行都没有，我只能说"不知道是谁发的"。
-                    string why =
-                        "START " + sessionId
-                        + "（" + appKind + "）第 " + (round + 1) + " 轮："
-                        + ReaderCodexPush.ColdCodexNote()
-                        + (sentCount == 0
-                            ? "还没送成过"
-                            : "上一条送出已满 "
-                              + VoiceEntrySentGrace.TotalSeconds.ToString(
-                                  "0", CultureInfo.InvariantCulture)
-                              + " 秒仍未起来，补发");
-                    using (ReaderCodexPush.Because(why))
-                    try
-                    {
-                        sentNow = await ReaderCodexPush
-                            .RequestVoiceEntryAsync(
-                                requestId,
-                                lifetime.Token).ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                        // RequestVoiceEntryAsync 自己已经记过原因。
-                    }
-                    if (sentNow)
-                    {
-                        sentCount++;
-                        lastSentAt = DateTime.UtcNow;
-                        Volatile.Write(ref _voiceEntryRunningSent, sentCount);
-                    }
-                    else if (hadBinding)
-                    {
-                        // ⚠ **"对面没有收下这条消息" = 目标线程死了，不是通道坏了**
-                        // （2026-09-11 实测）：02:34–02:36 连着 12 次失败，每次后面
-                        // 都跟一条"通道已建立" —— 管道好好的，是目标 01a08c53 已经
-                        // 归档。而我只会重建通道、从不换目标，于是原地空转两分钟。
-                        //
-                        // 换成绑定那条（它是从活着的列表里挑出来的）。真连不上
-                        // 管道的情况下面那次 ensure 照样处理。
-                        if (ReaderCodexPush.LastNote.Contains(
-                                "对面没有收下", StringComparison.Ordinal))
-                        {
-                            ReaderCodexPush.ClearVoiceEntryTargetOverride();
-                        }
-                        // ⚠ **发送失败本身就是"这条绑定不通"的实测证据**，
-                        // 比等下一轮再问时钟强 —— 那正是本文件顶部那条教条
-                        // （判目标还活着用推送本身，不用时钟）。
-                        //
-                        // 实录 2026-09-11 00:18:24：绑定指着 d1db7cb6，而 Codex
-                        // 重启后管道名早就变了（管道名每次重启都变）。当时要等
-                        // 满一轮 10 秒才轮到重建，00:18:35 才好 —— 那 11 秒是
-                        // 白等的，因为失败的那一刻我们就已经知道它坏了。
-                        //
-                        // ⚠ 只在**本来有绑定**时才补这一次：绑定为 null 的情况
-                        // 循环顶部已经 ensure 过了，再来一次纯属重复。
-                        await TryEnsureChannelAsync(requestId, lifetime.Token)
-                            .ConfigureAwait(false);
-                    }
-                }
-                // ⚠ 这里**没有** `if (sent) return;`（2026-09-10 删掉的）。
-                // 送达只说明消息进了管道；判"起来了没有"的始终是循环顶部那次
-                // 台账读取。收工的唯一理由是语音真的起来了。
-                // ⚠ 这里原来有一个 40 秒的早退：没有绑定就提前放弃、直接兜底。
-                // 那在旧前提下是对的 —— 当时每一轮只是**干等**，等满 90 秒
-                // 纯属让按钮白闪。
-                //
-                // **前提没了**（2026-09-10）：现在每一轮都会主动跑一次
-                // TryEnsureChannelAsync，Codex 没起来时它立刻返回、起来了就当场
-                // 把通道建出来。等待本身成了有产出的事，早退反而是提前认输。
-                //
-                // 实测代价：22:47:51 按下 → 40 秒早退 → 因为 F24 兜底关着，
-                // 两条路都不通、什么都没做（用户看到"按钮直接灭掉"）；
-                // 而通道 22:49:06 就自己好了 —— **只差 35 秒**。
-                // 现在让它跑满窗口（90 秒），到点再谈兜底。
-                if (DateTime.UtcNow >= deadline)
-                {
-                    // 推送这条路走不通时，**桥自己把语音开起来**。
-                    //
-                    // 2026-09-10 与 Codex 核对后定的分工：它明确表示"通过模拟
-                    // 快捷键控制桌面应用这条操作路线目前不能执行"，并建议把桥端
-                    // 启动与它能做的（状态回报、处理通知、授权挂断）分开设计。
-                    // 那就分开 —— 起通话走桥自己那条已验证的链（拉起 Codex →
-                    // 等就绪 → 沉降 → 按一次 → 用台账确认），实测 3.7~5.8 秒。
-                    //
-                    // ⚠ 守卫全在 SetActiveAsync 里：已在通话不按（再按是挂断）、
-                    // 台账读不到失败关闭、冷却期内不按。
-                    //
-                    // ⚠ 记一次失败：连够 VoiceEntryRestartAfterFailures 次，
-                    // 下一次入口会先重启一次 Codex。
-                    WriteVoiceEntryStreak(ReadVoiceEntryStreak() + 1);
-                    if (ReaderCodexEndpoint.Current() is null)
-                    {
-                        // 通道整整一个窗口都没建起来 —— 这条得让 App 说出来，
-                        // 否则按钮只是灭掉（见 NoteBridgeGaveUp）。
-                        NoteBridgeGaveUp(
-                            requestId,
-                            "通道没能建立（Codex 可能还没加载完）");
-                    }
-                    StartVoiceFromBridge(control, requestId);
-                    return;
-                }
-                try
-                {
-                    await Task.Delay(
-                        VoiceEntryRetryInterval,
-                        lifetime.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    return;
-                }
-            }
-          }
-          finally
-          {
-              // ⚠ 无论怎么退出都要放闸 —— 漏放一次就是
-              // 「从此再也起不了语音」，而那种失效没有任何提示。
-              // 被接管的旧任务例外：闸已经归新任务持有，它不能替新任务放。
-              if (Volatile.Read(ref _voiceEntryGeneration) == myGeneration)
-              {
-                  Interlocked.Exchange(ref _voiceEntryInFlight, 0);
-              }
-          }
-        });
+        // ⚠⚠ 这里**没有** fallback 了（2026-09-22 用户拍板：
+        //   「我说要删掉的是使用桌面端的语音然后进行桥接的」）。
+        //
+        //   原来语音核心不在时，会去拉桌面 Codex：按全局快捷键把它的语音模式
+        //   打开、轮询台账确认起没起、失败重试。那条链整条删除 ——
+        //   本机不再有任何代码去驱动某个桌面聊天应用的语音。
+        //
+        //   ⚠ 但要**出声**：什么都不做且不吭气，表现就是"按了没反应"，
+        //   而真实原因（ReaderPC 没开）在别处根本看不出来。
+        ReaderCodexPush.NoteVoiceEntryOutcome(
+            "no-voice-core", false,
+            "语音核心不在（runtime 里没有 " + ExternalVoiceBackendFileName
+            + "）：请先在 ReaderPC 里启动语音核心。桌面端语音那条链已删除，不再有后备。");
     }
-
     /// <summary>入口任务一条都没送成、跑了这么久之后，新的 START 可以接管它。</summary>
-    private static readonly TimeSpan VoiceEntryTakeoverAfter = TimeSpan.FromSeconds(30);
-    private static int _voiceEntryGeneration;
-    private static long _voiceEntryRunningStartedTicks;
-    private static int _voiceEntryRunningSent;
-    private static CancellationTokenSource? _voiceEntryCts;
 
     /// <summary>连着几次整条入口都没把语音开起来，就重启一次 Codex。</summary>
     /// <remarks>
