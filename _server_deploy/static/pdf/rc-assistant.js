@@ -44,6 +44,10 @@
     var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML;
   }
   function typeset(el) {
+    // 同下面 renderMd：原生接管时这些 chip/公式行都在不渲染的子树里，排了没人看。
+    // ⚠ 这里**不能**调下面那个 _nativeOwnsThread —— 本文件有两个独立 IIFE
+    //   （37 行一个、964 行一个），跨不过去，调了就是每次 ReferenceError。
+    try { if (document.documentElement.classList.contains('bw-native-conversation-active')) return; } catch (_) {}
     try { if (RC.typeset) { RC.typeset(el); return; } } catch (e) {}
     try { if (el && window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (e) {}
   }
@@ -1452,13 +1456,23 @@
       });
     } catch (_) {}
   }
+  // 原生外壳接管助手时，这条消息流是 content-visibility:hidden 的，而原生侧栏
+  // 的正文来自结构化记录(turnCard.presentationOf 的 text 分段,里面就是源文本
+  // 的 $...$),**从不读这里排出来的公式**。也就是说 MathJax 在为一棵没人看、
+  // 也没人读的 DOM 排版 —— 长公式答案上这是最贵的一项
+  // (2026-09-22 用户:"后台如果在运行那些代码会很消耗性能")。
+  // ⚠ 每次现查 class,不缓存:模式是会被 setNativeMode/setLegacy 改的。
+  function _nativeOwnsThread() {
+    try { return document.documentElement.classList.contains('bw-native-conversation-active'); }
+    catch (_) { return false; }
+  }
   function renderMd(el, text, withMath) {
     try { el.innerHTML = (typeof md === 'function') ? md(text || ' ') : esc(text).replace(/\n/g, '<br>'); }
     catch (_) { el.innerHTML = esc(text).replace(/\n/g, '<br>'); }
     _linkifyPages(el);
     _assetInline(el);
     // withMath===false(流式期间)跳过 MathJax:原先每 100ms 对整段重 typeset,长答案末段二次方卡顿 → 收尾只跑一次
-    if (withMath !== false) { try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (_) {} }
+    if (withMath !== false && !_nativeOwnsThread()) { try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (_) {} }
     // 图片策略:流式期间不实例化 <img>——每个 delta 全量重渲会把图元素反复销毁重建,同一 URL 洪泛请求
     // (旧 img 上的 __proxied 防重标记随元素一起死)把后端 worker 打满 → 502;收尾/历史那次才真渲图,一图一请求。
     // 真渲时先过 rcImgStabilize(rc-video.js):已知失败的维基图直接换代理 URL,不再先撞一次墙。
