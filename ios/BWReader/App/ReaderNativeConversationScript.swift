@@ -68,24 +68,32 @@ enum ReaderNativeConversationScript {
         actions.set(actionId, { scope, node, run });
         return actionId;
       }
-      function reveal(node, tid, cardIndex) {
-        setLegacy(true);
-        if (tid && rc().turnCard?.openFlow) rc().turnCard.openFlow(tid);
-        if (node?.isConnected) {
-          const card = node.matches?.('.vc-card') ? node : node.querySelector?.('.vc-card');
-          if (card?.classList.contains('vc-dot')) card.querySelector('.vc-card-dot')?.click();
-          if (card?.classList.contains('vc-min')) card.querySelector('.vc-card-hd,.vc-if-hd')?.click();
-          if (Number.isInteger(cardIndex)) {
-            const group = [node, ...node.querySelectorAll('*')].find(el => el.__fcPager && Array.isArray(el.__fcActive));
-            const position = group?.__fcActive.indexOf(cardIndex) ?? -1;
-            if (position >= 0) group.__fcPager.goto(position, { reason: 'native-open-original' });
-          }
-          node.scrollIntoView({ block: 'center', behavior: 'instant' });
-        }
+      // 「打开原件」原来是 `setLegacy(true)` + 滚到那张卡 —— 也就是**把旧网页界面
+      // 端出来**。那是原生外壳里最后一条通往旧界面的路，已删除
+      // （2026-09-22 用户：“我要的是把旧的内容用原生功能直接代替后把原版删除”）。
+      // 取而代之：原件的内容就地交给原生检视器（下面 artifact 注册的 inspect）。
+      function revealContent(node) {
+        if (!node?.isConnected) return '';
+        // 只取正文，把网页自己的操作件剔掉 —— 它们在原生里既点不了、
+        // 显示出来也只是一堆没用的按钮文字。
+        const copy = node.cloneNode(true);
+        copy.querySelectorAll('button,input,select,textarea,script,style,.asst-btm,.asst-followups,.asst-undo,.asst-clip,.asst-jump')
+          .forEach(el => el.remove());
+        return String(copy.innerHTML || '').slice(0, 120000);
       }
       function artifact(id, node, title, body = '', tid = '') {
-        return { id, kind: 'artifact', title: text(title, 160) || '生成物', text: text(body, 1600), status: 'saved', data: {},
-          actionId: registerAction(id, node, () => reveal(node, tid)), actionLabel: tid ? '查看完整流程' : '打开原件' };
+        // ⚠ run 是空的：没有任何原生界面会去点它（openArtifact/action 已从
+        //   命令白名单里去掉）。原件改为**就地在原生里看**，所以这里必须
+        //   注册 inspect —— 不注册的话侧栏那个「内容资料」按钮点下去只会
+        //   得到"此项内容暂不可读取"，等于摆了个坏按钮。
+        const actionId = registerAction(id, node, () => {});
+        actions.get(actionId).inspect = () => ({
+          kind: 'html', title: text(title, 160) || '生成物',
+          content: { html: revealContent(node) ||
+            text(body, 1600).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') },
+        });
+        return { id, kind: 'artifact', title: text(title, 160) || '生成物', text: text(body, 1600),
+          status: 'saved', data: {}, actionId, actionLabel: tid ? '查看完整流程' : '查看原件' };
       }
       function safeFields(data, keys) {
         const out = {};
@@ -121,7 +129,7 @@ enum ReaderNativeConversationScript {
           return part.cards.map((card, index) => {
             const result = artifact(id + '-c-' + index, node, card.title || '学习卡片');
             result.kind = 'anki'; result.status = part.draft ? 'draft' : 'saved';
-            result.actionId = registerAction(result.id, node, () => reveal(node, '', index));
+            result.actionId = registerAction(result.id, node, () => {});
             actions.get(result.actionId).inspect = () => ({ kind: 'anki', title: result.title,
               content: { gid: part.gid, cardIndex: index, card: flashGroup(node)?.__fc.cards[index] || card } });
             result.data = { ...safeFields(card, ['front', 'back', 'question', 'answer', 'type', 'cloze', 'text', 'explanation']), draft: !!part.draft, gid: text(part.gid, 160) };
@@ -492,7 +500,7 @@ enum ReaderNativeConversationScript {
         if (rc().readerTOC?.read && rc().readerTOC?.jump) out.push('nativeTOC', 'openTOC');
         if (document.getElementById('asst-call')) out.push('toggleVoice');
         if (document.getElementById('asst-computer')) out.push('toggleComputerVoice');
-        if (actions.size) out.push('openArtifact', 'action', 'inspectArtifact');
+        if (actions.size) out.push('inspectArtifact');
         return out;
       }
       // ⚠ 条件里**去掉了 `isOpen()`**（2026-09-22 修「点侧栏按钮就崩」）。
@@ -1175,10 +1183,6 @@ enum ReaderNativeConversationScript {
               return { ok: false, error: '此项内容暂不可读取，请刷新后重试' };
             }
             return { ok: true, detail: JSON.parse(JSON.stringify(target.inspect())) };
-          } else if (action === 'openArtifact' || action === 'action') {
-            const target = actions.get(command.actionId);
-            if (!target || target.scope !== scope || !target.node?.isConnected) return { ok: false, error: '内容已更新，请重新打开' };
-            target.run();
           } else if (action === 'openModels' && typeof rc().assistant?.openModelSettings === 'function') {
             setLegacy(true); rc().assistant.openModelSettings();
           } else if (action === 'openSettings' && (typeof window.openSettings === 'function' || document.getElementById('ep-set-btn'))) {

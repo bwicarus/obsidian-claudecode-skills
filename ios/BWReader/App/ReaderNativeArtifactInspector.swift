@@ -23,14 +23,21 @@ struct ReaderNativeArtifactInspector: View {
                                     Text("原件数据完整保留。这里查看的是内容资料，不会重新生成或修改卡片。")
                                         .font(.subheadline).foregroundStyle(.secondary)
                                 }
-                                if !["anki", "fact", "general", "weather", "news", "images"].contains(detail.kind) {
+                                if !["anki", "fact", "general", "weather", "news", "images", "html"].contains(detail.kind) {
                                     Section {
                                         Label("此类型的原生交互尚未迁移", systemImage: "hammer")
                                             .foregroundStyle(.secondary)
                                     }
                                 }
                                 Section("内容资料") {
-                                    ReaderNativeInspectionValue(value: detail.content)
+                                    // 原件（artifact）的内容是一段 HTML —— 就地渲染，
+                                    // 而不是把标签当纯文本摆出来。这是「打开原件」不再
+                                    // 掉进旧网页界面之后，原件唯一的落脚处。
+                                    if detail.kind == "html", let html = detail.content["html"] as? String, !html.isEmpty {
+                                        ReaderNativeRichDocument(content: html, format: "html")
+                                    } else {
+                                        ReaderNativeInspectionValue(value: detail.content)
+                                    }
                                 }
                             }
                         }

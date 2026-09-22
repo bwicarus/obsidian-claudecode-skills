@@ -1291,7 +1291,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             // "showLegacy" 已删除：旧网页界面不再是一个可以被请求的目的地。
-            "hideLegacy", "openArtifact", "action", "refresh", "openTOC", "openSearch",
+            // "openArtifact" / "action" 一并删除：它们唯一的实现是把旧网页界面
+            // 端出来（reveal→setLegacy），而原生界面从来没有地方会去点它们。
+            "hideLegacy", "refresh", "openTOC", "openSearch",
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）

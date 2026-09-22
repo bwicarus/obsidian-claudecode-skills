@@ -400,13 +400,6 @@ final class ReaderNativeConversationModel: ObservableObject {
             return false
         }
         guard !pendingActions.contains(action) else { return false }
-        if action == "openArtifact" || action == "action" {
-            guard let id = parameters["actionId"] as? String,
-                  messages.contains(where: { $0.parts.contains(where: { $0.actionId == id }) }) else {
-                error = "这项操作已经更新，请使用当前卡片上的按钮。"
-                return false
-            }
-        }
         var command = parameters
         command["action"] = action
         command["scope"] = scope
