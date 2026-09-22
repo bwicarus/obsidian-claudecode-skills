@@ -242,6 +242,17 @@ private struct ReaderRootView: View {
             // 渲染进程被回收过。⚠ 页面此刻已经自己重载好了，这条提示**不是**
             // 要用户做什么，而是让这件事留下痕迹 —— 不出声它就等于没发生过，
             // 下次仍然只会收到一句"点一下就崩"。
+            if let notice = reader.transientNotice {
+                Text(notice)
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.top, 10)
+                    .onTapGesture { reader.dismissTransientNotice() }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+
             if let notice = reader.webContentRecoveryNotice {
                 Text(notice)
                     .font(.footnote)

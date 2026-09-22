@@ -442,15 +442,33 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     /// 页卡的锚标记（钉在正文词上的那些框）。同上：原生接管时由 PDFKit 解锚。
+    /// 标记框的每帧缓存。
+    ///
+    /// ⚠ 这个函数在 SwiftUI 的 body 里被调，而 body 随 `geometryRevision`
+    /// 重算 —— 也就是**滚动的每一帧、每一张卡都要跑一遍**。
+    /// 原来每次都线性扫一遍 notes 再重算几何，卡一多就是每帧 O(n²) ——
+    /// 用户报的“滚动时没跟紧画面、有延迟还卡顿”就是它。
+    /// 缓存按 (revision, 容器位置) 失效：两者都没变就不可能有新答案。
+    private var markerRectCacheKey: (revision: Int, container: CGRect)?
+    private var markerRectCache: [String: [CGRect]] = [:]
+
     func nativePageMarkerRects(id: String, in container: CGRect) -> [CGRect]? {
-        guard let document = nativePDFDocument,
-              let note = document.notes.first(where: { $0["id"] as? String == id }),
+        guard let document = nativePDFDocument else { return nil }
+        let key = (document.geometryRevision, container)
+        if markerRectCacheKey?.revision != key.revision || markerRectCacheKey?.container != key.container {
+            markerRectCacheKey = key
+            markerRectCache.removeAll(keepingCapacity: true)
+        }
+        if let cached = markerRectCache[id] { return cached }
+        guard let note = document.notes.first(where: { $0["id"] as? String == id }),
               let geometry = document.noteGeometry(note) else { return nil }
         // 绑定解不出来时返回空数组而不是 nil：那是"这张卡确实没钉在正文上"，
         // 跟"没有原生几何"是两回事，退回网页路径反而会画出错位的框。
-        return geometry.bindingRects.map {
+        let rects = geometry.bindingRects.map {
             document.view.convert($0, to: nil).offsetBy(dx: -container.minX, dy: -container.minY)
         }
+        markerRectCache[id] = rects
+        return rects
     }
 
     func nativePageCardRect(_ rect: CGRect, in container: CGRect) -> CGRect {
@@ -5433,6 +5451,28 @@ extension ReaderWebViewModel: WKNavigationDelegate {
     }
 
     func dismissWebContentRecoveryNotice() { webContentRecoveryNotice = nil }
+
+    /// 随手一句话的提示（顶层胶囊，几秒后自己消失）。
+    ///
+    /// ⚠ 存在的理由：原生那堆“点一下去做件事”的按钮失败时，错误只写进
+    /// `ReaderNativeConversationModel.error`，而那东西只在**侧栏里**显示 ——
+    /// 侧栏多半没开。于是用户看到的就是“点了没反应”，而我们连它报没报错都不知道。
+    @Published private(set) var transientNotice: String?
+    private var transientNoticeTicket = 0
+
+    func showTransientNotice(_ text: String) {
+        guard !text.isEmpty else { return }
+        transientNotice = text
+        transientNoticeTicket += 1
+        let ticket = transientNoticeTicket
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard let self, self.transientNoticeTicket == ticket else { return }
+            self.transientNotice = nil
+        }
+    }
+
+    func dismissTransientNotice() { transientNotice = nil }
 
     /// App 这一侧的内存占用。⚠ 渲染进程是**另一个**进程，这个数字不等于它 ——
     /// 但两边一起涨是常态，所以它仍然是"是不是内存压力"的第一手线索。

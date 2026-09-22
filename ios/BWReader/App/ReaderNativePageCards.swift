@@ -82,6 +82,23 @@ struct ReaderNativePageCards: View {
         .clipped()
     }
 
+    /// 打开/收起一张词锚卡。
+    ///
+    /// ⚠ 失败要**出声**。之前这里是 `Task { await model.perform(...) }` 把结果丢掉，
+    /// 而 `model.error` 只在侧栏里显示 —— 侧栏多半没开。于是用户看到的就是
+    /// “点了没反应”，而我们连它报没报错都不知道（2026-09-22 实报）。
+    private func openBoundCard(_ item: ReaderNativePagePlacement) {
+        guard let id = item.controls["toggleBound"] else {
+            reader.showTransientNotice("这张卡没有可用的展开操作。")
+            return
+        }
+        Task {
+            if await model.perform("liveAction", parameters: ["actionId": id]) == false {
+                reader.showTransientNotice(model.error ?? "卡片没能打开，请重试。")
+            }
+        }
+    }
+
     @ViewBuilder
     private func cards(in geometry: GeometryProxy) -> some View {
         ZStack(alignment: .topLeading) {
@@ -94,11 +111,7 @@ struct ReaderNativePageCards: View {
                     ForEach(Array(item.markers.enumerated()), id: \.element.id) { index, marker in
                         let box = nativeMarkers.map { index < $0.count ? $0[index] : .zero }
                             ?? reader.nativePageCardRect(marker.rect, in: geometry.frame(in: .global))
-                        Button {
-                            if let id = item.controls["toggleBound"] {
-                                Task { await model.perform("liveAction", parameters: ["actionId": id]) }
-                            }
-                        } label: {
+                        Button { openBoundCard(item) } label: {
                             ZStack {
                                 if marker.outline {
                                     RoundedRectangle(cornerRadius: 3)
@@ -121,11 +134,7 @@ struct ReaderNativePageCards: View {
                     //   因为序号是网页排的，这里不去猜一个可能对不上的号）。
                     if item.markers.isEmpty, item.bound, let boxes = nativeMarkers, !boxes.isEmpty {
                         ForEach(Array(boxes.enumerated()), id: \.offset) { _, box in
-                            Button {
-                                if let id = item.controls["toggleBound"] {
-                                    Task { await model.perform("liveAction", parameters: ["actionId": id]) }
-                                }
-                            } label: {
+                            Button { openBoundCard(item) } label: {
                                 RoundedRectangle(cornerRadius: 3)
                                     .stroke(ReaderNativeTheme.accent.opacity(item.open ? 1 : 0.65), lineWidth: 1.2)
                                     .frame(width: box.width, height: box.height)

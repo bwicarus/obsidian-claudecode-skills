@@ -54,5 +54,5 @@ test("④ 词锚描边由原生补，因为网页那份画不出来", () => {
   assert.doesNotMatch(fallback.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n"),
     /marker\.number|ordinal/);
   // 原生解不出绑定时返回空数组而不是 nil —— 那是「确实没钉在正文上」。
-  assert.match(WEBVIEW, /return geometry\.bindingRects\.map \{/);
+  assert.match(WEBVIEW, /let rects = geometry\.bindingRects\.map \{/);
 });

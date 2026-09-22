@@ -3749,7 +3749,18 @@
   async function nativePlacementAction(command) {
     if (!O || !command || command.generation !== _generation) throw new Error('书籍已切换');
     var note = currentNote(command.id), ctl = ctls[command.id];
-    if (!note || !ctl || JSON.stringify(note) !== command.version) throw new Error('卡片已更新，请重新操作');
+    if (!note || !ctl) throw new Error('卡片已更新，请重新操作');
+    // 版本必须逐字对得上的，只有**会改内容/位置**的那几个动作。
+    //
+    // ⚠ `toggleBound` / `collapse` / `expand` 只是开合，跟卡片内容无关。把它们一起
+    //   卡在严格版本上的后果是：快照里的 version 只要因为任何原因变一下
+    //   （几何、渲染态、时间戳…），点过去就是'卡片已更新'——
+    //   而用户看到的只是**点了没反应**（2026-09-22 实报：“点击绑定了卡片的
+    //   单词没反应”）。开合本来就是幂等的，过期也不会造成错误结果。
+    var contentAction = ['move', 'resize', 'remove', 'anchor'].indexOf(command.key) >= 0;
+    if (contentAction && JSON.stringify(note) !== command.version) {
+      throw new Error('卡片已更新，请重新操作');
+    }
     var slot = cardPayloadSlot(note), fields = {}, payload;
     if (!slot) throw new Error('此内容尚未迁移');
     if (command.key === 'resize') {

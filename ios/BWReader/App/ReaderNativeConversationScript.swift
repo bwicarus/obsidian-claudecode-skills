@@ -344,7 +344,27 @@ enum ReaderNativeConversationScript {
             imagesReady && !/<(?:iframe|video|audio|svg|canvas|script|button|input|select|textarea)\b/i.test(rich);
           item.root.toggleAttribute('data-bw-native-placement', !!supported);
           for (const marker of item.markers || []) marker.node.toggleAttribute('data-bw-native-placement', !!supported);
-          if (!supported || !item.visible && !item.markers?.length) return [];
+          // ⚠ `supported` 只该管**卡身能不能原生画**，不该把词错标记一起拖下水。
+          //   不支持时原来直接 return []，于是：网页标记留着（看着像旧框）、
+          //   原生不画 —— 而原生正文接管后网页那层根本不接触摸，结果就是
+          //   **旧框没转成新框，而且点不开**（2026-09-22 用户实报）。
+          //   现在：卡身不支持就不交卡身（网页那份继续显示），但**标记照交**，
+          //   至少点得开。
+          if (!supported) {
+            if (!item.bound || !item.markers?.length) return [];
+            const markerOnlyID = 'placement-' + hash(item.generation + ':' + item.id);
+            return [{ id: markerOnlyID, title: item.html?.label || '学习卡',
+              bound: item.bound, collapsed: item.collapsed, visible: false, open: item.open,
+              controls: controls, parts: [],
+              ink: { strokes: [], aspectRatio: 0, geometry: null }, size: null,
+              markers: (item.markers || []).map((marker, index) => ({
+                id: markerOnlyID + '-marker-' + index, kind: marker.kind, number: marker.number,
+                rect: { x: marker.rect.x / innerWidth, y: marker.rect.y / innerHeight,
+                  width: marker.rect.width / innerWidth, height: marker.rect.height / innerHeight } })),
+              rect: { x: item.rect.x / innerWidth, y: item.rect.y / innerHeight,
+                width: item.rect.width / innerWidth, height: item.rect.height / innerHeight } }];
+          }
+          if (!item.visible && !item.markers?.length) return [];
           const id = 'placement-' + hash(item.generation + ':' + item.id);
           const token = id + '-' + hash(item.version);
           const invoke = async (key, extra = {}) => { const ok = await owner.nativePlacementAction({
