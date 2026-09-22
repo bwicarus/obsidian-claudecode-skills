@@ -322,6 +322,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 拖卡时画的落点预览（窗口坐标）。nil = 当前没在拖，或这个点钉不住。
     @Published private(set) var cardDropPreview: ReaderNativeDropPreview?
     private var dropPreviewStamp = Date.distantPast
+    private var dropPreviewPoint = CGPoint(x: -10_000, y: -10_000)
     private var dropPreviewBusy = false
     private var webContentTerminationCount = 0
     @Published private(set) var libraryPresentationRequestID: UUID?
@@ -734,6 +735,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ///   没有（EPUB / 网页渲染的 PDF）才问网页那份 —— 那种情形下正文确实
     ///   由网页渲染，视口坐标是对的。
     func previewCardDrop(windowPoint: CGPoint) {
+        // ⚠⚠ **必须限流。** 原生那条看着是"同步的、很便宜"，其实每次都要跑一趟
+        //   JavaScriptCore（pdf-selection-core 的 hit + exact）。挂在拖动的
+        //   onChanged 上就是**每帧一次**，手指走 10 卡片只跟出 3
+        //   —— 2026-09-22 用户原话"移动完全不跟着手指"。
+        //   预览是给眼睛看的，隔几十毫秒更新一次完全够。
+        let dx = windowPoint.x - dropPreviewPoint.x, dy = windowPoint.y - dropPreviewPoint.y
+        guard dx * dx + dy * dy > 36, Date().timeIntervalSince(dropPreviewStamp) > 0.09 else { return }
+        dropPreviewPoint = windowPoint
+        dropPreviewStamp = Date()
         if let document = nativePDFDocument {
             let local = document.view.convert(windowPoint, from: nil)
             cardDropPreview = document.dropPreview(local).map {
@@ -745,18 +755,22 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         previewCardDropViaWeb(windowPoint)
     }
 
-    func clearCardDropPreview() { cardDropPreview = nil }
+    func clearCardDropPreview() {
+        cardDropPreview = nil
+        dropPreviewPoint = CGPoint(x: -10_000, y: -10_000)
+        dropPreviewStamp = .distantPast
+    }
 
     private func previewCardDropViaWeb(_ windowPoint: CGPoint) {
-        // 过网页那一跳是异步的：不限流会堆成一串排队的请求，预览反而落在手指后面。
-        guard !dropPreviewBusy, Date().timeIntervalSince(dropPreviewStamp) > 0.06 else { return }
+        // 过网页那一跳是异步的：同一时刻只允许一个在飞，否则会堆成一串排队的请求。
+        // （时间/距离的限流在上面 previewCardDrop 里统一做了，这里不再限一次。）
+        guard !dropPreviewBusy else { return }
         let size = webView.bounds.size
         guard size.width > 0, size.height > 0 else { return }
         let local = webView.convert(windowPoint, from: nil)
         let x = local.x / size.width, y = local.y / size.height
         guard (0...1).contains(x), (0...1).contains(y) else { cardDropPreview = nil; return }
         dropPreviewBusy = true
-        dropPreviewStamp = Date()
         Task { [weak self] in
             guard let self else { return }
             let receipt = await requestNativeConversationCommand(

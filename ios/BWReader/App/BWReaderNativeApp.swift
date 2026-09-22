@@ -183,11 +183,11 @@ private struct ReaderRootView: View {
                     },
                     onOpenFigure: { figure in
                         reader.openNativeFigurePanel(figure)
-                    },
-                    onOpenCard: { noteID in
-                        reader.openNativeBoundCard(noteID: noteID)
                     }
                 )
+                    // ⚠ 锁定框的点击由**每一页自己的 overlay view** 接（它跟着页面滚，
+                    //   命中的就是屏幕上看到的那个框）。视口这一层不参与。
+                    .onAppear { document.onOpenCard = { reader.openNativeBoundCard(noteID: $0) } }
                     .ignoresSafeArea(edges: .bottom)
             }
 

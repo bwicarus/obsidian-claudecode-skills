@@ -58,6 +58,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let bindingUnresolved: Bool
     }
 
+    /// 点正文里的卡片锁定框 → 展开那张卡。由 App 接到阅读器上。
+    var onOpenCard: ((String) -> Void)?
+
     let view = ReaderNativePDFView()
     @Published private(set) var position = Position(page: 1, scale: 1, visiblePages: [], fraction: 0, mode: "continuous", spreadOffset: 0, crop: nil)
     @Published private(set) var error: String?
@@ -523,6 +526,15 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         publishPosition()
     }
 
+    /// 把最新的锁定框推给每一页的 overlay。
+    /// ⚠ 便签变了、字符层刚加载完，都要重推 —— 否则框要等到那一页重新挂 overlay
+    /// 才出现（翻回来才看得见，等于"有时有有时没有"）。
+    private func refreshCardMarkers() {
+        for (number, overlay) in textOverlays {
+            overlay.cardMarkers = cardMarkers(page: number).map { ($0.id, $0.rects) }
+        }
+    }
+
     func applyNotes(_ domain: ReaderBookUserStateDomainPayload, bookID: String, contentSHA256: String) throws {
         guard domain.name == .notes, access?.record.id == bookID,
               digest == contentSHA256.lowercased(), ready else { throw ReaderBookUserStateWebAdapterError.contextChanged }
@@ -544,6 +556,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
         notes = records
         domainHeaders[.notes] = (domain.revision, domain.digest)
+        refreshCardMarkers()
     }
 
     /// Resolve saved anchors through PDFKit and the original character-binding
@@ -596,8 +609,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                   let bound = bind["page"] as? NSNumber, bound.intValue == page,
                   let core = selectionCores[page],
                   let value = try? core.binding(bind) else { return nil }
-            let rects = value.rects.compactMap { viewRect(normalized: $0, page: page) }
-            return rects.isEmpty ? nil : CardMarker(id: id, rects: rects)
+            // ⚠ 给**归一化**框，不给 view 坐标：消费方是页面自己的 overlay view，
+            //   它用 project 投影到自己的坐标系，然后跟着页面一起滚。
+            return value.rects.isEmpty ? nil : CardMarker(id: id, rects: value.rects)
         }
     }
 
@@ -878,6 +892,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             guard let self, let overlay else { return nil }
             return self.viewRect(normalized: rect, page: number, in: overlay)
         }
+        overlay.cardMarkers = cardMarkers(page: number).map { ($0.id, $0.rects) }
+        overlay.onOpenCard = { [weak self] id in self?.onOpenCard?(id) }
         overlay.onSelect = { [weak self] value in self?.acceptOCRSelection(value, page: number) }
         overlay.onError = { [weak self] in self?.error = "当前文字层无法确认这段选区的位置。" }
         overlay.onHighlight = { [weak self] value, color in
@@ -956,6 +972,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                     characterPages[number] = value; selectionCores[number] = core
                     textOverlays[number]?.characters = value
                     textOverlays[number]?.selectionCore = core
+                    // 字符层到位了，这一页的锁定框才解得出来 —— 立刻补上，
+                    // 否则要等下次挂 overlay 才出现。
+                    textOverlays[number]?.cardMarkers = cardMarkers(page: number).map { ($0.id, $0.rects) }
                 } catch {
                     guard generation == ticket, !Task.isCancelled else { return }
                     unavailableCharacterPages.insert(number)
@@ -994,6 +1013,16 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     var onGrammar: ((ReaderNativePDFSelection.Value) -> Void)?
     /// 重新识别这块区域（点坐标的并集矩形）。
     var onRecognize: ((CGRect) -> Void)?
+    /// 绑定到正文的卡片「锁定框」（页内归一化坐标）。
+    ///
+    /// ⚠⚠ 必须画在**这一层**。它是 PDFKit 给每一页的 overlay view，作为页面的
+    /// 子视图**跟着页面一起滚**，一帧都不用重算。此前两版分别画在
+    /// ReaderNativePageCards（按窗口坐标）和 ReaderNativePDFViewport 的 Canvas
+    /// （按 geometryRevision 重画）—— 都是"滚动时不断重新渲染"，于是留残影
+    /// （2026-09-22 用户连报三次）。
+    var cardMarkers: [(id: String, rects: [CGRect])] = [] { didSet { setNeedsDisplay() } }
+    /// 点锁定框 → 展开那张卡。
+    var onOpenCard: ((String) -> Void)?
     private var start: Int?
     private var selected: ReaderNativePDFSelection.Value?
     private let leadingHandle = ReaderNativePDFSelectionHandle()
@@ -1059,6 +1088,9 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         // 点在已有划线上 → 开它的编辑面板（与网页「点划线弹浮层」同一个意思），
         // 而不是把那一个字选起来。⚠ 顺序不能反：先 resolve 再判断的话，菜单已经
         // 弹出来了，编辑面板会叠在它上面。
+        // 点在卡片锁定框上 → 展开那张卡。⚠ 排在划线之前：绑卡的那一段往往同时
+        //   也划了线，先判划线的话卡永远打不开。
+        if let id = cardMarkerAt(location) { onOpenCard?(id); return }
         if let id = highlightAt?(location) { onEditHighlight?(id); return }
         guard let index = hit(location) else { return }
         resolve(index, index); showMenu()
@@ -1191,11 +1223,38 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         editMenu.dismissMenu(); updateHandles(); setNeedsDisplay()
     }
     override func draw(_ rect: CGRect) {
-        guard let selected, let context = UIGraphicsGetCurrentContext() else { return }
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        // 锁定框先画：选区高亮压在它上面才看得出"这一段既绑着卡、又正被选中"。
+        // ⚠ 观感对齐网页那份 .pgmark：实心描边 + 淡底，不是一条几乎看不见的细线
+        //   （2026-09-22 用户："颜色太浅线太细"）。
+        for marker in cardMarkers {
+            for normalized in marker.rects {
+                guard let box = project?(normalized) else { continue }
+                let path = UIBezierPath(roundedRect: box.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 3)
+                context.setFillColor(ReaderNativeMarkerStyle.fill.cgColor)
+                context.addPath(path.cgPath); context.fillPath()
+                context.setStrokeColor(ReaderNativeMarkerStyle.stroke.cgColor)
+                context.setLineWidth(2)
+                context.addPath(path.cgPath); context.strokePath()
+            }
+        }
+        guard let selected else { return }
         context.setFillColor(UIColor.systemTeal.withAlphaComponent(0.22).cgColor)
         for normalized in selected.rects {
             if let box = project?(normalized) { context.fill(box) }
         }
+    }
+
+    /// 点中了哪个锁定框。⚠ 命中范围放宽 6pt：一行字的框只有十几点高，
+    /// 按原尺寸判定基本点不中。
+    private func cardMarkerAt(_ point: CGPoint) -> String? {
+        for marker in cardMarkers {
+            for normalized in marker.rects {
+                guard let box = project?(normalized) else { continue }
+                if box.insetBy(dx: -6, dy: -6).contains(point) { return marker.id }
+            }
+        }
+        return nil
     }
 }
 
@@ -1231,8 +1290,6 @@ struct ReaderNativePDFViewport: View {
     var onTranslateSentence: ((ReaderNativePDFDocument.VocabSentence) -> Void)?
     /// 点图徽标 → 打开原生描述面板（描述文本是服务端早就生成好的，不在这里烧额度）。
     var onOpenFigure: ((ReaderNativePDFDocument.Figure) -> Void)?
-    /// 点正文里的卡片锁定框 → 展开那张卡（参数是便签 id）。
-    var onOpenCard: ((String) -> Void)?
     var body: some View {
         ZStack {
             ReaderNativePDFSurface(document: document)
@@ -1346,14 +1403,6 @@ struct ReaderNativePDFViewport: View {
                         pageContext.stroke(Path(roundedRect: rect, cornerRadius: 7),
                                            with: .color(green.opacity(0.95)), lineWidth: 2.5)
                     }
-                    // 卡片锁定框：跟高亮同一层，所以跟随滚动、不留残影。
-                    for marker in document.cardMarkers(page: number) {
-                        for rect in marker.rects {
-                            pageContext.stroke(
-                                Path(roundedRect: rect.insetBy(dx: -1, dy: -1), cornerRadius: 3),
-                                with: .color(ReaderNativeTheme.accent.opacity(0.75)), lineWidth: 1.2)
-                        }
-                    }
                     for stroke in document.ink[number] ?? [] {
                         ReaderNativeInkDrawing.draw(stroke, in: frame, context: &pageContext)
                     }
@@ -1399,23 +1448,10 @@ struct ReaderNativePDFViewport: View {
                 }
             }
 
-            // 卡片锁定框的点击。⚠ 跟「译」和图徽标一样必须是**真控件** ——
-            //   Canvas 接不到点击，上一版就是靠另一层 overlay 的按钮去接，
-            //   位置对不上，于是"点击后根本打不开卡片"。
-            ForEach(document.position.visiblePages, id: \.self) { number in
-                let _ = document.geometryRevision
-                ForEach(document.cardMarkers(page: number), id: \.id) { marker in
-                    ForEach(Array(marker.rects.enumerated()), id: \.offset) { _, rect in
-                        Button { onOpenCard?(marker.id) } label: {
-                            Color.clear.frame(width: max(12, rect.width), height: max(12, rect.height))
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("打开这段绑定的卡片")
-                        .position(x: rect.midX, y: rect.midY)
-                    }
-                }
-            }
+            // ⚠ 锁定框**不在这里画、也不在这里接点击**。它画在每一页自己的
+            //   overlay view 里（ReaderNativePDFTextOverlay）—— 那是页面的子视图，
+            //   跟着页面一起滚，一帧都不用重算。放在这一层就得按 geometryRevision
+            //   反复重画，滚动时必然留残影。
         }.clipped()
     }
 }
@@ -1505,4 +1541,17 @@ struct ReaderNativeFigureBadge: View {
 struct ReaderNativeDropPreview: Equatable {
     var rects: [CGRect] = []
     var line: CGRect?
+}
+
+/// 卡片锁定框的观感。⚠ 单独拎出来是因为它被用户否过一次：
+/// "颜色太浅线太细"。这是唯一来源，两处（绘制与将来可能的别处）都从这里取。
+enum ReaderNativeMarkerStyle {
+    static var stroke: UIColor {
+        UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.48, green: 0.78, blue: 0.73, alpha: 1)
+                : UIColor(red: 0.13, green: 0.40, blue: 0.38, alpha: 1)
+        }
+    }
+    static var fill: UIColor { stroke.withAlphaComponent(0.14) }
 }
