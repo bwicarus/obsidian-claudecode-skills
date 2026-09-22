@@ -255,8 +255,13 @@ private struct ReaderNativeConversationArtifactCard: View {
                         }
                     }
                 } else {
-                    Text("学习卡正在同步…")
+                    // ⚠ 带上原因。只写"正在同步…"的话，卡在这儿就是一条死路 ——
+                    //   没人说得出是节点没了、卡组没挂上，还是状态取不到。
+                    Text(part.string("liveReason").isEmpty
+                         ? "学习卡正在同步…"
+                         : "学习卡暂时读不到（\(part.string("liveReason"))）")
                         .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
+                        .textSelection(.enabled)
                 }
             } else if part.kind == "fact" {
                 richContent(firstText(part.string("answer"), part.text))

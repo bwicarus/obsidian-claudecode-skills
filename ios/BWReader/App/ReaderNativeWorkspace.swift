@@ -120,6 +120,20 @@ struct ReaderNativeWorkspace<Document: View>: View {
                                 }
                             }
                             .animation(.easeOut(duration: 0.18), value: conversation.readerSelectionText)
+                            // 把手挂在**正文区**右缘：侧栏一开正文就窄了，把手自然
+                            // 落在两者的交界上，跟网页那只的位置一致；侧栏关着时它
+                            // 贴在屏幕右缘 —— 那正是用来打开侧栏的地方。
+                            .overlay(alignment: .trailing) {
+                                if enabled {
+                                    ReaderNativeSidebarGrip(
+                                        width: $sidebarWidth,
+                                        available: geometry.size.width,
+                                        open: nativeSidebarVisible,
+                                        onToggle: { Task { await conversation.perform("toggleAssistant") } }
+                                    )
+                                    .disabled(!conversation.supports("toggleAssistant"))
+                                }
+                            }
                             .overlay {
                                 if dropTarget {
                                     RoundedRectangle(cornerRadius: 8)
@@ -129,14 +143,6 @@ struct ReaderNativeWorkspace<Document: View>: View {
                             }
                     }
                     if nativeSidebarVisible {
-                        // 侧栏宽度拖杆。⚠ 网页那个把手本来就能拖宽，原生接管后这个
-                        //   能力没人补上（2026-09-22 用户：“无法拖动侧边栏改变宽度”）。
-                        //   接管一个能力就要把它原来会的事一并接过来，否则就是“新的替代了旧的，
-                        //   但比旧的少一截”。
-                        ReaderNativeSidebarGrip(
-                            width: $sidebarWidth,
-                            available: geometry.size.width
-                        )
                         ReaderNativeConversationView(
                             model: conversation, voiceBridge: voiceBridge,
                             onClose: { Task { await conversation.perform("toggleAssistant") } },
@@ -151,17 +157,19 @@ struct ReaderNativeWorkspace<Document: View>: View {
                 // ⚠ 展开把手跟收起按钮**同一个位置**（顶部居中）。
                 //   原来收起在右、展开在左，用户得满屏找它去了哪里
                 //   （2026-09-22 用户：“打开在右边关闭在左边很蠢”）。
+                // ⚠ 收起和展开是**同一个把手、同一个位置**（正文区顶部居中）。
+                //   收起按钮原来长在顶栏**里面的右端** —— 一旦收起，它就跟顶栏
+                //   一起消失，再出现时却在别处（2026-09-22 用户："上边栏关闭的
+                //   按钮也应该在外部中间而不是内部右边"）。
                 .overlay(alignment: .top) {
-                    if navigationCollapsed {
-                        Button { navigationCollapsed = false } label: {
-                            Image(systemName: "chevron.down")
-                                .font(.caption.weight(.semibold))
-                                .frame(width: 44, height: 26)
-                                .readerGlass(in: Capsule(), fallback: .regularMaterial)
-                        }
-                        .accessibilityLabel("展开阅读顶栏")
-                        .padding(6)
+                    Button { navigationCollapsed.toggle() } label: {
+                        Image(systemName: navigationCollapsed ? "chevron.down" : "chevron.up")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 44, height: 26)
+                            .readerGlass(in: Capsule(), fallback: .regularMaterial)
                     }
+                    .accessibilityLabel(navigationCollapsed ? "展开阅读顶栏" : "收起阅读顶栏")
+                    .padding(6)
                 }
             }
         }
@@ -326,10 +334,6 @@ struct ReaderNativeWorkspace<Document: View>: View {
                 .accessibilityLabel(conversation.sidebarOpen ? "收起 AI 侧栏" : "展开 AI 侧栏")
                 .disabled(!conversation.supports("toggleAssistant") || conversation.isPerforming("toggleAssistant"))
             }
-            Button { navigationCollapsed = true } label: {
-                Image(systemName: "chevron.up").frame(width: 36, height: 36)
-            }
-            .accessibilityLabel("收起阅读顶栏")
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 14)
@@ -338,16 +342,20 @@ struct ReaderNativeWorkspace<Document: View>: View {
     }
 }
 
-/// 侧栏与正文之间的拖杆。
+/// 侧栏把手 —— 照网页那只做（`#ep-side-handle`）：正文区右缘中间一枚竖排标签，
+/// **点开关侧栏、拖调宽度**，侧栏关着的时候它照样在。
 ///
-/// ⚠ 它替代的是网页抽屉把手「长按后左右拖动调整宽度」那个能力。原生接管侧栏之后
-/// 那条路没了，而宽度是用户每天都在调的东西 —— 接管一个能力就要把它原来会的事
-/// 一并接过来，否则就是"新的替代了旧的，但比旧的少一截"。
+/// ⚠ 上一版只有"拖杆"，而且只在侧栏**已经打开**时才挂进 HStack —— 关着的时候
+/// 屏幕上根本没有这个东西，于是"把手始终没看见"（2026-09-22 用户实报两次）。
+/// 网页那只的第一职责本来就是**打开侧栏**，宽度是它附带的第二件事。
 @MainActor
 struct ReaderNativeSidebarGrip: View {
     @Binding var width: Double
     let available: CGFloat
+    var open: Bool
+    var onToggle: () -> Void
     @State private var startWidth: Double?
+    @State private var dragged = false
 
     /// ⚠ 上下界跟着屏幕走：写死的最小值在窄屏上会把正文挤没。
     static func clamp(_ value: Double, available: CGFloat) -> CGFloat {
@@ -356,28 +364,44 @@ struct ReaderNativeSidebarGrip: View {
     }
 
     var body: some View {
-        // ⚠ 把手必须有**真实宽度**。上一版是 1pt 的线 + overlay 里的胶囊，
-        //   结果是既看不清也点不到 —— overlay 画在父视图范围外，手势命中不了
-        //   （2026-09-22 用户：“侧栏把手始终没看见”）。
-        Capsule()
-            .fill(ReaderNativeTheme.muted.opacity(0.75))
-            .frame(width: 4, height: 46)
-            .frame(width: 14).frame(maxHeight: .infinity)
-            .readerGlass(in: RoundedRectangle(cornerRadius: 7),
-                         fallback: ReaderNativeTheme.muted.opacity(0.18))
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 2)
-                .onChanged { value in
-                    if startWidth == nil {
-                        startWidth = width > 0 ? width : Double(available) * 0.36
+        Text("助手 · 知识点")
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(ReaderNativeTheme.ink.opacity(0.85))
+            .lineLimit(1)
+            .fixedSize()
+            .rotationEffect(.degrees(90))
+            .frame(width: 26, height: 116)
+            .readerGlass(in: UnevenRoundedRectangle(
+                topLeadingRadius: 14, bottomLeadingRadius: 14,
+                bottomTrailingRadius: 0, topTrailingRadius: 0),
+                         fallback: ReaderNativeTheme.accentWash)
+            .overlay(alignment: .leading) {
+                Capsule().fill(ReaderNativeTheme.muted.opacity(0.55))
+                    .frame(width: 3, height: 34).padding(.leading, 3)
+            }
+            .contentShape(Rectangle())
+            // ⚠ 拖动优先于点击：先判有没有真拖过，没拖过才算点击。
+            //   两个手势分开挂会互相吞（拖到一半松手也触发 toggle）。
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard open else { return }
+                        if abs(value.translation.width) < 3, !dragged { return }
+                        dragged = true
+                        if startWidth == nil {
+                            startWidth = width > 0 ? width : Double(available) * 0.36
+                        }
+                        width = Double(Self.clamp((startWidth ?? 0) - Double(value.translation.width),
+                                                  available: available))
                     }
-                    width = Double(Self.clamp((startWidth ?? 0) - Double(value.translation.width),
-                                              available: available))
-                }
-                .onEnded { _ in startWidth = nil }
-        )
-            .accessibilityLabel("调整侧栏宽度")
+                    .onEnded { _ in
+                        if !dragged { onToggle() }
+                        dragged = false
+                        startWidth = nil
+                    }
+            )
+            .accessibilityLabel(open ? "收起 AI 侧栏" : "展开 AI 侧栏")
+            .accessibilityHint("左右拖动可调整侧栏宽度")
             .accessibilityAdjustableAction { direction in
                 let base = width > 0 ? width : Double(available) * 0.36
                 width = Double(Self.clamp(base + (direction == .increment ? 40 : -40), available: available))

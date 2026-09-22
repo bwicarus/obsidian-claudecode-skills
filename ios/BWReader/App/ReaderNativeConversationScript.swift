@@ -226,7 +226,13 @@ enum ReaderNativeConversationScript {
         for (const part of message.parts) {
           if (part.kind === 'tool' || part.id.endsWith('-original')) continue;
           const target = actions.get(part.actionId), node = target?.node;
-          if (!node?.isConnected) continue;
+          if (!node?.isConnected) {
+            // ⚠ 说出来。学习卡卡在"正在同步…"时，原来这里是直接 continue ——
+            //   原生那边只看到 live!==true，分不清是节点没了、卡组没挂上，
+            //   还是状态取不到。三种情况要做的事完全不同（2026-09-22 实报）。
+            if (part.kind === 'anki') part.data.liveReason = 'node-gone';
+            continue;
+          }
           const group = flashGroup(node);
           const cardIndex = Number(part.id.match(/-c-(\d+)$/)?.[1] || 0);
           const pinOwner = [node, ...node.querySelectorAll('*')].find(el => el.__bwPinHoldBindings?.length);
@@ -251,6 +257,10 @@ enum ReaderNativeConversationScript {
           }
           if (group?.__fc.cards[cardIndex]?._removed) { part.removed = true; continue; }
           const interaction = group && rc().flashcard?.interactionState(group, cardIndex);
+          if (!interaction && part.kind === 'anki') {
+            part.data.liveReason = !group ? 'no-card-group'
+              : !rc().flashcard ? 'no-flashcard-module' : 'no-state:' + cardIndex;
+          }
           if (interaction && (part.kind === 'anki' || part.kind === 'artifact')) {
             part.kind = 'anki';
             part.data.live = true;
@@ -1211,21 +1221,22 @@ enum ReaderNativeConversationScript {
            (bw-native-shell)。写在这里就要等本脚本跑完再等 setNativeMode 送到,
            而原生顶栏是 SwiftUI 画的、不等任何人。bw-native-navigation 这个类保留,
            因为 epub-html.js 和原生选区条还拿它判断"现在是原生导航"。 */
-        /* ⚠ content-visibility 而不是 opacity:0。原生自己画这批卡时，网页那份
-           只剩"数据来源"一个职责，可它照旧在**布局、绘制、合成**整棵子树
-           （富文本、公式、图片），等于同一批卡片画两遍
-           —— 2026-09-22 用户："后台如果在运行那些代码会很消耗性能"。
-           也不能 display:none：那样 getBoundingClientRect 全是 0，
-           而 EPUB 那条路的页卡位置正是从这个矩形来的，会导致一张都画不出来。
-           content-visibility:hidden 恰好两头都满足：盒子照常参与布局（几何还准），
-           里面整棵跳过渲染。 */
-        .bw-native-page-cards [data-bw-native-placement] {content-visibility:hidden!important;pointer-events:none!important}
+        /* ⚠⚠ 这里必须是 visibility:hidden。三个都试过，只有它同时成立：
+           · opacity:0 —— 照旧布局、绘制、合成整棵子树（富文本/公式/图片），
+             等于同一批卡片画两遍，正是"后台跑着很耗性能"的来源。
+           · display:none —— getBoundingClientRect 全是 0。
+           · content-visibility:hidden —— 它会**连同尺寸一起 contain**：
+             盒子宽高由内容撑开的那些（浮动卡片就是）直接塌成 0×0。
+             nativeFloatingState 按 rect.width<=0 过滤，于是整张卡被判成
+             不存在 —— 表现就是"松手后卡片直接消失了"（2026-09-22 实报，我造的）。
+           visibility:hidden 保留完整布局（几何仍然准），只跳过绘制。 */
+        .bw-native-page-cards [data-bw-native-placement] {visibility:hidden!important;pointer-events:none!important}
         /* 对话正文同理：原生侧栏接管后，网页那条消息流谁也看不见，却还在为
            每条回答排版、绘制（富文本 + 公式 + 图片），历史越长越贵。
            ⚠ 这里**不能**删 DOM：原生侧栏的内容目前正是从这些节点读出来的
            （真要删得先把对话做成数据模型）。content-visibility 只停渲染、
            不动 DOM，是眼下唯一两头都成立的做法。 */
-        .bw-native-conversation-active #asst-thread {content-visibility:hidden!important}
+        .bw-native-conversation-active #asst-thread {visibility:hidden!important}
         .bw-native-conversation-active #ep-side,.bw-native-conversation-active #grammar-panel,
         .bw-native-conversation-active #side-handle,.bw-native-conversation-active #ep-side-handle {visibility:hidden!important;pointer-events:none!important}
         .bw-native-conversation-active body.grammar-open #main,.bw-native-conversation-active body.grammar-open #header {padding-right:0!important}

@@ -183,6 +183,9 @@ private struct ReaderRootView: View {
                     },
                     onOpenFigure: { figure in
                         reader.openNativeFigurePanel(figure)
+                    },
+                    onOpenCard: { noteID in
+                        reader.openNativeBoundCard(noteID: noteID)
                     }
                 )
                     .ignoresSafeArea(edges: .bottom)

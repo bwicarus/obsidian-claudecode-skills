@@ -480,6 +480,27 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return rects
     }
 
+    /// 点正文里的锁定框 → 展开那张卡。
+    ///
+    /// ⚠ 走的是页卡自己的 `toggleBound` 控件 id，跟侧栏里点开是同一条路。
+    /// 找不到就**出声** —— "点了没反应"是这块地方已经栽过一次的坑。
+    func openNativeBoundCard(noteID: String) {
+        guard let placement = nativeConversation.placements.first(where: { $0.id == noteID }) else {
+            showTransientNotice("这段绑定的卡片还没加载好，请稍后再点。")
+            return
+        }
+        guard let action = placement.controls["toggleBound"] else {
+            showTransientNotice("这张卡没有可用的展开操作。")
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            if await nativeConversation.perform("liveAction", parameters: ["actionId": action]) == false {
+                showTransientNotice(nativeConversation.error ?? "卡片没能打开，请重试。")
+            }
+        }
+    }
+
     func nativePageCardRect(_ rect: CGRect, in container: CGRect) -> CGRect {
         let local = CGRect(x: rect.minX * webView.bounds.width, y: rect.minY * webView.bounds.height,
                            width: rect.width * webView.bounds.width, height: rect.height * webView.bounds.height)

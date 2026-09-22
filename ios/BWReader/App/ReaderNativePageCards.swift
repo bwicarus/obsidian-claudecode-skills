@@ -152,7 +152,12 @@ struct ReaderNativePageCards: View {
                     //   是空的：**这张卡钉在正文哪一段，屏幕上完全看不出来**。
                     //   原生自己解得出那几个框，就用它们补一个描边（没有序号，
                     //   因为序号是网页排的，这里不去猜一个可能对不上的号）。
-                    if item.markers.isEmpty, item.bound, let boxes = nativeMarkers, !boxes.isEmpty {
+                    // ⚠ 原生正文自己画锁定框（ReaderNativePDFViewport 的 Canvas +
+                    //   真控件层，跟着页面滚），这一层就不要再画一遍 ——
+                    //   两份同时在，滚动时就是"有残影"，点击也落在慢半拍的那份上
+                    //   （2026-09-22 用户连报两次）。
+                    if reader.nativePDFDocument == nil,
+                       item.markers.isEmpty, item.bound, let boxes = nativeMarkers, !boxes.isEmpty {
                         ForEach(Array(boxes.enumerated()), id: \.offset) { _, box in
                             Button { openBoundCard(item) } label: {
                                 RoundedRectangle(cornerRadius: 3)

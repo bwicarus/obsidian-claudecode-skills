@@ -16,6 +16,7 @@ const STICKY = read("_server_deploy/static/pdf/rc-stickynote.js");
 const BINDCARD = read("_server_deploy/static/pdf/reader.src/34-bindcard.js");
 const CARDS = read("ios/BWReader/App/ReaderNativePageCards.swift");
 const WEBVIEW = read("ios/BWReader/App/ReaderWebView.swift");
+const PDFDOC = read("ios/BWReader/App/ReaderNativePDFDocument.swift");
 
 const body = (source, from, to) => source.slice(source.indexOf(from), source.indexOf(to));
 
@@ -47,12 +48,30 @@ test("③ 藏着＝原生也看不见（visible 是从 DOM 量的）", () => {
 test("④ 词锚描边由原生补，因为网页那份画不出来", () => {
   // .pgmark 是网页在 pgbind-layer 里画的，要 __charBoxes；接管后 item.markers
   // 是空的 —— 这张卡钉在正文哪一段，屏幕上完全看不出来。
-  const fallback = CARDS.slice(CARDS.indexOf("if item.markers.isEmpty, item.bound"));
-  assert.match(fallback, /let boxes = nativeMarkers, !boxes\.isEmpty/);
+  //
+  // ⚠ 但只在**没有原生正文**时由这一层补。原生 PDFKit 接管后，框改由
+  // ReaderNativePDFViewport 画在跟随页面滚动的那一层（见下面 ⑤）——
+  // 两份同时画，滚动时就是残影，点击还落在慢半拍的那份上（2026-09-22 实报）。
+  const fallback = CARDS.slice(CARDS.indexOf("if reader.nativePDFDocument == nil,"));
+  assert.match(fallback, /item\.markers\.isEmpty, item\.bound, let boxes = nativeMarkers, !boxes\.isEmpty/);
   assert.match(fallback, /RoundedRectangle\(cornerRadius: 3\)/);
   // 不猜序号：序号是网页排的，猜一个可能跟别处对不上。
   assert.doesNotMatch(fallback.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n"),
     /marker\.number|ordinal/);
   // 原生解不出绑定时返回空数组而不是 nil —— 那是「确实没钉在正文上」。
   assert.match(WEBVIEW, /let rects = geometry\.bindingRects\.map \{/);
+});
+
+test("⑤ 原生正文接管时，锁定框画在跟随页面滚动的那一层", () => {
+  // ⚠ 这一条防的是 2026-09-22 连报两次的现象：框"没跟紧画面、有延迟、有残影"，
+  // 而且"点击后根本打不开卡片"。根因是它画在工作区之上的另一层 overlay 里、
+  // 按窗口坐标摆位，跟 PDFKit 的滚动各走各的。
+  //
+  // 正确的位置是 ReaderNativePDFViewport：Canvas（画）+ 真控件层（接点击），
+  // 两者都读 geometryRevision，跟高亮/生词下划线同一套。
+  assert.match(PDFDOC, /func cardMarkers\(page: Int\) -> \[CardMarker\]/);
+  const viewport = PDFDOC.slice(PDFDOC.indexOf("struct ReaderNativePDFViewport"));
+  assert.match(viewport, /for marker in document\.cardMarkers\(page: number\)/);
+  // 点击必须是真控件 —— Canvas 接不到点击，这正是"点了打不开"的原因。
+  assert.match(viewport, /Button \{ onOpenCard\?\(marker\.id\) \}/);
 });

@@ -41,6 +41,13 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let note: String
         let text: String
     }
+    /// ⚠ 用具名类型而不是元组：`ForEach(_:id: \.id)` 的 keypath 在元组标签上
+    /// 根本不成立（编译不过）。
+    struct CardMarker: Identifiable {
+        let id: String
+        let rects: [CGRect]
+    }
+
     struct NoteGeometry {
         let id: String
         let page: Int
@@ -571,6 +578,27 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         return NoteGeometry(id: id, page: number.intValue, rect: rect, bindingRects: bindingRects,
                             bindingQuality: resolved?.quality, bindingMatches: resolved?.matches ?? 0,
                             bindingUnresolved: bind?["kind"] as? String == "page-chars" && bindingRects.isEmpty)
+    }
+
+    /// 绑定在正文上的卡片「锁定框」——**按页**给出，坐标系就是 PDFView 自己的。
+    ///
+    /// ⚠ 这些框必须画在跟着页面滚的那一层里（Canvas / 真控件层）。原来它们画在
+    /// `ReaderNativePageCards`（整个工作区之上的另一层 SwiftUI overlay）里、按
+    /// **窗口坐标**摆位，于是滚动时总慢半拍、还留残影，点也点不中
+    /// （2026-09-22 用户连报两次："没跟紧画面而是有延迟还卡顿"、"还是有残影，
+    /// 而且点击后根本打不开卡片"）。
+    func cardMarkers(page: Int) -> [CardMarker] {
+        notes.compactMap { note -> CardMarker? in
+            guard let id = note["id"] as? String,
+                  let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any],
+                  let bind = payload["bind"] as? [String: Any],
+                  bind["kind"] as? String == "page-chars",
+                  let bound = bind["page"] as? NSNumber, bound.intValue == page,
+                  let core = selectionCores[page],
+                  let value = try? core.binding(bind) else { return nil }
+            let rects = value.rects.compactMap { viewRect(normalized: $0, page: page) }
+            return rects.isEmpty ? nil : CardMarker(id: id, rects: rects)
+        }
     }
 
     func setSpread(_ enabled: Bool, firstPageAlone: Bool) {
@@ -1203,6 +1231,8 @@ struct ReaderNativePDFViewport: View {
     var onTranslateSentence: ((ReaderNativePDFDocument.VocabSentence) -> Void)?
     /// 点图徽标 → 打开原生描述面板（描述文本是服务端早就生成好的，不在这里烧额度）。
     var onOpenFigure: ((ReaderNativePDFDocument.Figure) -> Void)?
+    /// 点正文里的卡片锁定框 → 展开那张卡（参数是便签 id）。
+    var onOpenCard: ((String) -> Void)?
     var body: some View {
         ZStack {
             ReaderNativePDFSurface(document: document)
@@ -1316,6 +1346,14 @@ struct ReaderNativePDFViewport: View {
                         pageContext.stroke(Path(roundedRect: rect, cornerRadius: 7),
                                            with: .color(green.opacity(0.95)), lineWidth: 2.5)
                     }
+                    // 卡片锁定框：跟高亮同一层，所以跟随滚动、不留残影。
+                    for marker in document.cardMarkers(page: number) {
+                        for rect in marker.rects {
+                            pageContext.stroke(
+                                Path(roundedRect: rect.insetBy(dx: -1, dy: -1), cornerRadius: 3),
+                                with: .color(ReaderNativeTheme.accent.opacity(0.75)), lineWidth: 1.2)
+                        }
+                    }
                     for stroke in document.ink[number] ?? [] {
                         ReaderNativeInkDrawing.draw(stroke, in: frame, context: &pageContext)
                     }
@@ -1358,6 +1396,24 @@ struct ReaderNativePDFViewport: View {
                 ForEach(document.figures[number] ?? []) { figure in
                     ReaderNativeFigureBadge(document: document, figure: figure, page: number,
                                             onOpen: onOpenFigure)
+                }
+            }
+
+            // 卡片锁定框的点击。⚠ 跟「译」和图徽标一样必须是**真控件** ——
+            //   Canvas 接不到点击，上一版就是靠另一层 overlay 的按钮去接，
+            //   位置对不上，于是"点击后根本打不开卡片"。
+            ForEach(document.position.visiblePages, id: \.self) { number in
+                let _ = document.geometryRevision
+                ForEach(document.cardMarkers(page: number), id: \.id) { marker in
+                    ForEach(Array(marker.rects.enumerated()), id: \.offset) { _, rect in
+                        Button { onOpenCard?(marker.id) } label: {
+                            Color.clear.frame(width: max(12, rect.width), height: max(12, rect.height))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("打开这段绑定的卡片")
+                        .position(x: rect.midX, y: rect.midY)
+                    }
                 }
             }
         }.clipped()
