@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// 固定项之间的分隔符，用「单元分隔符」而不是换行/逗号：工具标题就是网页按钮的
+/// title，里面出现标点是常态，用常见字符当分隔符迟早把一个名字劈成两半。
+///
+/// ⚠ 放在类型外面是因为 `ReaderNativeWorkspace` 是**泛型**结构体，
+/// Swift 不允许泛型类型里有 static 存储属性（2026-09-22 build 845 就红在这）。
+private let readerPinnedToolSeparator: Character = "\u{1F}"
+
 /// App navigation and conversation surround the existing document surface.
 /// The WebView and Pencil canvas stay together so their coordinate system is unchanged.
 @MainActor
@@ -21,12 +28,8 @@ struct ReaderNativeWorkspace<Document: View>: View {
     ///   不能用 actionId，它带着 scope，**换一本书就变**，固定会自己掉。
     @AppStorage("reader.pinnedTools") private var pinnedToolsRaw = ""
 
-    /// ⚠ 分隔符用「单元分隔符」而不是换行/逗号：工具标题是网页按钮的 title，
-    ///   里面出现标点是常态，用常见字符当分隔符迟早会把一个名字劈成两半。
-    private static let pinnedToolSeparator: Character = "\u{1F}"
-
     private var pinnedToolIDs: [String] {
-        pinnedToolsRaw.split(separator: Self.pinnedToolSeparator).map(String.init).filter { !$0.isEmpty }
+        pinnedToolsRaw.split(separator: readerPinnedToolSeparator).map(String.init).filter { !$0.isEmpty }
     }
 
     private func toolIdentity(_ control: ReaderNativeControl) -> String {
@@ -49,7 +52,7 @@ struct ReaderNativeWorkspace<Document: View>: View {
         let identity = toolIdentity(control)
         var list = pinnedToolIDs
         if let at = list.firstIndex(of: identity) { list.remove(at: at) } else { list.append(identity) }
-        pinnedToolsRaw = list.joined(separator: String(Self.pinnedToolSeparator))
+        pinnedToolsRaw = list.joined(separator: String(readerPinnedToolSeparator))
     }
 
     private func runReadingTool(_ control: ReaderNativeControl) {
