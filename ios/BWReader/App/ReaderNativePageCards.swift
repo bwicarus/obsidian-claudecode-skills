@@ -331,7 +331,14 @@ private struct ReaderNativePlacedCard: View {
                     // 原生正文接管时走原生锚点：落点要换成**页内**归一化坐标。
                     // 网页那条路把它当网页视口坐标，而接管后视口里没有那一页 ——
                     // 卡会飞到别处。原生写失败才退回去。
-                    if await reader.moveNativeCard(id: item.id, windowPoint: point) { return }
+                    if await reader.moveNativeCard(id: item.id, windowPoint: point) {
+                        // ⚠ 兜一手：暂态位移本来靠"新几何到了"来清（onChange(of: rect)）。
+                        //   可要是落点跟原位几乎一样，rect 不变、那一下就永远不会来，
+                        //   卡片会一直画在偏移后的位置上。等一拍还没来就自己清。
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        committed = nil
+                        return
+                    }
                     // ⚠ 这里以前是 `guard … else { return }`：拖了一下、卡弹回去、
                     //   一个字都没有。用户看到的就是"拖不动"，而我们连它为什么
                     //   没动都不知道。落点定不下来就说出来。

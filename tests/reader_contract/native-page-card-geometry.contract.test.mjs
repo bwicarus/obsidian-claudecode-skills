@@ -52,7 +52,13 @@ test("③ 拖动写页内归一化锚点，不是网页视口坐标", () => {
   assert.match(move, /return false/, "换不出来要退回网页那条路");
   // 视图那侧：原生成功就 return，别再写一遍网页锚点。
   const gesture = body(CARDS, "private var moveGesture", "private var resizeGesture");
-  assert.match(gesture, /if await reader\.moveNativeCard\(id: item\.id, windowPoint: point\) \{ return \}/);
+  // 原生那条先走；成了就不再写网页锚点（分支体内 return）。
+  const nativeFirst = gesture.slice(
+    gesture.indexOf("if await reader.moveNativeCard(id: item.id, windowPoint: point) {"),
+    gesture.indexOf("guard let action = item.controls"),
+  );
+  assert.ok(nativeFirst.length > 0, "原生落点分支必须排在网页路径之前");
+  assert.match(nativeFirst, /return/);
 
   const branch = body(SCRIPT, "action === 'nativeCardMove' || action === 'nativeCardResize'",
                       "action === 'nativeSelectionLookup'");
