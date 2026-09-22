@@ -21,6 +21,17 @@ function embeddedScript(file) {
   return source.slice(start + 4, end).replace(/\\#\([^)]*\)/g, "0");
 }
 
+/** 剥掉行注释再做文本断言。
+ *
+ * ⚠ 2026-09-22 这一天我被自己写的注释绐倒四次：注释里为了说清楚
+ *   "不该再写 X"，就不得不把 X 写出来；而 `doesNotMatch(/X/)` 看不出
+ *   那是注释。结果是"注释写得越清楚，测试越红"。
+ */
+function codeOnly(text) {
+  const NL = String.fromCharCode(10);
+  return text.split(NL).filter((line) => !line.trim().startsWith("//")).join(NL);
+}
+
 const FILES = ["ReaderNativeConversationScript.swift"];
 
 for (const file of FILES) {
@@ -219,6 +230,14 @@ test("富文本的振假名重建不许在布局里重入", () => {
   assert.doesNotMatch(callback.slice(0, callback.indexOf("built.forEach")),
                       /addSubview|rubyLabels\.append/,
                       "又在 enumerate 回调里挂视图/改属性了");
-  assert.match(fn, /var built: \[UILabel\] = \[\]/);
-  assert.match(fn, /rubyLabels = built/);
+  // ⚠ 真因在这里：原来存着 `rubyLabels: [UILabel]`，而它被读出来是
+  //   **空指针** —— Swift 数组永远不可能是空指针，除非这块内存还是零：
+  //   `UITextView(usingTextLayoutManager:)` 是继承来的 ObjC 初始化器，
+  //   它内部就可能触发一次布局，而那一刻子类的 Swift 存储属性还没赋值。
+  //   ⚠ 所以不能只"加保护"：重入闸是个 Bool，零值正好放行。
+  //   必须让那个会读到零的存储属性**不存在**。
+  assert.doesNotMatch(codeOnly(fn), /rubyLabels/, "又把标签存回存储属性了");
+  assert.match(fn, /subviews\.compactMap \{ \$0 as\? ReaderNativeRubyLabel \}/,
+               "标签必须从 subviews 里认（ObjC 属性，任何时刻都合法）");
+  assert.match(fn, /var built: \[ReaderNativeRubyLabel\] = \[\]/);
 });

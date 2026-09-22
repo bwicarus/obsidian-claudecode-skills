@@ -103,47 +103,48 @@ struct ReaderNativeRichText: UIViewRepresentable {
     }
 }
 
+/// 振假名标注用的标签。单独一个类只为一件事：不存数组也能从
+/// `subviews` 里把它们认出来（理由见下面 layoutSubviews 的注释）。
+private final class ReaderNativeRubyLabel: UILabel {}
+
 @MainActor
 final class ReaderNativeTextView: UITextView {
-    private var rubyLabels: [UILabel] = []
-    /// 重入闸。没有它就是 2026-09-22 那个崩溃 —— 见下面 layoutSubviews。
+    /// 重入闸。⚠ 它是 **Bool**：零值读出来就是 false，即使内存还是零
+    /// 也不会解引用任何东西 —— 这一点在下面那段里很关键。
     private var rebuildingRuby = false
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // ⚠⚠ **绝不能在这里重入**（2026-09-22 崩溃实录，dSYM 符号化后确认就是本函数）。
+        // ⚠⚠ **这里不能有任何 Swift 引用类型的存储属性被读**（2026-09-22
+        //   崩溃实录，dSYM 符号化到本函数，出错指令 `ldr x21, [x8, #16]`，x8 = 0）。
         //
-        //   原来在 `enumerateAttribute` 的回调里 `addSubview` + `rubyLabels.append`。
-        //   `addSubview` 会让布局失效，UIKit 可能**同步**再调进本函数；重入那一轮
-        //   开头就 `rubyLabels.removeAll(keepingCapacity: true)` —— 于是**同一个数组
-        //   被两层同时改**，外层再去读缓冲区就读到空指针。崩溃报告里的出错指令正是
-        //   `ldr x21, [x8, #16]`（读数组的 count），x8 = 0。
+        //   原来这里存着 `rubyLabels: [UILabel]`，而它被读出来是**空指针** ——
+        //   Swift 数组永远不可能是空指针，除非这块内存还是零：
+        //   `UITextView(usingTextLayoutManager:)` 是**继承来的 ObjC 初始化器**，
+        //   它在内部就可能触发一次布局，而那一刻子类的 Swift 存储属性还没赋值。
         //
-        //   ⚠ 它的表现极具迷惑性：跟"做了什么"无关，只跟"有没有触发一次布局"有关 ——
-        //   启动闲置几秒、开关侧栏、点复习模式，三个毫不相干的操作崩在同一行。
-        //   我为此连查三轮、改错两版，最后靠 dSYM 才定位到。
+        //   ⚠ 所以正确的做法不是"加保护"（我上一版加的重入闸就没拦住它：
+        //   那是个 Bool，零值正好放行），而是**让那个会读到零的存储属性不存在**：
+        //   标签改从 `subviews` 里认（ObjC 属性，任何时刻都返回合法数组）。
         guard !rebuildingRuby else { return }
         rebuildingRuby = true
         defer { rebuildingRuby = false }
 
-        // ⚠ 先把旧的从属性里摘出来再动手：哪怕 removeFromSuperview 又触发一次布局，
-        //   那一轮也被上面的闸挡住，不会再碰 rubyLabels。
-        let previous = rubyLabels
-        rubyLabels = []
-        previous.forEach { $0.removeFromSuperview() }
+        subviews.compactMap { $0 as? ReaderNativeRubyLabel }.forEach { $0.removeFromSuperview() }
 
         guard let attributedText, attributedText.length > 0 else { return }
         layoutManager.ensureLayout(for: textContainer)
-        // ⚠ 先全算进**局部**数组，最后一次性挂上去并赋值给属性。
-        //   在回调里边建边挂边 append，就是上面那个重入。
-        var built: [UILabel] = []
+        // ⚠ 先全算进**局部**数组，最后一次性挂上去。
+        //   在 enumerate 的回调里边建边挂，addSubview 会让布局失效、UIKit 可能同步
+        //   重入本函数，那是另一类麻烦（上面那个闸就是为它留的）。
+        var built: [ReaderNativeRubyLabel] = []
         attributedText.enumerateAttribute(.readerRuby, in: NSRange(location: 0, length: attributedText.length)) { reading, range, _ in
             guard let reading = reading as? String, !reading.isEmpty else { return }
             let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
             let rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
             let font = attributedText.attribute(.font, at: range.location, effectiveRange: nil) as? UIFont
                 ?? UIFont.preferredFont(forTextStyle: .subheadline)
-            let label = UILabel()
+            let label = ReaderNativeRubyLabel()
             label.text = reading
             label.font = font.withSize(font.pointSize * 0.52)
             label.textColor = .secondaryLabel
@@ -158,7 +159,6 @@ final class ReaderNativeTextView: UITextView {
             built.append(label)
         }
         built.forEach { addSubview($0) }
-        rubyLabels = built
     }
 }
 
