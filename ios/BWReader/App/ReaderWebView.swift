@@ -459,7 +459,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     func nativePageMarkerRects(id: String, in container: CGRect) -> [CGRect]? {
         guard let document = nativePDFDocument else { return nil }
-        let key = (document.geometryRevision, container)
+        let key = (revision: document.geometryRevision, container: container)
         if markerRectCacheKey?.revision != key.revision || markerRectCacheKey?.container != key.container {
             markerRectCacheKey = key
             markerRectCache.removeAll(keepingCapacity: true)
