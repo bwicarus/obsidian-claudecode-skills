@@ -36,7 +36,11 @@ test("① 落库仍走 RC.stickynote.createAt，只是锚点由原生给", () =>
 test("② 顶栏按钮有 id，原生才认得出它", () => {
   // 没有 id 的话只能按标题字符串认，改一个字就失效。
   assert.match(HTML, /<button id="note-new" onclick="window\._noteCreateAtCenter/);
-  const menu = WORKSPACE.slice(WORKSPACE.indexOf("ForEach(conversation.readingTools.filter"));
+  // ⚠ 拦截点搬到了 `runReadingTool`（2026-09-22 顶栏工具改成可自定义，
+  //   菜单项和钉在顶栏上的按钮**共用同一条执行路径**）。
+  //   约定本身没变，而且共用一条路反而更安全：不会出现"菜单里拦住了、
+  //   顶栏那个没拦住"。
+  const menu = WORKSPACE.slice(WORKSPACE.indexOf("private func runReadingTool("));
   assert.match(menu, /control\.key == "note-new", reader\.nativePDFDocument != nil/);
   assert.match(menu, /reader\.createNativeStickyNote\(\)/);
   // 拦下来之后不能再 liveAction 一次，否则网页那条静默路径照样跑。
