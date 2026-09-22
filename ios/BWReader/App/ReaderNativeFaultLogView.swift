@@ -13,6 +13,7 @@ import SwiftUI
 @MainActor
 struct ReaderNativeFaultLogView: View {
     @ObservedObject var reporter: ReaderNativeFaultReporter
+    @ObservedObject private var profile = ReaderNativeStartupProfile.shared
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
 
@@ -23,6 +24,17 @@ struct ReaderNativeFaultLogView: View {
                     Text(reporter.statusLine)
                         .font(.footnote.weight(.medium))
                         .foregroundStyle(reporter.pendingCount > 0 ? .orange : .secondary)
+                    // 启动基线。⚠ 放在这一屏而不是"阅读设置"里，理由同上：
+                    //   最需要看数字的时候（页面卡死/内存吃紧），阅读设置恰恰打不开。
+                    Text("启动与内存")
+                        .font(.footnote.weight(.semibold))
+                    Text(profile.readable + String(format: "
+当前占用 %dMB",
+                                                   ReaderNativeStartupProfile.footprintMB()))
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Divider()
                     Text(reporter.readableReport)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
@@ -36,7 +48,13 @@ struct ReaderNativeFaultLogView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(copied ? "已复制" : "复制") {
-                        UIPasteboard.general.string = reporter.readableReport
+                        UIPasteboard.general.string =
+                            profile.readable + String(format: "
+当前占用 %dMB
+
+",
+                                                      ReaderNativeStartupProfile.footprintMB())
+                            + reporter.readableReport
                         copied = true
                     }
                 }

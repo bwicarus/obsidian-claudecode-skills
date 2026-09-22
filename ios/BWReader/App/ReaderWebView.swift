@@ -1124,6 +1124,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             }
             self.nativePDFMountFailure = nil
             self.nativePDFDocument = document
+            ReaderNativeStartupProfile.shared.mark("原生阅读区挂载")
         }
     }
 
@@ -5590,17 +5591,9 @@ extension ReaderWebViewModel: WKNavigationDelegate {
     /// App 这一侧的内存占用。⚠ 渲染进程是**另一个**进程，这个数字不等于它 ——
     /// 但两边一起涨是常态，所以它仍然是"是不是内存压力"的第一手线索。
     /// 取不到就回 0，绝不因为一个诊断数字让上报失败。
-    private static func memoryFootprintMB() -> Int {
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-            }
-        }
-        guard result == KERN_SUCCESS else { return 0 }
-        return Int(info.phys_footprint / (1024 * 1024))
-    }
+    // ⚠ 内存读取的唯一实现在 ReaderNativeStartupProfile —— 两处各写一份，
+    //   日后就会报出两个对不上的数。
+    private static func memoryFootprintMB() -> Int { ReaderNativeStartupProfile.footprintMB() }
 
     /// 把这次回收记成一句人看得懂的话。**在 `resetForNavigation()` 之前调**
     /// —— 它会把上一条命令连同会话状态一起清掉，那正是我们要的线索。
@@ -5658,6 +5651,9 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         webContentProcessNeedsReload = false
         isLoading = false
         loadError = nil
+        // 基线：到这一刻为止烧掉的，主要就是阅读器前端那 5.77 MB JS 的解析与执行。
+        // 「把判断搬进 Swift 值不值」这个问题，答案的一半在这个数字里。
+        ReaderNativeStartupProfile.shared.mark("网页层就绪 (didFinish)")
         Task { @MainActor [weak self] in
             let enabled = UserDefaults.standard.object(forKey: "reader.nativeInterfaceEnabled") as? Bool ?? true
             await self?.setNativeConversationMode(enabled)

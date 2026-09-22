@@ -52,6 +52,8 @@ final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
         // 系统因为新的睡眠样本把 App 唤到后台时视图层不出现，挂在 .task 里
         // 永远不跑 —— 表现是"权限给了、投递也开了，就是一条都没上报"。
         // 这跟下面 VoIP 那条踩过的是同一个坑。
+        // 基线起点。⚠ 放在最前：晚一步就把它自己那一段也算进"启动"里了。
+        Task { @MainActor in ReaderNativeStartupProfile.shared.mark("App 启动") }
         ReaderSleepReporter.activateFromLaunch()
         // VoIP 来电（通知阶梯最响的一级）。**必须在启动时注册**：
         // ⚠ 晚注册 = token 迟迟拿不到，而没有 token 就永远打不进来 ——
