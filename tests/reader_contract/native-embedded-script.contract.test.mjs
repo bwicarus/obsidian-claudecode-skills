@@ -164,7 +164,14 @@ test("网页外壳的隐藏在 documentStart 落地，不靠消息送达", () =>
   assert.doesNotMatch(styles.slice(0, 1400), /#fs-restore|#ep-top/,
                       "外壳隐藏规则又被搬回 documentEnd 的脚本里了");
   const fn = js.slice(js.indexOf("function applyVisualMode("), js.indexOf("function setLegacy("));
+  // ⚠ 只有**真得到过答案**（setNativeMode 调过）时才能碰这个类。
+  //   本函数会在消息送到之前先跑，那时 nativeMode 还是初值 false ——
+  //   照字面写就把 documentStart 藏好的网页顶栏又放出来，用户看到的
+  //   是**两条顶栏并排**（2026-09-22 实际发生，是我自己引入的回归）。
+  assert.match(fn, /if \(nativeModeKnown\) \{/, "没有先问知不知道就动了外壳");
   assert.match(fn, /bw-native-legacy-chrome', !nativeMode \|\| legacyVisible/);
+  const js2 = embeddedScript("ReaderNativeConversationScript.swift");
+  assert.match(js2, /nativeModeKnown = true;/, "setNativeMode 没把知情标记立起来");
 });
 
 test("App 里根本不建那套网页侧栏外壳", () => {

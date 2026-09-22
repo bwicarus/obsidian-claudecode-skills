@@ -17,6 +17,9 @@ enum ReaderNativeConversationScript {
       //   任何一条不成立，用户看到的就是**两个侧栏并排**。
       //   不开它，这一整类条件就都不存在了。
       let nativeAssistantOpen = false;
+      // Swift 那边到底说没说过话。没说之前，网页外壳保持
+      // documentStart 定的默认（藏着），不能拿初值 false 当“已知关闭”。
+      let nativeModeKnown = false;
       let thread = null, threadObserver = null, timer = null, revision = 0;
       let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null, selectionSubscription = null, selectionRegistry = null;
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
@@ -482,7 +485,15 @@ enum ReaderNativeConversationScript {
         // 网页外壳的"放回来"开关。⚠ 默认（没有这个类）＝**不存在** —— 那条样式
         //   在 atDocumentStart 就落好了，不依赖这个脚本、也不依赖 setNativeMode
         //   送没送到。这里只负责"该放回来的时候放回来"。
-        root.classList.toggle('bw-native-legacy-chrome', !nativeMode || legacyVisible);
+        // ⚠ **不知道就不动**（2026-09-22 修回归）。
+        //   documentStart 已经把网页外壳默认藏掉了；而本函数会在
+        //   `setNativeMode` 还没送到的时候先跑一次（snapshot 里就会调），
+        //   那时 nativeMode 还是初值 false —— 若照字面写，就把外壳又放了出来，
+        //   用户看到的就是**两条顶栏并排**。我自己写的"默认不存在"，
+        //   被自己这行撤销了。所以只有**真得到过答案**时才能碰这个类。
+        if (nativeModeKnown) {
+          root.classList.toggle('bw-native-legacy-chrome', !nativeMode || legacyVisible);
+        }
         root.classList.toggle('bw-native-page-cards', nativeMode && !legacyVisible);
         root.classList.toggle('bw-native-conversation-active', owns);
         // ⚠ 真正的修复在这一行，上面那几个 class 只是第二道。无头＝抽屉退成纯状态：
@@ -497,6 +508,7 @@ enum ReaderNativeConversationScript {
       }
       function setNativeMode(enabled) {
         nativeMode = !!enabled;
+        nativeModeKnown = true;
         applyVisualMode(); schedule();
         return { ok: true };
       }
