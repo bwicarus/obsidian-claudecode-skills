@@ -24,6 +24,11 @@ struct ReaderNativePagePlacement: Identifiable {
     /// 'dot'（圆角方标记）/ 'min'（长条）/ 'full'（方块）。
     /// ⚠ 不能只看 collapsed —— 那把三态压成两态，圆点和长条就长得一样了。
     let form: String
+    /// 便签色板。⚠ 唯一来源是 rc-stickynote 的 COLORS —— 原生不另抄一份，
+    /// 抄了迟早会漂（同一张卡在两个表面上可选的颜色不一样）。
+    /// ⚠ 具名类型而不是元组：`ForEach(_:id: \.hex)` 的 keypath 在元组标签上
+    /// 根本不成立（编译不过）。今天在 CardMarker 上已经栽过一次。
+    let palette: [Swatch]
     /// 钉在正文上。⚠ 钉住的卡**不进长条态**（用户 2026-08-18 拍板：概要与锚点
     /// 重复），所以它的形态循环是 标记 ⇄ 方块 两态，不是三态。
     let pinned: Bool
@@ -65,6 +70,10 @@ struct ReaderNativePagePlacement: Identifiable {
         let raw = value["form"] as? String ?? (value["collapsed"] as? Bool == true ? "dot" : "full")
         form = ["dot", "min", "full"].contains(raw) ? raw : "full"
         pinned = value["pinned"] as? Bool ?? (value["bound"] as? Bool ?? false)
+        palette = (value["palette"] as? [[String: Any]] ?? []).compactMap { entry in
+            guard let hex = entry["c"] as? String, !hex.isEmpty else { return nil }
+            return Swatch(hex: hex, name: entry["n"] as? String ?? hex)
+        }
     }
 
     /// 长条态的摘要 —— 照原版 `_cardForm`：没摘要就从正文摘一行，
@@ -105,6 +114,15 @@ struct ReaderNativePagePlacement: Identifiable {
         return Color(red: Double((value >> 16) & 255) / 255,
                      green: Double((value >> 8) & 255) / 255,
                      blue: Double(value & 255) / 255)
+    }
+}
+
+extension ReaderNativePagePlacement {
+    /// 色板里的一格。
+    struct Swatch: Identifiable, Hashable {
+        let hex: String
+        let name: String
+        var id: String { hex }
     }
 }
 
@@ -326,6 +344,16 @@ private struct ReaderNativePlacedCard: View {
         .accessibilityHint(item.pinned ? "在标记与展开之间切换" : "圆 / 长条 / 方块")
     }
 
+    private func runColor(_ hex: String) {
+        guard let action = item.controls["color"] else { return }
+        Task {
+            if await model.perform("liveAction",
+                                   parameters: ["actionId": action, "value": hex]) == false {
+                reader.showTransientNotice(model.error ?? "没能换颜色，请重试。")
+            }
+        }
+    }
+
     private func runForm(_ value: String) {
         guard let action = item.controls["form"] else {
             reader.showTransientNotice("这张卡不能切换形态。")
@@ -414,6 +442,19 @@ private struct ReaderNativePlacedCard: View {
                     Menu {
                         if !item.bound && !item.floating {
                             Button("锚定到正文", systemImage: "pin") { run("anchor") }
+                        }
+                        if !item.palette.isEmpty, item.controls["color"] != nil {
+                            Menu("卡片颜色") {
+                                ForEach(item.palette) { entry in
+                                    Button {
+                                        runColor(entry.hex)
+                                    } label: {
+                                        Label(entry.name,
+                                              systemImage: entry.hex.caseInsensitiveCompare(item.surfaceHex) == .orderedSame
+                                                ? "checkmark.circle.fill" : "circle.fill")
+                                    }
+                                }
+                            }
                         }
                         Button(item.floating ? "关闭浮动卡片" : "移除这处卡片", systemImage: "trash", role: .destructive) { confirmRemoval = true }
                     } label: { Image(systemName: "ellipsis").frame(width: 28, height: 32) }

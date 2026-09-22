@@ -396,6 +396,11 @@ enum ReaderNativeConversationScript {
           for (const key of ['anchor', 'collapse', 'expand', 'remove', 'toggleBound', 'trash', 'favorite']) {
             controls[key] = registerAction(token + '-' + key, item.root, () => invoke(key, { confirmed: key === 'remove' }));
           }
+          // 换便签色。色板的唯一来源是 rc-stickynote 的 COLORS，这里只转交。
+          controls.color = registerAction(token + '-color', item.root, command => {
+            if (typeof command.value !== 'string') throw new Error('颜色无效');
+            return invoke('color', { value: command.value });
+          });
           // 形态循环按钮（圆 / 长条 / 方块）。裁剪规则在 rc-stickynote 那侧统一做。
           controls.form = registerAction(token + '-form', item.root, command => {
             if (!['dot', 'min', 'full'].includes(command.value)) throw new Error('形态无效');
@@ -445,7 +450,7 @@ enum ReaderNativeConversationScript {
             bound: item.bound, collapsed: item.collapsed, visible: item.visible, open: item.open, controls, parts,
             // 卡面本身的用色与磨砂强度（原版 applyColor 的同一组值）。
             surface: { color: item.color, opacity: item.opacity, blur: item.blur },
-            form: item.form, pinned: item.pinned,
+            form: item.form, pinned: item.pinned, palette: item.palette,
             ink: { strokes: item.strokes, aspectRatio: item.iar, geometry: item.inkGeometry },
             size: item.presentationSize ? { width: item.presentationSize.w / innerWidth, height: item.presentationSize.h / innerHeight } : null,
             markers,

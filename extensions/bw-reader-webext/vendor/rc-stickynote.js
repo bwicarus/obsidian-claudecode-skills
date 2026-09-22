@@ -3799,6 +3799,8 @@ if (window.__bwPwaProviderOnly) return;
         // ⚠ 钉在书页上的卡**不进长条态**（用户 2026-08-18 拍板：概要与锚点重复），
         //   所以这里给 pinned 让原生按同一条规则裁剪形态循环，而不是另造一套。
         form: String(note[slot].form || 'full'), pinned: !!wordBindOf(note),
+        // 色板唯一来源就是上面的 COLORS —— 原生不另抄一份，抄了就会漂。
+        palette: COLORS.map(function (item) { return { c: item.c, n: item.n }; }),
         visible: rect.width > 0 && rect.height > 0, markers: markers, open: !!ctl._bindOpen,
         rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
     }).filter(Boolean);
@@ -3869,6 +3871,13 @@ if (window.__bwPwaProviderOnly) return;
     } else if (command.key === 'remove') {
       if (command.confirmed !== true) throw new Error('请确认移除这处书页卡片');
       return await deleteNote(note);
+    } else if (command.key === 'color') {
+      // 换便签色 —— 走跟色板同一条 setColor（卡面 = rgba(色, α)，见 applyColor）。
+      // ⚠ 只认色板里的七色：原生那边也照这张表画，放开任意色会让两个表面对不上。
+      var picked = String(command.value || '');
+      if (!COLORS.some(function (item) { return item.c === picked; })) throw new Error('不在色板里的颜色');
+      setColor(ctl, picked);
+      return true;
     } else if (command.key === 'trash') {
       // 拖到左上角删除区松手 —— 跟浮层拖删同手感，**不弹确认**（原版 _hardDelete）。
       _hardDelete(ctl);
