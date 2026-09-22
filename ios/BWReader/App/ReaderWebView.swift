@@ -315,6 +315,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 页面已经重载、功能也恢复了，但如果这里不出声，这件事就等于没发生过 ——
     /// 用户只会说"点一下就崩"，而没有任何地方记得崩之前在做什么。
     @Published private(set) var webContentRecoveryNotice: String?
+    /// 随手一句话的提示（顶层胶囊，几秒后自己消失）。
+    /// ⚠ 存储属性必须写在**类体**里 —— extension 不能有存储属性，
+    ///   这个错今天已经犯过两次（build 845 的泛型 static、849 的 extension）。
+    @Published private(set) var transientNotice: String?
+    private var transientNoticeTicket = 0
     private var webContentTerminationCount = 0
     @Published private(set) var libraryPresentationRequestID: UUID?
     /// 顶栏「App 设置」请求打开原生工具 sheet。与书库那条同一套做法：
@@ -5457,9 +5462,6 @@ extension ReaderWebViewModel: WKNavigationDelegate {
     /// ⚠ 存在的理由：原生那堆“点一下去做件事”的按钮失败时，错误只写进
     /// `ReaderNativeConversationModel.error`，而那东西只在**侧栏里**显示 ——
     /// 侧栏多半没开。于是用户看到的就是“点了没反应”，而我们连它报没报错都不知道。
-    @Published private(set) var transientNotice: String?
-    private var transientNoticeTicket = 0
-
     func showTransientNotice(_ text: String) {
         guard !text.isEmpty else { return }
         transientNotice = text
