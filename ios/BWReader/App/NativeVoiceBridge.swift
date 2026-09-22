@@ -113,7 +113,9 @@ final class NativeVoiceBridge: ObservableObject {
 
     @Published private(set) var state: NativeVoiceBridgeState = .idle {
         didSet {
-            reader?.updateNativeVoiceButton(state: state)
+            // ⚠ 这里原来还要把状态推给网页那个「电脑语音」按钮
+            //   （reader.updateNativeVoiceButton）。那个按钮随功能一起删了；
+            //   通话状态现在由原生侧栏自己读 `voiceBridge.state`。
             if oldValue != state {
                 recordDiagnostic(
                     category: "state",
@@ -130,7 +132,6 @@ final class NativeVoiceBridge: ObservableObject {
     @Published private(set) var networkSummary = "checking"
     @Published private(set) var diagnostics: [NativeVoiceDiagnosticEntry] = []
 
-    private weak var reader: ReaderWebViewModel?
     private let audio = NativeAudioEngine()
     private let sharedStore = ReaderNativeBridgeStore()
     private let pathMonitor = NativeVoicePathMonitor()
@@ -221,8 +222,9 @@ final class NativeVoiceBridge: ObservableObject {
     /// 那个概念随「电脑语音」一起删了；现在这条通道只服务 CLI 语音通话。
     var activeTargetName: String { "电脑通话" }
 
+    /// ⚠ 只剩**一个方向**：把自己交给阅读器（通话中的读页上下文要用）。
+    /// 反向那条（桥推状态给网页的「电脑语音」按钮）随该功能一起删了。
     func bind(reader: ReaderWebViewModel) {
-        self.reader = reader
         reader.bind(nativeVoiceBridge: self)
     }
 
