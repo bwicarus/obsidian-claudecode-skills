@@ -143,6 +143,7 @@ actor DirectVoiceSocket {
     /// Starts one exact Windows voice session.  This convenience method opens
     /// and authenticates the WSS first when necessary.
     func start(
+        appKind: DirectVoiceTargetApp = .codexDesktop,
         takeover: Bool = false
     ) async throws -> DirectVoiceSession {
         if state == .disconnected || state == .failed {
@@ -173,10 +174,15 @@ actor DirectVoiceSocket {
         setState(.starting)
 
         do {
-            // 不带 appKind = 桥那侧的默认目标，跟删掉"电脑语音"之前的线格一致。
+            // Keep the original Codex wire shape exactly compatible with the
+            // stable bridge.  Only the newer GPT Classic target needs an
+            // explicit appKind discriminator.
             var startFields: [String: DirectJSONValue] = [
                 "sessionId": .string(session.id),
             ]
+            if appKind != .codexDesktop {
+                startFields["appKind"] = .string(appKind.rawValue)
+            }
             if takeover {
                 startFields["takeover"] = .bool(true)
             }
@@ -321,6 +327,25 @@ actor DirectVoiceSocket {
                 DirectVoiceProtocol.requestTimeoutNanoseconds
         )
         return try parseStatusResult(payload)
+    }
+
+    /// 把用户**打字说的话**送进正在进行的那通 Codex 语音。
+    ///
+    /// 用户 2026-09-11 提的「把电脑语音模式下那个输入框利用起来」。
+    ///
+    /// ⚠ App 上这条**必须走原生**：网页侧 `RC.computerVoice` 那套 DirectSocket
+    /// 在 App 里根本没有 session（状态是原生推进去的），所以 JS 直接发会
+    /// 静静失败 —— 实测就是"输入框绿了、回答却来自文字助手"。
+    ///
+    /// 桥那侧不在通话时回 `{ok:false, reason:"not-in-call"}`，不是异常。
+    func codexType(text: String) async throws -> Bool {
+        let payload = try await request(
+            action: "codex-type",
+            fields: ["text": .string(text)],
+            timeoutNanoseconds:
+                DirectVoiceProtocol.requestTimeoutNanoseconds
+        )
+        return payload.objectValue?["ok"]?.boolValue ?? false
     }
 
     /// Gracefully stops an active session, then always releases the WSS.

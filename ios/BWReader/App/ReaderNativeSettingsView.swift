@@ -34,6 +34,7 @@ final class ReaderNativeSettingsModel: ObservableObject, Identifiable {
         case "models": models = value
         case "voice": fields = (value["fields"] as? [[String: Any]] ?? []).compactMap(ReaderNativeSettingField.init)
         case "profiles": profiles = value["profiles"] as? [String] ?? []; activeProfile = value["active"] as? String ?? ""
+        case "computer": computer = value
         default: break
         }
     }
@@ -128,9 +129,12 @@ struct ReaderNativeSettingsView: View {
                     Picker("设置分类", selection: $tab) {
                         Text("阅读 AI").tag("models")
                         Text("语音与朗读").tag("voice")
+                        Text("电脑通话").tag("computer")
                     }.pickerStyle(.segmented)
                 }
-                if tab == "models" { modelSections } else { voiceSections }
+                if tab == "models" { modelSections }
+                else if tab == "voice" { voiceSections }
+                else { computerSections }
             }
             .scrollContentBackground(.hidden).background(ReaderNativeTheme.canvas)
             .navigationTitle("模型与声音").navigationBarTitleDisplayMode(.inline)
@@ -138,12 +142,16 @@ struct ReaderNativeSettingsView: View {
                 ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
                 ToolbarItem(placement: .topBarLeading) {
                     Button("刷新", systemImage: "arrow.clockwise") {
-                        Task { await model.reload() }
+                        Task {
+                            if tab == "computer" { await model.load("computer") }
+                            else { await model.reload() }
+                        }
                     }
                         .disabled(model.saving || !model.loading.isEmpty)
                 }
             }
             .task { await model.reload() }
+            .task(id: tab) { if tab == "computer" { await model.load("computer") } }
             .alert("保存当前设置为预设", isPresented: $naming) {
                 TextField("名称（最多 20 字）", text: $profileName)
                 Button("取消", role: .cancel) { }
@@ -222,9 +230,82 @@ struct ReaderNativeSettingsView: View {
         }
     }
 
-    // ⚠ 「电脑通话」这一页（目标应用选择 Codex / GPT Classic、Windows 桥接与
-    //   Codex 语音状态、错误段）已整体删除 —— 把 iPad 音频接到桌面聊天应用
-    //   这个功能去掉了（2026-09-22 用户拍板）。CLI 语音通话不经过这一页。
+    @ViewBuilder private var computerSections: some View {
+        let value = model.computer
+        let busy = value["busy"] as? Bool == true
+        let target = value["target"] as? String
+        let status = value["status"] as? [String: Any] ?? [:]
+        let voice = status["codexVoice"] as? [String: Any] ?? [:]
+        Section("语音与文字接力目标") {
+            if model.loading.contains("computer") { ProgressView("读取电脑通话状态…") }
+            ForEach(["codex-desktop", "chatgpt-classic"], id: \.self) { item in
+                Button {
+                    Task { await model.save(section: "computer", values: ["value": item]) }
+                } label: {
+                    HStack {
+                        Text(item == "codex-desktop" ? "Codex" : "GPT Classic")
+                        Spacer()
+                        if target == item { Image(systemName: "checkmark") }
+                    }
+                }.disabled(busy || model.saving || model.loading.contains("computer") || target == nil)
+            }
+            if busy { Text("结束当前电脑语音后可切换目标。").font(.caption).foregroundStyle(.secondary) }
+            Text(target == "chatgpt-classic"
+                 ? "音频连接 GPT Classic；文字接力沿用旧版文字注入开关。阅读快照与卡片工具仍由 Codex 提供。"
+                 : "电脑按钮连接 Codex 音频；阅读快照与卡片工具由 ReaderPC 提供。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        Section("连接状态") {
+            LabeledContent("Windows 桥接", value: computerConnectionLabel(value))
+            LabeledContent("Codex 语音", value: computerVoiceLabel(value, voice: voice))
+            if let reason = value["reason"] as? String, !reason.isEmpty {
+                Text(reason).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            ForEach(value["errors"] as? [String] ?? [], id: \.self) { message in
+                Text(message).foregroundStyle(.red).textSelection(.enabled)
+            }
+        }
+        if let failure = status["lastError"] as? [String: Any], !failure.isEmpty {
+            computerErrorSection("最近 Windows 错误", failure: failure)
+        }
+        if let failure = value["clientError"] as? [String: Any], !failure.isEmpty {
+            computerErrorSection("最近连接错误", failure: failure)
+        }
+        Section {
+            Text("刷新只读取连接状态，切换目标在下次连接生效。点击侧栏电脑按钮才建立音频连接；挂断停止音频桥接。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func computerConnectionLabel(_ value: [String: Any]) -> String {
+        switch value["state"] as? String {
+        case "ready": return "已就绪"
+        case "active", "running": return "已连接"
+        case "idle": return (value["status"] as? [String: Any])?["ready"] as? Bool == true ? "已就绪" : "空闲"
+        case "offline": return "离线或电脑休眠"
+        case "busy": return "忙碌"
+        default: return "暂未取得状态"
+        }
+    }
+
+    private func computerVoiceLabel(_ value: [String: Any], voice: [String: Any]) -> String {
+        if value["voiceEnabled"] as? Bool == false { return "已关闭" }
+        if voice["status"] as? String == "available" {
+            return voice["active"] as? Bool == true ? "正在运行" : "未运行"
+        }
+        if voice["status"] as? String == "error" { return "读取失败" }
+        return "暂未取得状态"
+    }
+
+    private func computerErrorSection(_ title: String, failure: [String: Any]) -> some View {
+        Section(title) {
+            ForEach(["code", "stage", "message", "hresult", "failureId", "atUtc", "at"], id: \.self) { key in
+                if let text = failure[key] as? String, !text.isEmpty {
+                    Text(text).font(.caption.monospaced()).textSelection(.enabled)
+                }
+            }
+        }
+    }
 }
 
 @MainActor

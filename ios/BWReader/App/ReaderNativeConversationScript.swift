@@ -509,6 +509,7 @@ enum ReaderNativeConversationScript {
         if (typeof window.openSearch === 'function' || document.getElementById('ep-search-btn')) out.push('openSearch');
         if (rc().readerTOC?.read && rc().readerTOC?.jump) out.push('nativeTOC', 'openTOC');
         if (document.getElementById('asst-call')) out.push('toggleVoice');
+        if (document.getElementById('asst-computer')) out.push('toggleComputerVoice');
         if (actions.size) out.push('inspectArtifact');
         return out;
       }
@@ -812,8 +813,8 @@ enum ReaderNativeConversationScript {
           } else if (action === 'newConversation') {
             if (conversationMode() !== 'normal' || !rc().voicecall?.canStartNewTopic?.()) return { ok: false, error: '当前通话不支持新话题' };
             rc().voicecall.startNewTopic();
-          } else if (action === 'toggleVoice') {
-            const button = document.getElementById('asst-call');
+          } else if (action === 'toggleVoice' || action === 'toggleComputerVoice') {
+            const button = document.getElementById(action === 'toggleVoice' ? 'asst-call' : 'asst-computer');
             if (!button || button.disabled || button.classList.contains('vc-review-disabled')) return { ok: false, error: '当前无法使用这项语音功能' };
             button.click();
           } else if (action === 'hideLegacy') {

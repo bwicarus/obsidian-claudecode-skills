@@ -300,14 +300,7 @@ test("local activity and snapshot identity expose only opaque book IDs", () => {
   assert.match(NATIVE_FEATURES, /localBookID: clean\(window\.__BW_NATIVE_LOCAL_BOOK_ID__/);
   assert.match(NATIVE_FEATURES, /window\.__BW_NATIVE_LOCAL_READER__ === true\s*\? "" : clean\(location\.href/);
   assert.match(NATIVE_FEATURES, /isTrustedLocalRuntimeFeatureURL\(webView\.url\)/);
-  // ⚠ 原来这里钉的是"诊断里把带能力的本地 URL 遮成 native-local://<capability-redacted>"。
-  // 那段遮盖只存在于「电脑语音」toggle 被拒时的上报器里，而该功能已整体删除
-  // （2026-09-22），于是**没有任何诊断再打印这个 URL** —— 要求比原来更强。
-  // 钉住"它不要回来"，连同下面那条 currentURL 的形状一起。
-  assert.doesNotMatch(
-    WEB_VIEW,
-    /reportNativeVoiceToggleRejected|__BW_NATIVE_COMPUTER_VOICE_LAST_REJECT__/,
-  );
+  assert.match(WEB_VIEW, /native-local:\/\/<capability-redacted>/);
   assert.match(WEB_VIEW, /return local/);
   assert.doesNotMatch(WEB_VIEW, /legacyReader|bwicarus\.taile44d0c\.ts\.net/);
   assert.doesNotMatch(NATIVE_FEATURES, /openNativeReaderURL|candidate\.port|bwicarus\.taile44d0c\.ts\.net/);

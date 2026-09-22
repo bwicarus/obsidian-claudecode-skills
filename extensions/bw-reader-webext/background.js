@@ -152,9 +152,8 @@ const NATIVE_APP_CONTRACT = "bw-reader-native/1";
 const NATIVE_APP_IDENTIFIER = "space.bwicarus.bwreader2";
 const NATIVE_APP_ACTIONS = new Set([
   "capabilities",
-  // ⚠ 没有 "voice.toggle"：它是"点一下拉起 App、把 iPad 音频接到桌面聊天应用"
-  //   的入口，随「电脑语音」整个下线（2026-09-22 用户拍板）。
   "voice.status",
+  "voice.toggle",
   "voice.context",
   "agent.status",
   "agent.toggle",
@@ -5801,6 +5800,7 @@ function nativeAppRequestPayload(message, sender) {
   const base = ["type", "action", "requestId"];
   let required = base;
   let optional = [];
+  if (action === "voice.toggle") required = [...base, "appKind", "webContext"];
   if (action === "voice.context") required = [...base, "webContext"];
   if (action === "agent.toggle") required = [...base, "command"];
   if (action === "agent.events") required = [...base, "after"];
@@ -5837,7 +5837,17 @@ function nativeAppRequestPayload(message, sender) {
     action,
     requestId
   };
-  if (action === "voice.context") {
+  if (action === "voice.toggle") {
+    const appKind = String(message.appKind || "");
+    if (!NATIVE_APP_KINDS.has(appKind)) {
+      throw nativeAppPublicError(
+        "电脑客户端目标无效",
+        "BW_NATIVE_APP_KIND_INVALID"
+      );
+    }
+    payload.appKind = appKind;
+    payload.webContext = nativeAppWebContext(message.webContext, sender);
+  } else if (action === "voice.context") {
     payload.webContext = nativeAppWebContext(message.webContext, sender);
   } else if (action === "agent.toggle") {
     const command = String(message.command || "");
@@ -6208,17 +6218,22 @@ function normalizeNativeAppResponse(response, payload) {
   };
   if (payload.action === "capabilities") {
     const actions = Array.isArray(response.actions) ? response.actions.map(String) : [];
+    const appKinds = Array.isArray(response.appKinds) ? response.appKinds.map(String) : [];
     if (
       !actions.includes("capabilities") ||
       !actions.includes("voice.status") ||
+      !actions.includes("voice.toggle") ||
+      appKinds.some((value) => !NATIVE_APP_KINDS.has(value)) ||
+      !appKinds.includes("codex-desktop") ||
       response.launchScheme !== "bwreader"
     ) {
       throw nativeAppPublicError(
-        "BWReader App 能力不完整",
+        "BWReader App 电脑语音能力不完整",
         "BW_NATIVE_APP_CAPABILITY_MISSING"
       );
     }
     normalized.actions = Array.from(new Set(actions));
+    normalized.appKinds = Array.from(new Set(appKinds));
     normalized.launchScheme = "bwreader";
     return normalized;
   }
@@ -6377,7 +6392,17 @@ function normalizeNativeAppResponse(response, payload) {
     return normalized;
   }
   normalized.state = normalizeNativeAppState(response.state);
-  if (payload.action === "agent.toggle" && payload.command === "start") {
+  if (payload.action === "voice.toggle") {
+    const expectedLaunchURL = `bwreader://native-voice?requestId=${encodeURIComponent(payload.requestId)}`;
+    if (response.launchURL !== expectedLaunchURL) {
+      throw nativeAppPublicError(
+        "BWReader App 启动地址无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    normalized.launchURL = expectedLaunchURL;
+    normalized.opened = response.opened === true;
+  } else if (payload.action === "agent.toggle" && payload.command === "start") {
     const expectedLaunchURL = `bwreader://native-agent?requestId=${encodeURIComponent(payload.requestId)}`;
     if (response.launchURL !== expectedLaunchURL) {
       throw nativeAppPublicError(

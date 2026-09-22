@@ -29,13 +29,19 @@ enum DirectVoiceProtocol {
     static let startTimeoutNanoseconds: UInt64 = 45_000_000_000
 }
 
-// ⚠ `DirectVoiceTargetApp`（codex-desktop / chatgpt-classic）已删除。
-// 「电脑语音」这个功能 —— 把 iPad 的音频接到 Windows 上某个桌面聊天应用、
-// 再往它输入框里打字 —— 整个去掉了（2026-09-22 用户拍板）。
-//
-// ⚠ 这条 **socket 本身留着**：CLI 语音通话（语音核心推 VoIP → CallKit 接通 →
-// onCallAudioReady）用的就是它当音频通道。删 socket 会把要保留的那条一起删掉。
-// 桥那侧的线格里"不带 appKind"原本就等于默认目标，所以这边只是不再发这个字段。
+enum DirectVoiceTargetApp: String, Sendable, Equatable {
+    case codexDesktop = "codex-desktop"
+    case chatGPTClassic = "chatgpt-classic"
+
+    var displayName: String {
+        switch self {
+        case .codexDesktop:
+            return "Codex"
+        case .chatGPTClassic:
+            return "GPT Classic"
+        }
+    }
+}
 
 struct DirectVoiceConfiguration: Sendable, Equatable {
     static let production = DirectVoiceConfiguration()

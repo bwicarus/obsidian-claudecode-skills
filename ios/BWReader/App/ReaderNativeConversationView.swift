@@ -23,18 +23,19 @@ struct ReaderNativeConversationView: View {
 
     private var voiceAction: String? {
         if model.voice.mode == "realtime" { return model.supports("toggleVoice") ? "toggleVoice" : nil }
-        // ⚠ 「电脑语音」（toggleComputerVoice）已删除 —— 把 iPad 音频接到
-        //   Windows 上某个桌面聊天应用那条功能整个去掉了。
+        if model.voice.mode == "computer" || voiceBridge.state.isActive || voiceBridge.state.isBusy {
+            return model.supports("toggleComputerVoice") ? "toggleComputerVoice" : nil
+        }
+        if model.supports("toggleComputerVoice") { return "toggleComputerVoice" }
         return model.supports("toggleVoice") ? "toggleVoice" : nil
     }
 
     private var voiceActive: Bool {
-        // 通话中也算"语音进行中"：CLI 语音走的就是这条通道。
-        model.voice.active || voiceBridge.state.isActive
+        model.voice.active || (voiceAction == "toggleComputerVoice" && voiceBridge.state.isActive)
     }
 
     private var voiceBusy: Bool {
-        model.voice.busy || voiceBridge.state.isBusy
+        model.voice.busy || (voiceAction == "toggleComputerVoice" && voiceBridge.state.isBusy)
     }
 
     var body: some View {
@@ -123,7 +124,7 @@ struct ReaderNativeConversationView: View {
                     Button {
                         Task { await model.perform(voiceAction) }
                     } label: {
-                        Label(voiceActive || voiceBusy ? "结束通话" : "开始语音",
+                        Label(voiceActive || voiceBusy ? "结束通话" : voiceAction == "toggleComputerVoice" ? "电脑语音" : "开始语音",
                               systemImage: voiceActive || voiceBusy ? "stop.fill" : "waveform")
                             .font(.subheadline.weight(.medium))
                             .frame(maxWidth: .infinity).padding(.vertical, 3)
@@ -144,7 +145,7 @@ struct ReaderNativeConversationView: View {
                 // ⚠ 旧界面的入口（“完整功能”）已删除，连带能力本身也不再上报。
                 //   菜单的出现条件改成"它自己有东西可点"，而不是"能不能召唤旧界面"。
                 if ["openReview", "openModels", "openSettings", "openSearch",
-                    "toggleVoice"].contains(where: model.supports) {
+                    "toggleVoice", "toggleComputerVoice"].contains(where: model.supports) {
                     Menu {
                         if model.supports("openReview") {
                             Button(isReview ? "结束复习" : "打开复习", systemImage: "rectangle.on.rectangle") {
@@ -170,6 +171,11 @@ struct ReaderNativeConversationView: View {
                             if model.supports("toggleVoice"), voiceAction != "toggleVoice" {
                                 Button("开始普通语音", systemImage: "phone") {
                                     Task { await model.perform("toggleVoice") }
+                                }
+                            }
+                            if model.supports("toggleComputerVoice"), voiceAction != "toggleComputerVoice" {
+                                Button("开始电脑语音", systemImage: "desktopcomputer") {
+                                    Task { await model.perform("toggleComputerVoice") }
                                 }
                             }
                         }

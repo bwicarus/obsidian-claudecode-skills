@@ -32,7 +32,7 @@ test("App 电脑语音用封顶退避恢复明确的 Windows 清理中响应", (
 
 test("恢复仍对未知 START 结果 fail closed 且不自动 takeover", () => {
   const recovery = BRIDGE.slice(BRIDGE.indexOf("private func performRecovery"));
-  assert.match(recovery, /newSocket\.start\(\)/);
+  assert.match(recovery, /newSocket\.start\(appKind: activeAppKind\)/);
   assert.doesNotMatch(recovery, /newSocket\.start\([\s\S]{0,160}takeover: true/);
   assert.match(BRIDGE, /if !startRequestSent \{[\s\S]*return true/);
   assert.match(BRIDGE, /confirmedRecoveryRejectionCodes\.contains\(failure\.code\)/);
