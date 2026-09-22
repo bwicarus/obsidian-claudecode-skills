@@ -232,32 +232,21 @@ struct ReaderNativeSettingsView: View {
 
     @ViewBuilder private var computerSections: some View {
         let value = model.computer
-        let busy = value["busy"] as? Bool == true
-        let target = value["target"] as? String
         let status = value["status"] as? [String: Any] ?? [:]
         let voice = status["codexVoice"] as? [String: Any] ?? [:]
-        Section("语音与文字接力目标") {
+        // ⚠ 「语音与文字接力目标」（Codex / GPT Classic 二选一）已删除
+        //   （2026-09-22 用户拍板）：桥里"去拉某个桌面聊天应用的语音"那条链没了，
+        //   通话的另一头只有一个 —— ReaderPC 的语音核心。留着一个不再改变任何
+        //   行为的选择器，只会让人以为还能选。
+        Section {
             if model.loading.contains("computer") { ProgressView("读取电脑通话状态…") }
-            ForEach(["codex-desktop", "chatgpt-classic"], id: \.self) { item in
-                Button {
-                    Task { await model.save(section: "computer", values: ["value": item]) }
-                } label: {
-                    HStack {
-                        Text(item == "codex-desktop" ? "Codex" : "GPT Classic")
-                        Spacer()
-                        if target == item { Image(systemName: "checkmark") }
-                    }
-                }.disabled(busy || model.saving || model.loading.contains("computer") || target == nil)
-            }
-            if busy { Text("结束当前电脑语音后可切换目标。").font(.caption).foregroundStyle(.secondary) }
-            Text(target == "chatgpt-classic"
-                 ? "音频连接 GPT Classic；文字接力沿用旧版文字注入开关。阅读快照与卡片工具仍由 Codex 提供。"
-                 : "电脑按钮连接 Codex 音频；阅读快照与卡片工具由 ReaderPC 提供。")
+            Text("电脑通话接 ReaderPC 的语音核心；阅读快照与卡片工具由 ReaderPC 提供。"
+                 + "语音核心没启动时不会去拉任何桌面应用，只会明确报错。")
                 .font(.caption).foregroundStyle(.secondary)
-        }
+        } header: { Text("电脑通话") }
         Section("连接状态") {
             LabeledContent("Windows 桥接", value: computerConnectionLabel(value))
-            LabeledContent("Codex 语音", value: computerVoiceLabel(value, voice: voice))
+            LabeledContent("语音核心", value: computerVoiceLabel(value, voice: voice))
             if let reason = value["reason"] as? String, !reason.isEmpty {
                 Text(reason).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }

@@ -4088,13 +4088,10 @@ internal sealed class DirectBridgeProtocolSession
             true,
             "收到 START（session " + (sessionId.Length > 12
                 ? sessionId[..12] : sessionId) + "），准备判断要不要请求入口");
-        if (!string.Equals(
-                appKind,
-                DirectAppTargets.CodexDesktop,
-                StringComparison.Ordinal))
-        {
-            return;
-        }
+        // ⚠ 这里原来有一句"只对 Codex 桌面端"。桌面端那条链删掉之后，它变成了一个
+        //   **陷阱**：目标选成 GPT Classic 就会从这里提前返回，于是语音核心也不开
+        //   —— 表现是"换了个目标，语音就再也起不来"。appKind 现在不参与任何路由，
+        //   只是线格上留着的一个字段（老版本 App 还在发）。
         // 外部语音后端（2026-09-13 用户：「临时更改本地的线路，两条虚拟线缆不连旧的
         // Codex App 而是连到我们自己的 CLI 语音上」）：runtime/voice-backend-external.json
         // 在，就不去拉桌面 Codex 的语音 —— App 的音频照常走两条线缆，另一头由自建的
