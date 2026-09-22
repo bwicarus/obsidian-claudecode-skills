@@ -110,6 +110,8 @@ struct ReaderNativePageMarker: Identifiable {
 struct ReaderNativePageCards: View {
     @ObservedObject var reader: ReaderWebViewModel
     @ObservedObject var model: ReaderNativeConversationModel
+    /// 正在拖的那根手指（本层局部坐标）。nil = 没在拖。
+    @State private var dragFinger: CGPoint?
 
     var body: some View {
         GeometryReader { geometry in
@@ -149,6 +151,8 @@ struct ReaderNativePageCards: View {
                 // ⚠ 自成一层：它每秒更新十来次，混在这一层里就会把每张卡一起重算。
                 ReaderNativeDropPreviewLayer(model: reader.cardDropPreviews,
                                              origin: geometry.frame(in: .global).origin)
+                // 边缘投放区（删除 / 收藏）。⚠ 判据用**手指**位置，不是卡左上角。
+                ReaderNativeCardDropZones(finger: dragFinger, size: geometry.size)
                 ForEach(model.placements) { item in
                     // ⚠ 原生正文接管时坐标必须来自 PDFKit 解锚：网页那套 rect 是从
                     //   DOM 推的，而接管后网页不渲页、滚动也不同步，它已经不对应
@@ -205,7 +209,8 @@ struct ReaderNativePageCards: View {
                     if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < geometry.size.width && rect.minY < geometry.size.height {
                         ReaderNativePlacedCard(item: item, reader: reader, model: model,
                                                origin: geometry.frame(in: .global).origin,
-                                               rect: rect, available: geometry.size)
+                                               rect: rect, available: geometry.size,
+                                               finger: $dragFinger)
                             .offset(x: rect.minX, y: rect.minY)
                             .zIndex(10)
                     }
@@ -231,6 +236,8 @@ private struct ReaderNativePlacedCard: View {
     let origin: CGPoint
     let rect: CGRect
     let available: CGSize
+    /// 拖动中的手指位置（本层局部坐标），交给投放区判据用。
+    @Binding var finger: CGPoint?
     @GestureState private var translation: CGSize = .zero
     /// 松手到新位置回来之间的**暂态位移**。
     ///
@@ -361,7 +368,11 @@ private struct ReaderNativePlacedCard: View {
         .offset(committed ?? .zero)
         // 手势被打断时 GestureState 会自己归零，而 onEnded 不一定来 ——
         // 不擦的话预览会留在屏幕上，看着像"钉在那儿了"。
-        .onChange(of: translation) { _, value in if value == .zero { reader.clearCardDropPreview() } }
+        // 手势被打断时 GestureState 自己归零而 onEnded 不一定来 —— 预览和投放区
+        // 都得在这里擦掉，不然会留在屏幕上（红区一直亮着尤其吓人）。
+        .onChange(of: translation) { _, value in
+            if value == .zero { reader.clearCardDropPreview(); finger = nil }
+        }
         .onChange(of: rect) { _, _ in committed = nil }
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
             if item.floating, Date().timeIntervalSince(lastTouch) > 2 {
@@ -386,15 +397,47 @@ private struct ReaderNativePlacedCard: View {
     }
 
     private var moveGesture: some Gesture {
-        DragGesture(minimumDistance: 6)
+        // ⚠ coordinateSpace: .global —— 投放区判据要的是**手指在屏幕上哪儿**。
+        //   默认坐标系是手势所在那个小视图，拿来跟屏幕边缘比毫无意义。
+        DragGesture(minimumDistance: 6, coordinateSpace: .global)
             .updating($translation) { value, state, _ in state = value.translation }
-            // ⚠ 探测点＝**卡左上角**（+1 避开自身边框），不是手指 —— 那才是钉入点。
-            //   跟下面 onEnded 用同一个式子：预览与落点必须是同一个点。
-            .onChanged { value in reader.previewCardDrop(windowPoint: dropPoint(value.translation)) }
+            .onChanged { value in
+                // 两个探测点，故意不同（原版就是这么分的）：
+                // · 投放区（删除/收藏）看**手指**；
+                // · 落点预览看**卡左上角**（+1 避开自身边框）—— 那才是钉入点。
+                //   写成同一个会出现"看着在删除区、松手却钉在正文上"。
+                finger = CGPoint(x: value.location.x - origin.x, y: value.location.y - origin.y)
+                reader.previewCardDrop(windowPoint: dropPoint(value.translation))
+            }
             .onEnded { value in
                 reader.clearCardDropPreview()
+                let released = CGPoint(x: value.location.x - origin.x, y: value.location.y - origin.y)
+                finger = nil
                 let scope = model.scope
                 let point = dropPoint(value.translation)
+                // 删除区 / 收藏区优先于"钉到正文"（原版 onHandleUp 的顺序）。
+                if ReaderNativeCardDropZone.inTrash(released), let action = item.controls["trash"] {
+                    committed = nil
+                    Task {
+                        if await model.perform("liveAction", parameters: ["actionId": action]) == false {
+                            reader.showTransientNotice(model.error ?? "没能删除这张卡。")
+                        }
+                    }
+                    return
+                }
+                if ReaderNativeCardDropZone.inDock(released, screenHeight: available.height),
+                   let action = item.controls["favorite"] {
+                    // 收藏是**复制**：原卡回原位，不改锚点（原版同一条注释）。
+                    committed = nil
+                    Task {
+                        if await model.perform("liveAction", parameters: ["actionId": action]) == false {
+                            reader.showTransientNotice(model.error ?? "这张卡没能加入收藏夹。")
+                        } else {
+                            reader.showTransientNotice("已收入收藏夹")
+                        }
+                    }
+                    return
+                }
                 committed = value.translation
                 Task {
                     // 原生正文接管时走原生锚点：落点要换成**页内**归一化坐标。
@@ -499,6 +542,96 @@ private struct ReaderNativeDropPreviewLayer: View {
                     .offset(x: line.minX - origin.x, y: line.minY - origin.y)
                     .allowsHitTesting(false)
             }
+        }
+    }
+}
+
+/// 拖卡时出现在屏幕边缘的两块投放区。几何、配色与判据全部照搬网页那版
+/// （rc-voicecall 的 `#vc-trash` / `#vc-dock-hint`，页卡用法见 rc-stickynote
+/// onHandleMove/onHandleUp）：
+///
+/// · 左上角 126×92 的红色区＝删除，**整个拖动期间都在**，手指进区才变"烫"；
+/// · 底边整条 150pt 的紫色渐变＝收藏，**只在手指进区时出现**（原版就是
+///   `favorite.hint(inZone(...))`，不是一直亮着）。
+///
+/// ⚠ 判据用的是**手指**位置，不是卡左上角 —— 落点预览才用卡角。原版两个探测点
+/// 就是不同的，写成同一个会让"看着在删除区、松手却钉在正文上"。
+enum ReaderNativeCardDropZone {
+    static let trashSize = CGSize(width: 126, height: 92)
+    static let dockHeight: CGFloat = 150
+    /// 手指进入判定的高度（130），比视觉高度（150）略小 —— 与原版一致。
+    static let dockHitHeight: CGFloat = 130
+
+    static func inTrash(_ point: CGPoint) -> Bool {
+        point.x < trashSize.width && point.y < trashSize.height
+    }
+    static func inDock(_ point: CGPoint, screenHeight: CGFloat) -> Bool {
+        screenHeight - point.y < dockHitHeight
+    }
+
+    static let danger = Color(red: 1, green: 0.271, blue: 0.227)      // #ff453a
+    static let dock = Color(red: 0.482, green: 0.424, blue: 1)        // #7b6cff
+}
+
+@MainActor
+struct ReaderNativeCardDropZones: View {
+    /// 手指当前位置（窗口坐标）。nil = 没在拖，什么都不画。
+    var finger: CGPoint?
+    let size: CGSize
+
+    var body: some View {
+        if let finger {
+            let hotTrash = ReaderNativeCardDropZone.inTrash(finger)
+            let inDock = ReaderNativeCardDropZone.inDock(finger, screenHeight: size.height)
+            ZStack(alignment: .topLeading) {
+                // 收藏区：底边一条渐变，只在手指进区时出现。
+                if inDock {
+                    LinearGradient(
+                        colors: [ReaderNativeCardDropZone.dock.opacity(0.38),
+                                 ReaderNativeCardDropZone.dock.opacity(0.10),
+                                 .clear],
+                        startPoint: .bottom, endPoint: .top)
+                        .frame(height: ReaderNativeCardDropZone.dockHeight)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .overlay(alignment: .bottom) {
+                            Label("收入收藏夹", systemImage: "star.fill")
+                                .font(.caption.weight(.semibold)).foregroundStyle(.white)
+                                .padding(.bottom, 18)
+                        }
+                }
+                // 删除区：左上角，整个拖动期间都在；进区变"烫"。
+                VStack(spacing: 4) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 22, weight: .medium))
+                        .scaleEffect(hotTrash ? 1.16 : 1)
+                        .rotationEffect(.degrees(hotTrash ? -8 : 0))
+                    Text("删除").font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(.white)
+                .frame(width: ReaderNativeCardDropZone.trashSize.width,
+                       height: ReaderNativeCardDropZone.trashSize.height)
+                .background(
+                    LinearGradient(
+                        colors: hotTrash
+                            ? [ReaderNativeCardDropZone.danger, ReaderNativeCardDropZone.danger.opacity(0.8)]
+                            : [ReaderNativeCardDropZone.danger.opacity(0.92),
+                               ReaderNativeCardDropZone.danger.opacity(0.45)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing),
+                    in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
+                                               bottomTrailingRadius: 24, topTrailingRadius: 0))
+                .overlay(
+                    UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
+                                           bottomTrailingRadius: 24, topTrailingRadius: 0)
+                        .stroke(.white.opacity(hotTrash ? 0.35 : 0), lineWidth: 2))
+                .scaleEffect(hotTrash ? 1.06 : 1, anchor: .topLeading)
+                .shadow(color: ReaderNativeCardDropZone.danger.opacity(hotTrash ? 0.85 : 0),
+                        radius: 22, y: 10)
+                .opacity(0.97)
+            }
+            .frame(width: size.width, height: size.height, alignment: .topLeading)
+            .allowsHitTesting(false)
+            .animation(.easeOut(duration: 0.14), value: hotTrash)
+            .animation(.easeOut(duration: 0.2), value: inDock)
         }
     }
 }

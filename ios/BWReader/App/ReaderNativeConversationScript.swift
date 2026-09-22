@@ -393,7 +393,7 @@ enum ReaderNativeConversationScript {
             key: command.value.kind, opId: command.value.opId, eventOpId: command.value.eventOpId,
             segments: command.value.segments, aspectRatio: command.value.aspectRatio
           }));
-          for (const key of ['anchor', 'collapse', 'expand', 'remove', 'toggleBound']) {
+          for (const key of ['anchor', 'collapse', 'expand', 'remove', 'toggleBound', 'trash', 'favorite']) {
             controls[key] = registerAction(token + '-' + key, item.root, () => invoke(key, { confirmed: key === 'remove' }));
           }
           controls.move = registerAction(token + '-move', item.root, command => {

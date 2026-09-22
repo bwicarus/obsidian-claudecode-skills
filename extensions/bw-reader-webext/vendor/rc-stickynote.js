@@ -3809,7 +3809,7 @@ if (window.__bwPwaProviderOnly) return;
     //   （几何、渲染态、时间戳…），点过去就是'卡片已更新'——
     //   而用户看到的只是**点了没反应**（2026-09-22 实报：“点击绑定了卡片的
     //   单词没反应”）。开合本来就是幂等的，过期也不会造成错误结果。
-    var contentAction = ['move', 'resize', 'remove', 'anchor'].indexOf(command.key) >= 0;
+    var contentAction = ['move', 'resize', 'remove', 'anchor', 'trash'].indexOf(command.key) >= 0;
     if (contentAction && JSON.stringify(note) !== command.version) {
       throw new Error('卡片已更新，请重新操作');
     }
@@ -3857,6 +3857,14 @@ if (window.__bwPwaProviderOnly) return;
     } else if (command.key === 'remove') {
       if (command.confirmed !== true) throw new Error('请确认移除这处书页卡片');
       return await deleteNote(note);
+    } else if (command.key === 'trash') {
+      // 拖到左上角删除区松手 —— 跟浮层拖删同手感，**不弹确认**（原版 _hardDelete）。
+      _hardDelete(ctl);
+      return true;
+    } else if (command.key === 'favorite') {
+      // 拖到底边收藏区松手 —— 收藏是**复制**，原页卡留在原位（原版 _favoriteCard）。
+      if (!_favoriteCard(ctl)) throw new Error('这张卡没能加入收藏夹');
+      return true;
     } else throw new Error('不支持的卡片操作');
     var saved = await patchNote(note, fields, null, command.version);
     if (!saved || command.generation !== _generation) throw new Error('卡片保存未确认');
