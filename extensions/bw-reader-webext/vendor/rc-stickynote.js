@@ -3794,6 +3794,11 @@ if (window.__bwPwaProviderOnly) return;
         hasInk: !!(note.strokes && note.strokes.length), strokes: cloneValue(note.strokes || []), iar: Number(note.iar) || 0,
         inkGeometry: nativeInkGeometry(note, ctl), presentationSize: cloneValue(ctl._cardPresentationSize || null), bound: !!wordBindOf(note),
         collapsed: !!note.collapsed || note[slot].form === 'dot' || note[slot].form === 'min',
+        // 形态原样交出去（'dot' / 'min' / 'full'）。原生那边不能只看 collapsed：
+        // 那是把三态压成两态，圆点和长条就长得一样了。
+        // ⚠ 钉在书页上的卡**不进长条态**（用户 2026-08-18 拍板：概要与锚点重复），
+        //   所以这里给 pinned 让原生按同一条规则裁剪形态循环，而不是另造一套。
+        form: String(note[slot].form || 'full'), pinned: !!wordBindOf(note),
         visible: rect.width > 0 && rect.height > 0, markers: markers, open: !!ctl._bindOpen,
         rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
     }).filter(Boolean);
@@ -3838,8 +3843,15 @@ if (window.__bwPwaProviderOnly) return;
       var resolved = resolveFreeCardBind(ctl);
       if (!resolved) throw new Error('请先选中文字，或将卡片移到正文附近');
       payload = cloneValue(note[slot]); payload.bind = resolved.bind; fields[slot] = payload;
-    } else if (command.key === 'collapse' || command.key === 'expand') {
-      payload = cloneValue(note[slot]); payload.form = command.key === 'collapse' ? 'dot' : 'full';
+    } else if (command.key === 'collapse' || command.key === 'expand' || command.key === 'form') {
+      payload = cloneValue(note[slot]);
+      // 'form' 带明确形态（原生的形态循环按钮用它）；collapse/expand 保持原语义。
+      var next = command.key === 'collapse' ? 'dot'
+        : command.key === 'expand' ? 'full' : String(command.value || 'full');
+      if (['dot', 'min', 'full'].indexOf(next) < 0) throw new Error('形态无效');
+      // ⚠ 与 _cardForm 同一条裁剪：钉住的卡没有长条态。
+      if (next === 'min' && wordBindOf(note)) next = 'full';
+      payload.form = next;
       fields[slot] = payload; fields.collapsed = false;
     } else if (command.key === 'move') {
       if (![command.x, command.y].every(Number.isFinite)) throw new Error('落点无效');

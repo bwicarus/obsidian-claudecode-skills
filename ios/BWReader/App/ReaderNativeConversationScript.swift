@@ -396,6 +396,11 @@ enum ReaderNativeConversationScript {
           for (const key of ['anchor', 'collapse', 'expand', 'remove', 'toggleBound', 'trash', 'favorite']) {
             controls[key] = registerAction(token + '-' + key, item.root, () => invoke(key, { confirmed: key === 'remove' }));
           }
+          // 形态循环按钮（圆 / 长条 / 方块）。裁剪规则在 rc-stickynote 那侧统一做。
+          controls.form = registerAction(token + '-form', item.root, command => {
+            if (!['dot', 'min', 'full'].includes(command.value)) throw new Error('形态无效');
+            return invoke('form', { value: command.value });
+          });
           controls.move = registerAction(token + '-move', item.root, command => {
             if (![command.x, command.y].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
             return invoke('move', { x: command.x * innerWidth, y: command.y * innerHeight });
@@ -440,6 +445,7 @@ enum ReaderNativeConversationScript {
             bound: item.bound, collapsed: item.collapsed, visible: item.visible, open: item.open, controls, parts,
             // 卡面本身的用色与磨砂强度（原版 applyColor 的同一组值）。
             surface: { color: item.color, opacity: item.opacity, blur: item.blur },
+            form: item.form, pinned: item.pinned,
             ink: { strokes: item.strokes, aspectRatio: item.iar, geometry: item.inkGeometry },
             size: item.presentationSize ? { width: item.presentationSize.w / innerWidth, height: item.presentationSize.h / innerHeight } : null,
             markers,
