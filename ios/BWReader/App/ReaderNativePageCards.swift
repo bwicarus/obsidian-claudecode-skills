@@ -16,6 +16,11 @@ struct ReaderNativePagePlacement: Identifiable {
     let inkAspectRatio: CGFloat
     let inkGeometry: String
     let size: CGSize?
+    /// 卡面本身的用色与磨砂强度 —— 跟网页那版 applyColor 同一组值。
+    let surfaceColor: Color
+    let surfaceHex: String
+    let surfaceOpacity: Double
+    let surfaceBlur: Double
 
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String,
@@ -42,6 +47,44 @@ struct ReaderNativePagePlacement: Identifiable {
            let h = size["height"]?.doubleValue, w.isFinite, h.isFinite, w > 0, h > 0 {
             self.size = CGSize(width: w, height: h)
         } else { self.size = nil }
+        // ⚠ 卡面 = rgba(便签色, α) + 磨砂，**卡片本身就是那层玻璃**。
+        //   不能在一个不透明底色后面再套一层玻璃：什么都透不出来，还要付
+        //   实时背景重采样的钱（2026-09-22 用户："我的卡片本身就是半透明的，
+        //   你直接改造卡片本身"）。
+        let surface = value["surface"] as? [String: Any] ?? [:]
+        surfaceHex = surface["color"] as? String ?? "#ffffff"
+        surfaceColor = ReaderNativePagePlacement.color(surface["color"] as? String)
+        surfaceOpacity = min(1, max(0.3, (surface["opacity"] as? NSNumber)?.doubleValue ?? 0.72))
+        surfaceBlur = min(24, max(0, (surface["blur"] as? NSNumber)?.doubleValue ?? 10))
+    }
+
+    /// 深底 → 浅字。判据与网页那版 `isDarkBg` **逐字一致**：W3C 相对亮度，
+    /// 阈值 0.55，hex 解析失败按浅底（＝深字，也是它的现状语义）。
+    /// 差一点就会出现"同一张卡在两个表面上字色相反"。
+    var prefersLightText: Bool {
+        guard let rgb = ReaderNativePagePlacement.rgb(surfaceHex) else { return false }
+        func channel(_ value: Double) -> Double {
+            let v = value / 255
+            return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * channel(rgb.0) + 0.7152 * channel(rgb.1) + 0.0722 * channel(rgb.2) < 0.55
+    }
+
+    private static func rgb(_ hex: String) -> (Double, Double, Double)? {
+        var text = hex.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        if text.count == 3 { text = text.map { "\($0)\($0)" }.joined() }
+        guard text.count == 6, let value = UInt32(text, radix: 16) else { return nil }
+        return (Double((value >> 16) & 255), Double((value >> 8) & 255), Double(value & 255))
+    }
+
+    /// `#rgb` / `#rrggbb` → Color。解不出来用网页那边的默认白便签色。
+    private static func color(_ hex: String?) -> Color {
+        var text = (hex ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        if text.count == 3 { text = text.map { "\($0)\($0)" }.joined() }
+        guard text.count == 6, let value = UInt32(text, radix: 16) else { return .white }
+        return Color(red: Double((value >> 16) & 255) / 255,
+                     green: Double((value >> 8) & 255) / 255,
+                     blue: Double(value & 255) / 255)
     }
 }
 
@@ -224,10 +267,15 @@ private struct ReaderNativePlacedCard: View {
             .font(.caption.weight(.medium)).lineLimit(1)
             .padding(.horizontal, 12).padding(.vertical, 10)
             .frame(width: width, alignment: .leading)
-            .background(ReaderNativeTheme.card.opacity(0.96),
+            .foregroundStyle(item.prefersLightText ? Color.white : Color.black.opacity(0.88))
+            // 影子用**不透明**的便签色：拖动时它在正文上飞，半透明反而看不清自己。
+            .background(item.surfaceColor.opacity(max(0.85, item.surfaceOpacity)),
                         in: RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14))
             .overlay(RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14)
-                .stroke(ReaderNativeTheme.accent.opacity(0.55), lineWidth: 1.5))
+                .stroke(Color.black.opacity(0.28), lineWidth: 1))
+            // 浮起特效照原版 .rc-note-lift：微放大 + 轻微透明 + 更深的影。
+            .scaleEffect(1.03, anchor: .topLeading)
+            .opacity(0.92)
     }
 
     var body: some View {
@@ -286,11 +334,13 @@ private struct ReaderNativePlacedCard: View {
             }
         }
         .frame(width: width)
-        // 页卡是**浮在正文上**的，正是 Liquid Glass 该用的地方：下面的字要透出来，
-        // 才看得出这张卡钉在哪一段。iOS 26 以下原样用回不透明卡片色。
-        .readerGlass(in: RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14),
-                     fallback: ReaderNativeTheme.card)
-        .overlay(RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14).stroke(ReaderNativeTheme.accent.opacity(0.2)))
+        // 卡面 = 便签色 + 磨砂，**卡片本身就是那层玻璃**（见 readerNoteSurface）。
+        .readerNoteSurface(item.surfaceColor, opacity: item.surfaceOpacity, blur: item.surfaceBlur,
+                           in: RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14))
+        // 描边照原版 .rc-note-body：一道近黑的细边，不是主题强调色。
+        .overlay(RoundedRectangle(cornerRadius: item.collapsed ? 22 : 14)
+            .stroke(Color.black.opacity(0.22), lineWidth: 1))
+        .foregroundStyle(item.prefersLightText ? Color.white : Color.black.opacity(0.88))
         .overlay(alignment: .bottomTrailing) {
             if !item.collapsed, item.controls["resize"] != nil {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")

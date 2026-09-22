@@ -3786,6 +3786,10 @@ if (window.__bwPwaProviderOnly) return;
             number: node.dataset.ordinal || '', rect: { x: box.left, y: box.top, width: box.width, height: box.height } };
         }).filter(function (m) { return m.rect.width > 0 && m.rect.height > 0; }) : [];
       return { id: noteIdOf(note), generation: _generation, version: JSON.stringify(note),
+        // 便签色与磨砂参数：原生要用它们**当卡面本身**（body 背景 = rgba(色, α) +
+        // backdrop-filter，见 applyColor）。不交出去的话原生只能自己编一个底色，
+        // 那就是"套了层玻璃却什么都没透出来"。
+        color: note.color || DEFAULT_COLOR, opacity: noteOpacity(), blur: noteBlur(),
         root: ctl.root, card: cloneValue(note.card || null), html: cloneValue(note.html || null),
         hasInk: !!(note.strokes && note.strokes.length), strokes: cloneValue(note.strokes || []), iar: Number(note.iar) || 0,
         inkGeometry: nativeInkGeometry(note, ctl), presentationSize: cloneValue(ctl._cardPresentationSize || null), bound: !!wordBindOf(note),

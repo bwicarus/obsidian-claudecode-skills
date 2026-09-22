@@ -50,4 +50,25 @@ extension View {
             self.background(fallback, in: shape)
         }
     }
+
+    /// 便签/页卡的卡面：**卡片自己就是那层磨砂玻璃**。
+    ///
+    /// ⚠ 不要在一个不透明底色后面再套 `readerGlass` —— 什么都透不出来，还要付
+    /// 实时背景重采样的钱（2026-09-22 用户原话："我的卡片本身就是半透明的，
+    /// 你直接改造卡片本身"）。
+    ///
+    /// 配方照搬网页那版 `applyColor`：背景 = rgba(便签色, α)，α 默认 .72，
+    /// 后面垫一层模糊（blur 为 0 时不垫，跟它"0=纯半透明不模糊，置空省 GPU"一致）。
+    @ViewBuilder
+    func readerNoteSurface<S: Shape>(_ color: Color, opacity: Double, blur: Double, in shape: S) -> some View {
+        if #available(iOS 26.0, *), blur > 0 {
+            // tint 就是"给玻璃染上便签色"——这正是这张卡该有的样子。
+            self.glassEffect(.regular.tint(color.opacity(opacity)), in: shape)
+        } else if blur > 0 {
+            self.background(color.opacity(opacity), in: shape)
+                .background(.ultraThinMaterial, in: shape)
+        } else {
+            self.background(color.opacity(opacity), in: shape)
+        }
+    }
 }

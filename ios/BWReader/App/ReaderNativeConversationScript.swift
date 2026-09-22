@@ -380,21 +380,8 @@ enum ReaderNativeConversationScript {
           //   **旧框没转成新框，而且点不开**（2026-09-22 用户实报）。
           //   现在：卡身不支持就不交卡身（网页那份继续显示），但**标记照交**，
           //   至少点得开。
-          if (!supported) {
-            if (!item.bound || !item.markers?.length) return [];
-            const markerOnlyID = 'placement-' + hash(item.generation + ':' + item.id);
-            return [{ id: markerOnlyID, title: item.html?.label || '学习卡',
-              bound: item.bound, collapsed: item.collapsed, visible: false, open: item.open,
-              controls: controls, parts: [],
-              ink: { strokes: [], aspectRatio: 0, geometry: null }, size: null,
-              markers: (item.markers || []).map((marker, index) => ({
-                id: markerOnlyID + '-marker-' + index, kind: marker.kind, number: marker.number,
-                rect: { x: marker.rect.x / innerWidth, y: marker.rect.y / innerHeight,
-                  width: marker.rect.width / innerWidth, height: marker.rect.height / innerHeight } })),
-              rect: { x: item.rect.x / innerWidth, y: item.rect.y / innerHeight,
-                width: item.rect.width / innerWidth, height: item.rect.height / innerHeight } }];
-          }
-          if (!item.visible && !item.markers?.length) return [];
+          if (!supported && (!item.bound || !item.markers?.length)) return [];
+          if (supported && !item.visible && !item.markers?.length) return [];
           const id = 'placement-' + hash(item.generation + ':' + item.id);
           const token = id + '-' + hash(item.version);
           const invoke = async (key, extra = {}) => { const ok = await owner.nativePlacementAction({
@@ -417,6 +404,27 @@ enum ReaderNativeConversationScript {
             if (![command.value?.width, command.value?.height].every(v => Number.isFinite(v) && v > 0 && v <= 1)) throw new Error('尺寸无效');
             return invoke('resize', { width: command.value.width * innerWidth, height: command.value.height * innerHeight });
           });
+          const markers = (item.markers || []).map((marker, index) => ({
+            id: id + '-marker-' + (marker.index ?? index), kind: marker.kind, number: marker.number,
+            rect: { x: marker.rect.x / innerWidth, y: marker.rect.y / innerHeight,
+              width: marker.rect.width / innerWidth, height: marker.rect.height / innerHeight } }));
+          // 卡身原生画不出来（含 iframe/video/未就绪的图…）就只交标记：网页那份卡身
+          // 继续显示，但标记要点得开。
+          //
+          // ⚠⚠ 这一支原来排在 `const controls = {}` **前面**，却写着 `controls: controls`
+          //   —— 同一块作用域里的 const 还在暂时性死区，一读就 ReferenceError，
+          //   于是 pagePlacements 整个抛出：**这本书一张页卡都不交**。
+          //   表现就是"绑定到元素后卡片就打不开了"（2026-09-22 用户实报）。
+          //   现在挪到控件注册之后，toggleBound 是真的。
+          if (!supported) {
+            return [{ id, title: item.html?.label || '学习卡',
+              bound: item.bound, collapsed: item.collapsed, visible: false, open: item.open,
+              controls: { toggleBound: controls.toggleBound }, parts: [],
+              surface: { color: item.color, opacity: item.opacity, blur: item.blur },
+              ink: { strokes: [], aspectRatio: 0, geometry: null }, size: null, markers,
+              rect: { x: item.rect.x / innerWidth, y: item.rect.y / innerHeight,
+                width: item.rect.width / innerWidth, height: item.rect.height / innerHeight } }];
+          }
           const parts = item.card
             ? projectPart({ kind: 'cards', cards: item.card.cards, gid: item.card.gid }, id, item.root, '')
             : [{ id: id + '-html', kind: 'general', title: item.html.label || '卡片', text: '', status: 'saved',
@@ -430,10 +438,11 @@ enum ReaderNativeConversationScript {
           parts.forEach(part => { part.data.dragId = controls.move; });
           return [{ id, title: item.html?.label || (item.card?.cards.length > 1 ? '学习卡组' : '学习卡'),
             bound: item.bound, collapsed: item.collapsed, visible: item.visible, open: item.open, controls, parts,
+            // 卡面本身的用色与磨砂强度（原版 applyColor 的同一组值）。
+            surface: { color: item.color, opacity: item.opacity, blur: item.blur },
             ink: { strokes: item.strokes, aspectRatio: item.iar, geometry: item.inkGeometry },
             size: item.presentationSize ? { width: item.presentationSize.w / innerWidth, height: item.presentationSize.h / innerHeight } : null,
-            markers: (item.markers || []).map(marker => ({ id: id + '-marker-' + marker.index, kind: marker.kind, number: marker.number,
-              rect: { x: marker.rect.x / innerWidth, y: marker.rect.y / innerHeight, width: marker.rect.width / innerWidth, height: marker.rect.height / innerHeight } })),
+            markers,
             rect: { x: item.rect.x / innerWidth, y: item.rect.y / innerHeight,
               width: item.rect.width / innerWidth, height: item.rect.height / innerHeight } }];
         });
