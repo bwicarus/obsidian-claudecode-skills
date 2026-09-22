@@ -60,3 +60,6 @@ _server_deploy/static/pdfjs/
 
 # iOS 本地 ReaderBundle 由固定摘要打包脚本在 CI/XcodeGen 前重建，不提交派生产物
 ios/BWReader/Generated/ReaderBundle/
+# Laya 定型判断引擎的独立 venv（约 3 GB，含 torch+CUDA）。
+# 跟 doclayout-venv / spacy-venv 同理：装在本机，不进仓库。
+laya-venv/
