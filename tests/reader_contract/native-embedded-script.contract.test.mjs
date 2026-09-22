@@ -32,6 +32,22 @@ for (const file of FILES) {
   });
 }
 
+test("原生接管时根本不开网页抽屉", () => {
+  // ⚠ 2026-09-22 用户截图拍实的那一幕：**两个侧栏并排**。
+  //   只要还调 drawer().open()，网页那套侧栏就会滑出来，
+  //   能不能看见取决于一堆条件（nativeMode 送到没、tab 是不是 asst、
+  //   CSS 落了没）—— 任何一条不成立就是两套同时在。不开它，这整类条件就不存在了。
+  const js = embeddedScript("ReaderNativeConversationScript.swift");
+  const branch = js.slice(js.indexOf("action === 'toggleAssistant'"),
+                          js.indexOf("action === 'clearSelection'"));
+  assert.match(branch, /if \(nativeOwnsAssistant\(\)\) \{/, "原生接管时没走独立分支");
+  const owned = branch.slice(branch.indexOf("if (nativeOwnsAssistant())"));
+  assert.doesNotMatch(owned.slice(0, 400), /drawer\(\)\.open|drawer\(\)\?\.open/,
+                      "原生分支里又去开网页抽屉了");
+  // 开合由原生自己记，不再借网页抽屉的状态来表示。
+  assert.match(js, /sidebarOpen: nativeOwnsAssistant\(\) \? nativeAssistantOpen/);
+});
+
 test("开侧栏是「先压住再开」，不是反过来", () => {
   // ⚠ 顺序反了就是这次那个崩：网页抽屉先按自己的样式开出来（旧侧栏闪一下 +
   //   整本 EPUB 连续重排 400ms + backdrop-filter 开始合成），下一次快照才去压。
@@ -113,7 +129,12 @@ test("故障会自己送出去，而不是死在原地", () => {
   assert.match(view, /BW_WEBCONTENT_TERMINATED/, "渲染进程被回收没自动上报");
   const model = readFileSync(new URL(
     "../../ios/BWReader/App/ReaderNativeConversationModel.swift", import.meta.url), "utf8");
-  assert.match(model, /BW_NATIVE_COMMAND_FAILED/, "原生命令失败只写在没人看的地方");
+  // ⚠ 命令失败**只留面包屑，不各发一条上报**（2026-09-22 改）。
+  //   上一版每次失败都 report，而 report 会落盘 + 触发整个发件箱重投；
+  //   服务器书上这类失败是**成串**的（一次翻页九条），
+  //   于是诊断机制自己变成了负载源 —— 用户报的正是"关掉服务器就不闪退了"。
+  assert.match(model, /shared\.note\("fail"/, "命令失败连面包屑都没留");
+  assert.doesNotMatch(model, /shared\.report\(/, "命令失败又改成逐条上报了");
   const app = readFileSync(new URL(
     "../../ios/BWReader/App/BWReaderNativeApp.swift", import.meta.url), "utf8");
   assert.match(app, /beginSession\(origin: ReaderServer\.origin\)/);

@@ -10,6 +10,13 @@ enum ReaderNativeConversationScript {
       const handler = window.webkit?.messageHandlers?.bwNativeConversation;
       if (!handler || typeof handler.postMessage !== 'function') return;
       let legacyVisible = false, nativeMode = false;
+      // 原生侧栏的开合**由原生自己记**，不再借网页抽屉的开合来表示。
+      // ⚠ 这是 2026-09-22 反复栽跟头之后的收口：只要还调 `drawer().open()`，
+      //   网页那套侧栏就会按它自己的样式滑出来，能不能看见就取决于一堆条件
+      //   （nativeMode 送到没、tab 是不是 asst、CSS 落了没）——
+      //   任何一条不成立，用户看到的就是**两个侧栏并排**。
+      //   不开它，这一整类条件就都不存在了。
+      let nativeAssistantOpen = false;
       let thread = null, threadObserver = null, timer = null, revision = 0;
       let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null, selectionSubscription = null, selectionRegistry = null;
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
@@ -429,7 +436,7 @@ enum ReaderNativeConversationScript {
       function capabilities() {
         const out = ['refresh', 'showLegacy', 'hideLegacy', 'liveAction'];
         if (typeof window.__clearFocusSel === 'function') out.push('clearSelection');
-        if (typeof drawer()?.open === 'function' && typeof drawer()?.close === 'function') out.push('toggleAssistant');
+        if (typeof drawer()?.setTab === 'function') out.push('toggleAssistant');
         if (typeof window.__asstSend === 'function') out.push('send');
         if (rc().assistant?.conversationService?.stop) out.push('stop');
         if (rc().assistant?.conversationService?.clear) out.push('clearConversation');
@@ -463,6 +470,9 @@ enum ReaderNativeConversationScript {
       // ⚠ 保留 tab 判断**不是**多余的：网页自己也会开抽屉到 grammar/kg/vocab
       //   （epub-html.js 的 onOpenPanel 等），那些面原生没接管，一并压住就是
       //   "点了什么都不出来"。只压归原生管的那一个。
+      /** 助手这一面归不归原生管。归就由原生记开合，网页抽屉一步都不动。 */
+      function nativeOwnsAssistant() { return nativeMode && !legacyVisible; }
+
       function applyVisualMode(assistantOverride) {
         const root = document.documentElement;
         const owns = nativeMode && !legacyVisible &&
@@ -541,7 +551,7 @@ enum ReaderNativeConversationScript {
           legacyVisible, selection: selectedContext(),
           readerSelection: (typeof window.__bwReaderEpubSelection === 'function'
             ? (window.__bwReaderEpubSelection() || { text: '' }) : { text: '' }),
-          attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, sidebarOpen: isOpen() && activeTab() === 'asst', conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -677,7 +687,15 @@ enum ReaderNativeConversationScript {
               if (pending?.catch) pending.catch(schedule);
             }
           } else if (action === 'toggleAssistant') {
-            if (!drawer()?.open || !drawer()?.close) return { ok: false, error: '侧栏尚未准备好' };
+            if (!drawer()?.setTab) return { ok: false, error: '侧栏尚未准备好' };
+            // 原生接管时：**只切 tab，不开抽屉**。切 tab 是为了让助手那一面的
+            // 内容挂上去（原生从同一棵 DOM 读），它不改布局、不滑入、不挤压正文。
+            if (nativeOwnsAssistant()) {
+              nativeAssistantOpen = !nativeAssistantOpen;
+              if (nativeAssistantOpen) { try { drawer().setTab('asst'); } catch (_) {} }
+              schedule();
+              return { ok: true };
+            }
             if (isOpen() && activeTab() === 'asst') { drawer().close(); legacyVisible = false; }
             // ⚠ **先压住再开**，顺序不能反：反过来就是"网页抽屉先开出来、下一次
             //   快照才去压"，那一瞬间正是旧侧栏闪一下 + 整本重排的来源。

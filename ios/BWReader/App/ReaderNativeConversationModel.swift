@@ -422,10 +422,13 @@ final class ReaderNativeConversationModel: ObservableObject {
         guard !Task.isCancelled, generation == ticket else { return false }
         if let failure {
             error = failure.isEmpty ? "操作未完成，请重试。" : failure
-            // ⚠ 失败也要留痕：能看见的只有侧栏里一行红字，而侧栏多半没开着 ——
-            //   这正是"点了没反应"一直查不出来的原因。
-            ReaderNativeFaultReporter.shared.report(
-                code: "BW_NATIVE_COMMAND_FAILED", message: action, detail: error ?? "")
+            // ⚠ 失败**只留面包屑，不各发一条上报**（2026-09-22 改）。
+            //   上一版每次失败都 report 一次，而 report 会落盘 + 触发整个发件箱重投。
+            //   在服务器书上这类失败是**成串**的（一次翻页能来九条
+            //   `BW_PI_GATEWAY_REMOTE_BOOK`），于是诊断机制自己变成了负载源 ——
+            //   而用户报的正是"关掉服务器就不闪退了"。
+            //   面包屑是内存里的环形缓冲，够便宜；真出事时它会跟着崩溃报告一起走。
+            ReaderNativeFaultReporter.shared.note("fail", action + ":" + (error ?? ""))
             return false
         }
         return true
