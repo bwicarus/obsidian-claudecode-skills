@@ -16,6 +16,52 @@ struct ReaderNativeWorkspace<Document: View>: View {
 
     @AppStorage("reader.navigationCollapsed") private var navigationCollapsed = false
     @State private var dropTarget = false
+    /// 钉在顶栏的阅读工具。存的是换行分隔的身份串。
+    /// ⚠ 身份优先用网页按钮的 id（稳定）；没 id 的才退回标题 ——
+    ///   不能用 actionId，它带着 scope，**换一本书就变**，固定会自己掉。
+    @AppStorage("reader.pinnedTools") private var pinnedToolsRaw = ""
+
+    /// ⚠ 分隔符用「单元分隔符」而不是换行/逗号：工具标题是网页按钮的 title，
+    ///   里面出现标点是常态，用常见字符当分隔符迟早会把一个名字劈成两半。
+    private static let pinnedToolSeparator: Character = "\u{1F}"
+
+    private var pinnedToolIDs: [String] {
+        pinnedToolsRaw.split(separator: Self.pinnedToolSeparator).map(String.init).filter { !$0.isEmpty }
+    }
+
+    private func toolIdentity(_ control: ReaderNativeControl) -> String {
+        control.key.isEmpty ? "t:" + control.title : "k:" + control.key
+    }
+
+    /// 顶栏上要画的那几个，按用户选的顺序。
+    /// ⚠ 本书没有的工具就不画，但**不从设置里删** ——
+    ///   换本书又有了就该回来，静静清掉才是真丢东西。
+    private var pinnedTools: [ReaderNativeControl] {
+        let wanted = pinnedToolIDs
+        return conversation.readingTools
+            .filter { $0.key != "page" && wanted.contains(toolIdentity($0)) }
+            .sorted { a, b in
+                (wanted.firstIndex(of: toolIdentity(a)) ?? 0) < (wanted.firstIndex(of: toolIdentity(b)) ?? 0)
+            }
+    }
+
+    private func togglePinned(_ control: ReaderNativeControl) {
+        let identity = toolIdentity(control)
+        var list = pinnedToolIDs
+        if let at = list.firstIndex(of: identity) { list.remove(at: at) } else { list.append(identity) }
+        pinnedToolsRaw = list.joined(separator: String(Self.pinnedToolSeparator))
+    }
+
+    private func runReadingTool(_ control: ReaderNativeControl) {
+        // ⚠ 新建便签在原生接管时**必须**走原生那条路：网页的
+        // createAtCenter 靠 document.elementFromPoint 找落点，接管后一页都不在
+        // DOM 里，七个候选点全落空 —— 便签没建，连"放不了"的 toast 也看不见。
+        if control.key == "note-new", reader.nativePDFDocument != nil {
+            reader.createNativeStickyNote()
+            return
+        }
+        Task { await conversation.perform("liveAction", parameters: ["actionId": control.id]) }
+    }
 
     private var nativeSidebarVisible: Bool {
         enabled && conversation.sidebarOpen && !conversation.legacyVisible
@@ -167,21 +213,33 @@ struct ReaderNativeWorkspace<Document: View>: View {
                         .presentationCompactAdaptation(.popover)
                 }
             }
+            // 钉在顶栏上的工具（用户自己选）。
+            // ⚠ 不由我挑"常用的几个" —— 每本书、每个人常用的不一样，
+            //   挑错了就是"我要的那个又得点两下"。
+            if enabled {
+                ForEach(pinnedTools) { control in
+                    Button(control.title) { runReadingTool(control) }
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 8).frame(height: 30)
+                        .background(ReaderNativeTheme.accentWash, in: RoundedRectangle(cornerRadius: 9))
+                        .disabled(control.disabled)
+                        .accessibilityLabel(control.title)
+                }
+            }
             if enabled && !conversation.readingTools.isEmpty {
                 Menu {
                     ForEach(conversation.readingTools.filter { $0.key != "page" }) { control in
-                        Button(control.title) {
-                            // ⚠ 新建便签在原生接管时**必须**走原生那条路：网页的
-                            // createAtCenter 靠 document.elementFromPoint 找落点，
-                            // 接管后一页都不在 DOM 里，七个候选点全落空 —— 便签没建，
-                            // 连"放不了"的 toast 也看不见。
-                            if control.key == "note-new", reader.nativePDFDocument != nil {
-                                reader.createNativeStickyNote()
-                                return
-                            }
-                            Task { await conversation.perform("liveAction", parameters: ["actionId": control.id]) }
+                        Button(control.title) { runReadingTool(control) }
+                            .disabled(control.disabled)
+                    }
+                    Divider()
+                    Menu("固定到顶栏…") {
+                        ForEach(conversation.readingTools.filter { $0.key != "page" }) { control in
+                            Toggle(control.title, isOn: Binding(
+                                get: { pinnedToolIDs.contains(toolIdentity(control)) },
+                                set: { _ in togglePinned(control) }
+                            ))
                         }
-                        .disabled(control.disabled)
                     }
                 } label: {
                     Image(systemName: "textformat.size")
