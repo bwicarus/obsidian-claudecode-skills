@@ -291,6 +291,12 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeCardRepository.swift ios/BWReader/Tests/NativeCardRepository/main.swift -o "$RUNNER_TEMP/native-card-test"
           "$RUNNER_TEMP/native-card-test" "$RUNNER_TEMP/native-card-fixtures.json"
 
+      - name: Verify native card presentation parity
+        run: |
+          node ios/BWReader/Tests/NativeCardPresentation/fixtures.mjs "$RUNNER_TEMP/native-card-presentation.json"
+          xcrun swiftc ios/BWReader/App/ReaderNativeCardPresentation.swift ios/BWReader/Tests/NativeCardPresentation/main.swift -o "$RUNNER_TEMP/native-card-presentation-test"
+          "$RUNNER_TEMP/native-card-presentation-test" "$RUNNER_TEMP/native-card-presentation.json"
+
       - name: Verify native stroke geometry parity
         run: |
           node ios/BWReader/Tests/NativeStrokeRules/fixtures.mjs "$RUNNER_TEMP/native-stroke-fixtures.json"

@@ -258,7 +258,8 @@ enum ReaderNativeConversationScript {
       function inlineImageActions(part, node, target) {
         const inlineImages = {};
         if (!rc().voiceCard?.mediaRoute) return inlineImages;
-        const values = part.kind === 'anki' ?
+        const nativeCard = part.data.nativeCard?.card;
+        const values = nativeCard ? ['front','back','cloze','_displayFrontHtml','_displayBackHtml'].map(key => nativeCard[key]) : part.kind === 'anki' ?
           (part.data.state === 'draft' ? (part.data.fields || []).map(f => f.value) : (part.data.faces || []).map(f => f.content)) :
           [part.data.text, part.data.answer, part.data.detail, part.text];
         const expected = JSON.stringify(target.inspect?.().content);
@@ -311,19 +312,35 @@ enum ReaderNativeConversationScript {
           }
           if (typeof window.__setFocusSel === 'function') part.data.selectId = selectAction(part.id, node);
           if (group?.__fc.cards[cardIndex]?._removed) { part.removed = true; continue; }
-          const interaction = group && rc().flashcard?.interactionState(group, cardIndex);
-          if (!interaction && part.kind === 'anki') {
+          const nativeCard = nativeMode && group && rc().flashcard?.presentationInput?.(group, cardIndex);
+          const interaction = !nativeCard && group && rc().flashcard?.interactionState(group, cardIndex);
+          if (!nativeCard && !interaction && part.kind === 'anki') {
             part.data.liveReason = !group ? 'no-card-group'
               : !rc().flashcard ? 'no-flashcard-module' : 'no-state:' + cardIndex;
             if (!group) missingCardGroup(part, node);
           }
-          if (interaction && (part.kind === 'anki' || part.kind === 'artifact')) {
+          if (nativeCard && (part.kind === 'anki' || part.kind === 'artifact')) {
+            part.kind = 'anki';
+            part.data.nativeCard = nativeCard;
+            part.data.activeInGroup = group.__fc.idx === cardIndex;
+            const ids = {};
+            for (const key of ['del','add','reveal','rate-1','rate-2','rate-3','rate-4','export-desktop','export-mobile']) {
+              ids[key] = registerAction(part.id + '-control-' + key, group, () =>
+                rc().flashcard.performInteraction(group, cardIndex, key));
+            }
+            for (const key of ['front','back','cloze']) {
+              ids['edit-' + key] = registerAction(part.id + '-field-' + key, group, command =>
+                rc().flashcard.performInteraction(group, cardIndex, 'edit', { field: key, value: command.text }));
+            }
+            part.data.nativeCardActions = ids;
+          } else if (interaction && (part.kind === 'anki' || part.kind === 'artifact')) {
             part.kind = 'anki';
             part.data.live = true;
             part.data.state = String(interaction.state || '');
             part.data.faces = interaction.presentation.faces;
             part.data.notice = interaction.presentation.notice;
             part.data.editable = interaction.editable;
+            part.data.activeInGroup = group.__fc.idx === cardIndex;
             part.data.controls = interaction.controls.map(control => ({
               id: registerAction(part.id + '-control-' + control.key, group, () =>
                 rc().flashcard.performInteraction(group, cardIndex, control.key)),
@@ -756,6 +773,7 @@ enum ReaderNativeConversationScript {
         nativeMode = !!enabled;
         nativeModeKnown = true;
         rc().turnCard?.setNativePresentation?.(nativeMode);
+        rc().flashcard?.setNativePresentation?.(nativeMode);
         messagesDirty = true;
         applyVisualMode(); schedule();
         return { ok: true };

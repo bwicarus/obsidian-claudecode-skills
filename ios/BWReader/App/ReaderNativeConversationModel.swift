@@ -32,7 +32,7 @@ struct ReaderNativeConversationPart: Identifiable {
         title = value["title"] as? String ?? ""
         text = value["text"] as? String ?? ""
         status = value["status"] as? String ?? "unknown"
-        data = value["data"] as? [String: Any] ?? [:]
+        data = ReaderNativeCardPresentation.project(value["data"] as? [String: Any] ?? [:])
         actionId = (value["actionId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         actionLabel = value["actionLabel"] as? String
     }

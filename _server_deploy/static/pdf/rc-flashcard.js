@@ -267,7 +267,9 @@
   }
   var _EASE = [['1', '再来', 'e1'], ['2', '困难', 'e2'], ['3', '良好', 'e3'], ['4', '简单', 'e4']];
   var _groups = {};   // gid → {cards:共享卡对象数组, conts:[渲染实例容器]}:同 gid 多宿主(侧栏/浮层)状态联动
+  function nativePresentation() { return window.__BW_NATIVE_CONVERSATION_DATA__ === true; }
   function injectCss() {
+    if (nativePresentation()) return;
     if (document.getElementById('rc-flashcard-css')) return;
     var st = document.createElement('style'); st.id = 'rc-flashcard-css';
     st.textContent =
@@ -525,6 +527,23 @@
   }
   // Semantic operations shared by native controls and web projections. Native
   // controls never need to find a hidden button or synthesize an input event.
+  function presentationInput(container, i) {
+    var st = container && container.__fc, c = st && st.cards[i];
+    if (!Number.isInteger(i) || i < 0 || !c || c._removed) return null;
+    var card = Object.assign({}, c);
+    // Custom review templates are still provided by their owner, without
+    // inserting the result into a DOM or running the web card renderer.
+    if (st.opts && typeof st.opts.projectFaceHtml === 'function') {
+      card._displayFrontHtml = st.opts.projectFaceHtml(c, 'front');
+      card._displayBackHtml = st.opts.projectFaceHtml(c, 'back');
+    }
+    var mobile = window.BWReaderRuntime && window.BWReaderRuntime.ankiMobileExport;
+    return { card: card, gid: st.gid, cardIndex: i, readonly: !!st.readonly,
+      controlledReview: !!st.controlledReview,
+      canDesktop: !!(((st.opts && st.opts.localDraft) || entityIdOf(st.gid)) &&
+        RC.computerVoice && typeof RC.computerVoice.addLocalAnkiCard === 'function'),
+      canMobile: !!(mobile && typeof mobile.available === 'function' && mobile.available()) };
+  }
   function interactionState(container, i) {
     var st = container && container.__fc, c = st && st.cards[i];
     if (!Number.isInteger(i) || i < 0 || !c || c._removed) return null;
@@ -704,6 +723,10 @@
   }
   function updateSlide(container, i) {
     var st = container.__fc; if (!st) return;
+    if (nativePresentation()) {
+      notifyState(container, 'native-card-changed', i);
+      return;
+    }
     var slide = container.querySelector('.fc-slide[data-i="' + i + '"]'); if (!slide) return;
     slide.innerHTML = cardHtml(st, st.cards[i], i); bindSlide(container, slide, st, i);
     try { RC.typeset && RC.typeset(slide); } catch (e) {}
@@ -862,6 +885,15 @@
       if (!card._removed) activeIndices.push(index);
     });
     var n = activeIndices.length;
+    if (nativePresentation()) {
+      // The Swift card surface consumes semantic state. Do not construct
+      // hidden card HTML, load its images, typeset it or attach a web pager.
+      if (container.firstChild) container.replaceChildren();
+      container.__fcActive = activeIndices;
+      if (n && activeIndices.indexOf(st.idx) < 0) st.idx = activeIndices[0];
+      notifyState(container, 'native-card-mounted', st.idx);
+      return;
+    }
     if (!n) { container.innerHTML = '<div class="fc-collapsed">（草稿已全部删除）</div>'; return; }
     var activePosition = activeIndices.indexOf(st.idx);
     if (activePosition < 0) {
@@ -1240,7 +1272,7 @@
       var st = container && container.__fc;
       var pager = container && container.__fcPager;
       var active = container && container.__fcActive;
-      if (!st || !pager || typeof pager.goto !== 'function' || !active) return;
+      if (!st || !active || (!nativePresentation() && (!pager || typeof pager.goto !== 'function'))) return;
       var cards = st.cards || [];
       var isPending = function (c) {
         return c && !c._removed && (c._st === 'draft' || c._st === undefined) && !c._addPending;
@@ -1249,6 +1281,11 @@
       for (var k = fromIndex + 1; k < cards.length; k++) { if (isPending(cards[k])) { target = k; break; } }
       if (target < 0) for (var j = 0; j < fromIndex; j++) { if (isPending(cards[j])) { target = j; break; } }
       if (target < 0) return;
+      if (nativePresentation()) {
+        st.idx = target;
+        notifyState(container, 'advance-after-confirm', target);
+        return;
+      }
       var pos = active.indexOf(target);
       if (pos >= 0) pager.goto(pos, { reason: 'advance-after-confirm' });
     } catch (_) {}
@@ -2137,11 +2174,23 @@
         tool: 'reader_anki_draft'
       });
       if (result && result.bd) applyRepositoryRecord(result.bd, record);
-      if (!result || !result.el || !result.el.querySelector('.fc-card')) return null;
+      if (!result || !result.el || !(nativePresentation() ? result.bd && result.bd.__fc : result.el.querySelector('.fc-card'))) return null;
       return result;
     });
   }
   RC.flashcard = {
+    setNativePresentation: function (enabled) {
+      window.__BW_NATIVE_CONVERSATION_DATA__ = !!enabled;
+      if (enabled) {
+        var css = document.getElementById('rc-flashcard-css');
+        if (css) css.remove();
+      } else injectCss();
+      Object.keys(_groups).forEach(function (gid) {
+        _groups[gid].conts.forEach(function (container) {
+          if (container && container.isConnected && container.__fc) renderTrack(container);
+        });
+      });
+    },
     // 按 gid 取这一组当前挂着的容器。
     //
     // ⚠ 存在的理由：原生侧此前只能从"动作锚点那个 DOM 节点"往下爬找 __fc
@@ -2158,6 +2207,7 @@
       return null;
     },
     interactionState: interactionState,
+    presentationInput: presentationInput,
     performInteraction: performInteraction,
     mountDrafts: mountDrafts,
     mountPreview: mountPreview,

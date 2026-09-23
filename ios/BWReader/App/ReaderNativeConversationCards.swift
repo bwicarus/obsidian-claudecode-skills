@@ -150,6 +150,7 @@ struct ReaderNativeConversationArtifacts: View {
     @State private var visibleID: String?
 
     private var position: Int { (parts.firstIndex { $0.id == visibleID } ?? 0) + 1 }
+    private var preferredID: String? { parts.first { $0.data["activeInGroup"] as? Bool == true }?.id }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -174,6 +175,9 @@ struct ReaderNativeConversationArtifacts: View {
                 .scrollTargetBehavior(.viewAligned)
                 .scrollPosition(id: $visibleID)
                 .scrollIndicators(.hidden)
+                .onChange(of: preferredID, initial: true) { _, next in
+                    if let next { visibleID = next }
+                }
             } else if let part = parts.first {
                 ReaderNativeConversationArtifactCard(part: part, model: model, bare: bare)
             }
