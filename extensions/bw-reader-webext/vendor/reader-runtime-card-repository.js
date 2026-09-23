@@ -176,7 +176,16 @@
     }
   }
   function same(left, right) {
-    return JSON.stringify(left) === JSON.stringify(right);
+    if (left === right) return true;
+    if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+    if (Array.isArray(left) !== Array.isArray(right)) return false;
+    // Native persistence sorts object keys; JSON member order is not content.
+    // Array indexes still compare in place, preserving card/tag order.
+    var keys = Object.keys(left);
+    if (keys.length !== Object.keys(right).length) return false;
+    return keys.every(function (key) {
+      return Object.prototype.hasOwnProperty.call(right, key) && same(left[key], right[key]);
+    });
   }
 
   function secureId() {

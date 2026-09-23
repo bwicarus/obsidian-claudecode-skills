@@ -1919,7 +1919,7 @@ internal static class ReaderRealtimeOutputProtocol
             retryable: false);
 }
 
-internal sealed class ReaderRealtimeOutputBroker
+internal sealed partial class ReaderRealtimeOutputBroker
 {
     // An exact-text mutation may have to bring an off-screen PDF page into the
     // virtualized DOM and wait for its native text layer before it can produce
@@ -1967,6 +1967,7 @@ internal sealed class ReaderRealtimeOutputBroker
             ? null
             : new ReaderRealtimeOutputOutbox(outboxPath);
         _router.SourceAttached += OnSourceAttached;
+        InitializeArtifactDelivery(outboxPath);
     }
 
     internal ReaderRealtimeOutputSourceStatus GetSourceStatus(
@@ -2007,7 +2008,7 @@ internal sealed class ReaderRealtimeOutputBroker
     internal Task<ReaderRealtimeOutputAck> SendAsync(
         ReaderRealtimeOutputRequest request,
         CancellationToken cancellationToken) =>
-        SendAsync(request, cancellationToken, alreadyQueued: false);
+        SendArtifactGuardedAsync(request, cancellationToken);
 
     /// <param name="alreadyQueued">
     /// true 表示这条已经在队列里（重放路径）。

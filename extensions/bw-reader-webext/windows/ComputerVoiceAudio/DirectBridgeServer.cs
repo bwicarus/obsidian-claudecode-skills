@@ -705,6 +705,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/voice-core/ambient",
             new[] { "GET" },
             context => HandleVoiceCoreAmbientAsync(context, serviceToken));
+        app.MapMethods("/voice-core/artifacts", new[] { "GET", "POST" },
+            context => HandleVoiceCoreArtifactsAsync(context, serviceToken));
         // GET（2026-09-05）= 双工诊断只读口；POST 才是快照与钉住。方法表不放行 GET 的
         // 表现是 404，而处理函数里的 GET 分支看起来完全正常 —— 0.1.288 就这么丢过一次。
         app.MapMethods(
@@ -3386,6 +3388,39 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         await context.Response.WriteAsJsonAsync(
             new { ok = true, name },
             serviceCancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleVoiceCoreArtifactsAsync(HttpContext context, CancellationToken serviceToken)
+    {
+        if (!IsLocalProcessCaller(context))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        JsonObject result;
+        try
+        {
+            if (context.Request.Method == "GET")
+                result = _readerRealtimeOutputBroker.ArtifactState(context.Request.Query["requestKey"]);
+            else
+            {
+                if (context.Request.ContentLength is null or > 12000) throw new InvalidDataException("invalid-body-size");
+                var body = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: serviceToken)
+                    .ConfigureAwait(false) as JsonObject ?? throw new InvalidDataException("invalid-body");
+                string key = body["requestKey"]?.GetValue<string>() ?? "";
+                if (key.Length is < 1 or > 512) throw new InvalidDataException("invalid-request-key");
+                result = _readerRealtimeOutputBroker.StartArtifactResend(key,
+                    body["artifactId"]!.GetValue<string>(), body["sourceInstanceId"]!.GetValue<string>(),
+                    body["snapshotRevision"]!.GetValue<long>(), body["file"]!.GetValue<string>(),
+                    body["page"]!, serviceToken);
+            }
+        }
+        catch (Exception error) when (error is ReaderRealtimeOutputException or InvalidDataException
+            or JsonException or InvalidOperationException or NullReferenceException)
+        {
+            result = new JsonObject { ["ok"] = false, ["status"] = "not-started", ["error"] = error.Message };
+        }
+        await context.Response.WriteAsJsonAsync(result, serviceToken).ConfigureAwait(false);
     }
 
     private async Task HandleVoiceCoreAmbientAsync(

@@ -181,6 +181,8 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/ReaderQuery.cs",
     "ComputerVoiceAudio/KjPageClient.cs",
     "ComputerVoiceAudio/ReaderQueryRpc.cs",
+    "ComputerVoiceAudio/ReaderArtifactDelivery.cs",
+    "ComputerVoiceAudio/ReaderArtifactDeliverySelfTest.cs",
     "ComputerVoiceAudio/ReaderRealtimeOutput.cs",
     "ComputerVoiceAudio/ReaderRealtimeOutputOutbox.cs",
     "ComputerVoiceAudio/ReaderRealtimeOutputRpc.cs",

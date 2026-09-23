@@ -763,6 +763,7 @@ internal static class DirectBridgeSelfTest
         await CheckReaderRealtimeOutputMcpAsync(
             root,
             checks).ConfigureAwait(false);
+        await ReaderArtifactDeliverySelfTest.RunAsync(root, checks).ConfigureAwait(false);
         await CheckReaderDocumentAndViewportAsync(
             root,
             checks).ConfigureAwait(false);
@@ -12138,15 +12139,17 @@ internal static class DirectBridgeSelfTest
                         StringComparison.Ordinal)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
-                        "call reader_context_snapshot first",
+                        "Reader context is normally provided automatically for the current request",
                         StringComparison.Ordinal)
+                && !initialize.GetProperty("instructions").GetString()!
+                    .Contains("reader_context_snapshot first", StringComparison.Ordinal)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
                         "reader_highlight_range",
                         StringComparison.Ordinal)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
-                        "selected, highlighted, drawn, or circled",
+                        "data is missing, stale, pending, conflicting or ambiguous",
                         StringComparison.Ordinal)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(

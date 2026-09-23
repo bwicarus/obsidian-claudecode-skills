@@ -503,13 +503,15 @@ internal sealed class ReaderContextMcpServer
                     ["version"] = ServerVersion,
                 },
                 ["instructions"] =
-                    "Before answering any request whose meaning depends on "
-                    + "the live Reader state, call reader_context_snapshot "
-                    + "first. This includes indirect references such as "
-                    + "this, here, this page or paragraph, what is visible, "
-                    + "selected, highlighted, drawn, or circled, even when "
-                    + "the user does not say Reader or snapshot. Do not call "
-                    + "it for unrelated requests. After obtaining any "
+                    "Reader context is normally provided automatically for the current request. "
+                    + "Use the latest matching injected context directly when it is ready, fresh, "
+                    + "and contains the selection, source passage and binding data needed for the action. "
+                    + "Do not call reader_context_snapshot or reader_page_text as a routine first step "
+                    + "or merely to reconfirm information already supplied. Read only when required "
+                    + "data is missing, stale, pending, conflicting or ambiguous, or the user explicitly "
+                    + "requests a fresh check. Resolve this/here/selected against the request's supplied "
+                    + "selection; never guess missing text or binding positions. Do not read Reader "
+                    + "state for unrelated requests. After obtaining any "
                     + "structured weather/news/images/videos/fact/general "
                     + "result, immediately call reader_card in the same turn "
                     + "or reader_command when reader_card is filtered; do not "
@@ -527,8 +529,8 @@ internal sealed class ReaderContextMcpServer
                     + "subagents instead of starting a nested CLI worker. "
                     + "Use reader_card or reader_command with the same typed "
                     + "{card:{kind,title,data}} input. "
-                    + "For a source highlight, call "
-                    + "reader_context_snapshot first. When "
+                    + "For a source highlight, use the supplied source and block addresses; "
+                    + "read reader_context_snapshot only if the required source data is missing or stale. When "
                     + "currentPage.highlightSource is present, call "
                     + "reader_highlight_range with at={block,text?} (and to for a range) - "
                     + "the [NN] block numbers in currentPage.text are the address; never echo or search a long "
@@ -788,11 +790,13 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = ToolName,
                 ["description"] =
-                    "Use when the user says 这个/那个/这里, asks what page or book they are on, what they selected, or the 读音/意思 of a selected word (then pass brief:true). "
-                    + "Call this first whenever the request depends on the "
-                    + "live Reader state, including implicit references to "
-                    + "this/here, the visible page or paragraph, a selection, "
-                    + "highlight, drawing, or circle. It reads the newest "
+                    "Read Reader state on demand when the current request's injected context is "
+                    + "missing required information, stale, pending, conflicting or ambiguous, "
+                    + "or the user asks for a fresh check (pass brief:true for a compact result). "
+                    + "Context is normally supplied automatically: if it already identifies the book, "
+                    + "page, selection and required source data, use it directly without this call. "
+                    + "Saying 这个/那个/这里 or referring to a selection does not by itself require a read. "
+                    + "It reads the newest "
                     + "Windows-local Reader page and selection snapshot and "
                     + "is read-only. "
                     // 钉住语义（2026-09-05 用户定）：说完话 / 打字发出那一刻的快照另存一份，
@@ -861,7 +865,7 @@ internal sealed class ReaderContextMcpServer
                     + "selectedItems (what is selected or tapped right now) "
                     + "and recentActions (the last few things the user did) "
                     + "before asking the user to repeat; each carries its own "
-                    + "Hint field next to it saying exactly how to read it. In Codex all Reader tools run inside one exec script: read the snapshot and call the follow-up tool (highlight, card, page text) from the same script instead of spending a second turn.",
+                    + "Hint field next to it saying exactly how to read it. When a snapshot read is needed, it can be followed by the action in the same exec script. When supplied context is sufficient, call the action directly.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -2278,7 +2282,11 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = PageTextToolName,
                 ["description"] =
-                    "Use when the user asks 读第 N 页/这一节写了什么/找这一页里的一段话, or when a card must be bound to a passage (segments). "
+                    "Read page text only when the requested passage or binding data is not already "
+                    + "available in fresh matching injected context. A request to bind a card does "
+                    + "not itself require this call: when page and verbatim passage are known, "
+                    + "call reader_card with bind={kind:'page-chars',page,text,block?} directly. "
+                    + "Use this tool for missing text or unresolved positions, such as 读第 N 页/这一节写了什么/找这一页里的一段话. "
                     + "Read the text of one page (PDF) or section (EPUB) of the "
                     + "open book, from the Reader's own extraction. Also works "
                     + "on a plain web page the user is browsing: pass page 1 "
