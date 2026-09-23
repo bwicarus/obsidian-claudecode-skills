@@ -2080,6 +2080,15 @@
   root.addEventListener('bw:native-outbox-ready', function () {
     if (nativeBookWrites) scheduleReplicationDrain(0);
   });
+  root.addEventListener('bw:native-book-committed', function (event) {
+    var value = event && event.detail;
+    if (!nativeBookWrites || !value || value.bookID !== bookId) return;
+    announceLocalNotesChanged('swift');
+    var changes = Array.isArray(value.bindingChanges) ? value.bindingChanges : [];
+    var keys = Array.from(new Set(changes.flatMap(function (c) { return [c.before,c.after]; }).filter(Boolean)));
+    dispatchWordBindingsChanged(keys,changes,'swift');
+    scheduleReplicationDrain(0);
+  });
   function scheduleReplicationDrain(delayMs) {
     if (replicationDrainTimer != null) return;
     var timer = root.setTimeout(function () {

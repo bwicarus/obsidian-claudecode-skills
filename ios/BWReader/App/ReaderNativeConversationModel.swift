@@ -190,6 +190,16 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published var tocPanel: ReaderNativeTOCModel?
     @Published var navigationPanel: ReaderNativeNavigationModel?
     @Published private(set) var placements: [ReaderNativePagePlacement] = []
+    private var nativeHTMLNotes: [ReaderNativePagePlacement]? = nil
+    private var webPlacements: [ReaderNativePagePlacement] = []
+    func setNativeHTMLNotes(_ values: [[String:Any]]?) {
+        nativeHTMLNotes = values.map { $0.compactMap(ReaderNativePagePlacement.init) }
+        mergePlacements()
+    }
+    private func mergePlacements() {
+        guard let nativeHTMLNotes else { placements = webPlacements; return }
+        placements = webPlacements.filter { !($0.fromNote && $0.parts.count == 1 && $0.parts.first?.kind == "general") } + nativeHTMLNotes
+    }
     // Presentation survives closing/repositioning the SwiftUI sidebar, but is
     // scoped to this conversation and never persisted as a second history.
     @Published var draft = ""
@@ -286,7 +296,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         ready = payload["ready"] as? Bool ?? false
         busy = payload["busy"] as? Bool ?? false
         legacyVisible = payload["legacyVisible"] as? Bool ?? false
-        placements = (payload["placements"] as? [[String: Any]] ?? []).compactMap(ReaderNativePagePlacement.init)
+        webPlacements = (payload["placements"] as? [[String: Any]] ?? []).compactMap(ReaderNativePagePlacement.init)
+        mergePlacements()
         sidebarOpen = payload["sidebarOpen"] as? Bool ?? false
         favoritesCount = (payload["favoritesCount"] as? NSNumber)?.intValue ?? 0
         selectionText = (payload["selection"] as? [String: Any])?["text"] as? String ?? ""
@@ -379,7 +390,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         ready = false
         busy = false
         legacyVisible = false
-        placements = []
+        placements = []; webPlacements = []; nativeHTMLNotes = nil
         sidebarOpen = false
         selectionText = ""
         readerSelectionText = ""

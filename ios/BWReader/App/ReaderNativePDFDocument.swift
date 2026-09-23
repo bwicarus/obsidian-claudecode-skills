@@ -72,6 +72,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     private(set) var position = Position(page: 1, scale: 1, visiblePages: [], fraction: 0, mode: "continuous", spreadOffset: 0, crop: nil)
     @Published private(set) var error: String?
     @Published private(set) var ready = false
+    private(set) var notesContentRevision: UInt64 = 0
     /// 每一次布局/滚动都 +1。⚠ 不 @Published，理由同 position。
     private(set) var geometryRevision = 0
     /// 只在**缩放或重排**时变（纯滚动不变）：文档层卡片按它重算 —— 它们按文档坐标摆，
@@ -774,6 +775,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             throw ReaderBookUserStateWebAdapterError.invalidResponse
         }
         notes = records
+        notesContentRevision &+= 1
         domainHeaders[.notes] = (domain.revision, domain.digest)
         refreshCardMarkers()
     }

@@ -37,7 +37,7 @@ struct ReaderNativePageCardBody: View {
         } else if (part.kind == "general" || part.kind == "knowledge"),
                   format == "html" || part.string("text").range(of: "<[a-z][^>]*>", options: [.regularExpression, .caseInsensitive]) != nil {
             ReaderNativeCardHTML(html: part.string("text").isEmpty ? part.text : part.string("text"),
-                                 onSelection: selection(part))
+                                 onSelection: selection(part),inlineImages:part.data["inlineImages"] as? [String:String] ?? [:],imageModel:model)
         } else if part.kind == "general" || part.kind == "knowledge" {
             // .vc-if-g{font-size:13px;line-height:1.55}
             ReaderNativeRichText(content: part.string("text").isEmpty ? part.text : part.string("text"),
@@ -84,15 +84,17 @@ private struct ReaderNativePageCardFact: View {
     var answerFormat = "markdown"
     var detailFormat = "markdown"
     let onSelection: (String) -> Void
+    var inlineImages: [String:String] = [:]
+    var imageModel: ReaderNativeConversationModel? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             if !answer.isEmpty {
-                ReaderNativeRichText(content: answer, format: answerFormat, onSelection: onSelection,
+                ReaderNativeRichDocument(content: answer, format: answerFormat, onSelection: onSelection, inlineImages:inlineImages,imageModel:imageModel,
                                      font: .systemFont(ofSize: 15, weight: .semibold), color: ReaderNativeCardInk.text)
             }
             if !detail.isEmpty, detail != answer {
-                ReaderNativeRichText(content: detail, format: detailFormat, onSelection: onSelection,
+                ReaderNativeRichDocument(content: detail, format: detailFormat, onSelection: onSelection, inlineImages:inlineImages,imageModel:imageModel,
                                      font: .systemFont(ofSize: 12), color: ReaderNativeCardInk.detail)
             }
         }
@@ -104,6 +106,8 @@ private struct ReaderNativePageCardFact: View {
 private struct ReaderNativeCardHTML: View {
     let html: String
     let onSelection: (String) -> Void
+    var inlineImages: [String:String] = [:]
+    var imageModel: ReaderNativeConversationModel? = nil
 
     var body: some View {
         let blocks = ReaderNativeCardHTMLParser.blocks(html)
@@ -112,13 +116,14 @@ private struct ReaderNativeCardHTML: View {
                 switch block {
                 case .fact(let answer, let detail):
                     ReaderNativePageCardFact(answer: answer, detail: detail, answerFormat: "html",
-                                             detailFormat: "html", onSelection: onSelection)
+                                             detailFormat: "html", onSelection: onSelection,inlineImages:inlineImages,imageModel:imageModel)
                 case .general(let html):
-                    ReaderNativeRichText(content: html, format: "html", onSelection: onSelection,
+                    ReaderNativeRichDocument(content: html, format: "html", onSelection: onSelection,inlineImages:inlineImages,imageModel:imageModel,
                                          font: .systemFont(ofSize: 13), color: ReaderNativeCardInk.text)
                 case .rich(let html):
                     // .vc-card{font-size:14px;line-height:1.55}
                     ReaderNativeRichDocument(content: html, format: "html", onSelection: onSelection,
+                                             inlineImages:inlineImages,imageModel:imageModel,
                                              font: .systemFont(ofSize: 14), color: ReaderNativeCardInk.text)
                 case .dictionary(let entry):
                     ReaderNativeCardDictionary(entry: entry)

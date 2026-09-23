@@ -520,6 +520,7 @@ enum ReaderNativeConversationScript {
           ? Array.from({ length: 9 }, (_, i) => page - 4 + i).filter(n => n > 0) : null;
         const generation = sticky.nativeGeneration?.();
         return sticky.nativeNoteCards(pages).flatMap(item => {
+          if (window.__BW_NATIVE_HTML_NOTES__ === true && item.html && !item.card) return [];
           const owner = { get isConnected() { return sticky.nativeGeneration?.() === generation && !!sticky.nativeHasNote?.(item.id); } };
           const id = 'note-' + hash(item.id);
           const token = id + '-' + hash(item.version);
@@ -808,6 +809,8 @@ enum ReaderNativeConversationScript {
           readerSelection: (typeof window.__bwReaderEpubSelection === 'function'
             ? (window.__bwReaderEpubSelection() || { text: '' }) : { text: '' }),
           attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, captions: captionState(),
+          nativePinnedCards: (window.BWReaderRuntime?.contextSelections?.snapshot?.({maxText:0})?.items || [])
+            .filter(item => item.kind === 'card' && String(item.id).startsWith('card:')).map(item => String(item.id).slice(5)),
           favoritesCount: (() => { try { return Number(rc().voiceCard?.favorite?.count?.()) || 0; } catch (_) { return 0; } })(),
           sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);

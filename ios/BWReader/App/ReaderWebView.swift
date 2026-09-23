@@ -395,6 +395,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeInkSyncTasks: [String: Task<Void, Never>] = [:]
     private var nativePDFMutationCommandDepth = 0
     @Published private(set) var nativeInkHistoryBusy = false
+    private var nativeHTMLNoteActions: [String:ReaderNativeHTMLNotes.Action] = [:]
+    private var nativeHTMLNoteKey = ""
+    private var nativeHTMLNotesEnabled = false
+    private var nativeHTMLPinned = Set<String>()
 
     private func readingDomains(localBookID: String) async throws -> [ReaderBookUserStateDomainPayload] {
         if nativeReadingStoreBookID == localBookID {
@@ -870,6 +874,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard let self, !Task.isCancelled else { return }
             self.nativeInkSurfaceTask = nil
             self.publishNativeInkSurfaces()
+            self.publishNativeHTMLNotes()
             self.publishNativeVisibleText()
             // 翻页后可见页变了，生词下划线也要跟着取 —— 已经取过的页不重取。
             self.refreshNativePageOverlays()
@@ -968,7 +973,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         let event: [String:Any] = ["source":"native-pencil","opId":opID,"changes":changes,
             "surfaceIds":changes.compactMap { ($0["page"] as? NSNumber).map { "page:" + $0.stringValue } }]
         webView.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('rc:inkchange',{detail:value})); return true;",
-            arguments:["value":event],in:nil,contentWorld:.page,completionHandler:nil)
+            arguments:["value":event],in:nil,in:.page,completionHandler:nil)
         return true
     }
 
@@ -1003,6 +1008,119 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             } catch is CancellationError { }
             catch { self?.postClientLog("原生笔迹同步仍保留待处理记录：" + error.localizedDescription) }
         }
+    }
+
+    private func publishNativeHTMLNotes(force: Bool = false) {
+        guard let document = nativePDFDocument, let bookID = nativeReadingStoreBookID,
+              bookID == currentLocalBook?.id else { return }
+        let key = bookID + ":" + String(bookUserStateContextGeneration) + ":" + String(document.notesContentRevision)
+            + ":" + String(document.position.page) + ":" + nativeHTMLPinned.sorted().joined(separator:"|")
+        guard force || key != nativeHTMLNoteKey else { return }
+        do {
+            let snapshot = try ReaderNativeHTMLNotes.project(document.notes,bookID:bookID,page:document.position.page,pinned:nativeHTMLPinned)
+            nativeHTMLNoteActions = snapshot.actions; nativeHTMLNoteKey = key
+            nativeConversation.setNativeHTMLNotes(snapshot.placements)
+            if !nativeHTMLNotesEnabled {
+                nativeHTMLNotesEnabled = true
+                webView.evaluateJavaScript("window.__BW_NATIVE_HTML_NOTES__ = true; window.__bwNativeConversation?.snapshot?.();", completionHandler:nil)
+            }
+        } catch { nativeConversation.report("注解卡读取失败：" + error.localizedDescription) }
+    }
+
+    private func performNativeHTMLNoteCommand(_ command: [String:Any]) async -> [String:Any]? {
+        guard let token = command["actionId"] as? String, token.hasPrefix("native-note-") else { return nil }
+        do {
+            guard !isLoading, let action = nativeHTMLNoteActions[token],
+                  command["scope"] as? String == nativeConversation.scope,
+                  let book = currentLocalBook, let access = currentLocalBookAccess,
+                  nativeReadingStoreBookID == book.id, let deviceID = nativeReadingStoreDeviceID,
+                  let digest = currentLocalBookContentSHA256 else { throw ReaderNativeBookStore.MutationError.unavailable }
+            let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+            let notes = try ReaderNativeBookProjection(store:store).state("document-notes-legacy",bookID:book.id).payload as? [[String:Any]] ?? []
+            guard let note = notes.first(where: { $0["id"] as? String == action.noteID }), let html = note["html"] as? [String:Any] else {
+                throw ReaderNativeNoteRules.NoteError.missing
+            }
+            let outer = command["action"] as? String
+            if outer == "inspectArtifact" { return ["ok":true,"detail":["kind":"general","title":html["label"] ?? "卡片","content":html]] }
+            if outer == "mediaResource", let resource = action.resource { return ["ok":true,"resource":resource] }
+            guard outer == "liveAction" else { throw ReaderNativeNoteRules.NoteError.invalid("卡片命令") }
+            if ["favorite","select","pin"].contains(action.key) {
+                // These shared registries are still being migrated. Their
+                // adapter accepts authoritative data and never reads a card
+                // element or forces a hidden page to mount.
+                let result = try await webView.callAsyncJavaScript("""
+                    const html = note.html, cid = String(html.cid || note.id);
+                    const registry = window.BWReaderRuntime?.contextSelections;
+                    if (action === 'favorite') {
+                      const owner = window.RC?.voiceCard?.favorite;
+                      if (!owner?.save) throw new Error('收藏夹尚未就绪');
+                      const value = await owner.save({label:html.label || '工具卡片', raw:html.content || '',
+                        isHtml:!!html.isHtml,text:html.content || '',kind:'tool',cid});
+                      if (value === false) throw new Error('收藏未确认');
+                      return {ok:true};
+                    }
+                    if (action === 'select') {
+                      if (typeof text !== 'string' || text.length > 16000) throw new Error('选区内容无效');
+                      if (!text.trim()) { if (window.__bwNativeSelection?.owner === token) window.__bwNativeSelection.active = false; return {ok:true}; }
+                      window.__bwNativeSelection = {text:text.trim(),active:true,owner:token,scope};
+                      window.__setFocusSel(text.trim(),'text');
+                      if (window.__focusSel?.text !== text.trim()) throw new Error('选区暂未进入对话');
+                      return {ok:true};
+                    }
+                    if (!registry?.toggle) throw new Error('对话上下文尚未就绪');
+                    const plain = String(html.contextText || html.content || '').replace(/<[^>]+>/g,' ').replace(/\\s+/g,' ').trim();
+                    registry.toggle({id:'card:'+cid,kind:'card',label:String(html.label || '工具卡片').slice(0,200),text:plain.slice(0,16000),
+                      source:{cid,tool:String(html.kind || '')},meta:{contract:'tool-card-context/1',host:'page-placement',card:html}});
+                    return {ok:true,selected:!!registry.isSelected('card:'+cid)};
+                    """, arguments:["note":note,"action":action.key,"text":command["text"] as? String ?? "", "token":token,"scope":nativeConversation.scope],
+                    in:nil,contentWorld:.page)
+                guard currentLocalBookAccess === access else { throw ReaderNativeBookStore.MutationError.unavailable }
+                let receipt = result as? [String:Any] ?? ["ok":false]
+                if action.key == "pin" {
+                    let cid = html["cid"] as? String ?? action.noteID
+                    if receipt["selected"] as? Bool == true { nativeHTMLPinned.insert(cid) } else { nativeHTMLPinned.remove(cid) }
+                    publishNativeHTMLNotes(force:true)
+                }
+                return receipt
+            }
+            let value = command["value"] as? [String:Any] ?? [:]
+            var input: [String:Any] = ["id":action.noteID,"action":"update"]
+            switch action.key {
+            case "move":
+                var changes: [String:Any] = ["anchor":value.filter { ["page","x","y"].contains($0.key) }]
+                if ReaderNativeNoteActions.binding(note) != nil { changes["bind"] = value["bind"] ?? NSNull() }
+                input["changes"] = changes
+            case "anchor": input["changes"] = ["bind":value["bind"] ?? NSNull()]
+            case "form": input["changes"] = ["form":command["value"] ?? ""]
+            case "collapse": input["changes"] = ["form":"dot"]
+            case "expand": input["changes"] = ["form":"full"]
+            case "resize": input["changes"] = value
+            case "remove", "trash": input["action"] = "remove"
+            case "ink": input = value; input["action"] = "ink"; input["id"] = action.noteID
+            case "inspect": return ["ok":true]
+            default: throw ReaderNativeNoteRules.NoteError.invalid("卡片动作")
+            }
+            let generation = bookUserStateContextGeneration
+            guard nativePDFMutationCommandDepth == 0 else { throw ReaderNativeBookStore.MutationError.unavailable }
+            let pending = try await nativePDFMutationActor.hasUnfinishedMutation(book:access)
+            guard !pending, nativePDFMutationCommandDepth == 0, generation == bookUserStateContextGeneration,
+                  currentLocalBookAccess === access, currentLocalBookContentSHA256 == digest else { throw ReaderNativeBookStore.MutationError.unavailable }
+            let opID = input["opId"] as? String ?? "note-" + UUID().uuidString
+            input["opId"] = opID
+            let receipt = try ReaderNativeBookStore(store:store,bookID:book.id,deviceID:deviceID,displayName:book.title,contentSHA256:digest)
+                .perform(["bookID":book.id,"mutationId":opID,"operation":"note-operation","value":input])
+            markCloudSyncDirty()
+            await refreshNativePDFProjection()
+            if currentLocalBookAccess === access {
+                // Wake old transport/context consumers until those owners
+                // have migrated. No duplicate write and no rendered element.
+                webView.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('bw:native-book-committed',{detail:value})); return true;",
+                    arguments:["value":["bookID":book.id,"bindingChanges":receipt["bindingChanges"] ?? []]],in:nil,in:.page,completionHandler:nil)
+            }
+            var result = receipt["result"] as? [String:Any] ?? [:]
+            result["ok"] = true; result["persisted"] = true
+            return ["ok":true,"value":result]
+        } catch { return ["ok":false,"error":error.localizedDescription] }
     }
 
     /// 原生正文接管时拖动页卡：把落点换成 **PDF 页内归一化坐标**再写锚点。
@@ -1472,6 +1590,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             Task { @MainActor [weak self] in self?.scheduleNativeInkSurfacePublish() }
         }
         publishNativeInkSurfaces()
+        publishNativeHTMLNotes()
         refreshNativePageOverlays()
         document.onSelectionSearch = { query in
             // 原版 onSearchSel：用 Bing 搜选中内容。
@@ -1579,6 +1698,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             self.nativePDFMountFailure = nil
             self.nativePDFOpenFailure = nil
             self.nativePDFDocument = document
+            self.publishNativeInkSurfaces()
+            self.publishNativeHTMLNotes()
             ReaderNativeStartupProfile.shared.mark("原生阅读区挂载")
             let history = self.nativePDFLifecycleNotes.joined(separator: ",")
             self.nativePDFLifecycleNotes = []
@@ -1874,6 +1995,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                   let notes = domains.first(where: { $0.name == .notes }) else { return }
             try document.applyOverlays(domains, bookID: access.record.id, contentSHA256: digest)
             try document.applyNotes(notes, bookID: access.record.id, contentSHA256: digest)
+            publishNativeHTMLNotes()
         } catch {
             // 出声但不打断阅读：投影失败不该让正文消失。
             nativePDFMountFailure = "投影更新失败：" + String(describing: error).prefix(160)
@@ -1886,6 +2008,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativeHTMLNoteCommand(command) { return result }
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             // "showLegacy" 已删除：旧网页界面不再是一个可以被请求的目的地。
             // "openArtifact" / "action" 一并删除：它们唯一的实现是把旧网页界面
@@ -3071,6 +3194,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func resetBookUserStateContext(baseURL: URL) {
+        nativeHTMLNoteActions = [:]; nativeHTMLNoteKey = ""; nativeHTMLNotesEnabled = false; nativeHTMLPinned = []
+        nativeConversation.setNativeHTMLNotes(nil)
         nativeInkDocumentToken = UUID().uuidString
         nativeReadingStoreBookID = nil
         nativeReadingStoreDeviceID = nil
@@ -5777,6 +5902,10 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                   let body = message.body as? [String: Any],
                   body["version"] as? Int == 1 else { return }
             nativeConversation.receive(body)
+            if nativeHTMLNotesEnabled, let values = body["nativePinnedCards"] as? [String], Set(values) != nativeHTMLPinned {
+                nativeHTMLPinned = Set(values)
+                publishNativeHTMLNotes()
+            }
         } else if message.name == nativeComputerVoiceMessageName {
             // 只读采样,不影响下面 guard 的判定;仅用于 guard 失败时说明是哪一条。
             let sampledBody = message.body as? [String: Any]
@@ -5959,6 +6088,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     nativeReadingStoreBookID = bookID
                     nativeReadingStoreDeviceID = deviceID
                     publishNativeInkSurfaces()
+                    publishNativeHTMLNotes()
                     // Resume persisted pending pages, including books closed
                     // before the quiet period elapsed.
                     let pending = try store.records(collection:"native-ink-pending",idPrefix:"")
