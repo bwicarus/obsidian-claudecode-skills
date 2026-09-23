@@ -495,8 +495,9 @@ enum ReaderNativeConversationScript {
       function notePlacements() {
         const sticky = rc().stickynote;
         if (!nativeMode || legacyVisible || !sticky?.nativeNoteCards) return [];
+        // ⚠ 导航状态里当前页叫 position（readerNavigation.state），不叫 page。
         const nav = rc().readerNavigation?.state?.() || {};
-        const page = Number(nav.page);
+        const page = Number(nav.position);
         // 当前页前后几页够了：这份快照频繁序列化，整本书的卡片 HTML 不该每次都跟着走。
         const pages = Number.isInteger(page) && page > 0
           ? Array.from({ length: 9 }, (_, i) => page - 4 + i).filter(n => n > 0) : null;
