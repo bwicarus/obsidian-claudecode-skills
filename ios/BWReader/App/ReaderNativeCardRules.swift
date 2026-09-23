@@ -266,4 +266,46 @@ enum ReaderNativeCardRules {
     static func stateValue(id: String, states: Any, count: Int) throws -> [String: Any] {
         ["contract": "card-state/1", "schema": 1, "id": id, "cid": id, "gid": id, "states": try self.states(states, count: count)]
     }
+    static func legacy(_ value: Any) throws -> [String: Any] {
+        let input = try object(value, "legacy record", code: "LEGACY"), id = try identity(input, generate: false)
+        if has(input["kind"]), string(input["kind"]) != "cards" { throw fail("LEGACY", "legacy record.kind 不是 cards") }
+        let batch = input["batch"] as? [String: Any] ?? [:]
+        let shapes = [input["cards"], input["data"], input["batch"], batch["cards"], batch["data"]].compactMap { $0 as? [Any] }
+        guard let first = shapes.first else { throw fail("LEGACY", "legacy record 缺少 cards/data/batch") }
+        let normalized = try cards(first)
+        for shape in shapes.dropFirst() where try !same(normalized, cards(shape)) { throw fail("LEGACY", "legacy record 的 cards/data/batch 内容分叉") }
+        if has(input["states"]), has(batch["states"]), !same(input["states"]!, batch["states"]!) { throw fail("LEGACY", "legacy record 的 states/batch.states 内容分叉") }
+        let rawStates = try object(has(input["states"]) ? input["states"] : (batch["states"] ?? [:]), "legacy states", code: "LEGACY")
+        var stamp: Int64 = 0
+        if has(input["ts"]) {
+            let number = try number(input["ts"], "legacy ts")
+            stamp = try integer(number < 100_000_000_000 ? (number * 1000).rounded(.toNearestOrAwayFromZero) : number, "legacy ts")
+        }
+        var states = try freshStates(normalized.count)
+        for (key, value) in rawStates {
+            guard matches(key, "^(0|[1-9][0-9]*)$"), !key.contains("\n"), let index = Int(key), index < normalized.count else { throw fail("LEGACY", "legacy state index 无效或超出 cards") }
+            let exact = try exactState(value), status = string(exact["_st"])
+            let phase = status.isEmpty || status == "draft" ? "draft" : "confirmed"
+            var review = defaultReview(phase)
+            if phase == "confirmed" { review["status"] = status == "done" ? "review" : "learning" }
+            var legacyReceipt: [String: Any] = ["status": "succeeded", "noteIds": [], "cardIds": [],
+                "exportedAt": stamp > 0 ? stamp as Any : NSNull(), "updatedAt": stamp > 0 ? stamp as Any : NSNull()]
+            if has(exact["_nid"]) { legacyReceipt["noteIds"] = [exact["_nid"]!] }
+            if has(exact["card_id"]) || has(exact["id"]) { legacyReceipt["cardIds"] = [has(exact["card_id"]) ? exact["card_id"]! : exact["id"]!] }
+            let hasIDs = !(legacyReceipt["noteIds"] as! [Any]).isEmpty || !(legacyReceipt["cardIds"] as! [Any]).isEmpty
+            states[key] = try state(["phase": phase, "confirmedAt": max(1, stamp), "review": review,
+                "projections": hasIDs ? ["anki": ["pi-legacy": try receipt(legacyReceipt)]] : ["anki": [:]], "exactState": exact])
+        }
+        let reference = try text(has(input["source_ref"]) ? input["source_ref"] : input["src"], "legacy.source_ref", 8192)
+        let excluded = ["id", "cid", "gid", "kind", "cards", "data", "batch", "states", "source_ref", "src", "req"]
+        var metadata = input.filter { !excluded.contains($0.key) }
+        if !reference.isEmpty { metadata["source_ref"] = reference }
+        var source: [String: Any] = ["kind": "pi-legacy-card-registry", "sourceId": reference.isEmpty ? "pi-card-registry:" + id : reference]
+        if has(input["req"]) {
+            metadata["req"] = input["req"]
+            source["requirement"] = input["req"] is String ? input["req"] : String(decoding: try bytes(input["req"]!), as: UTF8.self)
+        }
+        if !metadata.isEmpty { source["legacy"] = metadata }
+        return ["id": id, "cards": normalized, "source": try self.source(source), "states": states, "timestamp": stamp]
+    }
 }

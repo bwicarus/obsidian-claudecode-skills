@@ -625,6 +625,13 @@
 
     return {
       contract: CONTRACT,
+      cardRepositoryCall: typeof port.cardRepositoryCall === 'function' ? function (operation, args) {
+        try { assertOpen(); } catch (error) { return Promise.reject(error); }
+        return Promise.resolve(port.cardRepositoryCall(operation, args, deviceId)).then(function (reply) {
+          notify(reply.changes || []);
+          return reply.result;
+        });
+      } : undefined,
       get: get,
       getMany: getMany,
       list: list,

@@ -785,6 +785,11 @@
     var mutationFactory = options.mutationFactory;
     var clock = typeof options.clock === 'function' ? options.clock : Date.now;
     var queue = Promise.resolve();
+    var nativeOwner = typeof store.cardRepositoryCall === 'function';
+    function nativeCommand(operation, args) {
+      var copied = Array.prototype.slice.call(args).map(function (value) { return value === undefined ? null : clone(value); });
+      return serialize(function () { return store.cardRepositoryCall(operation, copied); });
+    }
 
     function serialize(work) {
       var result = queue.then(work);
@@ -909,6 +914,7 @@
     }
 
     function registerDraft(input, operationOptions) {
+      if (nativeOwner) return nativeCommand('registerDraft', arguments);
       input = input || {};
       var id;
       var cards;
@@ -983,6 +989,7 @@
     }
 
     function saveConfirmedCard(input, operationOptions) {
+      if (nativeOwner) return nativeCommand('saveConfirmedCard', arguments);
       input = input || {};
       var id;
       try { id = identityOf(input, idFactory, true); }
@@ -1149,6 +1156,7 @@
     }
 
     function replaceEntity(idValue, replacement, operationOptions) {
+      if (nativeOwner) return nativeCommand('replaceEntity', arguments);
       return replaceEntityCore(
         idValue,
         replacement,
@@ -1160,6 +1168,7 @@
     // Backwards-compatible face-only API.  Page-card editing keeps using this
     // name and therefore cannot accidentally replace provenance metadata.
     function replaceContent(idValue, cardsValue, operationOptions) {
+      if (nativeOwner) return nativeCommand('replaceContent', arguments);
       return replaceEntityCore(
         idValue,
         { cards: cardsValue },
@@ -1169,6 +1178,7 @@
     }
 
     function removeDraftCard(idValue, cardIndex, operationOptions) {
+      if (nativeOwner) return nativeCommand('removeDraftCard', arguments);
       operationOptions = operationOptions || {};
       var id;
       var index;
@@ -1232,6 +1242,7 @@
     // on each index's projection receipt.  Keeping the entity and state map
     // intact preserves both batch identity and auditability.
     function removeCard(idValue, cardIndex, operationOptions) {
+      if (nativeOwner) return nativeCommand('removeCard', arguments);
       operationOptions = operationOptions || {};
       var id;
       var index;
@@ -1300,6 +1311,7 @@
     }
 
     function patchState(idValue, cardIndex, patch, operationOptions) {
+      if (nativeOwner) return nativeCommand('patchState', arguments);
       operationOptions = operationOptions || {};
       var id;
       var index;
@@ -1390,11 +1402,13 @@
       });
     }
     function recordAnkiReceipt(id, cardIndex, target, receipt, operationOptions) {
+      if (nativeOwner) return nativeCommand('recordAnkiReceipt', arguments);
       return patchState(id, cardIndex, {
         ankiReceipt: Object.assign({}, receipt || {}, { target: target })
       }, operationOptions);
     }
     function importLegacyBatch(inputRecords, operationOptions) {
+      if (nativeOwner) return nativeCommand('importLegacyBatch', arguments);
       operationOptions = operationOptions || {};
       var specs;
       try {
@@ -1586,6 +1600,7 @@
       });
     }
     function load(idValue, query) {
+      if (nativeOwner) return nativeCommand('load', arguments);
       var id;
       try { id = normalizeId(idValue); }
       catch (error) { return Promise.reject(error); }
@@ -1611,6 +1626,7 @@
       return page(0);
     }
     function snapshot(query) {
+      if (nativeOwner) return nativeCommand('snapshot', arguments);
       query = query || {};
       var includeDeleted = query.includeDeleted === true;
       return queue.then(function () {
@@ -1632,6 +1648,7 @@
       });
     }
     function tombstone(idValue, operationOptions) {
+      if (nativeOwner) return nativeCommand('tombstone', arguments);
       operationOptions = operationOptions || {};
       var id;
       try { id = normalizeId(idValue); }

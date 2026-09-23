@@ -49,7 +49,9 @@
       return root.webkit.messageHandlers[MESSAGE].postMessage(request).then(function (reply) {
         if (reply && reply.ok === false && reply.code === 'BW_DATA_CONFLICT') throw conflict();
         if (!reply || reply.ok !== true) {
-          throw new Error((reply && reply.code) || 'BW_NATIVE_DATA_STORE_FAILED');
+          var error = new Error((reply && (reply.error || reply.code)) || 'BW_NATIVE_DATA_STORE_FAILED');
+          error.code = (reply && reply.code) || 'BW_NATIVE_DATA_STORE_FAILED';
+          throw error;
         }
         return reply;
       });
@@ -66,6 +68,16 @@
     return {
       kind: 'native-bridge',
       store: storeName,
+      cardRepositoryCall: storeName === 'bw-reader-native-v1-global' ? function (operation, args, deviceId) {
+        var optionIndex = operation === 'patchState' ? 3 : operation === 'recordAnkiReceipt' ? 4 :
+          ['registerDraft', 'saveConfirmedCard', 'tombstone', 'importLegacyBatch'].indexOf(operation) >= 0 ? 1 : 2;
+        var options = args[optionIndex] || {};
+        var mutationId = options.mutationId != null ? String(options.mutationId).trim() :
+          ('native-card:' + Date.now().toString(36) + ':' + root.crypto.randomUUID());
+        return call('cardRepository', { request: {
+          operation: operation, arguments: args, mutationId: mutationId, deviceID: deviceId
+        } });
+      } : undefined,
 
       read: function (collection, id) {
         return call('read', { collection: collection, id: id }).then(function (reply) {

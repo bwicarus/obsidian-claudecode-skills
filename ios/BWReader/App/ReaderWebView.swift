@@ -6174,6 +6174,31 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 replyHandler(["ok":true],nil)
                 return
             }
+            if body["action"] as? String == "cardRepository" {
+                guard body["store"] as? String == "bw-reader-native-v1-global",
+                      let request = body["request"] as? [String: Any],
+                      let deviceID = request["deviceID"] as? String, !deviceID.isEmpty,
+                      deviceID.utf16.count <= 240 else {
+                    replyHandler(["ok": false, "code": "BW_CARD_REPOSITORY_UNAVAILABLE"], nil); return
+                }
+                do {
+                    let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+                    guard try store.meta("legacyImport") == "done" else {
+                        throw ReaderNativeCardRules.fail("UNAVAILABLE", "原生卡片数据库尚未完成迁移")
+                    }
+                    let receipt = try ReaderNativeCardRepository(store: store, deviceID: deviceID).perform(request)
+                    if !(receipt["changes"] as? [Any] ?? []).isEmpty {
+                        scheduleNativePDFProjectionRefresh()
+                        markCloudSyncDirty()
+                    }
+                    replyHandler(receipt, nil)
+                } catch let error as ReaderNativeCardRules.Failure {
+                    replyHandler(["ok": false, "code": error.code, "error": error.detail], nil)
+                } catch {
+                    replyHandler(["ok": false, "code": "BW_CARD_REPOSITORY_UNAVAILABLE", "error": error.localizedDescription], nil)
+                }
+                return
+            }
             if body["action"] as? String == "bookMutation" {
                 guard let request = body["request"] as? [String: Any],
                       let bookID = nativeReadingStoreBookID, bookID == currentLocalBook?.id,

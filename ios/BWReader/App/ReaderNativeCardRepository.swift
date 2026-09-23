@@ -105,7 +105,9 @@ struct ReaderNativeCardRepository {
     }
     private func execute(_ operation: String, args: [Any], mutation: String, at: Int64) throws -> Any {
         func arg(_ index: Int) -> Any? { args.indices.contains(index) ? args[index] : nil }
-        if operation == "importLegacyBatch" { throw R.fail("UNAVAILABLE", "旧记录导入尚未完成原生迁移") }
+        if operation == "importLegacyBatch" {
+            return try importLegacy(arg(0), options: arg(1) as? [String: Any] ?? [:], mutation: mutation, at: at)
+        }
         let creates = ["registerDraft", "saveConfirmedCard"].contains(operation)
         let input = creates ? try R.object(arg(0), "card input") : [:]
         let id = creates ? try R.identity(input, generate: true) : try R.id(arg(0))
@@ -117,13 +119,13 @@ struct ReaderNativeCardRepository {
         let options = arg(optionIndex) as? [String: Any] ?? [:]
         if operation == "tombstone" {
             guard rows.entity != nil || rows.state != nil else { throw R.fail("NOT_FOUND", "卡组不存在") }
-            if rows.entity?.deleted == true, rows.state?.deleted == true { return try project(rows, includeDeleted: true) as Any }
+            if rows.entity?.deleted == true, rows.state?.deleted == true { return try project(rows, includeDeleted: true)! }
             try validatePair(rows, id: id)
             try expected(rows.entity, options["ifEntityRev"], label: "ifEntityRev")
             try expected(rows.state, options["ifStateRev"], label: "ifStateRev")
             try write(Self.entities, id: id, value: value(rows.entity) ?? [:], previous: rows.entity, deleted: true, mutation: mutation + ":entity", at: at)
             try write(Self.states, id: id, value: value(rows.state) ?? [:], previous: rows.state, deleted: true, mutation: mutation + ":state", at: at)
-            return try load(id, includeDeleted: true) as Any
+            return try load(id, includeDeleted: true)!
         }
         try validatePair(rows, id: id)
         let previous = try project(rows, includeDeleted: false)
@@ -231,15 +233,80 @@ struct ReaderNativeCardRepository {
             try expected(rows.state, options["ifStateRev"], label: "ifStateRev")
             try write(Self.states, id: id, value: nextState, previous: rows.state, mutation: mutation + ":state", at: at)
         }
-        return try load(id) as Any
+        return try load(id)!
+    }
+    private func importLegacy(_ value: Any?, options: [String: Any], mutation: String, at: Int64) throws -> [Any] {
+        guard let items = value as? [Any], !items.isEmpty, items.count <= 500 else { throw R.fail("LEGACY", "legacy batch 必须包含 1-500 条记录") }
+        let specs = try items.map(R.legacy)
+        var seen = Set<String>(), results: [Any] = []
+        for spec in specs {
+            let id = spec["id"] as! String
+            guard seen.insert(id).inserted else { throw R.fail("LEGACY", "legacy batch 含重复 gid：" + id) }
+            let rows = try pair(id)
+            guard (rows.entity == nil) == (rows.state == nil) else { throw R.fail("PARTIAL", "legacy 导入遇到半条本地卡组：" + id) }
+            if rows.entity != nil, options["missingOnly"] as? Bool == true {
+                results.append(try project(rows, includeDeleted: false) as Any? ?? NSNull()); continue
+            }
+            try validatePair(rows, id: id)
+            let cards = spec["cards"] as! [[String: Any]], source = spec["source"] as! [String: Any]
+            let incoming = spec["states"] as! [String: Any]
+            if rows.entity == nil {
+                let timestamp = (spec["timestamp"] as! NSNumber).int64Value
+                let stamp = timestamp > 0 ? timestamp : at
+                try write(Self.entities, id: id, value: R.entity(id: id, cards: cards, source: source, created: stamp, updated: stamp),
+                    previous: nil, mutation: mutation + ":" + id + ":entity", at: at)
+                try write(Self.states, id: id, value: R.stateValue(id: id, states: incoming, count: cards.count),
+                    previous: nil, mutation: mutation + ":" + id + ":state", at: at)
+            } else {
+                let current = try project(rows, includeDeleted: false)!
+                guard R.same(current["cards"]!, cards) else { throw R.fail("LEGACY_CONFLICT", "legacy cards 与本地同 gid 内容分叉：" + id) }
+                let currentSource = current["source"] as! [String: Any]
+                let ref = R.string((currentSource["legacy"] as? [String: Any])?["source_ref"])
+                let incomingRef = R.string((source["legacy"] as? [String: Any])?["source_ref"])
+                if currentSource["kind"] as? String == "pi-legacy-card-registry", !ref.isEmpty, !incomingRef.isEmpty, ref != incomingRef { throw R.fail("LEGACY_CONFLICT", "legacy source_ref 与本地同 gid 来源分叉：" + id) }
+                var states = current["states"] as! [String: Any]
+                for key in incoming.keys.sorted() {
+                    var local = states[key] as! [String: Any]
+                    let remote = incoming[key] as! [String: Any]
+                    let localExact = local["exactState"] as! [String: Any], remoteExact = remote["exactState"] as! [String: Any]
+                    if !localExact.isEmpty, !remoteExact.isEmpty, !R.same(localExact, remoteExact) { throw R.fail("LEGACY_CONFLICT", "legacy state 与本地同 gid/index 状态分叉：" + id + "/" + key) }
+                    if localExact.isEmpty, !remoteExact.isEmpty {
+                        local["exactState"] = remoteExact
+                        if local["phase"] as? String == "draft" {
+                            for field in ["phase", "confirmedAt", "review"] { local[field] = remote[field] }
+                        }
+                    }
+                    var projections = local["projections"] as! [String: Any]
+                    var anki = projections["anki"] as! [String: Any]
+                    let remoteAnki = (remote["projections"] as! [String: Any])["anki"] as! [String: Any]
+                    for (target, receipt) in remoteAnki where anki[target] == nil { anki[target] = receipt }
+                    projections["anki"] = anki; local["projections"] = projections
+                    states[key] = try R.state(local)
+                }
+                let state = try R.stateValue(id: id, states: states, count: cards.count)
+                if !R.same(try self.value(rows.state)!, state) {
+                    try write(Self.states, id: id, value: state, previous: rows.state, mutation: mutation + ":" + id + ":state", at: at)
+                }
+            }
+            results.append(try load(id)!)
+        }
+        return results
     }
     private func write(_ collection: String, id: String, value: [String: Any], previous: ReaderNativeDataStore.Record?,
                        deleted: Bool = false, mutation: String, at: Int64) throws {
         let revision = previous?.rev ?? 0
+        if let remembered = try store.mutationResult(mutationId: mutation) {
+            let saved = try R.object(JSONSerialization.jsonObject(with: Data(remembered.utf8)), "mutation record")
+            guard saved["collection"] as? String == collection, saved["id"] as? String == id,
+                  saved["deleted"] as? Bool == deleted, R.same(saved["value"] as Any, value) else { throw R.fail("MUTATION_REUSED", "mutationId 已被不同内容使用") }
+            return
+        }
         guard revision >= 0, revision < 9_007_199_254_740_991 else { throw R.fail("CONFLICT", "记录 revision 已达到安全整数上限") }
         let parent: Any
-        if let previous { parent = previous.deleted ? ["deleted": true] : ["deleted": false, "value": try self.value(previous) as Any] }
-        else { parent = NSNull() }
+        if let previous {
+            if previous.deleted { parent = ["deleted": true] }
+            else { parent = ["deleted": false, "value": try self.value(previous)!] as [String: Any] }
+        } else { parent = NSNull() }
         try R.bounded(parent, "record.causal.parent", 512 * 1024)
         let record: [String: Any] = ["schema": 1, "collection": collection, "id": id, "rev": revision + 1,
             "updatedAt": at, "updatedBy": deviceID, "deleted": deleted, "value": value,

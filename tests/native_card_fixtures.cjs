@@ -49,7 +49,17 @@ const scenarios = [
    step('removeCard', id, 0, { ifStateRev: 2 }), step('tombstone', id, { ifStateRev: 999 }), step('load', id)],
   [step('saveConfirmedCard', { gid: id, card: basic, source }),
    step('recordAnkiReceipt', id, 0, '../bad', {}), step('load', 'card_ffff'),
-   step('replaceContent', 'card_ffff', [basic]), step('tombstone', 'card_ffff')]
+   step('replaceContent', 'card_ffff', [basic]), step('tombstone', 'card_ffff')],
+  [step('importLegacyBatch', [{ gid: id, kind: 'cards', cards: [basic, cloze], source_ref: 'old', ts: 1234,
+      states: { 0: { _st: 'done', _nid: 23, card_id: 34 } } }]),
+   step('importLegacyBatch', [{ gid: id, cards: [basic, cloze], source_ref: 'old', states: {} }]),
+   step('importLegacyBatch', [{ gid: id, cards: [basic, cloze], source_ref: 'old', states: { 1: { _st: 'draft' } } }]),
+   step('importLegacyBatch', [{ gid: 'card_ffff', cards: [basic] }, { gid: id, cards: [{ ...basic, front: 'fork' }] }]),
+   step('load', 'card_ffff'),
+   step('importLegacyBatch', [{ gid: id, cards: [{ ...basic, front: 'old' }] }, { gid: 'card_ffff', batch: { cards: [basic] } }], { missingOnly: true }),
+   step('tombstone', id),
+   step('importLegacyBatch', [{ gid: id, data: [basic] }], { missingOnly: true }),
+   step('snapshot', { includeDeleted: true })]
 ];
 (async () => {
   const sequences = [];
@@ -62,7 +72,7 @@ const scenarios = [
       at += 100;
       const record = { operation: item.operation, arguments: item.args, mutationId: 'fixture-' + at, at };
       let index = 2;
-      if (['registerDraft', 'saveConfirmedCard', 'tombstone'].includes(item.operation)) index = 1;
+      if (['registerDraft', 'saveConfirmedCard', 'tombstone', 'importLegacyBatch'].includes(item.operation)) index = 1;
       if (item.operation === 'patchState') index = 3;
       if (item.operation === 'recordAnkiReceipt') index = 4;
       if (!['load', 'snapshot'].includes(item.operation)) {
