@@ -192,6 +192,7 @@ struct ReaderNativeCardRepository {
             if R.same(previous?["cards"] as Any, cards), R.same(previous?["source"] as Any, source) { return previous! }
             nextEntity = try R.entity(id: id, cards: cards, source: source, created: oldEntity!["createdAt"]!, updated: at)
         case "removeDraftCard", "removeCard", "patchState", "recordAnkiReceipt":
+            if operation == "recordAnkiReceipt" { try expected(rows.entity, options["ifEntityRev"], label: "ifEntityRev") }
             let index = try R.integer(arg(1), "cardIndex")
             guard index < cards.count else { throw R.fail("CARD_INDEX", "cardIndex 超出卡组") }
             let key = String(index)

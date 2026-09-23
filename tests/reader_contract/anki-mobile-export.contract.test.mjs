@@ -392,7 +392,7 @@ test("requestSync 只返回 requested，非 App 环境不可用", async () => {
   );
 });
 
-test("原生桥持久化 pending，且只在 JS durable ack 后删除", () => {
+test("原生桥持久化 pending，且只在原生卡库确认后删除", () => {
   const webView = fs.readFileSync(
     path.join(ROOT, "ios/BWReader/App/ReaderWebView.swift"),
     "utf8",
@@ -412,8 +412,9 @@ test("原生桥持久化 pending，且只在 JS durable ack 后删除", () => {
   assert.match(webView, /super\.init\(\)[\s\S]*restorePendingAnkiMobileExports\(\)/);
   assert.match(webView, /func handleAnkiMobileCallback[\s\S]*restorePendingAnkiMobileExports\(\)/);
   assert.match(webView, /persistPendingAnkiMobileExports\(\)[\s\S]*UIApplication\.shared\.open/);
-  assert.match(webView, /return await api\.handleNativeCallback\(detail\)/);
-  assert.match(webView, /ack\["durable"\] as\? Bool == true[\s\S]*if durable \{[\s\S]*removeValue/);
+  assert.match(webView, /try owner\.confirm\(gid: pending\.gid, index: pending\.index, nonce: nonce\)[\s\S]*durable = true/);
+  assert.match(webView, /if durable \{\s*self\.pendingAnkiMobileExports\.removeValue/);
+  assert.doesNotMatch(webView, /return await api\.handleNativeCallback\(detail\)/);
   assert.doesNotMatch(
     webView,
     /window\.dispatchEvent\(new CustomEvent\([\s\S]{0,120}"bw-native-anki-mobile-callback"/,
@@ -423,4 +424,20 @@ test("原生桥持久化 pending，且只在 JS durable ack 后删除", () => {
   )?.[1] || "";
   assert.doesNotMatch(storedRecord, /let (front|back|cloze|url|token)\b/i);
   assert.match(app, /if reader\.handleAnkiMobileCallback\(url\) \{[\s\S]*return/);
+});
+
+test("原生导出不读网页卡库、不创建网页计时器，也不接受网页成功回调", async () => {
+  const calls = [];
+  const forbidden = () => { throw new Error('legacy repository or timer used'); };
+  let reply = { ok: true, status: 'pending', gid: GID, index: 0 };
+  const api = AnkiMobile.createAnkiMobileExport({
+    root: { __BW_NATIVE_LOCAL_READER__: true, setTimeout: forbidden },
+    bridge: { ownsExports: true, async request(value) { calls.push(value); return reply; } },
+  });
+  assert.equal(api.available(), true);
+  assert.deepEqual(await api.exportCard(GID, 0), reply);
+  assert.deepEqual(calls, [{ action: 'exportCard', gid: GID, index: 0 }]);
+  assert.deepEqual(await api.handleNativeCallback({ gid: GID, index: 0, nonce: 'a'.repeat(32) }), { ok: false, durable: false });
+  reply = { ok: false, error: '保存失败' };
+  await assert.rejects(api.exportCard(GID, 0), /保存失败/);
 });

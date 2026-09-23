@@ -297,6 +297,11 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativeCardPresentation.swift ios/BWReader/Tests/NativeCardPresentation/main.swift -o "$RUNNER_TEMP/native-card-presentation-test"
           "$RUNNER_TEMP/native-card-presentation-test" "$RUNNER_TEMP/native-card-presentation.json"
 
+      - name: Verify native AnkiMobile export receipts
+        run: |
+          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeCardRepository.swift ios/BWReader/App/ReaderNativeAnkiMobile.swift ios/BWReader/Tests/NativeAnkiMobile/main.swift -o "$RUNNER_TEMP/native-anki-mobile-test"
+          "$RUNNER_TEMP/native-anki-mobile-test"
+
       - name: Verify native Markdown and formula boundaries
         run: |
           mkdir -p "$RUNNER_TEMP/native-markdown-checks"

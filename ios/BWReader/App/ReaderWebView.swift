@@ -474,6 +474,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var webContentProcessNeedsReload = false
     private let ankiMobilePendingStore = ReaderAnkiMobilePendingStore.shared
     private var pendingAnkiMobileExports = [String: PendingAnkiMobileExport]()
+    private var nativeAnkiMobileExpiryTask: Task<Void, Never>?
 
     func setNativeConversationMode(_ enabled: Bool) async {
         guard isTrustedReaderURL(webView.url), !isLoading else { return }
@@ -2039,7 +2040,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func performNativeCardCommand(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "liveAction", let token = command["actionId"] as? String,
               let target = nativeConversation.nativeCardAction(token),
-              ["add", "del", "edit-front", "edit-back", "edit-cloze"].contains(target.key),
+              ["add", "del", "edit-front", "edit-back", "edit-cloze", "export-mobile"].contains(target.key),
               (target.input["entityRev"] as? NSNumber)?.int64Value ?? 0 > 0 else { return nil }
         do {
             guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
@@ -2053,6 +2054,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             } else {
                 guard let control = (state["controls"] as? [[String: Any]])?.first(where: { $0["key"] as? String == target.key }),
                       control["disabled"] as? Bool == false else { throw ReaderNativeCardRules.fail("TRANSITION", "当前卡片操作不可用") }
+            }
+            if target.key == "export-mobile", let gid = target.input["gid"] as? String, let index = target.input["cardIndex"] as? Int {
+                return await exportNativeAnkiMobile(gid: gid, index: index)
             }
             let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
             guard try store.meta("legacyImport") == "done" else { throw ReaderNativeCardRules.fail("UNAVAILABLE", "卡库尚未就绪") }
@@ -2658,7 +2662,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 configurable: false,
                 enumerable: false,
                 writable: false,
-                value: Object.freeze({ request })
+                value: Object.freeze({ request, ownsExports: true })
               });
               window.dispatchEvent(new CustomEvent(
                 "bw-native-anki-mobile-capability",
@@ -4846,6 +4850,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
         if foreground {
             deliverPendingAnkiMobileCallbacks()
+            scheduleNativeAnkiMobileExpiry()
         }
     }
 
@@ -5276,6 +5281,64 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
+    private func nativeAnkiMobileOwner() throws -> ReaderNativeAnkiMobile {
+        guard let deviceID = nativeReadingStoreDeviceID else { throw ReaderNativeAnkiMobile.Failure(message: "本地卡库尚未就绪") }
+        let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+        guard try store.meta("legacyImport") == "done" else { throw ReaderNativeAnkiMobile.Failure(message: "本地卡库仍在迁移") }
+        return ReaderNativeAnkiMobile(repository: ReaderNativeCardRepository(store: store, deviceID: deviceID))
+    }
+    private func acceptNativeAnkiReceipt(_ record: [String: Any]) {
+        nativeConversation.acceptCardRecord(record)
+        markCloudSyncDirty()
+        // Compatibility observers read the committed receipt only; no launch
+        // or persistence operation is replayed by this notification.
+        webView.callAsyncJavaScript("window.RC?.flashcard?.acceptNativeRecord(record,index,'receipt'); window.__bwNativeConversation?.snapshot?.();",
+            arguments: ["record": record, "index": -1], in: nil, contentWorld: .page, completionHandler: nil)
+    }
+    private func scheduleNativeAnkiMobileExpiry() {
+        nativeAnkiMobileExpiryTask?.cancel(); nativeAnkiMobileExpiryTask = nil
+        do {
+            let owner = try nativeAnkiMobileOwner(), entries = try owner.pending()
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            var deadline: Int64?
+            for entry in entries {
+                if entry.expiresAt <= now {
+                    do { if let record = try owner.expire(entry) { acceptNativeAnkiReceipt(record) } }
+                    catch { deadline = min(deadline ?? Int64.max, now + 30_000); postClientLog("AnkiMobile 过期回执待重试：" + error.localizedDescription) }
+                } else { deadline = min(deadline ?? Int64.max, entry.expiresAt) }
+            }
+            guard let deadline else { return }
+            nativeAnkiMobileExpiryTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .milliseconds(max(1, deadline - now))) } catch { return }
+                self?.scheduleNativeAnkiMobileExpiry()
+            }
+        } catch { /* Database readiness schedules this again after startup. */ }
+    }
+    private func exportNativeAnkiMobile(gid: String, index: Int) async -> [String: Any] {
+        do {
+            let owner = try nativeAnkiMobileOwner(), prepared = try owner.prepare(gid: gid, index: index)
+            acceptNativeAnkiReceipt(prepared.record); scheduleNativeAnkiMobileExpiry()
+            let response: [String: Any]
+            do {
+                response = try await withCheckedThrowingContinuation { continuation in
+                    handleNativeAnkiMobileRequest(prepared.request) { value, error in
+                        if let error { continuation.resume(throwing: ReaderNativeAnkiMobile.Failure(message: error)) }
+                        else { continuation.resume(returning: value as? [String: Any] ?? [:]) }
+                    }
+                }
+            } catch {
+                acceptNativeAnkiReceipt(try owner.didNotOpen(prepared.pending, message: error.localizedDescription))
+                scheduleNativeAnkiMobileExpiry(); throw error
+            }
+            guard response["ok"] as? Bool == true, response["opened"] as? Bool == true else {
+                let message = response["error"] as? String ?? "AnkiMobile 未安装或无法打开"
+                acceptNativeAnkiReceipt(try owner.didNotOpen(prepared.pending, message: message))
+                scheduleNativeAnkiMobileExpiry(); throw ReaderNativeAnkiMobile.Failure(message: message)
+            }
+            return ["ok": true, "status": "pending", "gid": gid, "index": index, "callbackExpected": true]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
     private func handleNativeAnkiMobileRequest(
         _ body: [String: Any],
         replyHandler: @escaping (Any?, String?) -> Void
@@ -5283,6 +5346,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         prunePendingAnkiMobileExports()
         guard let action = body["action"] as? String else {
             replyHandler(nil, "AnkiMobile 投影缺少 action")
+            return
+        }
+        if action == "exportCard" {
+            guard Set(body.keys) == Set(["action", "gid", "index"]), let gid = body["gid"] as? String,
+                  let index = body["index"] as? Int, (0...255).contains(index), isValidAnkiMobileGID(gid) else {
+                replyHandler(nil, "AnkiMobile 导出参数无效"); return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { replyHandler(nil, "阅读器已关闭"); return }
+                replyHandler(await self.exportNativeAnkiMobile(gid: gid, index: index), nil)
+            }
             return
         }
         if action == "sync" {
@@ -5342,6 +5416,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             return
         }
         let index = indexNumber.intValue
+        do {
+            let owner = try nativeAnkiMobileOwner()
+            guard let group = try owner.repository.load(gid), let pending = ReaderNativeAnkiMobile.pending(group, index: index),
+                  pending.nonce == nonce, pending.expiresAt == expiresAtNumber.int64Value,
+                  let cards = group["cards"] as? [[String: Any]], cards.indices.contains(index),
+                  try ReaderNativeAnkiMobile.addURL(gid: gid, index: index, card: cards[index], nonce: nonce) == rawURL else {
+                throw ReaderNativeAnkiMobile.Failure(message: "外部打开请求与本地待发卡片不一致")
+            }
+        } catch { replyHandler(nil, error.localizedDescription); return }
         let expiresAt = Date(
             timeIntervalSince1970:
                 Double(expiresAtNumber.int64Value) / 1_000
@@ -5437,37 +5520,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 && $0.value.documentIdentity == documentIdentity
         }
         for (nonce, var pending) in ready {
-            let detail: [String: Any] = [
-                "status": "succeeded",
-                "gid": pending.gid,
-                "index": pending.index,
-                "nonce": pending.nonce,
-            ]
             pending.delivering = true
             pendingAnkiMobileExports[nonce] = pending
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 var durable = false
                 do {
-                    let value = try await self.webView.callAsyncJavaScript(
-                        """
-                        const api = window.BWReaderRuntime?.ankiMobileExport;
-                        if (!api || api.CONTRACT !== "anki-mobile-export/1" ||
-                            typeof api.handleNativeCallback !== "function") {
-                          return { ok: false, durable: false };
-                        }
-                        return await api.handleNativeCallback(detail);
-                        """,
-                        arguments: ["detail": detail],
-                        in: nil,
-                        contentWorld: .page
-                    )
-                    if let ack = value as? [String: Any],
-                       Set(ack.keys) == Set(["ok", "durable"]),
-                       ack["ok"] as? Bool == true,
-                       ack["durable"] as? Bool == true {
-                        durable = true
-                    }
+                    let owner = try self.nativeAnkiMobileOwner()
+                    let record = try owner.confirm(gid: pending.gid, index: pending.index, nonce: nonce)
+                    self.acceptNativeAnkiReceipt(record)
+                    self.scheduleNativeAnkiMobileExpiry()
+                    durable = true
                 } catch {
                     durable = false
                 }
@@ -6192,6 +6255,8 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     }
                     nativeReadingStoreBookID = bookID
                     nativeReadingStoreDeviceID = deviceID
+                    scheduleNativeAnkiMobileExpiry()
+                    deliverPendingAnkiMobileCallbacks()
                     if nativeReplicationService == nil {
                         nativeReplicationService = ReaderNativeReplicationService(store:store,report:{ [weak self] message in
                             self?.postClientLog("原生复制队列：" + message)
