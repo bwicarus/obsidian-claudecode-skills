@@ -62,7 +62,7 @@ let read = ReaderNativeBookProjection(store: writing)
 let notes: [[String: Any]] = [["id": "placement-1", "anchor": ["kind":"pdf", "page":45], "created":100,
     "html": ["cid":"card-1", "content":"原文仍保留", "label":"SARS", "bind":["kind":"page-chars", "page":45, "text":"SARS"]]]]
 let save: [String: Any] = ["mutationId":"save-1", "bookID":book, "operation":"notes", "value":notes, "expectedRevision":0]
-check(try business.perform(save)["revision"] as? Int == 1, "native note write failed")
+check((try business.perform(save)["revision"] as? NSNumber)?.int64Value == 1, "native note write failed")
 let writtenCursor = try writing.cursor()
 check(writtenCursor == 4, "notes and three derived indexes must commit together")
 check(try business.perform(save)["replayed"] as? Bool == true, "retry was not recognized")
@@ -86,7 +86,7 @@ do { _ = try business.perform(failing); fatalError("expected index failure") }
 catch ReaderNativeDataStore.StoreError.sql { }
 check(try read.state("document-notes-legacy", bookID: book).revision == 1 && writing.cursor() == writtenCursor, "partial commit survived failure")
 try writing.execute("DROP TRIGGER fail_words")
-check(try business.perform(failing)["revision"] as? Int == 2, "failed transaction poisoned retry")
+check((try business.perform(failing)["revision"] as? NSNumber)?.int64Value == 2, "failed transaction poisoned retry")
 
 let highlights: [[String: Any]] = [["id":"h1", "page":45, "text":"SARS"], ["id":"h2", "page":44, "text":"エボラ"]]
 let make: [String: Any] = ["mutationId":"hl1", "bookID":book, "operation":"pdf-highlights", "value":highlights, "expectedRevision":0]
