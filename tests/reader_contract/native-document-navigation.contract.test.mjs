@@ -37,6 +37,24 @@ function host() {
 
 const position = (sequence, page) => ({ sequence, page, fraction: 0.42, scale: 1.2, visiblePages: [page] });
 
+test('native-owned continuation reports context without a second localStorage write', () => {
+  const {context, nav} = host();
+  const writes = [], reports = [];
+  context.localStorage = {getItem: () => '{}', setItem: (...args) => writes.push(args)};
+  context.document.title = 'Book · Reader';
+  context.RC.ctxSync = {report: value => reports.push(value)};
+  const code = source('02-position.js');
+  vm.runInContext(code.slice(0,code.indexOf('function _getLastPosition()')),context);
+  nav.attachNativeViewport({file:context.FILE_REL,token:'native',persistsNatively:true,goToPage: () => {}});
+  nav.acceptNativePosition('native',position(1,8));
+  assert.equal(writes.length,0);
+  assert.equal(reports.length,1);
+  assert.equal(reports[0].pos,8);
+  nav.detachNativeViewport('native');
+  context._saveLastPosition({page:9});
+  assert.equal(writes.length,1,'browser fallback still owns its position');
+});
+
 test('original navigation waits for native success and shares the canonical page-relative position', async () => {
   const { context, nav, saved, events } = host();
   let sequence = 0, succeeds = false;

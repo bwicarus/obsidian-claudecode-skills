@@ -46,13 +46,27 @@ struct ReaderNativeBookStore {
                       number.doubleValue >= 0, number.doubleValue <= 9_007_199_254_740_991 else { throw MutationError.invalid("预期修订号") }
                 expected = number.int64Value
             } else {
-                guard ["reading-position", "note-api", "note-operation", "highlight-api", "highlight-edit", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
+                guard ["reading-position", "pdf-position", "note-api", "note-operation", "highlight-api", "highlight-edit", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
                 expected = nil
             }
             let revision: Int64
             var result: [String: Any]? = nil
             var bindingChanges: [[String: Any]] = []
             switch operation {
+            case "pdf-position":
+                guard let input = value as? [String:Any] else { throw MutationError.invalid("PDF 位置") }
+                let viewport = try ReaderNativeReadingPosition.validated(input)
+                let previous = try projection.state("pdf-viewport",bookID:bookID)
+                if let payload = previous.payload, try Self.bytes(payload) == Self.bytes(viewport) { revision = previous.revision }
+                else { revision = try writeState("pdf-viewport",value:viewport,expected:previous.revision,mutation:mutation + ":viewport",at:stamp) }
+                let position = try projection.state("reading-position",bookID:bookID)
+                let old = position.payload as? [String:Any], page = viewport["page"] as! Int
+                if (old?["pos"] as? NSNumber)?.intValue != page || old?["kind"] as? String != "pdf" {
+                    try writeState("reading-position",value:["kind":"pdf","pos":page,"ts":stamp / 1000],expected:position.revision,mutation:mutation + ":position",at:stamp)
+                    _ = try enqueueReplication(["url":"/pdf/api/reading-pos","method":"POST",
+                        "body":["file":"localbook:" + bookID,"kind":"pdf","pos":page]],mutation:mutation + ":replication",at:stamp)
+                }
+                result = ["ok":true,"position":viewport]
             case "highlight-api", "highlight-edit":
                 guard let input = value as? [String:Any] else { throw MutationError.invalid("划线操作") }
                 let outcome = try mutateHighlight(input, edit:operation == "highlight-edit", mutation:mutation, at:stamp)

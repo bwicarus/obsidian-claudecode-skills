@@ -703,6 +703,7 @@
    *  东西，退回 IndexedDB 是安全的。不关的话下次启动还会撞同一堵墙，
    *  表现是"App 再也打不开了" —— 一个迁移 bug 不该有这种后果。 */
   function disableNativeStoreAfterFailure(error) {
+    if (root.__BW_NATIVE_DATA_STORE_REQUIRED__ === true) return;
     try { root.localStorage.setItem(NATIVE_STORE_FLAG, '0'); } catch (_) {}
     try { root.__BW_NATIVE_DATA_STORE__ = false; } catch (_) {}
     // 同一条通道、一个专用动作：让 App 设置里那个开关也跟着关。
@@ -746,6 +747,9 @@
   }
 
   function createStores() {
+    if (root.__BW_NATIVE_DATA_STORE_REQUIRED__ === true && !nativeStoreEnabled()) {
+      throw dataError('原生数据库不可用，原数据保留，未启用第二份存储', 'BW_NATIVE_STORE_REQUIRED');
+    }
     var registry = required('dataRegistry', 'syncCollections');
     var causal = registry.syncCollections();
     var prefix = 'bw-reader-native-v1';
@@ -7360,7 +7364,9 @@
           readState('reading-position', null)
         ]).then(function (values) {
           var positions = validReadingPositions(values[0], code);
-          if (!positions[identity] && values[1]) positions[identity] = clone(values[1]);
+          if (values[1] && (!positions[identity] || Number(values[1].ts || 0) >= Number(positions[identity].ts || 0))) {
+            positions[identity] = clone(values[1]);
+          }
           return { ok: true, positions: positions };
         });
       }, code);
@@ -7373,6 +7379,14 @@
         requireLocalFile(body.file, code);
         if (body.kind !== 'pdf' && body.kind !== 'epub') {
           throw outgoingRequestError('续读位置类型无效', code, 400);
+        }
+        if (body.kind === 'pdf' && root.RC?.readerNavigation?.nativeViewport?.persistsNatively === true) {
+          // Context reporting observes the committed native page. A delayed
+          // web report must not rewind it or enqueue another replication.
+          return readState('reading-position', null).then(function (position) {
+            if (!position || position.kind !== 'pdf') throw outgoingRequestError('原生阅读位置尚未保存', code, 409);
+            return { ok: true, pos: position.pos };
+          });
         }
         var value = {
           kind: body.kind,

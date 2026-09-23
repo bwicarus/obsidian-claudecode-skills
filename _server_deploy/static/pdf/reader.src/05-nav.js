@@ -100,7 +100,8 @@ RC.readerNavigation = {
     if (window.__BW_NATIVE_LOCAL_READER__ !== true || !viewport || viewport.file !== FILE_REL ||
         typeof viewport.token !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(viewport.token) ||
         typeof viewport.goToPage !== 'function') throw new Error('原生阅读视口无效');
-    this.nativeViewport = { file: FILE_REL, token: viewport.token, goToPage: viewport.goToPage, perform: viewport.perform, sequence: 0 };
+    this.nativeViewport = { file: FILE_REL, token: viewport.token, goToPage: viewport.goToPage, perform: viewport.perform,
+      persistsNatively: viewport.persistsNatively === true, sequence: 0 };
   },
   detachNativeViewport: function (token) {
     if (this.nativeViewport?.token !== token) return false;

@@ -391,6 +391,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private lazy var nativeDataStoreHost = ReaderNativeDataStoreHost()
     private var nativeReadingStoreBookID: String?
     private var nativeReadingStoreDeviceID: String?
+    private var nativeRequestedPDFPage: Int?
     private var nativeReplicationService: ReaderNativeReplicationService?
     private var nativeInkDocumentToken = UUID().uuidString
     private var nativeInkSyncTasks: [String: Task<Void, Never>] = [:]
@@ -2262,12 +2263,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // ⚠ 这里只是「许可」，不是「生效」：网页那边还要确认通道真在、
         //   两个模块都装上了。存储是唯一一类"选错了就把数据弄没"的东西，
         //   宁可不切换，也不要切到一半。
-        let nativeDataStoreWanted =
-            UserDefaults.standard.bool(forKey: "reader.nativeDataStore")
         contentController.addUserScript(WKUserScript(
             source: """
             (() => {
-              window.__BW_NATIVE_DATA_STORE__ = \(nativeDataStoreWanted ? "true" : "false");
+              window.__BW_NATIVE_DATA_STORE__ = true;
+              window.__BW_NATIVE_DATA_STORE_REQUIRED__ = true;
             })();
             """,
             injectionTime: .atDocumentStart,
@@ -2291,6 +2291,27 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
         if let localRuntimeServer {
             let navigationBridge = ReaderNativePDFNavigationBridge(webView: webView, trustedBaseURL: localRuntimeServer.baseURL)
+            navigationBridge.restorePosition = { [weak self] total in
+                guard let self, let bookID = self.nativeReadingStoreBookID, bookID == self.currentLocalBook?.id else { return nil }
+                let store = try self.nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+                guard var value = try ReaderNativeReadingPosition.restore(store:store,bookID:bookID,total:total) else { return nil }
+                if let page = self.nativeRequestedPDFPage {
+                    value["page"] = min(total,max(1,page)); value["fraction"] = 0
+                }
+                return value
+            }
+            navigationBridge.savePosition = { [weak self] bookID, value in
+                guard let self, bookID == self.nativeReadingStoreBookID, bookID == self.currentLocalBook?.id,
+                      let deviceID = self.nativeReadingStoreDeviceID else { throw ReaderNativeBookStore.MutationError.unavailable }
+                let store = try self.nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+                let writer = ReaderNativeBookStore(store:store,bookID:bookID,deviceID:deviceID,
+                    displayName:self.currentLocalBook?.title,contentSHA256:self.currentLocalBookContentSHA256)
+                _ = try writer.perform(["bookID":bookID,"mutationId":"position-" + UUID().uuidString,
+                    "operation":"pdf-position","value":value])
+                self.nativeReplicationService?.wake()
+                self.markCloudSyncDirty()
+            }
+            navigationBridge.reportFailure = { [weak self] message in self?.showTransientNotice("阅读位置未保存：" + message) }
             nativePDFNavigationBridge = navigationBridge
             contentController.addScriptMessageHandler(navigationBridge, contentWorld: .page,
                                                      name: ReaderNativePDFNavigationBridge.messageName)
@@ -3222,11 +3243,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func resetBookUserStateContext(baseURL: URL) {
+        nativePDFNavigationBridge?.flushPendingPosition()
         nativeHTMLNoteActions = [:]; nativeHTMLNoteKey = ""; nativeHTMLNotesEnabled = false; nativeHTMLPinned = []
         nativeConversation.setNativeHTMLNotes(nil)
         nativeInkDocumentToken = UUID().uuidString
         nativeReadingStoreBookID = nil
         nativeReadingStoreDeviceID = nil
+        nativeRequestedPDFPage = nil
         bookUserStateImportTask?.cancel()
         bookUserStateImportTask = nil
         localPDFContentIdentityTask?.cancel()
@@ -4410,6 +4433,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         initialPage: Int?
     ) async -> Bool {
         waitsForInitialBookDecision = false
+        nativePDFNavigationBridge?.flushPendingPosition()
         guard let localRuntimeServer else {
             library.reportError(
                 ReaderLocalRuntimeError.serverUnavailable(
@@ -4509,6 +4533,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             localPDFContentIdentityTask = nil
             bookUserStateContextGeneration &+= 1
             currentLocalBook = openingBook
+            nativeRequestedPDFPage = initialPage
             currentLocalBookAccess = access
             currentLocalLibrary = library
             currentLocalBookContentSHA256 = openingContentSHA256
@@ -4714,6 +4739,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         restartLocalRuntime: Bool = false
     ) {
         let wasForeground = readerForeground
+        if !foreground { nativePDFNavigationBridge?.flushPendingPosition() }
         readerForeground = foreground
         nativeReplicationService?.setActive(foreground)
         if foreground {
@@ -6180,13 +6206,10 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 } catch { replyHandler(nil, String(describing: error)) }
                 return
             }
-            // ⚠ 安全阀：搬家失败时网页那侧会请求把开关关回去。不让它
-            //   关的话，下次启动还会撞同一堵墙（“App 再也打不开了”），而设置里
-            //   还写着“已开启”—— 一个迁移 bug 不该有这种后果。
-            //   它只能把这**一个键置 false**，没有别的权限。
+            // Native mutations require one authoritative database. A migration
+            // failure is visible/retryable, never a switch to a second writer.
             if body["action"] as? String == "disableStore" {
-                UserDefaults.standard.set(false, forKey: "reader.nativeDataStore")
-                replyHandler(["ok": true], nil)
+                replyHandler(["ok":false,"error":"原生数据库迁移未完成，请重试；原数据已保留"], nil)
                 return
             }
             do {
@@ -6453,8 +6476,8 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         _ webView: WKWebView,
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
-        isLoading = true
         invalidateNativePDFDocument(reason: "navigation-start")
+        isLoading = true
         loadError = nil
         nativeConversation.resetForNavigation()
         nativePencilInk.invalidateDocument()

@@ -6,6 +6,7 @@ function _loadLastPositions() {
 }
 let _ogLastPage = null;
 function _saveLastPosition(patch) {
+  if (window.RC?.readerNavigation?.nativeViewport?.persistsNatively !== true) {
   const all = _loadLastPositions();
   all[FILE_REL] = {...(all[FILE_REL] || {}), ...patch, ts: Date.now()};
   // 最多保留 200 个 PDF 的记忆，按时间淘汰
@@ -16,6 +17,7 @@ function _saveLastPosition(patch) {
     try { localStorage.setItem(LAST_POS_KEY, JSON.stringify(trimmed)); } catch {}
   } else {
     try { localStorage.setItem(LAST_POS_KEY, JSON.stringify(all)); } catch {}
+  }
   }
   // 双向上下文同步:借用这个已有的翻页漏斗上报「当前活动文档」,不新增任何监听器。
   // 开关关着时 RC.ctxSync.report 立即返回 false(零网络);开着时由共享层合并 + 1s trailing。

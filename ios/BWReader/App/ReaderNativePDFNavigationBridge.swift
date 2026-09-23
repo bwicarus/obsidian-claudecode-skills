@@ -2,8 +2,8 @@ import Foundation
 import PDFKit
 import WebKit
 
-/// Carries original navigation commands to PDFKit, and sends actual native
-/// positions back through the original position/context owner. No second store.
+/// PDFKit owns navigation and SQLite owns persistence. The web observer is
+/// transitional context delivery only; it cannot save a second copy.
 @MainActor
 final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWithReply {
     static let messageName = "bwNativePDFNavigation"
@@ -19,6 +19,10 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
     private var pending: ReaderNativePDFDocument.Position?
     private var delivery: Task<Void, Never>?
     private var jumping = false
+    var restorePosition: ((Int) throws -> [String:Any]?)?
+    var savePosition: ((String, [String:Any]) throws -> Void)?
+    var reportFailure: ((String) -> Void)?
+    private var lastSaved: NSDictionary?
     private(set) var lastError: String?
 
     init(webView: WKWebView, trustedBaseURL: URL) {
@@ -34,7 +38,7 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
             arguments: [:], in: nil, contentWorld: .page)
         guard let result = value as? [String: Any], let file = result["file"] as? String,
               !file.isEmpty, (result["total"] as? NSNumber)?.intValue ?? 0 > 0 else { throw unavailable() }
-        return result
+        return try restorePosition?((result["total"] as! NSNumber).intValue) ?? result
     }
 
     /// Called once the native viewport has a real layout. Open/restore and
@@ -49,12 +53,12 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
               let file = initial["file"] as? String else { throw unavailable() }
         let lease = UUID().uuidString
         self.document = document; self.bookID = bookID; digest = contentSHA256.lowercased()
-        self.file = file; self.isCurrent = isCurrent; token = lease; sequence = 0; lastError = nil
+        self.file = file; self.isCurrent = isCurrent; token = lease; sequence = 0; lastError = nil; lastSaved = nil
         do {
             let result = try await webView.callAsyncJavaScript("""
                 const owner = window.RC?.readerNavigation;
                 if (!owner || owner.nativeState().file !== file || owner.nativeViewport) throw new Error('阅读视口已切换');
-                owner.attachNativeViewport({ file, token,
+                owner.attachNativeViewport({ file, token, persistsNatively: true,
                   goToPage: page => window.webkit.messageHandlers.bwNativePDFNavigation.postMessage({
                     action: 'page', token, file, bookID, digest, value: page
                   }),
@@ -77,6 +81,7 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
     /// Revoke synchronously before any asynchronous navigation/identity change.
     /// The token check prevents cleanup from detaching a newer book's viewport.
     func invalidate() {
+        flushPendingPosition()
         let previous = token
         token = nil; delivery?.cancel(); delivery = nil; pending = nil
         document?.onPosition = nil; document = nil; isCurrent = nil
@@ -87,6 +92,22 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
                 "return window.RC?.readerNavigation?.detachNativeViewport(token);",
                 arguments: ["token": previous], in: nil, contentWorld: .page)
         }
+    }
+
+    /// Scene suspension/book switches may arrive before the trailing timer.
+    /// Commit synchronously before revoking identity; never depend on WebKit.
+    func flushPendingPosition() {
+        guard let lease = token, valid(lease), let value = pending else { return }
+        do { try persist(payload(value)); pending = nil }
+        catch { lastError = error.localizedDescription; reportFailure?(error.localizedDescription) }
+    }
+
+    private func persist(_ value: [String:Any]) throws {
+        guard let savePosition else { throw unavailable() }
+        let viewport = try ReaderNativeReadingPosition.validated(value)
+        guard lastSaved?.isEqual(to:viewport) != true else { return }
+        try savePosition(bookID,viewport)
+        lastSaved = viewport as NSDictionary
     }
 
     private func valid(_ lease: String) -> Bool {
@@ -111,7 +132,10 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
                     try await self.publish(value, lease: lease)
                     self.lastError = nil
                 } catch {
-                    if !Task.isCancelled, self.valid(lease) { self.lastError = error.localizedDescription }
+                    if !Task.isCancelled, self.valid(lease) {
+                        if self.pending == nil { self.pending = self.document?.position }
+                        self.lastError = error.localizedDescription; self.reportFailure?(error.localizedDescription)
+                    }
                     return
                 }
             }
@@ -130,6 +154,7 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
     private func publish(_ position: ReaderNativePDFDocument.Position, lease: String) async throws {
         guard valid(lease), let webView else { throw unavailable() }
         let value = payload(position)
+        try persist(value)
         let response = try await webView.callAsyncJavaScript("""
             const owner = window.RC?.readerNavigation;
             if (!owner || owner.nativeViewport?.token !== token) return false;
@@ -187,7 +212,9 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
                 document.fitWidth()
             }
             guard valid(lease) else { throw unavailable() }
-            replyHandler(["ok": true, "position": payload(document.position)], nil)
+            let position = payload(document.position)
+            try persist(position)
+            replyHandler(["ok": true, "position": position], nil)
         } catch { replyHandler(nil, error.localizedDescription) }
     }
 

@@ -311,3 +311,27 @@ for entry in remaining { try outbound.acknowledge(entry,mutationID:entry.mutatio
 check(try outbound.pending().isEmpty, "native queue retained accepted commands")
 check(try highlightStore.record(collection:ReaderNativeReplicationOutbox.collection,id:firstPending.row.id)?.deleted == true, "ack hard-deleted record instead of retaining tombstone")
 print("Native replication queue: exact acknowledgments, retry safety and live reads past tombstones passed")
+
+let positionStore = try ReaderNativeDataStore(path:":memory:")
+let positionWriter = ReaderNativeBookStore(store:positionStore,bookID:book,deviceID:"viewport",now:{600_000})
+let positionRead = ReaderNativeBookProjection(store:positionStore)
+var viewport:[String:Any] = ["page":45,"fraction":0.37,"scale":1.25,"mode":"continuous","spreadOffset":0,"cropEnabled":false]
+func savePosition(_ id:String) throws {
+    _ = try positionWriter.perform(["bookID":book,"mutationId":id,"operation":"pdf-position","value":viewport])
+}
+try savePosition("first-position")
+let positionQueueCount = try ReaderNativeReplicationOutbox(store:positionStore).pending().count
+viewport["fraction"] = 0.81
+try savePosition("scroll-position")
+check(try ReaderNativeReplicationOutbox(store:positionStore).pending().count == positionQueueCount,"scrolling same page re-enqueued reading position")
+let restoredViewport = try ReaderNativeReadingPosition.restore(store:positionStore,bookID:book,total:90)!
+check(restoredViewport["page"] as? Int == 45 && restoredViewport["fraction"] as? Double == 0.81,"native continuation lost page fraction")
+try positionStore.execute("CREATE TRIGGER fail_position_send BEFORE INSERT ON records WHEN NEW.collection = 'native-replication-outbox' BEGIN SELECT RAISE(ABORT, 'send failed'); END")
+viewport["page"] = 46
+do { try savePosition("failed-position"); fatalError("position outbox failure swallowed") } catch ReaderNativeDataStore.StoreError.sql { }
+check((try positionRead.state("reading-position",bookID:book).payload as! [String:Any])["pos"] as? Int == 45,"page changed after failed commit")
+check((try positionRead.state("pdf-viewport",bookID:book).payload as! [String:Any])["page"] as? Int == 45,"viewport survived rolled back position")
+_ = try positionWriter.perform(["bookID":book,"mutationId":"remote-position","operation":"reading-position","value":["kind":"pdf","pos":100,"ts":700]])
+let clampedPosition = try ReaderNativeReadingPosition.restore(store:positionStore,bookID:book,total:90)!
+check(clampedPosition["page"] as? Int == 90 && clampedPosition["fraction"] as? Int == 0,"remote page reused previous page fraction or exceeded document")
+print("Native reading position: durable continuation, scroll coalescing, atomic replication and remote-page arbitration passed")

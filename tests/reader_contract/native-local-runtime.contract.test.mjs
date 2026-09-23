@@ -491,6 +491,7 @@ async function harness(options = {}) {
     __BW_NATIVE_LOCAL_READER__: true,
     __BW_NATIVE_COMPUTER_VOICE__: options.nativeComputerVoice === true,
     __BW_NATIVE_DATA_STORE__: !!options.nativeBookReply,
+    __BW_NATIVE_DATA_STORE_REQUIRED__: options.nativeStoreRequired === true,
     __BW_NATIVE_LOCAL_BOOK_ID__: options.bookId || DEFAULT_LOCAL_BOOK_ID,
     __BW_NATIVE_LOCAL_BASE_PATH__: "/r/" + "a".repeat(64),
     __BW_NATIVE_INTERFACE_MANIFEST__: clone(
@@ -2040,6 +2041,25 @@ test("native local reading position persists through the local document store", 
   const get = await context.fetch("/pdf/api/reading-pos");
   const payload = await get.json();
   assert.equal(payload.positions["localbook:localbook-" + "b".repeat(64)].pos, 12);
+});
+
+test('a delayed context report cannot overwrite the native committed page', async () => {
+  const {context,dataStoresState} = await harness();
+  const initial = await context.fetch('/pdf/api/reading-pos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:DEFAULT_LOCAL_FILE,kind:'pdf',pos:12})});
+  assert.equal(initial.status,200);
+  const key = 'native-reading-position:' + DEFAULT_LOCAL_BOOK_ID + ':reading-position';
+  const record = dataStoresState.document.values.get(key);
+  record.value.payload = {kind:'pdf',pos:18,ts:record.value.payload.ts + 5};
+  context.RC = {readerNavigation:{nativeViewport:{persistsNatively:true}}};
+  const response = await context.fetch('/pdf/api/reading-pos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:DEFAULT_LOCAL_FILE,kind:'pdf',pos:12})});
+  assert.equal((await response.json()).pos,18);
+  const positions = await (await context.fetch('/pdf/api/reading-pos')).json();
+  assert.equal(positions.positions[DEFAULT_LOCAL_FILE].pos,18,'old device cache must not hide native commit');
+  assert.equal(dataStoresState.document.values.get(key).value.payload.pos,18);
+});
+
+test('native-only App does not silently boot a second database when its store is unavailable', async () => {
+  await assert.rejects(harness({nativeStoreRequired:true}), error => error.code === 'BW_NATIVE_STORE_REQUIRED');
 });
 
 test("ready App note requests use Swift business commands and never retry a rejected native write in JS", async () => {
