@@ -36,8 +36,18 @@ for sequence in fixture["sequences"] as! [[[String: Any]]] {
             precondition(error.code == item["error"] as? String, "operation error differs: \(item["operation"]!) \(error) expected \(String(describing:item["error"]))")
         }
         let rows = try store.records(collection: "card-entities", idPrefix: "") + store.records(collection: "card-states", idPrefix: "")
-        let actual = try rows.map { try JSONSerialization.jsonObject(with: Data($0.json.utf8)) }
-        precondition(R.same(actual, item["records"]!), "persisted rows differ: \(item["operation"]!)\nactual \(actual)\nexpected \(item["records"]!)")
+        // Storage enumeration order is not part of the record contract (the
+        // browser memory store re-inserts a tombstone; SQLite orders by id).
+        func ordered(_ values: [[String: Any]]) -> [[String: Any]] {
+            values.sorted {
+                let a = ($0["collection"] as! String) + "/" + ($0["id"] as! String)
+                let b = ($1["collection"] as! String) + "/" + ($1["id"] as! String)
+                return a < b
+            }
+        }
+        let actual = try ordered(rows.map { try JSONSerialization.jsonObject(with: Data($0.json.utf8)) as! [String: Any] })
+        let expected = ordered(item["records"] as! [[String: Any]])
+        precondition(R.same(actual, expected), "persisted rows differ: \(item["operation"]!)\nactual \(actual)\nexpected \(expected)")
         count += 1
     }
 }
