@@ -9,7 +9,7 @@ struct ReaderNativeConversationPart: Identifiable {
     let title: String
     let text: String
     let status: String
-    let data: [String: Any]
+    var data: [String: Any]
     let actionId: String?
     let actionLabel: String?
 
@@ -46,7 +46,7 @@ struct ReaderNativeConversationMessage: Identifiable {
     let title: String
     let statusText: String
     let progressSummary: String
-    let parts: [ReaderNativeConversationPart]
+    var parts: [ReaderNativeConversationPart]
     let reviewSelections: [ReaderNativeReviewSelection]
 
     var tools: [ReaderNativeConversationPart] { parts.filter(\.isTool) }
@@ -203,6 +203,29 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published var navigationPanel: ReaderNativeNavigationModel?
     @Published private(set) var placements: [ReaderNativePagePlacement] = []
 
+    private var committedCards: [String: [String: Any]] = [:]
+    private func applyCommittedCards(_ parts: [ReaderNativeConversationPart]) -> [ReaderNativeConversationPart] {
+        parts.compactMap { part in
+            guard let input = part.data["nativeCard"] as? [String: Any], let gid = input["gid"] as? String,
+                  let record = committedCards[gid] else { return part }
+            guard let data = ReaderNativeCardPresentation.applying(record, to: part.data) else { return nil }
+            var updated = part; updated.data = data; return updated
+        }
+    }
+    func acceptCardRecord(_ record: [String: Any]) {
+        guard let gid = record["gid"] as? String, record["contract"] as? String == "card-repository/1" else { return }
+        if let previous = committedCards[gid] {
+            let oldEntity = (previous["entityRev"] as? NSNumber)?.int64Value ?? 0
+            let oldState = (previous["stateRev"] as? NSNumber)?.int64Value ?? 0
+            let newEntity = (record["entityRev"] as? NSNumber)?.int64Value ?? 0
+            let newState = (record["stateRev"] as? NSNumber)?.int64Value ?? 0
+            if oldEntity > newEntity || oldState > newState || (oldEntity == newEntity && oldState == newState) { return }
+        }
+        committedCards[gid] = record
+        messages = messages.map { value in var next = value; next.parts = applyCommittedCards(value.parts); return next }
+        mergePlacements()
+    }
+
     func nativeCardAction(_ token: String) -> (input: [String: Any], key: String)? {
         let parts = messages.flatMap(\.parts) + placements.flatMap(\.parts)
         for part in parts {
@@ -220,8 +243,10 @@ final class ReaderNativeConversationModel: ObservableObject {
         mergePlacements()
     }
     private func mergePlacements() {
-        guard let nativeHTMLNotes else { placements = webPlacements; return }
-        placements = webPlacements.filter { !($0.fromNote && $0.parts.count == 1 && $0.parts.first?.kind == "general") } + nativeHTMLNotes
+        let combined = nativeHTMLNotes.map { notes in
+            webPlacements.filter { !($0.fromNote && $0.parts.count == 1 && $0.parts.first?.kind == "general") } + notes
+        } ?? webPlacements
+        placements = combined.map { value in var next = value; next.parts = applyCommittedCards(value.parts); return next }
     }
     // Presentation survives closing/repositioning the SwiftUI sidebar, but is
     // scoped to this conversation and never persisted as a second history.
@@ -323,6 +348,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         }
         if nextScope != scope {
             inlineMedia.reset()
+            committedCards = [:]
             inspection = nil
             settingsPanel = nil
             readingSettingsPanel = nil
@@ -375,7 +401,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
         let nextCaptions = ReaderNativeCaptions(payload["captions"] as? [String: Any] ?? [:])
         if nextCaptions != captions { captions = nextCaptions }
-        if changedMessages { messages = nextMessages }
+        if changedMessages { messages = nextMessages.map { value in var next = value; next.parts = applyCommittedCards(value.parts); return next } }
         revision = nextRevision
         noteSnapshotCost(payload["payloadBytes"] as? Int ?? 0)
     }
@@ -448,6 +474,7 @@ final class ReaderNativeConversationModel: ObservableObject {
 
     func resetForNavigation() {
         inlineMedia.reset()
+        committedCards = [:]
         conversationStore = ReaderNativeConversationStore(); messageResyncPending = false
         inspection = nil
         settingsPanel = nil

@@ -16,7 +16,7 @@ struct ReaderNativePagePlacement: Identifiable {
     let open: Bool
     let markers: [ReaderNativePageMarker]
     let controls: [String: String]
-    let parts: [ReaderNativeConversationPart]
+    var parts: [ReaderNativeConversationPart]
     let ink: [ReaderNativeCardStroke]
     let inkAspectRatio: CGFloat
     let inkGeometry: String

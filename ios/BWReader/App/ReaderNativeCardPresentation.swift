@@ -3,6 +3,49 @@ import Foundation
 /// Native display policy for draft, review and saved cards. Inputs are data;
 /// no HTML document, hidden controls, layout or JavaScript renderer is needed.
 enum ReaderNativeCardPresentation {
+    /// Apply an authoritative local receipt immediately. Late web snapshots
+    /// cannot roll an edit back or make the next field save use an old revision.
+    static func applying(_ record: [String: Any], to data: [String: Any]) -> [String: Any]? {
+        guard var input = data["nativeCard"] as? [String: Any], let gid = input["gid"] as? String,
+              gid == record["gid"] as? String, let index = input["cardIndex"] as? Int,
+              let entityRev = record["entityRev"] as? NSNumber, let stateRev = record["stateRev"] as? NSNumber else { return data }
+        let priorEntity = (input["entityRev"] as? NSNumber)?.int64Value ?? 0
+        let priorState = (input["stateRev"] as? NSNumber)?.int64Value ?? 0
+        guard entityRev.int64Value >= priorEntity, stateRev.int64Value >= priorState,
+              entityRev.int64Value > priorEntity || stateRev.int64Value > priorState else { return data }
+        if record["deleted"] as? Bool == true { return nil }
+        guard let cards = record["cards"] as? [[String: Any]], cards.indices.contains(index),
+              let saved = (record["states"] as? [String: Any])?[String(index)] as? [String: Any],
+              var card = input["card"] as? [String: Any] else { return data }
+        if saved["removed"] as? Bool == true { return nil }
+        card.merge(cards[index]) { _, next in next }
+        card.merge(saved["exactState"] as? [String: Any] ?? [:]) { _, next in next }
+        if saved["phase"] as? String == "confirmed" {
+            if card["_st"] as? String == "draft" {
+                card["_st"] = "learn"; card["_ratingUnavailable"] = true; card["_ratingUnavailableReason"] = "not-exported"
+            }
+            if card["_addPending"] as? Bool == true {
+                card["_addPending"] = false; card["_addQueued"] = false; card["_addAid"] = NSNull()
+            }
+        }
+        let projections = (saved["projections"] as? [String: Any])?["anki"] as? [String: Any] ?? [:]
+        var statuses = Set<String>()
+        for (target, value) in projections {
+            guard target == "readerpc" || target.hasPrefix("ankimobile"), let receipt = value as? [String: Any],
+                  let status = receipt["status"] as? String else { continue }
+            card[target == "readerpc" ? "_pcExportStatus" : "_mobileExportStatus"] = status; statuses.insert(status)
+        }
+        for (status, reason) in [("unknown", "export-unknown"), ("pending", "export-pending"), ("succeeded", "external"), ("failed", "not-exported")] {
+            guard statuses.contains(status) else { continue }
+            card["_ratingUnavailable"] = true
+            if status != "failed" || saved["phase"] as? String == "confirmed" { card["_ratingUnavailableReason"] = reason }
+            break
+        }
+        input["card"] = card; input["entityRev"] = entityRev; input["stateRev"] = stateRev
+        var next = data; next["nativeCard"] = input
+        return project(next)
+    }
+
     static func interaction(_ input: [String: Any]) -> [String: Any]? {
         guard let c = input["card"] as? [String: Any], c["_removed"] as? Bool != true,
               let index = input["cardIndex"] as? Int, index >= 0 else { return nil }

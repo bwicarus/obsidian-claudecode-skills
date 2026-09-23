@@ -2061,6 +2061,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             if editing { input["field"] = String(target.key.dropFirst(5)); input["text"] = command["text"] ?? NSNull() }
             let receipt = try ReaderNativeCardRepository(store: store, deviceID: deviceID).perform([
                 "operation": "interact", "arguments": [input], "mutationId": "native-card-ui:" + UUID().uuidString])
+            if let record = receipt["result"] as? [String: Any] { nativeConversation.acceptCardRecord(record) }
             markCloudSyncDirty(); scheduleNativePDFProjectionRefresh()
             // Compatibility observers consume a receipt, never a command to
             // perform the local mutation again. Their failure cannot undo a
@@ -6235,6 +6236,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                         throw ReaderNativeCardRules.fail("UNAVAILABLE", "原生卡片数据库尚未完成迁移")
                     }
                     let receipt = try ReaderNativeCardRepository(store: store, deviceID: deviceID).perform(request)
+                    if let record = receipt["result"] as? [String: Any] { nativeConversation.acceptCardRecord(record) }
                     if !(receipt["changes"] as? [Any] ?? []).isEmpty {
                         scheduleNativePDFProjectionRefresh()
                         markCloudSyncDirty()
