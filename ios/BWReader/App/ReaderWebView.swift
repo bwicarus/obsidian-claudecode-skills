@@ -454,7 +454,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     func nativePageCardGeometry(id: String, size: CGSize?, in container: CGRect) -> CGRect? {
         guard let document = nativePDFDocument,
               let note = document.notes.first(where: { $0["id"] as? String == id }),
-              let geometry = document.noteGeometry(note, presentationSize: size) else { return nil }
+              let geometry = document.noteGeometry(note) else { return nil }   // size 是归一化的，不能当视图点
+        _ = size
         return document.view.convert(geometry.rect, to: nil)
             .offsetBy(dx: -container.minX, dy: -container.minY)
     }
@@ -464,7 +465,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     func nativePageCardDocumentRect(id: String, size: CGSize?) -> CGRect? {
         guard let document = nativePDFDocument, let content = document.view.documentView,
               let note = document.notes.first(where: { $0["id"] as? String == id }),
-              let geometry = document.noteGeometry(note, presentationSize: size) else { return nil }
+              let geometry = document.noteGeometry(note) else { return nil }
+        // ⚠ 不传 presentationSize：placement.size 是**除以网页视口**的归一化值，
+        //   noteGeometry 却把它当视图点用 —— 调过大小的卡会被算成 0.3×0.2 点。
+        //   原生改尺寸本来就写回便签自己的 w/h，noteGeometry 按 w/h × 页宽比例换算即可。
+        _ = size
         let rect = content.convert(geometry.rect, from: document.view)
         return rect.offsetBy(dx: -content.bounds.minX, dy: -content.bounds.minY)
     }
@@ -481,6 +486,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 找不到就**出声** —— "点了没反应"是这块地方已经栽过一次的坑。
     func openNativeBoundCard(noteID: String) {
         guard !noteID.isEmpty else { return }
+        traceCardPipeline("tap", noteID: noteID)
+        // 点完 1.5 秒再看一次：开合是异步的，状态要等网页那侧回来。
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            self?.traceCardPipeline("after-tap", noteID: noteID)
+        }
         // 网页那侧挂着这张卡：走它的开合（状态、词典段、上下文选中都在那边）。
         if let placement = nativeConversation.placements.first(where: { $0.noteID == noteID }),
            let action = placement.controls["toggleBound"] {
@@ -505,6 +516,65 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         if nativeOpenBoundNotes.contains(noteID) { nativeOpenBoundNotes.remove(noteID) }
         else { nativeOpenBoundNotes = [noteID] }   // 一次只展开一张（原版 toggleBoundCard 同规则）
     }
+
+    /// 卡片链路诊断：把"点锁定框 → 开合 → 画卡"每一环的实际状态写进回传服务器的客户端日志。
+    ///
+    /// ⚠ 为什么要它：这条链已经连续修错好几轮（2026-09-23 用户："这个问题已经连续错了
+    ///   太多次了"）。每一轮都是看截图推测哪一环坏了，而这台 iPad 我摸不到。
+    ///   与其再猜一轮，不如让它自己把现场说出来 —— 网页挂没挂这张卡、开合状态、原生能不能
+    ///   取到便签和几何、两种摆法各算出什么、文档层挂没挂。
+    func traceCardPipeline(_ stage: String, noteID: String) {
+        var parts: [String] = ["[card-trace] " + stage, "id=" + String(noteID.prefix(12))]
+        guard let document = nativePDFDocument else {
+            parts.append("nativePDF=nil")
+            postClientLog(parts.joined(separator: " "))
+            return
+        }
+        let placement = nativeConversation.placements.first { $0.noteID == noteID }
+        if let placement {
+            parts.append("web=yes open=\(placement.open) visible=\(placement.visible) bound=\(placement.bound)")
+            parts.append("ctrls=" + placement.controls.keys.sorted().joined(separator: ","))
+        } else {
+            parts.append("web=no")
+        }
+        parts.append("nativeOpen=\(nativeOpenBoundNotes.contains(noteID))")
+        parts.append("docLayer=\(documentCardLayerMounted) drawn=\(documentLayerCardCount)")
+        if let note = document.notes.first(where: { $0["id"] as? String == noteID }) {
+            let anchor = note["anchor"] as? [String: Any] ?? [:]
+            parts.append("anchor=\(anchor["kind"] ?? "-")/p\(anchor["page"] ?? "-")")
+            let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any] ?? [:]
+            let bind = payload["bind"] as? [String: Any] ?? [:]
+            parts.append("bind=p\(bind["page"] ?? "-") \(String(describing: bind["text"] ?? "-").prefix(12))")
+            if let geometry = document.noteGeometry(note) {
+                parts.append("geo=\(Int(geometry.rect.minX)),\(Int(geometry.rect.minY)) \(Int(geometry.rect.width))x\(Int(geometry.rect.height)) bindRects=\(geometry.bindingRects.count)")
+            } else {
+                parts.append("geo=nil")
+            }
+            parts.append("wordRect=" + (nativeWordCardDocumentRect(id: noteID, size: nil).map { "\(Int($0.minX)),\(Int($0.minY))" } ?? "nil"))
+            parts.append("pageRect=" + (nativePageCardDocumentRect(id: noteID, size: nil).map { "\(Int($0.minX)),\(Int($0.minY))" } ?? "nil"))
+        } else {
+            parts.append("note=missing notes=\(document.notes.count)")
+        }
+        parts.append("placements=\(nativeConversation.placements.count)")
+        postClientLog(parts.joined(separator: " "))
+    }
+
+    /// 写一行到网页那条已经在回传服务器的客户端日志（__bwClientLog）。
+    func postClientLog(_ line: String) {
+        ReaderNativeFaultReporter.shared.note("trace", String(line.prefix(180)))
+        guard let data = try? JSONSerialization.data(withJSONObject: [line]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript(
+            "(function(m){try{if(window.__bwClientLog)window.__bwClientLog('log',m);else if(window.dlog)window.dlog(m);}catch(e){}})(" + json + "[0])",
+            completionHandler: nil)
+    }
+
+    /// 文档层此刻实际画出了几张卡（它自己用 preference 报上来）。只给诊断用。
+    var documentLayerCardCount = 0
+
+    /// 原生正文被卸下的原因。卸下那一刻网页多半也在重载，日志发不出去 —— 先攒着，
+    /// 下一次原生正文重新挂上时一起报。
+    private var nativePDFLifecycleNotes: [String] = []
 
     /// 原生自己展开的词锚卡（网页没挂这张卡时）。
     @Published var nativeOpenBoundNotes: Set<String> = []
@@ -552,8 +622,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     func nativeWordCardDocumentRect(id: String, size: CGSize?) -> CGRect? {
         guard let document = nativePDFDocument, let content = document.view.documentView,
               let note = document.notes.first(where: { $0["id"] as? String == id }),
-              let geometry = document.noteGeometry(note, presentationSize: size),
+              let geometry = document.noteGeometry(note),   // 不传 size：理由同上
               let word = geometry.bindingRects.last else { return nil }
+        _ = size
         // 词所在的页（可能跟卡片锚点不是同一页）。
         let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any]
         let bindPage = ((payload?["bind"] as? [String: Any])?["page"] as? NSNumber)?.intValue ?? geometry.page
@@ -610,7 +681,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func remountNativePDFIfContentChanged(_ digest: String) {
         guard let document = nativePDFDocument, let bookID = currentLocalBook?.id,
               !document.matches(bookID: bookID, contentSHA256: digest) else { return }
-        invalidateNativePDFDocument()
+        invalidateNativePDFDocument(reason: "content-digest-changed")
         // 另起一轮：当前这次调用可能正发生在 prepare 里面（它也会取摘要），
         // 就地重挂会递归。
         Task { @MainActor [weak self] in self?.mountNativePDFDocumentIfEnabled() }
@@ -1149,7 +1220,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         setNativeDocumentCaptureViewport(document.view)
     }
 
-    private func invalidateNativePDFDocument() {
+    private func invalidateNativePDFDocument(reason: String = "unspecified") {
+        if nativePDFDocument != nil || activeNativePDFDocument != nil {
+            nativePDFLifecycleNotes.append(reason + "@" + String(Int(Date().timeIntervalSince1970) % 100000))
+            if nativePDFLifecycleNotes.count > 12 { nativePDFLifecycleNotes.removeFirst() }
+            ReaderNativeFaultReporter.shared.note("native-pdf", "invalidate:" + reason)
+        }
         nativePDFMountTask?.cancel()
         nativePDFMountTask = nil
         nativeInkSurfaceTask?.cancel()
@@ -1208,6 +1284,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             self.nativePDFMountFailure = nil
             self.nativePDFDocument = document
             ReaderNativeStartupProfile.shared.mark("原生阅读区挂载")
+            let history = self.nativePDFLifecycleNotes.joined(separator: ",")
+            self.nativePDFLifecycleNotes = []
+            self.postClientLog("[native-pdf] mounted" + (history.isEmpty ? "" : " after " + history))
         }
     }
 
@@ -5642,7 +5721,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         //   崩了几次，没有任何地方说得出来。于是每次都只能靠猜。
         //   页面里的线索随进程一起没了，能留下证据的只有 App 进程这一侧。
         noteWebContentTermination()
-        invalidateNativePDFDocument()
+        invalidateNativePDFDocument(reason: "webcontent-terminated")
         nativeConversation.resetForNavigation()
         webContentProcessNeedsReload = true
         isLoading = false
@@ -5716,7 +5795,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
         isLoading = true
-        invalidateNativePDFDocument()
+        invalidateNativePDFDocument(reason: "navigation-start")
         loadError = nil
         nativeConversation.resetForNavigation()
         nativePencilInk.invalidateDocument()

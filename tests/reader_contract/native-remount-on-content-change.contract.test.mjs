@@ -27,7 +27,7 @@ test("② 只在真的不匹配时重挂，且不就地递归", () => {
                   "/// 取可见页的**页面叠加数据**");
   assert.match(fn, /!document\.matches\(bookID: bookID, contentSHA256: digest\)/,
     "匹配就什么都不做 —— 每次取摘要都重挂会把书闪一下");
-  assert.match(fn, /invalidateNativePDFDocument\(\)/);
+  assert.match(fn, /invalidateNativePDFDocument\(reason: "content-digest-changed"\)/);
   assert.match(fn, /Task \{ @MainActor \[weak self\] in self\?\.mountNativePDFDocumentIfEnabled\(\) \}/,
     "重挂要另起一轮：这次调用可能就发生在 prepare 里面（它也取摘要），就地重挂会递归");
 });

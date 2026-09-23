@@ -407,7 +407,7 @@ struct ReaderNativePlacedCard: View {
     private var savedSize: CGSize? {
         // 文档层：rect 由 noteGeometry 算出，**已经含了**保存过的尺寸，而且单位就是
         // 这一层的单位；再按屏幕尺寸换一遍会差一个缩放倍数。
-        if unitScale != 1 || space != .global { return item.size == nil ? nil : rect.size }
+        if unitScale != 1 || space != .global { return nil }   // rect 已按便签 w/h 算好
         return item.size.map { reader.nativePageCardRect(CGRect(origin: .zero, size: $0), in: .zero).size }
     }
     /// 壳宽照原版 `_formW`：圆点 40 / 长条 300 / 方块按卡片自己的宽。

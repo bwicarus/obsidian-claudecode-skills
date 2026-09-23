@@ -67,7 +67,7 @@ test("③ 原生按可见页算屏幕矩形，并在布局变化时重推", () =
 });
 
 test("④ 换书/关闭时把待推任务取消掉", () => {
-  const invalidate = body(WEBVIEW, "private func invalidateNativePDFDocument()",
+  const invalidate = body(WEBVIEW, "private func invalidateNativePDFDocument(",
                           "/// 把原生 PDF 主阅读区挂到界面上");
   assert.match(invalidate, /nativeInkSurfaceTask\?\.cancel\(\)/,
     "不取消的话，上一本书的页面矩形会推给下一本");

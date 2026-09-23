@@ -27,7 +27,10 @@ test("① 显示走 noteGeometry，拿不到才退回网页", () => {
   assert.match(CARDS, /reader\.nativePageCardGeometry\(/, "卡身位置");
   assert.match(CARDS, /\?\? reader\.nativePageCardRect\(/, "退路必须还在");
   const geometry = body(WEBVIEW, "func nativePageCardGeometry(", "func openNativeBoundCard(");
-  assert.match(geometry, /document\.noteGeometry\(note, presentationSize: size\)/);
+  // ⚠ 不传 presentationSize：placement.size 是除以网页视口的归一化值，当视图点用会把
+  //   调过大小的卡算成 0.3×0.2 点。尺寸一律按便签自己的 w/h 换算。
+  assert.match(geometry, /document\.noteGeometry\(note\)/);
+  assert.doesNotMatch(geometry, /presentationSize: size/);
   assert.match(geometry, /return nil/, "没有原生几何时返回 nil，由调用方退回 —— 不猜");
   // 锚标记位置不在这层算：原生正文下由 PDFKit 页内 overlay 画（见
   // native-bound-card-visibility ⑤），这层按窗口坐标摆必然拖影。

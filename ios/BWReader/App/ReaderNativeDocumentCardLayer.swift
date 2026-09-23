@@ -186,6 +186,7 @@ struct ReaderNativeAnchoredCards: View {
         .coordinateSpace(name: Self.space)
         .onPreferenceChange(ReaderNativeCardFramesKey.self) { frames in
             layer.cardFrames = frames
+            reader.documentLayerCardCount = frames.count
         }
     }
 
