@@ -100,7 +100,7 @@ test("PDF exact-text highlight reuses a ready page and bounds a stalled navigati
     "pdfDoc",
     "currentPage",
     "setTimeout",
-    `${PDF.slice(start, end)}; return _pdfExactTextPage;`,
+    `const _NATIVE_LOCAL_PDF = false; ${PDF.slice(start, end)}; return _pdfExactTextPage;`,
   );
 
   const ready = { dataset: { loaded: "1" }, __charBoxes: [{ c: "A" }] };

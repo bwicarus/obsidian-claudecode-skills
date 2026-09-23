@@ -4,13 +4,8 @@
 // 网页层仍在渲页 —— 同一本书被 PDF.js 和 PDFKit 各渲一遍，PDF 数据在内存里
 // 也是两份。大书上被系统杀掉完全说得通。
 //
-// 但**不能一刀切成永不渲染**：还有路径要靠网页的 `__charBoxes` 取坐标
-// （AI 精确划线 / 来源校验）。所以规则是：批量渲染关掉，按需渲单页留着。
-//
-// ⚠ 顺带记一个查出来的事实：在这次改动**之前**，原生接管时 AI 精确划线就已经
-//   是坏的 —— `_pdfExactTextPage` 走 `window.goToPage`，而 `renderPage` 见到
-//   原生视口会直接转给原生并 return，网页那一页永远不渲，轮询 80×120ms 后必然
-//   抛 TEXT_LAYER_UNAVAILABLE。这里一并修好。
+// 字符定位也直接读 PDFKit 数据；App 不再通过按需渲染隐藏单页获得坐标。
+// 浏览器保留自己的导航和文字层路径，App 原生读取失败不能启用网页出图兜底。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -48,19 +43,38 @@ test("② 首屏也不渲，但遮罩照撤", () => {
     "遮罩必须照撤 —— 不渲不等于没准备好，否则原生正文上会一直盖着加载遮罩");
 });
 
-test("③ 按需渲单页的路留着，且不经 goToPage", () => {
+test("③ App 定位只读原生字符数据，不创建网页页图", async () => {
   const onDemand = HIGHLIGHT.slice(HIGHLIGHT.indexOf("async function _pdfExactTextPage"),
                                    HIGHLIGHT.indexOf("async function _pdfWaitForHighlightVisible"));
-  assert.match(code(onDemand), /nativeViewport\)/, "原生接管时要走另一条路");
-  assert.match(code(onDemand), /_renderPageInto\(page, ph\)/,
-    "直接渲那一页；goToPage 会被 renderPage 转给原生并 return，页永远不渲");
+  assert.doesNotMatch(code(onDemand), /_renderPageInto|createElement/);
   assert.match(code(onDemand), /window\.goToPage\(page\)/,
     "非原生接管时仍走原来的导航，不改既有行为");
-  // renderPage 的早返回是上面那段推理的前提；它变了，这里的绕行就没必要了。
   assert.match(code(RENDER), /const nativeOwner = window\.RC\?\.readerNavigation\?\.nativeViewport;/);
+  const forbidden = () => { assert.fail("App 文字定位不应读取 DOM 或触发导航/出图"); };
+  const factory = new Function("window", "document", "pdfDoc", "_mapCharBoxes",
+    `const _NATIVE_LOCAL_PDF = true; ${onDemand}; return _pdfExactTextPage;`);
+  const requests = [];
+  const chars = [{ c: "字", left: 10, top: 20 }];
+  let response = { ok: true, chars, revision: "rev1", pageWidth: 100, pageHeight: 200 };
+  const window = { goToPage: forbidden, webkit: { messageHandlers: { bwNativeReaderGeometry: {
+    async postMessage(request) { requests.push(request); return response; }
+  } } } };
+  const resolve = factory(window, { querySelector: forbidden, createElement: forbidden }, { numPages: 3 }, (value) => value);
+  const result = await resolve(2);
+  assert.deepEqual(requests, [{ action: "characters", page: 2 }]);
+  assert.equal(result.__nativeSource, true);
+  assert.equal(result.__charBoxes, chars);
+  assert.equal(result.__pageWPt, 100);
+  assert.equal(result.__pageTextRevision, "rev1");
+  response = { ok: false };
+  await assert.rejects(resolve(2), /TEXT_LAYER_UNAVAILABLE/);
+  delete window.webkit.messageHandlers.bwNativeReaderGeometry;
+  await assert.rejects(resolve(2), /GEOMETRY_UNAVAILABLE/);
 });
 
 test("④ 改完 reader.src 要拼合 —— 不然线上还是旧的", () => {
   assert.match(READER, /nativeViewport\)\s*return;/);
-  assert.match(READER, /_renderPageInto\(page, ph\)/);
+  const from = HIGHLIGHT.indexOf("async function _pdfExactTextPage");
+  const to = HIGHLIGHT.indexOf("async function _pdfWaitForHighlightVisible");
+  assert.ok(READER.includes(HIGHLIGHT.slice(from, to)), "原生字符数据入口必须同步到生成物");
 });

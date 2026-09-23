@@ -106,6 +106,7 @@ function pdfHarness() {
   const context = vm.createContext({
     window: null,
     FILE_REL: "book.pdf",
+    _NATIVE_LOCAL_PDF: false,
     pdfDoc: { numPages: 9 },
     currentPage: 2,
     document: { querySelector: () => pw },

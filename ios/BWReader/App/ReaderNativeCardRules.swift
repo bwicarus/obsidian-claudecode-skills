@@ -103,7 +103,7 @@ enum ReaderNativeCardRules {
     }
     static func card(_ value: Any?) throws -> [String: Any] {
         let input = try object(value, "card")
-        try fields(input, ["type", "front", "back", "cloze", "text", "deck", "tags", "reason"], "card")
+        try fields(input, ["type", "front", "back", "cloze", "text", "deck", "tags", "reason", "nodeIds"], "card")
         let type = try text(input["type"], "card.type", 32, required: true).lowercased()
         var result: [String: Any] = ["type": type]
         if type == "basic" {
@@ -129,6 +129,11 @@ enum ReaderNativeCardRules {
                 return tag
             }
             result["tags"] = Set(normalized).sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) }
+        }
+        if has(input["nodeIds"]) {
+            guard let nodes = input["nodeIds"] as? [String], nodes.count <= 8, Set(nodes).count == nodes.count,
+                  nodes.allSatisfy({ matches($0, "^kj:[0-9A-HJKMNP-TV-Z]{10}$") }) else { throw fail("INPUT", "card.nodeIds 无效或重复") }
+            result["nodeIds"] = nodes
         }
         return result
     }

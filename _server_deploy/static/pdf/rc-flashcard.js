@@ -87,6 +87,7 @@
       if (card[key] != null && String(card[key])) output[key] = String(card[key]);
     });
     if (Array.isArray(card.tags)) output.tags = card.tags.slice();
+    if (Array.isArray(card.nodeIds)) output.nodeIds = card.nodeIds.slice();
     return output;
   }
   function repositoryCards(cards) {

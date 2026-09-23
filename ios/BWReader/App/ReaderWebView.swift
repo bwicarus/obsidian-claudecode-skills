@@ -2044,8 +2044,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func performNativeCardCommand(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "liveAction", let token = command["actionId"] as? String,
               let target = nativeConversation.nativeCardAction(token),
-              ["add", "del", "edit-front", "edit-back", "edit-cloze", "export-mobile", "export-desktop"].contains(target.key),
+              ["add", "del", "edit-front", "edit-back", "edit-cloze", "export-mobile", "export-desktop", "reveal"].contains(target.key),
               (target.input["entityRev"] as? NSNumber)?.int64Value ?? 0 > 0 else { return nil }
+        // Queue-owned reviews have their own reveal/advance contract and are
+        // migrated with the review controller, not as independent saved cards.
+        if target.key == "reveal", target.input["controlledReview"] as? Bool == true { return nil }
         do {
             guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
                   let deviceID = nativeReadingStoreDeviceID,

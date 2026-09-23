@@ -12,8 +12,8 @@
 // 链路四段，任一段断掉这个菜单项就是个哑按钮：
 //   ① 选区层把「划线」放进菜单，并带上颜色键
 //   ② document 补页码 + 把归一化矩形乘回点坐标
-//   ③ 壳转成 nativeSelectionHighlight；允许清单是这条命令唯一的闸
-//   ④ 注入脚本直接落本地库，不依赖网页渲染
+//   ③ 壳校验书籍身份，直接提交 Swift 本地事务
+//   ④ 兼容脚本入口保留同样的数据形状，不依赖网页渲染
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -48,16 +48,19 @@ test("② document 补上页码，并把矩形还原成点坐标一起带出去"
   // 存储要的也是点 —— 这里必须乘回去，否则高亮会缩到页面左上角一小块。
   assert.match(DOCUMENT, /rect\.minX \* chars\.pageWidth/);
   assert.match(DOCUMENT, /rect\.maxY \* chars\.pageHeight/);
-  assert.match(SELECTION, /CGRect\(x: \$0\[0\] \/ width/,
+  assert.match(SELECTION, /CGRect\(x: \$0\.minX \/ geometry\.width/,
     "选区桥那侧仍是除法归一化 —— 它改了，上面的乘法就得跟着改");
 });
 
-test("③ 壳发的是 nativeSelectionHighlight，且它在允许清单里", () => {
-  assert.match(WEBVIEW, /"action": "nativeSelectionHighlight"/);
-  const allow = WEBVIEW.slice(WEBVIEW.indexOf("let allowed: Set<String>"),
-                              WEBVIEW.indexOf("guard let action = command[\"action\"]"));
-  assert.match(allow, /"nativeSelectionHighlight"/, "命令不在允许清单里就是个哑按钮");
-  assert.match(WEBVIEW, /nativePDFDocument\?\.matches\(bookID: bookID, contentSHA256: contentSHA256\) == true/);
+test("③ 选区直接提交原生事务，仍校验书籍身份", () => {
+  const native = WEBVIEW.slice(WEBVIEW.indexOf("private func highlightFromNativeSelection("),
+                              WEBVIEW.indexOf("private func performNativeHighlight("));
+  assert.match(native, /nativePDFDocument\?\.matches\(bookID: bookID, contentSHA256: contentSHA256\) == true/);
+  assert.match(native, /await performNativeHighlight\(operation:"highlight-api"/);
+  assert.doesNotMatch(native, /evaluateJavaScript|callAsyncJavaScript|nativeSelectionHighlight/);
+  for (const key of ["file", "page", "rects", "color", "text", "page_w", "page_h", "id"]) {
+    assert.ok(native.includes('"' + key + '":'), `原生记录缺少 ${key}`);
+  }
 });
 
 test("④ 直接落本地库，且记录形状与网页保存时一致", () => {

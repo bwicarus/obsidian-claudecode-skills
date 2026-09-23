@@ -90,6 +90,7 @@ if (window.__bwPwaProviderOnly) return;
       if (card[key] != null && String(card[key])) output[key] = String(card[key]);
     });
     if (Array.isArray(card.tags)) output.tags = card.tags.slice();
+    if (Array.isArray(card.nodeIds)) output.nodeIds = card.nodeIds.slice();
     return output;
   }
   function repositoryCards(cards) {
@@ -176,7 +177,8 @@ if (window.__bwPwaProviderOnly) return;
     if (record.source && typeof record.source === 'object' && st.opts) {
       st.opts.repositorySource = record.source;
     }
-    var changed = false;
+    var changed = st.entityRev !== record.entityRev || st.stateRev !== record.stateRev;
+    st.entityRev = record.entityRev; st.stateRev = record.stateRev;
     Object.keys(record.states).forEach(function (key) {
       var index = Number(key), saved = record.states[key], card = st.cards[index];
       if (!Number.isInteger(index) || !card || !saved) return;
@@ -270,7 +272,9 @@ if (window.__bwPwaProviderOnly) return;
   }
   var _EASE = [['1', '再来', 'e1'], ['2', '困难', 'e2'], ['3', '良好', 'e3'], ['4', '简单', 'e4']];
   var _groups = {};   // gid → {cards:共享卡对象数组, conts:[渲染实例容器]}:同 gid 多宿主(侧栏/浮层)状态联动
+  function nativePresentation() { return window.__BW_NATIVE_CONVERSATION_DATA__ === true; }
   function injectCss() {
+    if (nativePresentation()) return;
     if (document.getElementById('rc-flashcard-css')) return;
     var st = document.createElement('style'); st.id = 'rc-flashcard-css';
     st.textContent =
@@ -528,6 +532,25 @@ if (window.__bwPwaProviderOnly) return;
   }
   // Semantic operations shared by native controls and web projections. Native
   // controls never need to find a hidden button or synthesize an input event.
+  function presentationInput(container, i) {
+    var st = container && container.__fc, c = st && st.cards[i];
+    if (!Number.isInteger(i) || i < 0 || !c || c._removed) return null;
+    var card = Object.assign({}, c);
+    // Custom review templates are still provided by their owner, without
+    // inserting the result into a DOM or running the web card renderer.
+    if (st.opts && typeof st.opts.projectFaceHtml === 'function') {
+      card._displayFrontHtml = st.opts.projectFaceHtml(c, 'front');
+      card._displayBackHtml = st.opts.projectFaceHtml(c, 'back');
+    }
+    var mobile = window.BWReaderRuntime && window.BWReaderRuntime.ankiMobileExport;
+    return { card: card, gid: st.gid, cardIndex: i, readonly: !!st.readonly,
+      entityRev: st.entityRev || 0, stateRev: st.stateRev || 0,
+      autoExportDesktop: !!(st.opts && st.opts.localDraft),
+      controlledReview: !!st.controlledReview,
+      canDesktop: !!(((st.opts && st.opts.localDraft) || entityIdOf(st.gid)) &&
+        RC.computerVoice && typeof RC.computerVoice.addLocalAnkiCard === 'function'),
+      canMobile: !!(mobile && typeof mobile.available === 'function' && mobile.available()) };
+  }
   function interactionState(container, i) {
     var st = container && container.__fc, c = st && st.cards[i];
     if (!Number.isInteger(i) || i < 0 || !c || c._removed) return null;
@@ -707,6 +730,10 @@ if (window.__bwPwaProviderOnly) return;
   }
   function updateSlide(container, i) {
     var st = container.__fc; if (!st) return;
+    if (nativePresentation()) {
+      notifyState(container, 'native-card-changed', i);
+      return;
+    }
     var slide = container.querySelector('.fc-slide[data-i="' + i + '"]'); if (!slide) return;
     slide.innerHTML = cardHtml(st, st.cards[i], i); bindSlide(container, slide, st, i);
     try { RC.typeset && RC.typeset(slide); } catch (e) {}
@@ -865,6 +892,15 @@ if (window.__bwPwaProviderOnly) return;
       if (!card._removed) activeIndices.push(index);
     });
     var n = activeIndices.length;
+    if (nativePresentation()) {
+      // The Swift card surface consumes semantic state. Do not construct
+      // hidden card HTML, load its images, typeset it or attach a web pager.
+      if (container.firstChild) container.replaceChildren();
+      container.__fcActive = activeIndices;
+      if (n && activeIndices.indexOf(st.idx) < 0) st.idx = activeIndices[0];
+      notifyState(container, 'native-card-mounted', st.idx);
+      return;
+    }
     if (!n) { container.innerHTML = '<div class="fc-collapsed">（草稿已全部删除）</div>'; return; }
     var activePosition = activeIndices.indexOf(st.idx);
     if (activePosition < 0) {
@@ -960,6 +996,9 @@ if (window.__bwPwaProviderOnly) return;
   }
   function notifyState(container, reason, index) {
     var st = container && container.__fc;
+    if (st) {
+      try { window.dispatchEvent(new CustomEvent('rc:flashcard-state-changed', {detail:{gid:st.gid,reason:reason,cardIndex:index}})); } catch (_) {}
+    }
     try {
       if (st && st.opts &&
           typeof st.opts.onStateChange === 'function') {
@@ -1240,7 +1279,7 @@ if (window.__bwPwaProviderOnly) return;
       var st = container && container.__fc;
       var pager = container && container.__fcPager;
       var active = container && container.__fcActive;
-      if (!st || !pager || typeof pager.goto !== 'function' || !active) return;
+      if (!st || !active || (!nativePresentation() && (!pager || typeof pager.goto !== 'function'))) return;
       var cards = st.cards || [];
       var isPending = function (c) {
         return c && !c._removed && (c._st === 'draft' || c._st === undefined) && !c._addPending;
@@ -1249,6 +1288,11 @@ if (window.__bwPwaProviderOnly) return;
       for (var k = fromIndex + 1; k < cards.length; k++) { if (isPending(cards[k])) { target = k; break; } }
       if (target < 0) for (var j = 0; j < fromIndex; j++) { if (isPending(cards[j])) { target = j; break; } }
       if (target < 0) return;
+      if (nativePresentation()) {
+        st.idx = target;
+        notifyState(container, 'advance-after-confirm', target);
+        return;
+      }
       var pos = active.indexOf(target);
       if (pos >= 0) pager.goto(pos, { reason: 'advance-after-confirm' });
     } catch (_) {}
@@ -1402,6 +1446,16 @@ if (window.__bwPwaProviderOnly) return;
   //: ⚠ 两个入口共用这一份实现，别再复制一遍：状态字符串、可重试码表、
   //: 回执三态如果各写一遍，迟早只改一边。
   function runComputerExport(ctx) {
+    if (window.__bwNativeAnkiPC && window.__bwNativeAnkiPC.ownsExports === true) {
+      return Promise.resolve(window.__bwNativeAnkiPC.request({ action: 'exportCard', gid: ctx.gid, index: ctx.index }))
+        .then(function (result) {
+          if (!result || result.ok !== true) throw new Error(result && result.error || '电脑 Anki 导出未完成');
+          return true;
+        }).catch(function (error) {
+          if (!ctx.silent) RC.toast && RC.toast(String(error && error.message || error));
+          return false;
+        });
+    }
     var c = ctx.card;
     // 归属优先取**这张卡自己的**（2026-09-19：一次投递里各卡可以各绑各的），
     // 取不到才回落到整组的 source.kjNodes。
@@ -1559,6 +1613,10 @@ if (window.__bwPwaProviderOnly) return;
   //   幂等性早就有人管了。所以这里只补最后一步 —— 链路回来时把欠的补上。
   var _retryScheduled = false;
   function retryFailedComputerExports(reason) {
+    if (window.__bwNativeAnkiPC && window.__bwNativeAnkiPC.ownsExports === true) {
+      Promise.resolve(window.__bwNativeAnkiPC.request({ action: 'retry' })).catch(function () {});
+      return reason;
+    }
     if (_retryScheduled) return;
     var linked = false;
     try {
@@ -2137,11 +2195,39 @@ if (window.__bwPwaProviderOnly) return;
         tool: 'reader_anki_draft'
       });
       if (result && result.bd) applyRepositoryRecord(result.bd, record);
-      if (!result || !result.el || !result.el.querySelector('.fc-card')) return null;
+      if (!result || !result.el || !(nativePresentation() ? result.bd && result.bd.__fc : result.el.querySelector('.fc-card'))) return null;
       return result;
     });
   }
   RC.flashcard = {
+    acceptNativeRecord: function (record, index, action) {
+      var group = record && _groups[record.gid];
+      if (!group) return;
+      var containers = group.conts.filter(function (container) { return container && container.isConnected && container.__fc; });
+      containers.forEach(function (container) {
+        applyRepositoryRecord(container, record);
+        notifyState(container, 'native-card-committed', index);
+        if (action === 'add' || action === 'del') _advanceToNextDraft(container, index);
+      });
+      // The remaining external exporter observes an already committed card.
+      // It cannot redo confirmation and keeps its pending/unknown receipt gate.
+      if (action === 'add' && containers.length && !(window.__bwNativeAnkiPC && window.__bwNativeAnkiPC.ownsExports === true)) {
+        var owner = containers[0], card = owner.__fc.cards[index];
+        if (card && !card._pcExportStatus && owner.__fc.opts.localDraft) exportToComputerAnki(owner, index, true);
+      }
+    },
+    setNativePresentation: function (enabled) {
+      window.__BW_NATIVE_CONVERSATION_DATA__ = !!enabled;
+      if (enabled) {
+        var css = document.getElementById('rc-flashcard-css');
+        if (css) css.remove();
+      } else injectCss();
+      Object.keys(_groups).forEach(function (gid) {
+        _groups[gid].conts.forEach(function (container) {
+          if (container && container.isConnected && container.__fc) renderTrack(container);
+        });
+      });
+    },
     // 按 gid 取这一组当前挂着的容器。
     //
     // ⚠ 存在的理由：原生侧此前只能从"动作锚点那个 DOM 节点"往下爬找 __fc
@@ -2158,6 +2244,7 @@ if (window.__bwPwaProviderOnly) return;
       return null;
     },
     interactionState: interactionState,
+    presentationInput: presentationInput,
     performInteraction: performInteraction,
     mountDrafts: mountDrafts,
     mountPreview: mountPreview,

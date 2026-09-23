@@ -96,3 +96,7 @@ let removed = try ui.load(gid)!
 precondition((removed["cards"] as! [Any]).count == 2)
 precondition(((removed["states"] as! [String: Any])["1"] as! [String: Any])["removed"] as? Bool == true)
 print("Native card UI: edit, confirm, revision fence, replay, deletion and transactional rollback passed")
+let revealed = try ui.perform(command("reveal", "native-reveal"))["result"] as! [String: Any]
+let revealedExact = ((revealed["states"] as! [String: Any])["0"] as! [String: Any])["exactState"] as! [String: Any]
+precondition(revealedExact["_showBack"] as? Bool == true && revealedExact["_ratingUnavailable"] as? Bool == true)
+precondition((revealed["cards"] as! [[String: Any]])[0]["back"] as? String == "答")

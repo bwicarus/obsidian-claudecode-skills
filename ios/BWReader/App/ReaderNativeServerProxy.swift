@@ -137,6 +137,36 @@ final class ReaderNativeServerProxyBroker: @unchecked Sendable {
         )
     }
 
+    struct DataResponse: Sendable {
+        let status: Int
+        let data: Data
+    }
+    /// Native feature controllers consume the already-authorized request
+    /// directly. No loopback ticket, browser Fetch or hidden document is used.
+    func data(for prepared: ReaderNativeServerPreparedProxyRequest, maximumBytes: Int = 8 * 1024 * 1024) async throws -> DataResponse {
+        guard (1...(8 * 1024 * 1024)).contains(maximumBytes), let url = prepared.request.url,
+              url.scheme == "https", url.host == ReaderNativeServerGateway.serverHost, url.port == nil else {
+            throw ReaderNativeServerProxyError.invalidUpstream
+        }
+        let key = "native-data-" + UUID().uuidString
+        let transport = ReaderNativeServerUpstreamTransport { [weak self] in self?.finish(ticketToken: key) }
+        lock.lock()
+        guard scopeEpoch == prepared.scopeEpoch else { lock.unlock(); throw ReaderNativeServerProxyError.staleScope }
+        active[key] = transport
+        lock.unlock()
+        defer { transport.cancel(); finish(ticketToken: key) }
+        let upstream = try await transport.start(prepared.request)
+        var data = Data()
+        for try await chunk in upstream.body {
+            try Task.checkCancellation()
+            guard chunk.count <= maximumBytes - data.count else { throw ReaderNativeServerProxyError.responseTooLarge }
+            data.append(chunk)
+        }
+        lock.lock(); let current = scopeEpoch == prepared.scopeEpoch; lock.unlock()
+        guard current else { throw ReaderNativeServerProxyError.staleScope }
+        return DataResponse(status: upstream.response.statusCode, data: data)
+    }
+
     private func streamedResponse(
         request: URLRequest,
         scopeEpoch expectedEpoch: UInt64,
@@ -441,6 +471,7 @@ private struct ReaderNativeServerDataByteSequence:
 }
 
 enum ReaderNativeServerProxyError: LocalizedError {
+    case responseTooLarge
     case invalidUpstream
     case staleScope
     case invalidTicket
@@ -451,6 +482,7 @@ enum ReaderNativeServerProxyError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .responseTooLarge: return "服务器响应超过原生读取上限"
         case .invalidUpstream:
             return "BW_PI_PROXY_ROUTE：服务器流式请求地址无效"
         case .staleScope:

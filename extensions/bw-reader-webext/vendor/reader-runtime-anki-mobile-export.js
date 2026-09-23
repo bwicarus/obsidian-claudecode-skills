@@ -243,6 +243,9 @@
     }
     function available() {
       var nativeBridge = bridge();
+      if (environment.__BW_NATIVE_LOCAL_READER__ === true && nativeBridge && nativeBridge.ownsExports === true) {
+        return typeof nativeBridge.request === 'function';
+      }
       var repo;
       try { repo = repository(); } catch (_) { return false; }
       return environment.__BW_NATIVE_LOCAL_READER__ === true &&
@@ -355,6 +358,7 @@
         Number.isSafeInteger(Number(detail.callbackExpiresAt));
     }
     async function restorePending() {
+      if (bridge() && bridge().ownsExports === true) return true;
       var groups = await repository().snapshot({ includeDeleted: false });
       if (!Array.isArray(groups)) {
         throw new ExportError(
@@ -451,6 +455,13 @@
           'AnkiMobile 投影仅在 BWReader App 内可用',
           'BW_ANKIMOBILE_UNAVAILABLE'
         );
+      }
+      if (bridge() && bridge().ownsExports === true) {
+        var nativeResult = await bridge().request({ action: 'exportCard', gid: gid, index: cardIndex });
+        if (!nativeResult || nativeResult.ok !== true) {
+          throw new ExportError(String(nativeResult && nativeResult.error || 'AnkiMobile 导出未完成'), 'BW_ANKIMOBILE_EXPORT');
+        }
+        return nativeResult;
       }
       await ensureRestored();
       await expirePending();
@@ -585,6 +596,9 @@
     }
 
     async function handleNativeCallback(detail) {
+      // The app validates its own nonce-bound callback and commits SQLite.
+      // A web message cannot manufacture an external success receipt.
+      if (bridge() && bridge().ownsExports === true) return { ok: false, durable: false };
       try {
         exactKeys(detail, {
           status: true, gid: true, index: true, nonce: true

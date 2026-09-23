@@ -18,11 +18,15 @@ normalize('normalizeCard', [basic, cloze, { ...basic, tags: ['b', 'a', 'b'] }, {
   { ...basic, front: '\0' }, { ...cloze, front: 'x' }, { type: 'cloze', cloze: '{{c0::none}}' },
   { type: 'cloze', cloze: 'one', text: 'two' }, { type: 'basic', front: 12, back: true }, null]);
 normalize('normalizeCards', [[], [basic, cloze], [basic, null], Array(257).fill(basic)]);
+normalize('normalizeCard', [{ ...basic, nodeIds: ['kj:0123456789'] }, { ...basic, nodeIds: [] },
+  { ...basic, nodeIds: ['invalid'] }, { ...basic, nodeIds: ['kj:0123456789', 'kj:0123456789'] }]);
 normalize('normalizeSource', [source, { kind: 'x' }, { kind: 'x', url: 'https://example.org', anchor: { text: '字', index: 3 } },
   { ...source, bad: 'field' }, { ...source, location: [] }, { ...source, context: '\0' }, null]);
 function step(operation, ...args) { return { operation, args }; }
 const id = 'card_aabbccdd';
 const scenarios = [
+  [step('registerDraft', { gid: id, cards: [{ ...basic, nodeIds: ['kj:0123456789'] }, { ...basic, nodeIds: ['kj:9876543210'] }], source: { ...source, kjTrack: '' } }),
+   step('saveConfirmedCard', { gid: id, cardIndex: 1 }), step('load', id)],
   [step('registerDraft', { gid: id, cards: [basic, cloze], source }),
    step('registerDraft', { gid: id, cards: [basic, cloze], source: { ...source } }, { requireDraftIdForReplay: true }),
    step('saveConfirmedCard', { gid: id, cardIndex: 1 }), step('saveConfirmedCard', { gid: id, cardIndex: 1 }),

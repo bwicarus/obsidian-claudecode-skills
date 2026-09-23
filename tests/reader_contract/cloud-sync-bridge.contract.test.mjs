@@ -29,10 +29,11 @@ test("① 事务那三个字段都从同一串 payloadJson 算出来", () => {
   assert.match(RUNTIME, /bytes !== domain\.byteCount/);
 });
 
-test("② empty 不自己算，用那份逐字副本", () => {
+test("② empty 复用已对照验证的原生合并规则", () => {
   // runtime 拿它自己的 userStateDomainEmpty 复核，对不上整笔事务被拒。
   assert.match(MERGE, /func domainEmpty\(domain: String, value: Any\) throws -> Bool/);
-  assert.match(MERGE, /objectForKeyedSubscript\("domainEmpty"\)/);
+  assert.match(MERGE, /ReaderNativeBookMerge\.empty\(domain: domain, value: value\)/);
+  assert.doesNotMatch(MERGE, /import JavaScriptCore|objectForKeyedSubscript/);
   const apply = body(WEBVIEW, "func applyUserStateFromCloudSync(", "/// Prepare against the original");
   assert.match(apply, /merger\.domainEmpty\(domain: domain\.name, value: value\)/);
   assert.doesNotMatch(code(apply), /isEmpty \? true : false|\.count == 0/);

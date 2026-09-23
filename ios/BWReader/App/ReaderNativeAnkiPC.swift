@@ -94,14 +94,15 @@ struct ReaderNativeAnkiPC {
     }
     static func validated(_ data: Data) throws -> [String: Any] {
         func id(_ value: Any) -> Bool { guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return false }; let d = n.doubleValue; return d > 0 && d <= 9_007_199_254_740_991 && d.rounded(.towardZero) == d }
+        func boolean(_ value: Any?) -> Bool { guard let n = value as? NSNumber else { return false }; return CFGetTypeID(n) == CFBooleanGetTypeID() }
         guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(value.keys).subtracting(["ok", "added", "note_ids", "card_ids", "card_ids_by_note", "dedup"]).isEmpty,
-              value["ok"] as? Bool == true, let added = value["added"], id(added),
+              boolean(value["ok"]), value["ok"] as? Bool == true, let added = value["added"], id(added),
               let notes = value["note_ids"] as? [Any], notes.count == (added as! NSNumber).intValue, notes.allSatisfy(id),
               let cards = value["card_ids"] as? [Any], cards.allSatisfy(id),
               let mapping = value["card_ids_by_note"] as? [String: Any], mapping.allSatisfy({ key, value in
                   key.range(of: "^[0-9]+$", options: .regularExpression) != nil && (value as? [Any])?.allSatisfy(id) == true
-              }), value["dedup"] == nil || value["dedup"] is Bool else {
+              }), value["dedup"] == nil || boolean(value["dedup"]) else {
             throw Failure(code: "BW_READER_LOCAL_ANKI_RESPONSE_INVALID", message: "Anki 回执格式无效，结果仍需核实")
         }
         return value

@@ -65,7 +65,9 @@ test("native strokes use frozen stable surfaces and the existing save path", () 
 });
 
 test("navigation identity and operation ids make native retries fail closed and idempotent", () => {
-  assert.match(WEBVIEW, /didStartProvisionalNavigation[\s\S]{0,220}invalidateDocument\(\)/);
+  const navigation = WEBVIEW.slice(WEBVIEW.indexOf("didStartProvisionalNavigation"), WEBVIEW.indexOf("didFinish navigation"));
+  assert.match(navigation, /invalidateNativePDFDocument\(reason: "navigation-start"\)/);
+  assert.match(navigation, /nativePencilInk\.invalidateDocument\(\)/);
   assert.match(SWIFT, /let documentToken: String/);
   assert.match(SWIFT, /"opId": operation\.id/);
   assert.match(SWIFT, /"documentToken": operation\.documentToken/);

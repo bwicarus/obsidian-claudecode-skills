@@ -251,13 +251,18 @@ struct ReaderNativeCardRepository {
         let entityRev = try R.integer(input["entityRev"], "entityRev"), stateRev = try R.integer(input["stateRev"], "stateRev")
         guard entityRev == (current["entityRev"] as? NSNumber)?.int64Value,
               stateRev == (current["stateRev"] as? NSNumber)?.int64Value else { throw R.fail("CONFLICT", "卡片已经更新，请使用最新卡面") }
-        guard state["phase"] as? String == "draft", state["removed"] as? Bool != true else { throw R.fail("TRANSITION", "这张卡已经不在草稿状态") }
+        let reveal = input["action"] as? String == "reveal"
+        guard state["phase"] as? String == (reveal ? "confirmed" : "draft"), state["removed"] as? Bool != true else { throw R.fail("TRANSITION", "这张卡的状态不允许当前操作") }
         var exact = state["exactState"] as? [String: Any] ?? [:]
         guard !["_addPending", "_removePending", "_ratingPending", "_syncPending"].contains(where: { exact[$0] as? Bool == true }) else {
             throw R.fail("TRANSITION", "卡片还有尚未确认的操作，请勿重复提交")
         }
         let options: [String: Any] = ["ifEntityRev": entityRev, "ifStateRev": stateRev]
         switch input["action"] as? String {
+        case "reveal":
+            guard !["done", "preview"].contains(exact["_st"] as? String ?? "") else { throw R.fail("TRANSITION", "这张卡已经显示答案") }
+            exact["_showBack"] = true
+            return try execute("patchState", args: [id, index, ["exactState": exact], options], mutation: mutation + ":reveal", at: at) as! [String: Any]
         case "edit":
             let fields = cards[Int(index)]["type"] as? String == "cloze" ? ["cloze"] : ["front", "back"]
             guard let field = input["field"] as? String, fields.contains(field), let text = input["text"] as? String,

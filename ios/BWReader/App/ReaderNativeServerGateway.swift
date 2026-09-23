@@ -123,6 +123,24 @@ final class ReaderNativeServerGateway: NSObject, WKScriptMessageHandlerWithReply
         serverProxyBroker.cancelAll()
     }
 
+    /// Swift callers use exactly the same route manifest, remote book binding
+    /// and cookie policy as the former web request. This is not an unrestricted
+    /// URLSession escape hatch for local book IDs or caller-provided URLs.
+    func fetchData(path: String, method: String = "GET", body: Data = Data(), surface: ReaderNativeInterfaceSurface) async throws -> ReaderNativeServerProxyBroker.DataResponse {
+        guard let request = Self.parse([
+            "contract": Self.requestContract, "action": "fetch", "method": method, "path": path,
+            "headers": ["Accept": "application/json", "Content-Type": "application/json"],
+            "bodyEncoding": "base64", "body": body.base64EncodedString()
+        ]), let policy = interfaceManifest?.piRoutePolicy(path: request.routePath, method: request.method, surface: surface) else {
+            throw GatewayError("BW_PI_GATEWAY_ROUTE：原生数据接口未登记")
+        }
+        let authorized = try authorize(request, remoteBookPolicy: policy.remoteBook)
+        let epoch = scopeEpoch
+        let prepared = try await prepareProxyRequest(authorized.request, authorizedEpoch: epoch)
+        if let rid = authorized.registersContinuationRID { registerContinuation(rid: rid, routePath: authorized.request.routePath, epoch: epoch) }
+        return try await serverProxyBroker.data(for: prepared)
+    }
+
     func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage,

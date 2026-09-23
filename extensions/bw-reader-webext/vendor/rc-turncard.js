@@ -27,6 +27,7 @@ if (window.__bwPwaProviderOnly) return;
   var _turns = {};        // turn_id → {el, hd, parts:[], bd, flow, draft}
   var _cur = null;        // 当前轮 turn_id
   var _streamVersion = 0;
+  function _nativePresentation() { return window.__BW_NATIVE_CONVERSATION_DATA__ === true; }
   function _lookup(tid) { var alias = tidByTurnId(tid); return _turns[tid] || (alias && _turns[alias]); }
 
   function _thread() { return document.getElementById('asst-thread'); }
@@ -43,7 +44,7 @@ if (window.__bwPwaProviderOnly) return;
   // 粘底滚动（2026-09-14）：只有用户本来就贴着底部（阈值内）才自动滚到底；
   // 一旦向上滚开去读，流式增量就不再把视图往下拽——否则每条 delta 都 scrollTop=scrollHeight，界面不断抽搐。
   var STICKY = 120;
-  function _scroll() { try { var t = _thread(); if (!t) return; if (t.scrollHeight - t.scrollTop - t.clientHeight <= STICKY) t.scrollTop = t.scrollHeight; } catch (e) {} }
+  function _scroll() { if (_nativePresentation()) return; try { var t = _thread(); if (!t) return; if (t.scrollHeight - t.scrollTop - t.clientHeight <= STICKY) t.scrollTop = t.scrollHeight; } catch (e) {} }
 
   // ── 容器 ─────────────────────────────────────────────────────────────────
   function open(tid, target, options) {
@@ -80,6 +81,8 @@ if (window.__bwPwaProviderOnly) return;
   // 工具出现时才长出卡头(带【流程】按钮)。没有工具的轮次就是一条普通气泡 —— 容器**自适应**,
   // 而不是像旧代码那样把气泡"升格"成另一个 DOM(那会把还在流的文字搬来搬去 → 显示两遍)。
   function _ensureHead(t, label) {
+    if (label) t.presentationTitle = label;
+    if (_nativePresentation()) return null;
     if (t.hd) {
       var s0 = t.hd.querySelector(':scope > span');
       if (s0 && label) { s0.textContent = label; s0.title = label; }
@@ -127,6 +130,13 @@ if (window.__bwPwaProviderOnly) return;
 
   // ── ★ 唯一渲染器:实时与历史回放都走这里(不变式①)──────────────────────
   function renderPart(t, p) {
+    // The native conversation consumes structured text/tool state. Building
+    // Markdown, math, images and status controls in a hidden duplicate view
+    // would still execute their renderer and resource requests.
+    if (_nativePresentation() && (p.kind === 'text' || p.kind === 'tool' || p.kind === 'meta')) {
+      if (p.kind === 'tool') _ensureHead(t, p.label || p.tool || '工具');
+      return null;
+    }
     var d = document.createElement('div');
     d.className = 'rc-part rc-part-' + (p.kind || 'text');
     if (p.kind === 'text') {
@@ -427,6 +437,7 @@ if (window.__bwPwaProviderOnly) return;
 
   // 流程面板:把本轮所有 tool part(+meta)画成 AI 请求 → 工具 → 结果 的线性流程
   function _paintFlow(t) {
+    if (_nativePresentation()) return;
     var f = t.flow;
     f.innerHTML = '';
     var tools = t.parts.filter(function (p) { return p.kind === 'tool'; });
@@ -669,6 +680,7 @@ if (window.__bwPwaProviderOnly) return;
       t.draft = { kind: 'text', text: '', role: role || 'assistant', origin: origin, seq: t.parts.length, _streamText: true };
       if (itemId) t.draft.item_id = itemId;
       t.parts.push(t.draft);
+      if (!_nativePresentation()) {
       t.draft._el = document.createElement('div');
       // role=user：用户自己正在说的话，渲成他的气泡而不是助手正文（2026-09-21）。
       // 复用 .asst-u（已有的蓝色靠右气泡）：实时那条和定稿后那条长得一样，
@@ -677,12 +689,13 @@ if (window.__bwPwaProviderOnly) return;
         ? 'rc-part rc-part-text rc-part-user'
         : 'rc-part rc-part-text';
       t.bd.appendChild(t.draft._el);
+      }
     }
     t._drafts[draftKey] = t.draft;
     t.draft._draftKey = draftKey;
     t.draft._streamDraft = true;
     t.draft.text = text;
-    _md(t.draft._el, text);
+    if (!_nativePresentation() && t.draft._el) _md(t.draft._el, text);
     _scroll();
   }
   function _freezePart(t, draft) {
@@ -806,6 +819,7 @@ if (window.__bwPwaProviderOnly) return;
     var t = _turns[tid] || open(tid);
     if (!t) return;
     t.presentationStatus = { text: String(text || ''), done: !!done };
+    if (_nativePresentation()) return;
     var s = _statusEl(t);
     if (!text) { s.hidden = true; return; }
     s.hidden = false;
@@ -897,10 +911,42 @@ if (window.__bwPwaProviderOnly) return;
       role: parts.some(function (p) { return p.kind === 'text' && p.role === 'user'; }) ? 'user' : 'assistant',
       parts: parts,
       status: state,
+      title: t.presentationTitle || '',
+      progress: t.prog || null,
       streaming: parts.some(function (p) { return p.streaming; }) || !!(state.text && !state.done)
     }));
   }
   function reset() { _turns = {}; _cur = null; }
+  function setNativePresentation(enabled) {
+    enabled = !!enabled;
+    if (_nativePresentation() === enabled) return;
+    window.__BW_NATIVE_CONVERSATION_DATA__ = enabled;
+    Object.keys(_turns).forEach(function (tid) {
+      var t = _turns[tid];
+      if (enabled) {
+        t.parts.forEach(function (part) {
+          if (part.kind === 'text' && part._el) { part._el.remove(); delete part._el; }
+        });
+        if (t._progressResize) { t._progressResize.disconnect(); t._progressResize = null; }
+        if (t.hd) { t.hd.remove(); t.hd = null; }
+        if (t.statusEl) { t.statusEl.remove(); t.statusEl = null; }
+        t._flowBtn = null; t.flow.hidden = true; t.flow.textContent = '';
+      } else {
+        // The optional legacy mode reconstructs only presentation, without
+        // replaying card registration, tool execution or persistence hooks.
+        t.parts.forEach(function (part, index) {
+          if (part.kind !== 'text' || part._el) return;
+          var node = renderPart(t, part); if (!node) return;
+          part._el = node;
+          var next = t.parts.slice(index + 1).find(function (p) { return p._el && p._el.parentNode === t.bd; });
+          if (next) t.bd.insertBefore(node, next._el);
+        });
+        if (t.presentationTitle) _ensureHead(t, t.presentationTitle);
+        if (t.presentationStatus) status(tid, t.presentationStatus.text, t.presentationStatus.done);
+        if (t.prog) _paintProgress(t);
+      }
+    });
+  }
   // 容器改名（2026-09-15 根治）：运行器推来真实 turn id 时，把本地临时容器连同已画的部件搬到真实 id 下
   function rename(oldTid, newTid) {
     if (!oldTid || !newTid || oldTid === newTid) return false;
@@ -937,6 +983,7 @@ if (window.__bwPwaProviderOnly) return;
   }
   function flowOpen(tid) { var t = _lookup(tid); return !!(t && t.flow && !t.flow.hidden); }
   function openFlow(tid) {
+    if (_nativePresentation()) return false;
     var t = _lookup(tid); if (!t || !t.flow) return false;
     t.flow.hidden = false; _paintFlow(t);
     try { if (t._flowBtn) t._flowBtn.classList.add('on'); } catch (e) {}
@@ -1067,7 +1114,7 @@ if (window.__bwPwaProviderOnly) return;
   }
   function progress(tid, evt) {
     var t = _turns[tid]; if (!t || !evt) return null;
-    _progressCss();
+    if (!_nativePresentation()) _progressCss();
     var pr = t.prog || (t.prog = { total: null, states: [], skill: '', label: '' });
     if (evt.skill) pr.skill = evt.skill;
     if (evt.label) pr.label = evt.label;
@@ -1113,6 +1160,7 @@ if (window.__bwPwaProviderOnly) return;
     row.classList.toggle('is-counted', Number(row.getAttribute('data-points-width')) > (available > 0 ? available : 130));
   }
   function _paintProgress(t) {
+    if (_nativePresentation()) return;
     try {
       _ensureHead(t, t.prog && t.prog.skill ? t.prog.skill : undefined);
       var host = t.hd; if (!host) return;
@@ -1148,6 +1196,7 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   RC.turnCard = {
+    setNativePresentation: setNativePresentation,
     presentationOf: presentationOf,
     drop: drop,
     open: open, addPart: addPart, progress: progress, progressHtml: progressHtml, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,

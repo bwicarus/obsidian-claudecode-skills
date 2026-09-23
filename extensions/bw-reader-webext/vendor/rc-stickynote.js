@@ -2245,7 +2245,7 @@ if (window.__bwPwaProviderOnly) return;
   /// 永远对不上 —— 2026-09-23 那一串"框与词分离 / 改绑到别的词 / 开了不显示"全出自这里。
   /// 用户："所有旧的渲染在有新的功能代替后都应该把旧的给去掉"。
   function _nativeOwnsPageCards() {
-    try { return !!(window.RC && RC.readerNavigation && RC.readerNavigation.nativeViewport); }
+    try { return window.__BW_NATIVE_LOCAL_READER__ === true && !!window.__PDF_CFG || !!(window.RC && RC.readerNavigation && RC.readerNavigation.nativeViewport); }
     catch (_) { return false; }
   }
   function _releaseWebPageCards() {
@@ -3964,6 +3964,19 @@ if (window.__bwPwaProviderOnly) return;
   function nativeInkAction(command) {
     if (!O || !command || command.generation !== _generation) return Promise.reject(new Error('书籍已切换'));
     if (!/^[A-Za-z0-9_-]{1,96}$/.test(String(command.opId || '')) || !['commit', 'erase', 'createRegion'].includes(command.key)) return Promise.reject(new Error('无效笔迹操作'));
+    var runtime = window.__BW_READER_RUNTIME__;
+    if (!repoMode() && runtime && runtime.supportsNativeNoteOperations && runtime.supportsNativeNoteOperations()) {
+      var capturedGeneration = _generation;
+      return runtime.nativeNoteOperation({ action:'ink', id:String(command.id), opId:command.opId,
+        kind:command.key, geometry:command.geometry, segments:cloneValue(command.segments), aspectRatio:command.aspectRatio
+      }).then(function (receipt) {
+        var saved = applyLegacyCommittedRecord(receipt.note,capturedGeneration);
+        window.dispatchEvent(new CustomEvent('rc:inkchange',{detail:{source:'native-pencil',opId:command.eventOpId || command.opId,
+          noteId:String(command.id),page:Number(saved.anchor && saved.anchor.page) || undefined}}));
+        window.dispatchEvent(new Event('rc:placement-changed'));
+        return {ok:true,persisted:true};
+      });
+    }
     var signature = JSON.stringify(command), old = _nativeInkOps.get(command.opId);
     if (old && old.signature !== signature) return Promise.reject(new Error('笔迹操作标识冲突'));
     if (old && old.state !== 'failed') return old.promise;
@@ -4197,11 +4210,12 @@ if (window.__bwPwaProviderOnly) return;
     // 原生页卡的**数据**：只读便签本身，不挂任何 DOM（原生正文接管时网页一张卡都不挂）。
     // 只交 PDF 锚点的卡片式便签；pages 给了就只交锚点页或词锚页落在其中的那些。
     // 形态、色调、墨迹几何的取法与 nativePlacementState 逐字一致 —— 原生不另猜一份。
-    nativeNoteCards: function (pages) {
+    nativeNoteCards: function (pages, options) {
       var want = Array.isArray(pages) && pages.length ? pages : null;
       return notes.map(function (note) {
         var slot = cardPayloadSlot(note), anchor = note && note.anchor;
         if (!slot || !anchor || anchor.kind !== 'pdf') return null;
+        if (slot === 'html' && options && options.excludeHTML === true) return null;
         var bind = wordBindOf(note), data = note[slot];
         if (want && want.indexOf(anchor.page) < 0 && !(bind && want.indexOf(bind.page) >= 0)) return null;
         var id = noteIdOf(note);
@@ -4224,6 +4238,16 @@ if (window.__bwPwaProviderOnly) return;
       var note = currentNote(String(id || ''));
       if (!note) return Promise.resolve(false);
       changes = changes || {};
+      var runtime = window.__BW_READER_RUNTIME__;
+      if (!repoMode() && runtime && runtime.supportsNativeNoteOperations && runtime.supportsNativeNoteOperations()) {
+        var generation = _generation;
+        return runtime.nativeNoteOperation({action:'update',id:String(id),changes:cloneValue(changes),opId:mutationId('native-update',id)})
+          .then(function (receipt) {
+            applyLegacyCommittedRecord(receipt.note,generation);
+            window.dispatchEvent(new Event('rc:placement-changed'));
+            return true;
+          });
+      }
       var slot = cardPayloadSlot(note), fields = {}, payload = null;
       var a = changes.anchor;
       if (a && typeof a === 'object') {

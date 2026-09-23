@@ -231,7 +231,7 @@ test("只挂在助手入口，手动划线不经过它", () => {
   // 助手入口：savePDFHighlight → assistant-exact-highlight → independent=true
   const assistant = RUNTIME.slice(
     RUNTIME.indexOf("withNativePDFWriter('assistant-exact-highlight'"),
-    RUNTIME.indexOf("withNativePDFWriter('assistant-exact-highlight'") + 600,
+    RUNTIME.indexOf("announceAssistantHighlight(body, saved)", RUNTIME.indexOf("withNativePDFWriter('assistant-exact-highlight'")) + "announceAssistantHighlight(body, saved)".length,
   );
   assert.match(
     assistant,

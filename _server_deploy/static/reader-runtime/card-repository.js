@@ -29,7 +29,7 @@
   var MAX_ENTITY_BYTES = 2 * 1024 * 1024;
   var CARD_FIELDS = {
     type: true, front: true, back: true, cloze: true, text: true,
-    deck: true, tags: true, reason: true
+    deck: true, tags: true, reason: true, nodeIds: true
   };
   var SOURCE_FIELDS = {
     kind: true, sourceId: true, documentId: true, bookId: true, url: true,
@@ -308,6 +308,13 @@
     if (value.deck != null) output.deck = text(value.deck, 'card.deck', 512, false);
     if (value.reason != null) output.reason = text(value.reason, 'card.reason', 4096, false);
     if (value.tags != null) output.tags = normalizeTags(value.tags);
+    if (value.nodeIds != null) {
+      if (!Array.isArray(value.nodeIds) || value.nodeIds.length > 8 ||
+          value.nodeIds.some(function (id, index, all) { return typeof id !== 'string' || !/^kj:[0-9A-HJKMNP-TV-Z]{10}$/.test(id) || all.indexOf(id) !== index; })) {
+        throw new CardRepositoryError('card.nodeIds 无效或重复', 'BW_CARD_REPOSITORY_INPUT');
+      }
+      output.nodeIds = value.nodeIds.slice();
+    }
     return output;
   }
   function normalizeCards(value) {

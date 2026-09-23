@@ -60,6 +60,21 @@ function repository(store = makeStore(), overrides = {}) {
   };
 }
 
+test("同批不同卡片的知识节点经保存和重新打开后仍独立保留", async () => {
+  const { store, repo } = repository();
+  const cards = [
+    { ...basic('第一项'), nodeIds: ['kj:0123456789'] },
+    { ...basic('第二项'), nodeIds: ['kj:9876543210'] },
+  ];
+  await repo.registerDraft({ gid: CARD_A, cards, source: source({ kjNodes: 'kj:0000000000' }) }, { mutationId: 'node-draft' });
+  await repo.saveConfirmedCard({ gid: CARD_A, cardIndex: 1 }, { mutationId: 'node-confirm' });
+  const reopened = repository(store).repo;
+  const saved = await reopened.load(CARD_A);
+  assert.deepEqual(saved.cards.map(card => card.nodeIds), cards.map(card => card.nodeIds));
+  assert.equal(saved.states['1'].phase, 'confirmed');
+  assert.throws(() => Cards.normalizeCard({ ...basic(), nodeIds: ['kj:0123456789', 'kj:0123456789'] }));
+});
+
 test("缺 runtime.storage/batch 时 fail closed，不会伪装成本地入库成功", () => {
   assert.throws(
     () => Cards.createCardRepository({ store: null }),

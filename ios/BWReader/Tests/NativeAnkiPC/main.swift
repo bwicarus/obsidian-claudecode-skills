@@ -38,3 +38,11 @@ let recovered = try owner.recoverInterrupted()
 precondition(recovered.count == 1 && ReaderNativeAnkiPC.receipt(recovered[0], index: 2)["status"] as? String == "unknown")
 do { _ = try owner.prepare(gid: gid, index: 2, render: { $0 }); preconditionFailure("restart retried pending") } catch is ReaderNativeAnkiPC.Failure {}
 print("Native desktop Anki: source identity, durable-before-send, stable AID, response validation and unknown-result gates passed")
+let concept = "card_fafa"
+_ = try repo.perform(["operation": "registerDraft", "arguments": [["gid": concept,
+    "cards": [["type": "basic", "front": "一", "back": "1", "nodeIds": ["kj:0123456789"]], ["type": "basic", "front": "二", "back": "2", "nodeIds": ["kj:9876543210"]]],
+    "source": ["kind": "test", "sourceId": "source", "kjNodes": "kj:0000000000"]]], "mutationId": "create-concept"])
+_ = try repo.perform(["operation": "saveConfirmedCard", "arguments": [["gid": concept, "cardIndex": 1]], "mutationId": "confirm-concept"])
+let conceptAttempt = try ReaderNativeAnkiPC(repository: repo).prepare(gid: concept, index: 1, render: { $0 })
+let conceptRequest = try JSONSerialization.jsonObject(with: conceptAttempt.request) as! [String: Any]
+precondition(conceptRequest["nodeIds"] as? [String] == ["kj:9876543210"], "second card inherited the first card or group ownership")

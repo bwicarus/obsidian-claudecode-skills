@@ -299,6 +299,7 @@ function _loadLastPositions() {
 }
 let _ogLastPage = null;
 function _saveLastPosition(patch) {
+  if (window.RC?.readerNavigation?.nativeViewport?.persistsNatively !== true) {
   const all = _loadLastPositions();
   all[FILE_REL] = {...(all[FILE_REL] || {}), ...patch, ts: Date.now()};
   // 最多保留 200 个 PDF 的记忆，按时间淘汰
@@ -309,6 +310,7 @@ function _saveLastPosition(patch) {
     try { localStorage.setItem(LAST_POS_KEY, JSON.stringify(trimmed)); } catch {}
   } else {
     try { localStorage.setItem(LAST_POS_KEY, JSON.stringify(all)); } catch {}
+  }
   }
   // 双向上下文同步:借用这个已有的翻页漏斗上报「当前活动文档」,不新增任何监听器。
   // 开关关着时 RC.ctxSync.report 立即返回 false(零网络);开着时由共享层合并 + 1s trailing。
@@ -641,6 +643,14 @@ async function loadPdf() {
     loadBookFig();          // 拉本书「插图描述/徽标」开关(默认关 → 不画徽标不烧 AI)
     _loadPhraseFavs();      // 拉收藏词组（词组按钮收藏态 + 分词依据）
     _maybeRestoreLastPos();   // URL 未带 page 时跳到上次位置
+    if (_NATIVE_LOCAL_PDF) {
+      // Metadata/preferences are ready for nativeState(). The App must never
+      // bootstrap web page images, text DOM, ink canvases or image prefetch.
+      if (deferredNativeCrop) await deferredNativeCrop;
+      _pdfInitDone = true;
+      pdfLoadHide();
+      return;
+    }
     if (readMode !== 'single') {   // 连续 / 双页 都走 setupContinuousMode(内部按 spread 分行)
       await setupContinuousMode();
     } else {
@@ -771,6 +781,9 @@ async function renderPage(num) {
     if (receipt.position.sequence > nativeOwner.sequence) RC.readerNavigation.acceptNativePosition(nativeOwner.token, receipt.position);
     return;
   }
+  // App PDF pixels belong to PDFKit from boot, including before its first layout.
+  // Keep the requested position for nativeState(), never create a hidden page.
+  if (_NATIVE_LOCAL_PDF) { currentPage = num; return; }
   currentPage = num;
   { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(num) : num); }
   window._refreshVocabIfPage?.();   // 离散翻页(◀▶/滑块/跳页)也刷新「本页」单词本(连续模式下 loadPageNodes 只靠滚动触发,会漏)
@@ -853,7 +866,7 @@ function _bucketReqW(cw) {
 }
 const _prefetched = new Set();
 function _prefetchAround(num, radius) {
-  if (!_imgMode) return;
+  if (!_imgMode || _NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   const meta = window.__imgMeta; if (!meta) return;
   const cw = Math.floor(meta.page_w * scale);
   const baseW = _bucketReqW(cw);   // 跟 _renderPageImg 同一公式(此前预取用 cw×dpr、渲染用 max(natW,…),首次预取会取错档)
@@ -876,6 +889,7 @@ window._prefetchAround = _prefetchAround;
 // 图片模式渲染:用服务端渲染好的页图(<img>)代替 PDF.js canvas。叠层(选词 char 层/高亮/振假名/墨迹)
 // 全是按坐标定位,跟 canvas 路径一样工作。只取这一页的图(几百 KB),不下载整本 PDF。
 async function _renderPageImg(num, wrap, viewport) {
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   const _gen = (wrap.__imgGen = (wrap.__imgGen || 0) + 1);   // 重入守卫:并发/IO 重渲时,旧渲染 decode 完别覆盖新渲染(最后发起的赢)
   const cw = Math.floor(viewport.width);
   let ch = Math.floor(viewport.height);   // 初值用 meta(page1)高,decode 后改用本页图的真实宽高比(见下)
@@ -889,7 +903,7 @@ async function _renderPageImg(num, wrap, viewport) {
   img.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt;
   // **先把新页图 decode 好再换**:旧内容/旧图一直可见到此刻 → 去边/缩放/侧栏等重渲染无空白闪烁(cache 命中=秒回)
   try { await img.decode(); } catch (_) {}
-  if (!wrap.isConnected || wrap.__imgGen !== _gen) return;   // 解码期间该页已被释放 / 已有更新的渲染 → 放弃
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport || !wrap.isConnected || wrap.__imgGen !== _gen) return;
   if (img.naturalWidth === 0) return;   // decode 失败(catch 吞掉)→ 别换入空/坏图,留旧内容;loaded 仍 0,IO 滚到时重试
   // 自愈:decode 这段异步窗口里全局 scale 变了(缩放/切模式与渲染赛跑)→ 别用旧 scale 的图换入,否则本页
   // 定格在旧 scale(其它页已新 scale → 行间大小不一)。按当前 scale 重渲;__imgGen 守卫防叠加,scale 稳定后
@@ -960,10 +974,11 @@ async function _renderPageImg(num, wrap, viewport) {
 // 拿到「模糊近似图」后,等服务端后台补渲精确宽完成,再把这一页的 <img> 原地换成清晰图(只换图、不重渲整页)。
 // cache-bust 绕开浏览器缓存(近似图返回 no-store,本就不缓存;busted url 取磁盘上已渲好的精确图)。最多重试 3 次。
 async function _scheduleSharpen(num, wrap, reqW, mt, gen, tries) {
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   tries = tries || 0;
   if (tries > 3) return;
   setTimeout(async () => {
-    if (!wrap.isConnected || wrap.__imgGen !== gen) return;   // 页已释放 / 已有更新渲染 → 放弃
+    if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport || !wrap.isConnected || wrap.__imgGen !== gen) return;
     const im = document.createElement('img'); im.decoding = 'async';
     im.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt + '&sharp=' + Date.now();
     try { await im.decode(); } catch (_) { return _scheduleSharpen(num, wrap, reqW, mt, gen, tries + 1); }
@@ -974,9 +989,11 @@ async function _scheduleSharpen(num, wrap, reqW, mt, gen, tries) {
   }, 1600 + tries * 1600);
 }
 async function _renderPageInto(num, wrap) {
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   if (!pdfDoc) return;
   if (wrap.dataset.loaded === '1') return;
   const page = await pdfDoc.getPage(num);
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   const viewport = page.getViewport({scale});
   if (_imgMode) { await _renderPageImg(num, wrap, viewport); return; }   // 图片模式:渲染服务端页图,不用 canvas/PDF.js
   // 清空 wrap（placeholder 内容或上次的渲染），不动 wrap 本身的 className/dataset
@@ -1265,7 +1282,8 @@ RC.readerNavigation = {
     if (window.__BW_NATIVE_LOCAL_READER__ !== true || !viewport || viewport.file !== FILE_REL ||
         typeof viewport.token !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(viewport.token) ||
         typeof viewport.goToPage !== 'function') throw new Error('原生阅读视口无效');
-    this.nativeViewport = { file: FILE_REL, token: viewport.token, goToPage: viewport.goToPage, perform: viewport.perform, sequence: 0 };
+    this.nativeViewport = { file: FILE_REL, token: viewport.token, goToPage: viewport.goToPage, perform: viewport.perform,
+      persistsNatively: viewport.persistsNatively === true, sequence: 0 };
   },
   detachNativeViewport: function (token) {
     if (this.nativeViewport?.token !== token) return false;
@@ -2378,6 +2396,7 @@ if (!_restoreFullscreen) {
 
 // 连续模式：所有页占位 + IntersectionObserver 懒加载
 async function setupContinuousMode() {
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   const container = document.getElementById('page-container');
   container.innerHTML = '';
   if (_contIO) { _contIO.disconnect(); _contIO = null; }
@@ -8009,6 +8028,19 @@ function _hlGesture() {
 }
 let _allHighlights = [];
 let _hlByPage = {};
+// Native writes publish a committed record. Update the transitional lookup
+// index directly; no page mount, fetch, raster or web overlay is needed.
+window.addEventListener('bw:native-highlight-committed', function (event) {
+  const value = event && event.detail;
+  if (!value || 'localbook:' + value.bookID !== FILE_REL || !value.result?.ok) return;
+  const highlight = value.result.highlight;
+  const id = highlight?.id || value.input?.id || value.input?.body?.id;
+  if (!id) return;
+  _allHighlights = _allHighlights.filter(h => h && h.id !== id);
+  if (highlight && !value.result.deleted) _allHighlights.push(highlight);
+  _hlByPage = {};
+  for (const h of _allHighlights) (_hlByPage[h.page] ||= []).push(h);
+});
 let _resultContext = null;   // {charSel, text, sentence, kind} 由 onTranslate/onExplain 入口存
 let _resultReqId = 0;        // 结果框请求序号：每开一次新框 +1，异步回调写入前比对，过期(被新任务覆盖)就丢弃
 
@@ -8193,7 +8225,7 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
     }
     _allHighlights.push(d.highlight);
     (_hlByPage[pageNum] ||= []).push(d.highlight);
-    renderHighlightsOnPage(pw, pageNum);
+    if (!pw.__nativeSource) renderHighlightsOnPage(pw, pageNum);
     _lastHlColor = color;
     localStorage.setItem('pdf-hl-last-color', color);
     return d.highlight;
@@ -8207,7 +8239,7 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
       _hlByPage[pageNum] = (_hlByPage[pageNum] || []).filter((item) => item && item.id !== cid);
       _allHighlights.push(h);
       (_hlByPage[pageNum] ||= []).push(h);
-      renderHighlightsOnPage(pw, pageNum);
+      if (!pw.__nativeSource) renderHighlightsOnPage(pw, pageNum);
       _lastHlColor = color;
       try { localStorage.setItem('pdf-hl-last-color', color); } catch (_) {}
       RC.outbox.send('hl', cid, '/pdf/api/highlights', Object.assign({ id: cid }, payload));
@@ -8509,6 +8541,20 @@ function _pdfExactTextRange(chars, sourceText) {
 async function _pdfExactTextPage(targetPage) {
   const page = Number(targetPage);
   if (!Number.isInteger(page) || page < 1 || !pdfDoc || page > pdfDoc.numPages) throw new Error('BW_READER_HIGHLIGHT_PAGE_INVALID');
+  if (_NATIVE_LOCAL_PDF) {
+    const sink = window.webkit?.messageHandlers?.bwNativeReaderGeometry;
+    if (!sink?.postMessage) throw new Error('BW_NATIVE_GEOMETRY_UNAVAILABLE');
+    const value = await sink.postMessage({ action: 'characters', page });
+    if (!value?.ok || !Array.isArray(value.chars)) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
+    // Data object, deliberately not a DOM element. No page image/canvas or
+    // text-layer layout is needed to validate a quote or mint a range snapshot.
+    const boxes = _mapCharBoxes(value.chars, 1, value.source, value.revision, value.characterGeometry);
+    if (value.layout) boxes.__layout = value.layout;
+    return { __nativeSource: true, dataset: { pageNum: String(page) },
+      __charBoxes: boxes,
+      __pageWPt: value.pageWidth, __pageHPt: value.pageHeight,
+      __pageTextRevision: value.revision };
+  }
   const readyPage = () => {
     const pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
     return pw && pw.dataset.loaded === '1' && Array.isArray(pw.__charBoxes) && pw.__charBoxes.length
@@ -8521,20 +8567,7 @@ async function _pdfExactTextPage(targetPage) {
   if (current) return current;
   let navigationError = null;
   try {
-    // ⚠ 原生正文接管时 goToPage 会被 renderPage 直接转给原生并 return，
-    //   网页这一页**永远不会渲**，于是下面轮询 9.6 秒后必然抛
-    //   BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE（AI 精确划线因此是坏的）。
-    //   这种情况下绕开导航，直接把这一页渲进隐藏的 DOM —— 只渲这一页，
-    //   不恢复批量渲染。
-    if (window.RC?.readerNavigation?.nativeViewport) {
-      const ph = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
-      if (!ph) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
-      if (ph.dataset.loaded !== '1') {
-        Promise.resolve(_renderPageInto(page, ph)).catch((error) => { navigationError = error; });
-      }
-    } else {
-      Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
-    }
+    Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
   } catch (error) {
     navigationError = error;
   }
@@ -8550,6 +8583,9 @@ async function _pdfExactTextPage(targetPage) {
 }
 
 async function _pdfWaitForHighlightVisible(pw, page, id) {
+  // Native overlays are refreshed by the successful storage mutation event.
+  // Waiting for a hidden .hl-saved node would reintroduce a web renderer.
+  if (pw.__nativeSource) return;
   for (let tries = 0; tries < 40; tries++) {
     renderHighlightsOnPage(pw, page);
     const rendered = Array.from(pw.querySelectorAll('.hl-saved')).find((node) =>
@@ -8671,9 +8707,11 @@ async function _nativeExactHighlight(request, colorValue) {
   try {
     located = await sink.postMessage({ action: 'binding', page, text: String(request.text || '') });
   } catch (_) {
+    if (_NATIVE_LOCAL_PDF) throw new Error('BW_NATIVE_GEOMETRY_UNAVAILABLE');
     return null;   // 通道不在（桌面/扩展表面）→ 退回网页路径
   }
   if (!located || located.ok !== true || !Array.isArray(located.rects) || !located.rects.length) {
+    if (_NATIVE_LOCAL_PDF) throw new Error('BW_READER_HIGHLIGHT_TEXT_NOT_FOUND');
     return null;   // 原生说不可用或没命中 → 退回网页路径，别在这里下结论
   }
   const saved = await runtime.savePDFHighlight({

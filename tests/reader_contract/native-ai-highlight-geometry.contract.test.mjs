@@ -6,10 +6,10 @@
 // 必需品 —— 正好抵消掉止血。
 //
 // 现在改成：先问原生字符层要坐标（`bwNativeReaderGeometry` 通道），拿到就直接
-// 落本地库；原生说不可用或没命中，才退回网页那条老路。
+// 落本地库；App 原生字符层不可用时明确失败，浏览器仍保留网页路径。
 //
 // 三条必须同时成立，缺一这条链就废：
-//   ① 网页入口先走原生，且**失败要退回**而不是当成"这段文字不在书里"
+//   ① 网页入口先走原生；无原生宿主的浏览器仍能使用原有路径
 //   ② 壳这侧把"没挂原生正文"和"没定位到"分开回答
 //   ③ 原生定位返回的是**点坐标**，与存储同一口径
 import assert from "node:assert/strict";
@@ -53,8 +53,10 @@ test("② 壳把「没挂原生」和「没定位到」分开回答", () => {
   // 两者混成一个错误码，调用方就无法判断该退回还是该如实报"书里没有这段"。
   assert.notEqual(handler.indexOf("BW_NATIVE_GEOMETRY_UNAVAILABLE"),
                   handler.indexOf("BW_NATIVE_GEOMETRY_MISS"));
-  // exact-shape 闸：多一个字段就拒，和这套代码里其它入站闸同口径。
-  assert.match(handler, /Set\(body\.keys\) == \["action", "page", "text"\]/);
+  // 字符层请求只需要 page，绑定请求还必须提供 text；两者均拒绝未知字段。
+  assert.match(handler, /Set\(body\.keys\)\.isSubset\(of: \["action", "page", "text"\]\)/);
+  assert.match(handler, /\["binding", "characters"\]\.contains\(action\)/);
+  assert.match(handler, /action == "characters" \|\| \(\(body\["text"\]/);
 });
 
 test("③ 原生定位返回点坐标，与存储同一口径", () => {

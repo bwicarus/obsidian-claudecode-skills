@@ -5607,6 +5607,10 @@
       );
     }
     var type = safeText(value.type, "Anki card type", 16, false);
+    if (value.nodeIds != null) {
+      if (!Array.isArray(value.nodeIds)) throw directError("卡片知识节点无效", "BW_READER_ANKI_NODE_INVALID", false);
+      if (value.nodeIds.length) normalizeKjNodeIds(value.nodeIds, "卡片知识节点", "");
+    }
     function projectionField(markdown, name) {
       var html = ankiProjectionHtml(markdown);
       if (html.length > 64000) {
@@ -5621,7 +5625,7 @@
     var canonical;
     var projection;
     if (type === "basic") {
-      exactObject(value, ["type", "front", "back"], [], "本机 Anki 基础卡");
+      exactObject(value, ["type", "front", "back"], ["nodeIds"], "本机 Anki 基础卡");
       canonical = {
         type: type,
         front: safeText(value.front, "Anki front", 64000, false),
@@ -5638,7 +5642,7 @@
       return { canonical: canonical, projection: projection };
     }
     if (type === "cloze") {
-      exactObject(value, ["type", "cloze"], [], "本机 Anki 填空卡");
+      exactObject(value, ["type", "cloze"], ["nodeIds"], "本机 Anki 填空卡");
       canonical = {
         type: type,
         cloze: safeText(value.cloze, "Anki cloze", 64000, false),
