@@ -41,8 +41,6 @@ struct ReaderNativeReadingSettingsView: View {
     @State private var crop: [String: Double] = [:]
     @State private var colors: [String] = []
     @State private var newColor = Color.yellow
-    /// 原生 PDF 主阅读区的开关（迁移中，默认关）。与 BWReaderNativeApp 同一个键。
-    @AppStorage("reader.nativePDFRenderer") private var nativePDFRenderer = false
     /// iCloud 跨设备同步（默认关）。开关只驱动引擎起停；关掉不删云端也不删基线。
     @AppStorage("reader.iCloudSync") private var iCloudSync = false
     /// 数据落在 App 自己沙盒的 SQLite 里（默认关，迁移中）。
@@ -121,10 +119,10 @@ struct ReaderNativeReadingSettingsView: View {
                             .disabled(colors == savedColors)
                         Button("恢复默认色板") { colors = ["#fff59d", "#a7f3d0", "#a3d4ff", "#fda4af"] }
                     }
-                    // 原生主阅读区（迁移中）。**默认关**：还没接齐的能力见下面的说明，
-                    // 开着它就用不到那几项 —— 与其让人一头雾水，不如把边界写在开关旁边。
+                    // 原生主阅读区。PDF 一律由 PDFKit 画（2026-09-23 起没有开关：网页渲页在
+                    // App 里整条不要了）；这里只报状态与最近一次失败。
                     Section {
-                        Toggle("用原生 PDFKit 渲染正文", isOn: $nativePDFRenderer)
+                        Label("PDF 正文由 PDFKit 画", systemImage: "doc.richtext")
                         if let failure = nativePDFMountFailure {
                             Label(failure, systemImage: "exclamationmark.triangle")
                                 .font(.footnote).foregroundStyle(.orange)
@@ -135,7 +133,7 @@ struct ReaderNativeReadingSettingsView: View {
                         // ⚠ 这段话是给人做决定用的，不是装饰：接齐一项就删一项。
                         //   写着"尚未接"而其实已经接了的话，用户会为了一个不存在的
                         //   限制一直关着它。
-                        Text("开启后正文由 PDFKit 画，网页层退到后面继续管数据。"
+                        Text("正文由 PDFKit 画，网页层只在后面管数据、不再渲页。"
                              + "已接：位置/翻页/布局/缩放/去边、选字、高亮与墨迹、"
                              + "查词/翻译/解释/词组/语法、划线与编辑、页卡、便签、"
                              + "整页翻译、图徽标、Pencil。"

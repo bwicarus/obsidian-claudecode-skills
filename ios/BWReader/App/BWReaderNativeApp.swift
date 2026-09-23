@@ -131,20 +131,47 @@ private struct ReaderRootView: View {
     @State private var libraryStartupNotice: String?
     @State private var nativeToolsInitialAction: ReaderNativeFeatureAction?
     @AppStorage("reader.nativeInterfaceEnabled") private var nativeInterfaceEnabled = true
-    /// 原生 PDF 主阅读区。**默认关**：交接文件第 5 条 —— 未接齐的 PDFKit 主阅读区
-    /// 不默认启用。打开后 ReaderWebView 退到后面当数据层，正文由 PDFKit 画。
-    @AppStorage("reader.nativePDFRenderer") private var nativePDFRendererEnabled = false
     /// iCloud 跨设备同步（默认关）。⚠ 这里要在**启动时**也跟一次 ——
     /// 只在设置里翻转时接的话，重开 App 后同步就静静地不工作了。
     @AppStorage("reader.iCloudSync") private var iCloudSyncEnabled = false
 
-    /// 原生正文**真的盖上去了**才算接管。只看开关会在文档还没挂上来的那一段
-    /// 把网页层也藏掉，屏幕上就是一片空白。
+    /// 原生正文已经挂上、可以画了。
     private var nativePDFSurfaceActive: Bool {
         // ⚠ 「显示旧界面」时必须让开：网页层此时被藏着，原生正文又盖在上面，
         // 点了旧界面会得到一片空白 —— 一个没有出路的死角。
-        nativePDFRendererEnabled && reader.nativePDFDocument != nil
+        reader.nativePDFDocument != nil && !reader.nativeConversation.legacyVisible
+    }
+
+    /// 网页层藏起来：本机 PDF 书从头到尾都不让网页渲的页露面 —— 挂上之前显示
+    /// 「正在打开」，打不开显示原因与重试（见 nativePDFPlaceholder），**不退回网页渲页**。
+    private var webLayerHidden: Bool {
+        (reader.nativePDFExpected || reader.nativePDFDocument != nil)
             && !reader.nativeConversation.legacyVisible
+    }
+
+    /// 原生正文还没挂上时占住阅读区：正在打开 / 打不开（原因 + 重试）。
+    @ViewBuilder
+    private var nativePDFPlaceholder: some View {
+        if let failure = reader.nativePDFOpenFailure {
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.title2).foregroundStyle(.orange)
+                Text(failure)
+                    .font(.footnote).multilineTextAlignment(.center)
+                    .foregroundStyle(ReaderNativeTheme.ink)
+                Button("重试") { reader.retryNativePDFOpen() }
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding(20)
+            .readerGlass(in: RoundedRectangle(cornerRadius: 18), fallback: .ultraThinMaterial)
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ProgressView("正在打开")
+                .tint(ReaderNativeTheme.accent)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
+        }
     }
 
     var body: some View {
@@ -172,9 +199,13 @@ private struct ReaderRootView: View {
             //   一套上层建筑（references/unified-control-layer.md）。
             ReaderWebView(model: reader)
                 .ignoresSafeArea(edges: .bottom)
-                .opacity(nativePDFSurfaceActive ? 0 : 1)
-                .allowsHitTesting(!nativePDFSurfaceActive)
-                .accessibilityHidden(nativePDFSurfaceActive)
+                .opacity(webLayerHidden ? 0 : 1)
+                .allowsHitTesting(!webLayerHidden)
+                .accessibilityHidden(webLayerHidden)
+
+            if webLayerHidden && !nativePDFSurfaceActive {
+                nativePDFPlaceholder
+            }
 
             if nativePDFSurfaceActive, let document = reader.nativePDFDocument {
                 ReaderNativePDFViewport(

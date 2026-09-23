@@ -217,7 +217,7 @@ enum ReaderNativeConversationScript {
       //   gid 是这组卡的身份，比"它此刻挂在哪儿"稳得多 —— 这也是把判断从 DOM
       //   上摘下来的第一步。
       function flashGroup(node, gid) {
-        const found = node
+        const found = node?.querySelectorAll
           ? [node, ...node.querySelectorAll('*')].find(el => el.__fc && Array.isArray(el.__fc.cards))
           : null;
         if (found) return found;
@@ -233,6 +233,39 @@ enum ReaderNativeConversationScript {
           for (const image of template.content.querySelectorAll('img')) sources.add(image.getAttribute('src') || '');
         }
         return Array.from(sources);
+      }
+      // 卡身里选中文字 → 进对话。侧栏卡与原生页卡共用。
+      function selectAction(partId, node) {
+        return registerAction(partId + '-select', node, command => {
+          if (typeof command.text !== 'string' || command.text.length > 16000) throw new Error('选区内容无效或过长');
+          const selection = command.text.trim();
+          if (!selection) {
+            if (window.__bwNativeSelection?.owner === partId) window.__bwNativeSelection.active = false;
+            return;
+          }
+          window.__bwNativeSelection = { text: selection, active: true, owner: partId, scope };
+          window.__setFocusSel(selection, 'text');
+          if (window.__focusSel?.text !== selection) throw new Error('选区暂未进入对话，请重试');
+        });
+      }
+      // 卡内的内联图片 → 不透明 id（Swift 拿不到任意 URL，只能按 id 取同一条本地资源路由）。
+      function inlineImageActions(part, node, target) {
+        const inlineImages = {};
+        if (!rc().voiceCard?.mediaRoute) return inlineImages;
+        const values = part.kind === 'anki' ?
+          (part.data.state === 'draft' ? (part.data.fields || []).map(f => f.value) : (part.data.faces || []).map(f => f.content)) :
+          [part.data.text, part.data.answer, part.data.detail, part.text];
+        const expected = JSON.stringify(target.inspect?.().content);
+        for (const source of inlineImageSources(values).slice(0, 64)) {
+          if (!source || source.length > 8192 || !rc().voiceCard.mediaRoute(source)) continue;
+          const mediaID = registerAction(part.id + '-inline-' + hash(source), node, () => {});
+          actions.get(mediaID).resource = () => {
+            if (JSON.stringify(target.inspect?.().content) !== expected) throw new Error('图片已更新');
+            return rc().voiceCard.mediaRoute(source);
+          };
+          inlineImages[source] = mediaID;
+        }
+        return inlineImages;
       }
       function liveArtifacts(messages) {
         for (const message of messages) {
@@ -254,20 +287,7 @@ enum ReaderNativeConversationScript {
             part.data.pinned = pin.selected;
             part.data.pinId = registerAction(part.id + '-pin', pinOwner, () => rc().voiceCard.toggleContext(pinOwner, cardIndex));
           }
-          if (typeof window.__setFocusSel === 'function') {
-            const selectionOwner = part.id;
-            part.data.selectId = registerAction(part.id + '-select', node, command => {
-              if (typeof command.text !== 'string' || command.text.length > 16000) throw new Error('选区内容无效或过长');
-              const selection = command.text.trim();
-              if (!selection) {
-                if (window.__bwNativeSelection?.owner === selectionOwner) window.__bwNativeSelection.active = false;
-                return;
-              }
-              window.__bwNativeSelection = { text: selection, active: true, owner: selectionOwner, scope };
-              window.__setFocusSel(selection, 'text');
-              if (window.__focusSel?.text !== selection) throw new Error('选区暂未进入对话，请重试');
-            });
-          }
+          if (typeof window.__setFocusSel === 'function') part.data.selectId = selectAction(part.id, node);
           if (group?.__fc.cards[cardIndex]?._removed) { part.removed = true; continue; }
           const interaction = group && rc().flashcard?.interactionState(group, cardIndex);
           if (!interaction && part.kind === 'anki') {
@@ -296,23 +316,7 @@ enum ReaderNativeConversationScript {
           const body = cardElement?.querySelector('.vc-card-bd') || node.querySelector('.vc-if-bd');
           // Inline images retain the same local asset/proxy route as image
           // cards. Swift receives opaque IDs; it cannot request arbitrary URLs.
-          const inlineImages = {};
-          if (rc().voiceCard?.mediaRoute) {
-            const values = part.kind === 'anki' ?
-              (part.data.state === 'draft' ? (part.data.fields || []).map(f => f.value) : (part.data.faces || []).map(f => f.content)) :
-              [part.data.text, part.data.answer, part.data.detail, part.text];
-            const expected = JSON.stringify(target.inspect?.().content);
-            for (const source of inlineImageSources(values).slice(0, 64)) {
-              if (!source || source.length > 8192 || !rc().voiceCard.mediaRoute(source)) continue;
-              const mediaID = registerAction(part.id + '-inline-' + hash(source), node, () => {});
-              actions.get(mediaID).resource = () => {
-                if (JSON.stringify(target.inspect?.().content) !== expected) throw new Error('图片已更新');
-                return rc().voiceCard.mediaRoute(source);
-              };
-              inlineImages[source] = mediaID;
-            }
-          }
-          part.data.inlineImages = inlineImages;
+          part.data.inlineImages = inlineImageActions(part, node, target);
           if ((group || body) && rc().stickynote) {
             part.data.dragId = registerAction(part.id + '-place', node, async command => {
               if (![command.x, command.y].every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
@@ -476,6 +480,102 @@ enum ReaderNativeConversationScript {
             markers,
             rect: { x: item.rect.x / innerWidth, y: item.rect.y / innerHeight,
               width: item.rect.width / innerWidth, height: item.rect.height / innerHeight } }];
+        });
+      }
+      // 原生正文接管 PDF 时的页卡：**只按便签数据交**，网页一张卡都不挂。
+      //
+      // ⚠ 以前交的是网页挂出来的那几张（nativePlacementState 读 DOM），而网页只挂它自己
+      //   渲染到的那几页 —— 跟原生正文显示的页永远不同步。2026-09-23 那一串
+      //   "刚建的能开、翻页回来就打不开 / 框与词分离 / 拖到别的词上"全出自这里。
+      //   用户："不能就把网页的渲染直接彻底删掉么""所有旧的渲染在有新的功能代替后
+      //   都应该把旧的给去掉"。
+      //
+      // 动作属主是便签本身（它还在就算"还连着"）；位置、开合全由原生按 PDFKit 管，
+      // 这里只交内容与控件。控件键名与网页那版一致，原生卡片视图不用分两套。
+      function notePlacements() {
+        const sticky = rc().stickynote;
+        if (!nativeMode || legacyVisible || !sticky?.nativeNoteCards) return [];
+        const nav = rc().readerNavigation?.state?.() || {};
+        const page = Number(nav.page);
+        // 当前页前后几页够了：这份快照频繁序列化，整本书的卡片 HTML 不该每次都跟着走。
+        const pages = Number.isInteger(page) && page > 0
+          ? Array.from({ length: 9 }, (_, i) => page - 4 + i).filter(n => n > 0) : null;
+        const generation = sticky.nativeGeneration?.();
+        return sticky.nativeNoteCards(pages).flatMap(item => {
+          const owner = { get isConnected() { return sticky.nativeGeneration?.() === generation && !!sticky.nativeHasNote?.(item.id); } };
+          const id = 'note-' + hash(item.id);
+          const token = id + '-' + hash(item.version);
+          const label = item.html?.label || (item.card?.cards?.length > 1 ? '学习卡组' : '学习卡');
+          let parts;
+          if (item.card) {
+            parts = projectPart({ kind: 'cards', cards: item.card.cards || [], gid: item.card.gid }, id, owner, '');
+          } else {
+            const part = { id: id + '-html', kind: 'general', title: label, text: '', status: 'saved',
+              data: { text: item.html.content || '', format: item.html.isHtml ? 'html' : 'text' } };
+            part.actionId = registerAction(part.id, owner, () => {});
+            const target = actions.get(part.actionId);
+            target.inspect = () => ({ kind: 'general', title: label, content: item.html });
+            if (typeof window.__setFocusSel === 'function') part.data.selectId = selectAction(part.id, owner);
+            part.data.inlineImages = inlineImageActions(part, owner, target);
+            // 长按＝带入/移出对话（原版 pinBind，登记表同一份记录形状）。
+            part.data.pinned = !!sticky.nativeCardContextSelected?.(item.id);
+            part.data.pinId = registerAction(part.id + '-pin', owner, () => {
+              if (sticky.nativeToggleCardContext(item.id) == null) throw new Error('这张卡不能带入对话');
+              schedule();
+            });
+            parts = [part];
+          }
+          const update = async changes => {
+            if (!(await sticky.nativeUpdateNote(item.id, changes))) throw new Error('卡片没能保存');
+            return true;
+          };
+          const remove = async () => {
+            if (!(await sticky.nativeDeleteNote(item.id))) throw new Error('卡片没能删除');
+            return true;
+          };
+          const controls = {};
+          // 移动：页码 + 页内坐标由原生按 PDFKit 算好。钉词的卡连同原生认好的词一起改绑；
+          // 自由卡**不会**因为拖了一下就变成钉词卡（原版同规则）。
+          controls.move = registerAction(token + '-move', owner, command => {
+            const v = command.value;
+            if (!v || !Number.isInteger(v.page)) throw new Error('落点不在页面内');
+            return update({ anchor: { page: v.page, x: v.x, y: v.y }, bind: item.bound ? (v.bind || null) : null });
+          });
+          // 锚定到正文：原生认好的词（卡角最近的词）交过来，首次绑。
+          controls.anchor = registerAction(token + '-anchor', owner, command => {
+            const v = command.value;
+            if (!v || !v.bind) throw new Error('请先将卡片移到正文附近');
+            return update({ bind: v.bind });
+          });
+          controls.form = registerAction(token + '-form', owner, command => {
+            if (!['dot', 'min', 'full'].includes(command.value)) throw new Error('形态无效');
+            return update({ form: command.value });
+          });
+          controls.collapse = registerAction(token + '-collapse', owner, () => update({ form: 'dot' }));
+          controls.expand = registerAction(token + '-expand', owner, () => update({ form: 'full' }));
+          // 尺寸按卡片自身单位（原生已按页宽 / base_w 换算好）。
+          controls.resize = registerAction(token + '-resize', owner, command => {
+            const v = command.value;
+            if (!v || !(Number(v.w) > 0) || !(Number(v.h) > 0)) throw new Error('尺寸无效');
+            return update({ w: Number(v.w), h: Number(v.h) });
+          });
+          controls.remove = registerAction(token + '-remove', owner, remove);
+          controls.trash = registerAction(token + '-trash', owner, remove);
+          controls.favorite = registerAction(token + '-favorite', owner, async () => {
+            if (!(await sticky.nativeFavoriteNote(item.id))) throw new Error('这张卡没能加入收藏夹');
+            return true;
+          });
+          controls.ink = registerAction(id + '-ink', owner, command => sticky.nativeInkAction({
+            id: item.id, generation, geometry: command.value.geometry,
+            key: command.value.kind, opId: command.value.opId, eventOpId: command.value.eventOpId,
+            segments: command.value.segments, aspectRatio: command.value.aspectRatio
+          }));
+          parts.forEach(part => { part.data.dragId = controls.move; });
+          return [{ id, noteId: item.id, source: 'note', title: label,
+            bound: item.bound, collapsed: item.form !== 'full', visible: true, open: false, controls, parts,
+            form: item.form, pinned: item.pinned, tone: item.tone || '',
+            ink: { strokes: item.strokes, aspectRatio: item.iar, geometry: item.inkGeometry },
+            size: null, markers: [], rect: { x: 0, y: 0, width: 0, height: 0 } }];
         });
       }
       function floatingPlacements(items) {
@@ -653,9 +753,14 @@ enum ReaderNativeConversationScript {
         }).filter(Boolean);
         previousNodes = all;
         liveArtifacts(messages);
-        const pageStates = rc().stickynote?.nativePlacementState?.() || [];
+        // 原生正文接管 PDF 时，页卡由原生按便签数据自己画 —— 网页不挂、这里也不交。
+        // （交了就是两份：一份网页按它自己的页挂出来，一份原生按 PDFKit 画，永远对不上。）
+        const nativePageCards = !!window.RC?.readerNavigation?.nativeViewport;
+        if (nativePageCards) { try { rc().stickynote?.nativeReleaseWebPageCards?.(); } catch (_) {} }
+        const pageStates = nativePageCards ? [] : (rc().stickynote?.nativePlacementState?.() || []);
         const floatingStates = rc().voiceCard?.nativeFloatingState?.() || [];
-        const placements = [...pagePlacements(pageStates), ...floatingPlacements(floatingStates)];
+        const placements = [...(nativePageCards ? notePlacements() : pagePlacements(pageStates)),
+          ...floatingPlacements(floatingStates)];
         previousPlacementNodes = [...pageStates, ...floatingStates].map(item => item.root);
         const readingTools = toolbarActions();
         const attachments = selectedAttachments();
@@ -669,7 +774,8 @@ enum ReaderNativeConversationScript {
           legacyVisible, selection: selectedContext(),
           readerSelection: (typeof window.__bwReaderEpubSelection === 'function'
             ? (window.__bwReaderEpubSelection() || { text: '' }) : { text: '' }),
-          attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, captions: captionState(), sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, captions: captionState(),
+          sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -787,7 +893,8 @@ enum ReaderNativeConversationScript {
         observeDrawer();
         applyVisualMode();
         wrapNotifications(rc().turnCard, ['addPart', 'draftText', 'freezeDraft', 'reconcile', 'cliPart', 'busy', 'idle', 'status', 'progress', 'drop', 'rename', 'reset']);
-        wrapNotifications(rc().stickynote, ['placeCardAt', 'placeHtmlAt', 'nativePlacementAction', 'mountPending', 'repositionAll', 'loadAll']);
+        wrapNotifications(rc().stickynote, ['placeCardAt', 'placeHtmlAt', 'nativePlacementAction', 'mountPending', 'repositionAll', 'loadAll',
+          'nativeUpdateNote', 'nativeDeleteNote', 'nativeFavoriteNote', 'nativeToggleCardContext', 'nativeInkAction']);
         wrapNotifications(rc().voiceCard, ['nativeFloatingAction']);
         if (!accountSubscription && account()?.subscribe) accountSubscription = account().subscribe(schedule);
       }
@@ -799,11 +906,11 @@ enum ReaderNativeConversationScript {
         const parameterKeys = ['action', 'scope', 'text', 'actionId', 'x', 'y'];
         if (command.action === 'settingsRead') parameterKeys.push('section');
         if (['nativePageSelection', 'nativeSelectionHighlight', 'nativeSelectionLookup',
-             'nativeCardMove', 'nativeCardResize', 'nativeVocabMark',
+             'nativeVocabMark',
              'nativeFigureAttach', 'nativeGrammar',
              'nativeHighlightEdit', 'nativePhraseFav',
              'nativeCreateNote', 'nativeOcrSelection',
-             'nativeEpubHighlight', 'nativeNoteDelete'].includes(command.action)) parameterKeys.push('value');
+             'nativeEpubHighlight'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -955,50 +1062,6 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换，请在原书核对结果' };
             if (!saved || saved.ok !== true) return { ok: false, error: '划线未落库' };
             return { ok: true, value: { id: (saved.highlight && saved.highlight.id) || saved.id || '', page: value.page } };
-          } else if (action === 'nativeCardMove' || action === 'nativeCardResize') {
-            // 原生正文接管时的页卡拖动 / 改大小。
-            //
-            // ⚠ 走 `/pdf/api/notes` 的 PATCH（字段级合并），本地 runtime 就地落库。
-            //   **不走网页的锚点解析器**：那条路把落点当成网页视口坐标，而原生接管后
-            //   网页视口里根本没有那一页，卡会飞到别处。页码与页内归一化坐标由原生
-            //   那侧用 PDFKit 的 canonicalPoint 算好，这里只负责写。
-            const value = command.value;
-            const fileRel = window.__PDF_CFG && window.__PDF_CFG.file_rel;
-            if (!value || typeof value.id !== 'string' || !value.id ||
-                typeof fileRel !== 'string' || !fileRel) return { ok: false, error: '页卡参数无效' };
-            const patch = { file: fileRel, id: value.id };
-            if (action === 'nativeCardMove') {
-              if (!Number.isSafeInteger(value.page) || value.page < 1 ||
-                  !Number.isFinite(value.x) || !Number.isFinite(value.y) ||
-                  value.x < 0 || value.x > 1 || value.y < 0 || value.y > 1) {
-                return { ok: false, error: '落点不在页面内' };
-              }
-              patch.anchor = { kind: 'pdf', page: value.page, x: value.x, y: value.y };
-            } else {
-              if (!(Number(value.w) > 0) || !(Number(value.h) > 0)) return { ok: false, error: '尺寸无效' };
-              patch.w = Number(value.w); patch.h = Number(value.h);
-            }
-            const captured = scope;
-            let saved;
-            try {
-              const r = await fetch('/pdf/api/notes', {
-                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(patch)
-              });
-              saved = await r.json();
-            } catch (error) {
-              return { ok: false, error: String(error && error.message || error).slice(0, 200) };
-            }
-            if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
-            if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
-            return { ok: true, value: { id: value.id } };
-          } else if (action === 'nativeNoteDelete') {
-            // 原生自己画的词锚卡（网页没挂这张卡）上的删除。走便签自己的 deleteNote，
-            // 网页内存里的那份一起删 —— 直接打 DELETE 的话网页还拿着旧对象，之后会写回来。
-            const value = command.value;
-            if (!value || typeof value.id !== 'string' || !value.id) return { ok: false, error: '卡片参数无效' };
-            const removed = await rc().stickynote?.nativeDeleteNote?.(value.id);
-            return removed ? { ok: true } : { ok: false, error: '卡片没能删除' };
           } else if (action === 'nativeEpubHighlight') {
             // EPUB 选区条的「划线」。落库、锚点解析、就地上色、记住上次用的颜色
             // 都在底座 saveHl 那条路上，这里只转交。

@@ -2237,7 +2237,31 @@
       if (ctl._bindOpen) _placeWordCard(ctl, null, true);
     }
   }
+  /// 原生正文接管 PDF 时，页卡由原生按便签数据自己画（ReaderNativeDocumentCardLayer），
+  /// 网页**一张都不挂**：挂了就要为词锚标记按需渲字符层，而且挂载状态跟原生显示的页
+  /// 永远对不上 —— 2026-09-23 那一串"框与词分离 / 改绑到别的词 / 开了不显示"全出自这里。
+  /// 用户："所有旧的渲染在有新的功能代替后都应该把旧的给去掉"。
+  function _nativeOwnsPageCards() {
+    try { return !!(window.RC && RC.readerNavigation && RC.readerNavigation.nativeViewport); }
+    catch (_) { return false; }
+  }
+  function _releaseWebPageCards() {
+    for (var id in ctls) {
+      var c = ctls[id];
+      if (!c || !c.root) continue;
+      if (c.portaled) { try { portalOut(c); } catch (_) {} }
+      if (c.root.isConnected) { try { c.root.remove(); } catch (_) {} }
+      var b = wordBindOf(c.note);
+      if (b && window.__pageBindRemove) { try { window.__pageBindRemove(b, id); } catch (_) {} }
+      c._bindMarked = false; c._bindOpen = false;
+    }
+  }
   function ensureMounted(note) {
+    if (_nativeOwnsPageCards()) {
+      var owned = ctls[note.id];
+      if (owned && owned.root && owned.root.isConnected) { try { owned.root.remove(); } catch (_) {} }
+      return false;
+    }
     var ctlP = ctls[note.id];
     if (ctlP && ctlP.portaled) return true;   // 展开态在叠加层:重定位/重挂交给 portal(repositionPortaled),不回插内容容器
     var m = null;
@@ -3946,7 +3970,8 @@
     var promise = previous.catch(function () {}).then(async function () {
       if (generation !== _generation) throw new Error('书籍已切换');
       var note = currentNote(id), ctl = ctls[id];
-      if (!note || !ctl || !cardPayloadSlot(note)) throw new Error('卡片已移除');
+      if (!note || !cardPayloadSlot(note)) throw new Error('卡片已移除');
+      // 几何与 nativeNoteCards 交出去的 inkGeometry 同一算法、同一个 ctls[id]（网页不挂卡时为空）。
       if (nativeInkGeometry(note, ctl) !== command.geometry) throw new Error('卡片位置已改变，请在新位置重画');
       var raw = Array.isArray(command.segments) ? command.segments : [];
       if (!raw.length || raw.length > 64) throw new Error('无效笔迹分段');
@@ -4159,10 +4184,106 @@
     placeHtmlAt: function (x, y, card, anchor) { return Promise.resolve(createHtmlAt(x, y, card, true, anchor)); },
     nativePlacementState: nativePlacementState,
     nativePlacementAction: nativePlacementAction,
-    // 按便签 id 删除 —— 不要求这张卡在网页里挂着（原生自己画的词锚卡没有网页控件）。
+    // ── 原生页卡的按 id 操作（原生正文接管时网页一张卡都不挂，见 _nativeOwnsPageCards）──
+    // 删除：走便签自己的 deleteNote，网页内存与持久化一起更新。
     nativeDeleteNote: function (id) {
       var note = currentNote(String(id || ''));
       return note ? deleteNote(note) : Promise.resolve(false);
+    },
+    nativeGeneration: function () { return _generation; },
+    // 原生页卡的**数据**：只读便签本身，不挂任何 DOM（原生正文接管时网页一张卡都不挂）。
+    // 只交 PDF 锚点的卡片式便签；pages 给了就只交锚点页或词锚页落在其中的那些。
+    // 形态、色调、墨迹几何的取法与 nativePlacementState 逐字一致 —— 原生不另猜一份。
+    nativeNoteCards: function (pages) {
+      var want = Array.isArray(pages) && pages.length ? pages : null;
+      return notes.map(function (note) {
+        var slot = cardPayloadSlot(note), anchor = note && note.anchor;
+        if (!slot || !anchor || anchor.kind !== 'pdf') return null;
+        var bind = wordBindOf(note), data = note[slot];
+        if (want && want.indexOf(anchor.page) < 0 && !(bind && want.indexOf(bind.page) >= 0)) return null;
+        var id = noteIdOf(note);
+        return { id: id, version: JSON.stringify(note),
+          card: slot === 'card' ? cloneValue(note.card) : null,
+          html: slot === 'html' ? cloneValue(note.html) : null,
+          bound: !!bind, pinned: !!bind,
+          // 老便签只有 collapsed、没有 form：网页那边收起的便签就是一枚小标记。
+          form: String(data.form || (note.collapsed ? 'dot' : 'full')),
+          tone: bind ? wordCardPresentation(note).tone
+            : (slot === 'card' ? (data.type || '#bf5af2') : (data.type || '')),
+          strokes: cloneValue(note.strokes || []), iar: Number(note.iar) || 0,
+          inkGeometry: nativeInkGeometry(note, ctls[id]) };
+      }).filter(Boolean);
+    },
+    nativeHasNote: function (id) { return !!currentNote(String(id || '')); },
+    nativeReleaseWebPageCards: function () { if (_nativeOwnsPageCards()) _releaseWebPageCards(); },
+    // 改锚点 / 改绑词 / 改形态 / 改尺寸。字段级合并，经 patchNote（内存与持久化同一条路）。
+    nativeUpdateNote: function (id, changes) {
+      var note = currentNote(String(id || ''));
+      if (!note) return Promise.resolve(false);
+      changes = changes || {};
+      var slot = cardPayloadSlot(note), fields = {}, payload = null;
+      var a = changes.anchor;
+      if (a && typeof a === 'object') {
+        if (!Number.isInteger(a.page) || a.page < 1 || ![a.x, a.y].every(Number.isFinite) ||
+            a.x < 0 || a.x > 1 || a.y < 0 || a.y > 1) return Promise.reject(new Error('落点不在页面内'));
+        fields.anchor = { kind: 'pdf', page: a.page, x: a.x, y: a.y };
+      }
+      var nb = changes.bind;
+      if (slot && nb && typeof nb === 'object') {   // 已绑的改绑，自由卡「锚定到正文」首次绑
+        if (nb.kind === 'page-chars' && Number.isInteger(nb.page) && Number.isInteger(nb.from) &&
+            Number.isInteger(nb.to) && nb.from >= 0 && nb.to >= nb.from && typeof nb.text === 'string' && nb.text) {
+          payload = payload || cloneValue(note[slot]);
+          payload.bind = { kind: 'page-chars', page: nb.page, from: nb.from, to: nb.to, text: nb.text.slice(0, 200) };
+          if (Array.isArray(nb.ois) && nb.ois.length && nb.ois.length <= 512) {
+            payload.bind.ois = nb.ois.filter(function (v) { return Number.isInteger(v) && v >= 0; });
+            if (!payload.bind.ois.length) delete payload.bind.ois;
+          }
+        }
+      }
+      if (slot && ['dot', 'min', 'full'].indexOf(changes.form) >= 0) {
+        var form = changes.form;
+        if (form === 'min' && wordBindOf(note)) form = 'full';   // 钉词的卡不进长条（原版同规则）
+        payload = payload || cloneValue(note[slot]);
+        payload.form = form;
+        fields.collapsed = false;
+      }
+      if (payload) fields[slot] = payload;
+      if (Number(changes.w) > 0 && Number(changes.h) > 0) {
+        fields.w = Math.max(60, Math.min(4000, Math.round(Number(changes.w))));
+        fields.h = Math.max(40, Math.min(4000, Math.round(Number(changes.h))));
+      }
+      if (!Object.keys(fields).length) return Promise.resolve(false);
+      return patchNote(note, fields).then(function (saved) { return !!saved; });
+    },
+    // 收藏：复制进收藏夹，原卡不动（原版 _favoriteCard 同一条）。
+    nativeFavoriteNote: function (id) {
+      var note = currentNote(String(id || ''));
+      if (!note) return Promise.resolve(false);
+      return Promise.resolve(_favoriteCard({ note: note })).then(function (r) { return r !== false; });
+    },
+    // 长按＝带入/移出对话：直接在上下文登记表里切换（与 bindHtmlCardSelection 同一份记录形状）。
+    nativeToggleCardContext: function (id) {
+      var note = currentNote(String(id || ''));
+      var registry = window.BWReaderRuntime && window.BWReaderRuntime.contextSelections;
+      if (!note || !note.html || !registry || typeof registry.toggle !== 'function') return null;
+      var html = note.html, cid = String(html.cid || note.id || '');
+      if (!cid) return null;
+      var text = String(html.contextText || '') ||
+        String(html.content || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      var card = {};
+      try { card = cloneValue(html); } catch (_) {}
+      return registry.toggle({
+        id: 'card:' + cid, kind: 'card', label: String(html.label || '工具卡片').slice(0, 200),
+        text: text.slice(0, 16000), source: { cid: cid, tool: String(html.kind || '') },
+        meta: { contract: 'tool-card-context/1', host: 'page-placement', card: card }
+      });
+    },
+    nativeCardContextSelected: function (id) {
+      var note = currentNote(String(id || ''));
+      var registry = window.BWReaderRuntime && window.BWReaderRuntime.contextSelections;
+      if (!note || !note.html || !registry || typeof registry.isSelected !== 'function') return false;
+      var cid = String(note.html.cid || note.id || '');
+      return !!cid && !!registry.isSelected('card:' + cid);
     },
     nativeInkAction: nativeInkAction,
     persistBoundCard: persistBoundCard,   // AI page-chars：Promise 只在 create+本地投影成功后 ok:true

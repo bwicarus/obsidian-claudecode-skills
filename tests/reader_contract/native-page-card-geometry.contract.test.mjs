@@ -44,45 +44,69 @@ test("② 跟着 PDF 滚动/缩放重画", () => {
     "document 那侧要真的在布局时 bump 它");
 });
 
-test("③ 拖动写页内归一化锚点，不是网页视口坐标", () => {
-  const move = body(WEBVIEW, "func moveNativeCard(", "func resizeNativeCard(");
-  assert.match(move, /document\.canonicalPoint\(local, from: document\.view\)/,
-    "落点要经 PDFKit 换成 (页码, 页内归一化坐标)");
-  assert.match(move, /"action": "nativeCardMove"/);
-  assert.match(move, /return false/, "换不出来要退回网页那条路");
-  // 视图那侧：原生成功就 return，别再写一遍网页锚点。
-  const gesture = body(CARDS, "private var moveGesture", "private var resizeGesture");
-  // 原生那条先走；成了就不再写网页锚点（分支体内 return）。
-  const nativeStart = gesture.indexOf("if await reader.moveNativeCard(id: item.noteID, windowPoint: point) {");
-  const nativeFirst = gesture.slice(nativeStart, gesture.indexOf("guard let action = item.controls", nativeStart));
-  assert.ok(nativeFirst.length > 0, "原生落点分支必须排在网页路径之前");
-  assert.match(nativeFirst, /return/);
+const STICKY = read("_server_deploy/static/pdf/rc-stickynote.js");
 
-  const branch = body(SCRIPT, "action === 'nativeCardMove' || action === 'nativeCardResize'",
-                      "action === 'nativeSelectionLookup'");
-  assert.match(branch, /patch\.anchor = \{ kind: 'pdf', page: value\.page/);
-  assert.match(branch, /value\.x < 0 \|\| value\.x > 1/, "页内坐标必须在 0..1");
-  assert.match(branch, /'\/pdf\/api\/notes'/);
-  assert.match(branch, /method: 'PATCH'/, "字段级合并，别整条覆盖");
+test("③ 拖动写页内归一化锚点，经便签自己的写入路径，不是网页视口坐标", () => {
+  // 落点由 PDFKit 定页：页码 + 页内归一化坐标（+ 原生认出的词）。
+  const target = body(WEBVIEW, "func nativeDropTarget(", "func nativeWordCardDocumentRect(");
+  assert.match(target, /document\.pagePoint\(at: local\)/);
+  assert.match(target, /document\.wordBind\(at: local\)/);
+  // 便签来源的卡与词锚卡同一条：原生算落点，交给卡片自己的 move 控件。
+  const gesture = body(CARDS, "private func finishDrag(", "private var resizeGesture");
+  assert.match(gesture, /if item\.bound \|\| item\.fromNote \{/);
+  // ⚠ 旧的 nativeCardMove / nativeCardResize 直接 PATCH /pdf/api/notes，绕过网页内存里
+  //   那份便签 —— 之后网页按旧对象写回就会把改动冲掉。已删，不许回来。
+  assert.doesNotMatch(WEBVIEW, /nativeCardMove|nativeCardResize/);
+  assert.doesNotMatch(SCRIPT, /nativeCardMove|nativeCardResize/);
+  // 写入走 patchNote（内存与持久化同一条路）；页内坐标必须在 0..1。
+  const update = body(STICKY, "nativeUpdateNote: function (id, changes) {", "nativeFavoriteNote: function (id) {");
+  assert.match(update, /a\.x < 0 \|\| a\.x > 1 \|\| a\.y < 0 \|\| a\.y > 1/);
+  assert.match(update, /return patchNote\(note, fields\)/);
+  // 自由卡拖一下不会变成钉词卡（原版同规则）。
+  assert.match(SCRIPT, /bind: item\.bound \? \(v\.bind \|\| null\) : null/);
 });
 
 test("④ 改大小按卡片自身单位存", () => {
-  const resize = body(WEBVIEW, "func resizeNativeCard(", "func placeNativeConversationCard(");
-  assert.match(resize, /base > 0 \? pageRect\.width \/ base : 1/,
+  const units = body(WEBVIEW, "func nativeCardUnits(", "func placeNativeConversationCard(");
+  assert.match(units, /base > 0 \? pageRect\.width \/ base : 1/,
     "ratio 要与 noteGeometry 同一算法，否则每缩放一次书尺寸就记错一次");
-  assert.match(resize, /Double\(size\.width\) \/ ratio/);
+  assert.match(units, /size\.width \/ ratio/);
   // noteGeometry 那侧的同一算法：它变了，这里要跟着变。
   assert.match(DOCUMENT, /let ratio = base > 0 \? pageRect\.width \/ base : 1/);
+  assert.match(CARDS, /reader\.nativeCardUnits\(id: item\.noteID, screenSize: screen\)/);
 });
 
-test("⑤ 钉在词上的卡：拖动时词由原生认，连同页内坐标交给网页，不再用网页视口坐标", () => {
-  const gesture = body(CARDS, "private var moveGesture", "private var resizeGesture");
-  const start = gesture.indexOf("if item.bound {");
-  const bound = gesture.slice(start, gesture.indexOf("return\n                }", start) + 10);
+test("⑤ 钉在词上的卡：拖动时词由原生认，连同页内坐标交给卡片的 move 控件", () => {
+  const gesture = body(CARDS, "private func finishDrag(", "private var resizeGesture");
+  const start = gesture.indexOf("if item.bound || item.fromNote {");
+  const bound = gesture.slice(start, gesture.indexOf("\n            return\n        }", start) + 20);
   assert.match(bound, /reader\.nativeDropTarget\(windowPoint: point\)/);
   assert.match(bound, /"value": target/);
-  assert.match(WEBVIEW, /document\.wordBind\(at: local\)/);
   assert.match(DOCUMENT, /func wordBind\(at local: CGPoint\) -> WordBind\?/);
-  const STICKY = readFileSync(new URL("_server_deploy/static/pdf/rc-stickynote.js", ROOT), "utf8");
   assert.match(STICKY, /command\.key === 'move' && command\.native && typeof command\.native === 'object'/);
+});
+
+test("⑥ 原生正文下页卡只来自便签数据：网页一张卡都不挂", () => {
+  // 2026-09-23 用户："不能就把网页的渲染直接彻底删掉么""所有旧的渲染在有新的功能
+  // 代替后都应该把旧的给去掉"。网页只挂它自己渲染到的那几页，跟原生显示的页永远不同步。
+  const ensure = body(STICKY, "function ensureMounted(note) {", "var ctlP = ctls[note.id];");
+  assert.match(ensure, /if \(_nativeOwnsPageCards\(\)\)/);
+  assert.match(ensure, /return false;/);
+  assert.match(SCRIPT, /nativePageCards \? notePlacements\(\) : pagePlacements\(pageStates\)/);
+  // 数据出口不碰 DOM。
+  const cards = body(STICKY, "nativeNoteCards: function (pages) {", "nativeHasNote: function (id) {");
+  assert.doesNotMatch(cards, /querySelector|getBoundingClientRect|\.root\b/);
+  // 屏幕层（按窗口坐标摆、必然慢一帧）不画便签来源的卡；文档层只画它们。
+  assert.match(CARDS, /if !item\.fromNote \{/);
+  const LAYER = read("ios/BWReader/App/ReaderNativeDocumentCardLayer.swift");
+  assert.match(LAYER, /ForEach\(model\.placements\.filter\(\\\.fromNote\)\)/);
+  // 按便签数据现造 placement 的旁路已删：内容只有一个来源。
+  assert.doesNotMatch(CARDS, /init\?\(nativeNote/);
+  assert.doesNotMatch(WEBVIEW, /func nativeOnlyPlacements|func deleteNativeNote/);
+});
+
+test("⑦ 点锁定框打开的词锚卡总是完全展开（原版 forceOpenCardFull），位置按展开尺寸算", () => {
+  assert.match(CARDS, /private var form: String \{ item\.bound && item\.fromNote \? "full" : item\.form \}/);
+  const word = body(WEBVIEW, "func nativeWordCardDocumentRect(", "func nativePageCardRect(");
+  assert.match(word, /document\.noteGeometry\(note, expanded: true\)/);
 });

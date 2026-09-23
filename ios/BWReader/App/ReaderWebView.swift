@@ -399,7 +399,21 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var localPDFContentIdentityTask: Task<Void, Never>?
     private var bookUserStateContextGeneration: UInt64 = 0
     private var currentLocalBook: ReaderLocalBookRecord?
-    private var currentLocalBookAccess: ReaderLocalBookAccess?
+    private var currentLocalBookAccess: ReaderLocalBookAccess? {
+        didSet {
+            let pdf = currentLocalBookAccess?.record.format == .pdf
+            if nativePDFExpected != pdf { nativePDFExpected = pdf }
+        }
+    }
+    /// 当前是本机 PDF 书：正文**只由 PDFKit 画**，网页层永远不露面（它只当数据层）。
+    ///
+    /// ⚠ 以前原生正文挂在一个默认关的开关后面，挂上之前 / 被卸下重挂的那一段，
+    ///   屏幕上露出来的是网页渲的页和网页那套卡片、锁定框 —— 2026-09-23 用户截图里
+    ///   "刚做好是细线框、滚动有残影，翻页回来又变了样"就是两套渲染来回换。
+    ///   用户："不能就把网页的渲染直接彻底删掉么 app 里不需要啊"。
+    @Published private(set) var nativePDFExpected = false
+    /// 原生正文没能打开的原因。非 nil = 显示错误与「重试」，**不退回网页渲页**。
+    @Published private(set) var nativePDFOpenFailure: String?
     private var nativePDFSelectionSequence = 0
     private weak var currentLocalLibrary: ReaderLocalLibraryManager?
     private var currentLocalBookContentSHA256: String?
@@ -474,27 +488,27 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return rect.offsetBy(dx: -content.bounds.minX, dy: -content.bounds.minY)
     }
 
-    /// 这张卡归文档层画（钉在 PDF 页上），还是留在屏幕层（浮动卡 / 解不出原生几何）。
-    func drawsInDocumentLayer(_ item: ReaderNativePagePlacement) -> Bool {
-        guard documentCardLayerMounted, !item.floating, !item.noteID.isEmpty else { return false }
-        return nativePageCardDocumentRect(id: item.noteID, size: item.size) != nil
+    /// 词锚卡此刻是否展开。便签来源的卡开合只由原生管（nativeOpenBoundNotes）。
+    func isBoundCardOpen(_ item: ReaderNativePagePlacement) -> Bool {
+        item.fromNote ? nativeOpenBoundNotes.contains(item.noteID) : item.open
     }
 
-    /// 点正文里的锁定框 → 展开那张卡。
+    /// 点正文里的锁定框 → 展开 / 收起那张卡。
     ///
-    /// ⚠ 走的是页卡自己的 `toggleBound` 控件 id，跟侧栏里点开是同一条路。
+    /// 原生正文下开合是原生自己的状态（nativeOpenBoundNotes），卡由文档层按便签数据画；
+    /// 只有网页在渲页时，才走网页挂的那张卡的 `toggleBound` 控件。
     /// 找不到就**出声** —— "点了没反应"是这块地方已经栽过一次的坑。
     func openNativeBoundCard(noteID: String) {
         guard !noteID.isEmpty else { return }
         traceCardPipeline("tap", noteID: noteID)
-        // 点完 1.5 秒再看一次：开合是异步的，状态要等网页那侧回来。
+        // 点完 1.5 秒再看一次：文档层有没有真把卡画出来（drawn=）。
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             self?.traceCardPipeline("after-tap", noteID: noteID)
         }
-        // 网页那侧挂着这张卡：走它的开合（状态、词典段、上下文选中都在那边）。
-        if let placement = nativeConversation.placements.first(where: { $0.noteID == noteID }),
-           let action = placement.controls["toggleBound"] {
+        let placement = nativeConversation.placements.first(where: { $0.noteID == noteID })
+        // 网页在渲页时挂的卡：走它自己的开合。
+        if let placement, !placement.fromNote, let action = placement.controls["toggleBound"] {
             nativeOpenBoundNotes.remove(noteID)
             Task { [weak self] in
                 guard let self else { return }
@@ -504,12 +518,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             }
             return
         }
-        // 网页没挂这张卡（它只挂网页自己渲染到的那几页，跟原生正文显示的页不同步）：
-        // 原生直接按便签数据把卡画出来。
-        // ⚠ 原来这里一律提示"还没加载好" —— 于是翻到别页再回来，框看得见却怎么点都打不开
-        //   （2026-09-23 用户实报）。
-        guard let note = nativePDFDocument?.notes.first(where: { $0["id"] as? String == noteID }),
-              ReaderNativePagePlacement(nativeNote: note, open: true) != nil else {
+        // 原生正文下：开合只是原生自己的状态，卡由文档层按便签数据画。
+        // 内容还没到（快照只带当前页前后几页）就说出来，不静默。
+        guard placement != nil || nativeOpenBoundNotes.contains(noteID) else {
             showTransientNotice("这张卡的内容还没同步到本机，请稍后再点。")
             return
         }
@@ -532,10 +543,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         let placement = nativeConversation.placements.first { $0.noteID == noteID }
         if let placement {
-            parts.append("web=yes open=\(placement.open) visible=\(placement.visible) bound=\(placement.bound)")
+            parts.append("placement=\(placement.fromNote ? "note" : "web") open=\(isBoundCardOpen(placement)) bound=\(placement.bound) form=\(placement.form)")
             parts.append("ctrls=" + placement.controls.keys.sorted().joined(separator: ","))
         } else {
-            parts.append("web=no")
+            parts.append("placement=none")
         }
         parts.append("nativeOpen=\(nativeOpenBoundNotes.contains(noteID))")
         parts.append("docLayer=\(documentCardLayerMounted) drawn=\(documentLayerCardCount)")
@@ -576,34 +587,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 下一次原生正文重新挂上时一起报。
     private var nativePDFLifecycleNotes: [String] = []
 
-    /// 原生自己展开的词锚卡（网页没挂这张卡时）。
+    /// 原生正文下展开着的词锚卡（开合只在原生，一次一张）。
     @Published var nativeOpenBoundNotes: Set<String> = []
-
-    /// 网页没挂、但原生已展开的那几张卡，按便签数据现造一份 placement。
-    func nativeOnlyPlacements() -> [ReaderNativePagePlacement] {
-        guard let document = nativePDFDocument, !nativeOpenBoundNotes.isEmpty else { return [] }
-        let mounted = Set(nativeConversation.placements.map(\.noteID))
-        return nativeOpenBoundNotes.sorted().compactMap { id in
-            guard !mounted.contains(id), let note = document.notes.first(where: { $0["id"] as? String == id }) else {
-                return nil
-            }
-            return ReaderNativePagePlacement(nativeNote: note, open: true)
-        }
-    }
-
-    /// 原生自己画的卡上的删除（网页没挂这张卡，没有网页控件可用）。
-    func deleteNativeNote(noteID: String) async -> Bool {
-        let receipt = await requestNativeConversationCommand([
-            "action": "nativeNoteDelete", "scope": nativeConversation.scope, "value": ["id": noteID],
-        ])
-        guard receipt["ok"] as? Bool == true else {
-            showTransientNotice(receipt["error"] as? String ?? "卡片没能删除。")
-            return false
-        }
-        nativeOpenBoundNotes.remove(noteID)
-        scheduleNativePDFProjectionRefresh()
-        return true
-    }
 
     /// 拖卡松手的落点：页码 + 页内归一化坐标 + 原生认出的词（认不出就没有 bind）。
     func nativeDropTarget(windowPoint: CGPoint) -> [String: Any]? {
@@ -622,7 +607,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     func nativeWordCardDocumentRect(id: String, size: CGSize?) -> CGRect? {
         guard let document = nativePDFDocument, let content = document.view.documentView,
               let note = document.notes.first(where: { $0["id"] as? String == id }),
-              let geometry = document.noteGeometry(note),   // 不传 size：理由同上
+              // 不传 size：理由同上。按展开尺寸算 —— 打开的词锚卡总是完全展开。
+              let geometry = document.noteGeometry(note, expanded: true),
               let word = geometry.bindingRects.last else { return nil }
         _ = size
         // 词所在的页（可能跟卡片锚点不是同一页）。
@@ -684,7 +670,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         invalidateNativePDFDocument(reason: "content-digest-changed")
         // 另起一轮：当前这次调用可能正发生在 prepare 里面（它也会取摘要），
         // 就地重挂会递归。
-        Task { @MainActor [weak self] in self?.mountNativePDFDocumentIfEnabled() }
+        Task { @MainActor [weak self] in self?.mountNativePDFDocument() }
     }
 
     /// 取可见页的**页面叠加数据**（生词下划线 + 已掌握词面集），交给原生正文画。
@@ -871,7 +857,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 那个坐标不指向任何东西 —— 卡会飞到别处。
     /// 拖卡时告诉用户"松手会锁在哪"。
     ///
-    /// ⚠ 判据必须与 `moveNativeCard` **同源**，否则预览与落点会各说各话：
+    /// ⚠ 判据必须与 `nativeDropTarget` **同源**，否则预览与落点会各说各话：
     ///   有原生文档就走 PDFKit + pdf-selection-core（同步，跟手不掉帧）；
     ///   没有（EPUB / 网页渲染的 PDF）才问网页那份 —— 那种情形下正文确实
     ///   由网页渲染，视口坐标是对的。
@@ -938,37 +924,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
-    /// 返回 false = 没有原生几何或落点不在任何页上，调用方退回网页那条路。
-    func moveNativeCard(id: String, windowPoint: CGPoint) async -> Bool {
-        guard let document = nativePDFDocument else { return false }
-        let local = document.view.convert(windowPoint, from: nil)
-        guard let placed = document.canonicalPoint(local, from: document.view) else { return false }
-        let receipt = await requestNativeConversationCommand([
-            "action": "nativeCardMove",
-            "value": ["id": id, "page": placed.page,
-                      "x": placed.point.x, "y": placed.point.y],
-        ])
-        return receipt["ok"] as? Bool == true
-    }
-
-    /// 原生正文接管时改页卡大小。屏幕尺寸 → 卡片自身单位（除以 noteGeometry 用的
-    /// 那个 ratio = 页宽 / base_w），否则每缩放一次书、卡片尺寸就被记错一次。
-    func resizeNativeCard(id: String, size: CGSize) async -> Bool {
+    /// 屏幕尺寸 → 卡片自身单位（便签 w/h）。比例与 noteGeometry 同一算法：页宽 / base_w。
+    /// ⚠ 两边算法一变就对不上：每缩放一次书，卡片尺寸就被记错一次。
+    func nativeCardUnits(id: String, screenSize size: CGSize) -> CGSize? {
         guard let document = nativePDFDocument,
               let note = document.notes.first(where: { $0["id"] as? String == id }),
               let anchor = note["anchor"] as? [String: Any],
               let page = (anchor["page"] as? NSNumber)?.intValue,
               let pageRect = document.viewRect(normalized: CGRect(x: 0, y: 0, width: 1, height: 1), page: page),
-              pageRect.width > 0 else { return false }
+              pageRect.width > 0 else { return nil }
         let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any] ?? [:]
         let base = (payload["base_w"] as? NSNumber)?.doubleValue ?? 0
         let ratio = base > 0 ? pageRect.width / base : 1
-        guard ratio > 0, size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return false }
-        let receipt = await requestNativeConversationCommand([
-            "action": "nativeCardResize",
-            "value": ["id": id, "w": Double(size.width) / ratio, "h": Double(size.height) / ratio],
-        ])
-        return receipt["ok"] as? Bool == true
+        guard ratio > 0, size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return nil }
+        return CGSize(width: size.width / ratio, height: size.height / ratio)
     }
 
     func placeNativeConversationCard(actionID: String, scope: String, windowPoint: CGPoint) async {
@@ -983,7 +952,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "y": point.y / webView.bounds.height
         ]
         // ⚠ 原生接管正文后上面那组视口坐标**解不出锚点** —— 网页视口里没有那一页。
-        //   跟 moveNativeCard 一样先用 PDFKit 定页，把页内坐标一并交过去；
+        //   跟 nativeDropTarget 一样先用 PDFKit 定页，把页内坐标一并交过去；
         //   网页那侧拿到就跳过自己的解析。拿不到（EPUB / 网页渲染）就照旧。
         if let document = nativePDFDocument,
            let placed = document.canonicalPoint(document.view.convert(windowPoint, from: nil), from: document.view) {
@@ -1253,16 +1222,24 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 拿到 0×0 然后抛 unavailable。`onGeometry` 就是"已布局"的信号
     /// （document 自己在 layoutChanged 里触发，此前没人接）。
     ///
-    /// 默认关：交接文件第 5 条 —— 未接齐的 PDFKit 主阅读区不默认启用。
-    func mountNativePDFDocumentIfEnabled() {
-        guard UserDefaults.standard.bool(forKey: ReaderWebViewModel.nativePDFRendererDefaultsKey) else { return }
-        guard nativePDFDocument == nil, nativePDFMountTask == nil, !isLoading else { return }
+    /// 本机 PDF 书一律原生（不再有开关）。打不开就**出声**（nativePDFOpenFailure），
+    /// 不退回网页渲页 —— App 里那套已经不要了。
+    func mountNativePDFDocument() {
+        guard nativePDFExpected, nativePDFDocument == nil, nativePDFMountTask == nil, !isLoading else { return }
         let generation = bookUserStateContextGeneration
         nativePDFMountTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { if self.bookUserStateContextGeneration == generation { self.nativePDFMountTask = nil } }
             let document: ReaderNativePDFDocument
-            do { document = try await self.prepareNativePDFDocument() } catch { return }
+            do { document = try await self.prepareNativePDFDocument() } catch {
+                // 换书 / 导航中途被取消不算失败；其余一律摆出来，给「重试」。
+                guard !Task.isCancelled, self.bookUserStateContextGeneration == generation,
+                      self.nativePDFExpected else { return }
+                let reason = String(describing: error).prefix(160)
+                self.nativePDFOpenFailure = "正文没能打开：" + reason
+                self.postClientLog("[native-pdf] prepare failed: " + reason)
+                return
+            }
             guard !Task.isCancelled, self.bookUserStateContextGeneration == generation else {
                 document.close()
                 return
@@ -1277,11 +1254,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     document.onGeometry = nil
                     do { try await self.activateNativePDFDocument(document) } catch {
                         // 出声：静默失败的表现是「原生阅读区白着，没人知道为什么」。
-                        self.nativePDFMountFailure = String(describing: error).prefix(200).description
+                        // 卸下这份半挂的文档，让错误面板（带重试）顶上来，而不是一块白。
+                        let reason = String(describing: error).prefix(160)
+                        self.nativePDFMountFailure = String(reason)
+                        self.invalidateNativePDFDocument(reason: "activate-failed")
+                        self.nativePDFOpenFailure = "正文没能打开：" + reason
+                        self.postClientLog("[native-pdf] activate failed: " + reason)
                     }
                 }
             }
             self.nativePDFMountFailure = nil
+            self.nativePDFOpenFailure = nil
             self.nativePDFDocument = document
             ReaderNativeStartupProfile.shared.mark("原生阅读区挂载")
             let history = self.nativePDFLifecycleNotes.joined(separator: ",")
@@ -1290,7 +1273,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
-    static let nativePDFRendererDefaultsKey = "reader.nativePDFRenderer"
+    /// 错误面板上的「重试」。
+    func retryNativePDFOpen() {
+        nativePDFOpenFailure = nil
+        mountNativePDFDocument()
+    }
 
     /// 生词句子行首的「译」：整句交给原生翻译面板（与选区菜单里的「翻译」同一个，
     /// 不另做一套句子翻译 UI）。
@@ -1500,7 +1487,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
             "nativeSelectionHighlight", "nativeSelectionLookup",
-            "nativeCardMove", "nativeCardResize", "nativeVocabMark", "nativeFigureAttach",
+            "nativeVocabMark", "nativeFigureAttach",
             "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav", "nativeCreateNote",
             "nativeOcrSelection", "nativeEpubHighlight", "nativeEpubHighlightColors",
             "anchorPreview"]
@@ -5799,6 +5786,8 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         loadError = nil
         nativeConversation.resetForNavigation()
         nativePencilInk.invalidateDocument()
+        nativeOpenBoundNotes = []   // 开合是这本书的原生状态，换页面就清
+        nativePDFOpenFailure = nil
         bookUserStateImportTask?.cancel()
         bookUserStateImportTask = nil
         localPDFContentIdentityTask?.cancel()
@@ -5846,7 +5835,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         updateNativeAgentVoiceState()
         // 书渲完才挂原生主阅读区：prepare 要读原件身份、初始位置和 user-state 包，
         // 这三样在 didFinish 之前都还没就位。
-        mountNativePDFDocumentIfEnabled()
+        mountNativePDFDocument()
         if let deferred = deferredBookUserStateMessage {
             deferredBookUserStateMessage = nil
             showBookUserStateMessage(

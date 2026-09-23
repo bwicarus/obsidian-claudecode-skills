@@ -31,8 +31,10 @@ struct ReaderNativePagePlacement: Identifiable {
     /// 'dot'（圆角方标记）/ 'min'（长条）/ 'full'（方块）。
     /// ⚠ 不能只看 collapsed —— 那把三态压成两态，圆点和长条就长得一样了。
     let form: String
-    /// 原生按便签数据现造的（网页没挂这张卡）。没有网页控件：开合、删除走原生。
-    let nativeOnly: Bool
+    /// 原生正文接管 PDF 时的页卡：内容与控件来自**便签数据**（网页一张卡都不挂），
+    /// 位置由 PDFKit 解锚、开合由原生管。只画在文档层（跟 PDF 同一帧滚）。
+    /// ⚠ 没有网页 rect —— 它的 rect 是 0，绝不能拿去按网页坐标摆。
+    let fromNote: Bool
     /// 钉在正文上。⚠ 钉住的卡**不进长条态**（用户 2026-08-18 拍板：概要与锚点
     /// 重复），所以它的形态循环是 标记 ⇄ 方块 两态，不是三态。
     let pinned: Bool
@@ -45,7 +47,7 @@ struct ReaderNativePagePlacement: Identifiable {
               [x, y, w, h].allSatisfy({ $0.isFinite }), w >= 0, h >= 0 else { return nil }
         self.id = id
         noteID = value["noteId"] as? String ?? ""
-        nativeOnly = value["nativeOnly"] as? Bool ?? false
+        fromNote = value["source"] as? String == "note"
         title = value["title"] as? String ?? "卡片"
         rect = CGRect(x: x, y: y, width: w, height: h)
         bound = value["bound"] as? Bool ?? false
@@ -69,35 +71,6 @@ struct ReaderNativePagePlacement: Identifiable {
         let raw = value["form"] as? String ?? (value["collapsed"] as? Bool == true ? "dot" : "full")
         form = ["dot", "min", "full"].contains(raw) ? raw : "full"
         pinned = value["pinned"] as? Bool ?? (value["bound"] as? Bool ?? false)
-    }
-
-    /// 网页没挂这张卡时，按便签数据现造一份（只支持 html 槽 —— 现有页卡全是这种）。
-    /// 色调取法与网页 wordCardPresentation 一致：词锚卡按分类，自由卡用自己的 type。
-    init?(nativeNote note: [String: Any], open: Bool) {
-        guard let id = note["id"] as? String, !id.isEmpty,
-              let html = note["html"] as? [String: Any] else { return nil }
-        let label = (html["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "卡片"
-        let bound = (html["bind"] as? [String: Any])?["kind"] as? String == "page-chars"
-        let tone = bound ? ReaderNativePagePlacement.hexString(ReaderNativeMarkerStyle.tone(html, slot: "html"))
-                         : (html["type"] as? String ?? "")
-        let zero = NSNumber(value: 0)
-        let part: [String: Any] = [
-            "id": "native-" + id + "-html", "kind": "general", "title": label, "text": "", "status": "saved",
-            "data": ["text": html["content"] as? String ?? "",
-                     "format": html["isHtml"] as? Bool == true ? "html" : "text"],
-        ]
-        self.init([
-            "id": "native-" + id, "noteId": id, "nativeOnly": true, "title": label,
-            "rect": ["x": zero, "y": zero, "width": zero, "height": zero],
-            "bound": bound, "collapsed": false, "floating": false, "visible": true, "open": open,
-            "controls": [String: String](), "parts": [part], "tone": tone, "form": "full", "pinned": bound,
-        ])
-    }
-
-    private static func hexString(_ color: UIColor) -> String {
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        color.getRed(&r, green: &g, blue: &b, alpha: &a)
-        return String(format: "#%02x%02x%02x", Int(round(r * 255)), Int(round(g * 255)), Int(round(b * 255)))
     }
 
     /// `#rrggbb` / `#rgb` → UIColor；解不出来返回 nil。
@@ -177,7 +150,9 @@ struct ReaderNativePageCards: View {
     }
 
     private var openBoundIDs: Set<String> {
-        Set(model.placements.filter { $0.bound && $0.open }.map(\.noteID)).union(reader.nativeOpenBoundNotes)
+        // 便签来源的卡开合只看原生；网页挂的卡（仅网页渲页时）看它自己的状态。
+        Set(model.placements.filter { $0.bound && $0.open && !$0.fromNote }.map(\.noteID))
+            .union(reader.nativeOpenBoundNotes)
     }
 
     /// 打开/收起一张词锚卡。
@@ -234,9 +209,9 @@ struct ReaderNativePageCards: View {
         if reader.nativePDFDocument == nil {
             webMarkers(item, frame: frame)
         }
-        // 钉在正文上的卡由文档层画（ReaderNativeDocumentCardLayer，跟着 PDF 同一帧滚）。
-        // 这一层只剩浮动卡，以及原生几何解不出来时的网页坐标退路。
-        if !reader.drawsInDocumentLayer(item) {
+        // 便签来源的页卡只由文档层画（ReaderNativeDocumentCardLayer，跟着 PDF 同一帧滚）。
+        // 这一层只剩浮动卡，以及网页在渲页时（原生正文没挂上）网页挂的那几张。
+        if !item.fromNote {
             let rect = cardRect(item, frame: frame)
             if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < size.width && rect.minY < size.height {
                 ReaderNativePlacedCard(item: item, reader: reader, model: model, rect: rect, available: size,
@@ -312,7 +287,19 @@ struct ReaderNativePlacedCard: View {
     let toWindow: (CGPoint) -> CGPoint
     /// 在文档层里（跟 PDF 滚的那层）：rect 已按便签 w/h 算好，不再用网页那套尺寸。
     var inDocumentLayer = false
-    @GestureState private var translation: CGSize = .zero
+    /// 卡头蓄力状态（原版 `.rc-card-drag-charging` / `-ready`）。
+    private enum Press { case idle, charging, ready }
+    @State private var press: Press = .idle
+    @State private var pressToken = 0
+    @State private var pressCancelled = false
+    @State private var moved = false
+    /// 拖动中的跟手位移（蓄满之后才有）。
+    @State private var translation: CGSize = .zero
+    /// 手势被系统打断时 onEnded 不一定来 —— 靠它归零把蓄力/拖动状态擦掉。
+    @GestureState private var touching = false
+    /// 原版 `CARD_DRAG_HOLD_MS = 420` / `CARD_DRAG_TOL = 8`（rc-stickynote 开头那组常量）。
+    private static let holdSeconds: Double = 0.42
+    private static let holdTolerance: CGFloat = 8
     /// 松手到新位置回来之间的**暂态位移**。
     ///
     /// ⚠ 没有它，`@GestureState` 在松手那一刻就归零，而写回是异步的 ——
@@ -353,10 +340,15 @@ struct ReaderNativePlacedCard: View {
         }
     }
 
+    /// 呈现用的形态。原生正文下的词锚卡只在展开时画，而**点锁定框打开总是完全展开**
+    /// —— 原版 toggleBoundCard 里 forceOpenCardFull 那条（2026-08-25 用户拍板："点标记
+    /// 打开 = 用户要看内容"）。只影响呈现，不改存下来的形态。
+    private var form: String { item.bound && item.fromNote ? "full" : item.form }
+
     /// 下一个形态。⚠ 裁剪规则与网页 `_cardForm` 一致：钉住的卡跳过长条。
     ///   「形态循环按宿主裁剪，而不是给每个宿主另造一套」——那句注释就在原版里。
     private var nextForm: String {
-        switch item.form {
+        switch form {
         case "dot": return item.pinned ? "full" : "min"
         case "min": return "full"
         default: return "dot"
@@ -365,7 +357,7 @@ struct ReaderNativePlacedCard: View {
 
     private var finish: ReaderNativeCardFinish { ReaderNativeCardFinish(item.tone) }
     /// 圆点态照 .vc-card.vc-dot：没有卡面、描边与阴影，只剩那枚标记。
-    private var isDot: Bool { item.form == "dot" }
+    private var isDot: Bool { form == "dot" }
     private var surfaceFill: Color { isDot ? Color.clear : finish.fill }
     private var surfaceBorder: Color { isDot ? Color.clear : finish.border }
     private var dropShadow: Color { isDot ? Color.clear : Color.black.opacity(0.45) }
@@ -377,20 +369,24 @@ struct ReaderNativePlacedCard: View {
     /// ⚠ 只在圆点态出现 —— 原版展开后「左上角那枚标记按钮**不再显示**（用户要求）；
     ///   形态切换改点头部」（rc-voicecall 那条注释原话）。
     private var formMarker: some View {
-        Button { runForm(nextForm) } label: {
-            Image(systemName: item.bound ? "pin.fill" : "rectangle.on.rectangle")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(finish.tone)
-                .frame(width: 40, height: 40)
-                .background(finish.tone.opacity(0.14), in: RoundedRectangle(cornerRadius: 13))
-                .background(Color(red: 22 / 255, green: 26 / 255, blue: 38 / 255).opacity(0.38),
-                            in: RoundedRectangle(cornerRadius: 13))
-                .overlay(RoundedRectangle(cornerRadius: 13).stroke(finish.border, lineWidth: 0.5))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("展开卡片")
-        .accessibilityHint(item.pinned ? "在标记与展开之间切换" : "圆 / 长条 / 方块")
+        Image(systemName: item.bound ? "pin.fill" : "rectangle.on.rectangle")
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(finish.tone)
+            .frame(width: 40, height: 40)
+            .background(finish.tone.opacity(0.14), in: RoundedRectangle(cornerRadius: 13))
+            .background(Color(red: 22 / 255, green: 26 / 255, blue: 38 / 255).opacity(0.38),
+                        in: RoundedRectangle(cornerRadius: 13))
+            .overlay(RoundedRectangle(cornerRadius: 13).stroke(finish.border, lineWidth: 0.5))
+            .contentShape(RoundedRectangle(cornerRadius: 13))
+            // 点按 = 切形态；按住 420ms = 拖（原版圆点同一条蓄力链）。
+            .gesture(pressGesture(onTap: { runForm(nextForm) }))
+            .accessibilityElement()
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("展开卡片")
+            .accessibilityHint(item.pinned ? "在标记与展开之间切换" : "圆 / 长条 / 方块")
+            .accessibilityAction { runForm(nextForm) }
     }
+
 
     private func runForm(_ value: String) {
         guard let action = item.controls["form"] else {
@@ -408,7 +404,7 @@ struct ReaderNativePlacedCard: View {
     /// 点卡头：词锚卡 = 收起回词上（原版点标记同一动作）；自由卡 = 形态循环。
     private func tapHeader() {
         if item.bound {
-            if item.nativeOnly { reader.openNativeBoundCard(noteID: item.noteID) }   // 原生自己开的，原生自己收
+            if item.fromNote { reader.openNativeBoundCard(noteID: item.noteID) }   // 开合归原生：再点一次就是收
             else { run("collapse") }
         } else { runForm(nextForm) }
     }
@@ -421,14 +417,14 @@ struct ReaderNativePlacedCard: View {
     }
     /// 壳宽照原版 `_formW`：圆点 40 / 长条 300 / 方块按卡片自己的宽。
     private var width: CGFloat {
-        switch item.form {
+        switch form {
         case "dot": return 40
         case "min": return min(300, max(180, available.width - 32))
         default: return min(max(180, (resizing ?? savedSize)?.width ?? rect.width), max(44, available.width))
         }
     }
     /// 圆角：圆点态 13（与 .vc-card-dot 同值），其余 16（.vc-card{border-radius:16px}）。
-    private var corner: CGFloat { item.form == "dot" ? 13 : 16 }
+    private var corner: CGFloat { form == "dot" ? 13 : 16 }
     private var bodyHeight: CGFloat? {
         (resizing ?? savedSize).map { max(64, min($0.height, available.height) - 41) }
     }
@@ -437,15 +433,19 @@ struct ReaderNativePlacedCard: View {
     /// ⚠ 上一版是"原卡淡到 .22 + 只拖一条标题影子"，用户看到的就是一块残影
     ///   （2026-09-23："长按移动时留下一个残影"）。拖动慢的真凶是每帧跑 JS 的落点
     ///   预览和挂在主模型上的发布（都已拆掉/限流），不是卡本身。
-    private var dragging: Bool { translation != .zero }
+    private var dragging: Bool { press == .ready }
 
     var body: some View {
         card
-            // 浮起特效照原版 .rc-note-lift：微放大 + 更深的影。
+            // 蓄力：卡片在按住的 420ms 里轻轻"按进去"（系统长按菜单同一手感，不用进度条 ——
+            // 2026-09-23 用户："不一定非要用进度条，完全可以用苹果的特效来显示"）。
+            .scaleEffect(press == .charging ? 0.96 : 1)
+            // 蓄满：弹性浮起（原版 .rc-note-lift：微放大 + 更深的影）+ 触感。以左上角为原点，
+            // 视觉左上 = 钉入点，松手不跳位（原版 #51 同一条）。
             .scaleEffect(dragging ? 1.03 : 1, anchor: .topLeading)
             .shadow(color: .black.opacity(dragging ? 0.28 : 0), radius: 18, y: 8)
-            // 动画只管浮起（缩放/阴影），不管跟手位移 —— 否则松手那一下会回弹。
-            .animation(.easeOut(duration: 0.12), value: dragging)
+            // ⚠ 动画全部走 setPress 里的显式 withAnimation，跟手位移不带动画 ——
+            //   否则松手那一下会回弹。
             .offset(translation)
             .zIndex(dragging ? 100 : 0)
     }
@@ -469,10 +469,10 @@ struct ReaderNativePlacedCard: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("删除这张卡片")
-            } else if item.form != "dot" {
+            } else if form != "dot" {
                 Menu {
                     if !item.floating {
-                        Button("锚定到正文", systemImage: "pin") { run("anchor") }
+                        Button("锚定到正文", systemImage: "pin") { anchorToText() }
                     }
                     Button(item.floating ? "关闭浮动卡片" : "移除这处卡片", systemImage: "trash", role: .destructive) {
                         confirmRemoval = true
@@ -489,9 +489,10 @@ struct ReaderNativePlacedCard: View {
         .padding(.leading, 13).padding(.trailing, 7)
         .frame(minHeight: 40)
         .contentShape(Rectangle())
-        .onTapGesture { tapHeader() }
-        .gesture(moveGesture)
+        // 点按 = 收起/切形态；按住 420ms 蓄满才能拖（见 pressGesture）。
+        .gesture(pressGesture(onTap: tapHeader))
         .accessibilityAddTraits(.isButton)
+        .accessibilityAction { tapHeader() }
         .accessibilityHint(item.bound ? "收起到正文" : "切换卡片形态")
     }
 
@@ -499,11 +500,11 @@ struct ReaderNativePlacedCard: View {
         VStack(alignment: .leading, spacing: 0) {
             if isDot {
                 // 收起态：**整张卡就是那枚标记**（原版 `.vc-card.vc-dot`）。
-                formMarker.simultaneousGesture(moveGesture)
+                formMarker
             } else {
                 header
             }
-            if item.form == "full" {
+            if form == "full" {
                 // 原版卡头下那条分隔线（截图里贯穿卡宽的细线）。
                 Rectangle().fill(Color.white.opacity(0.12)).frame(height: 0.5)
                 ScrollView {
@@ -560,7 +561,7 @@ struct ReaderNativePlacedCard: View {
         }
         .animation(.easeOut(duration: 0.15), value: contextSelected)
         .overlay(alignment: .bottomTrailing) {
-            if item.form == "full", item.controls["resize"] != nil {
+            if form == "full", item.controls["resize"] != nil {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.45))
@@ -585,6 +586,7 @@ struct ReaderNativePlacedCard: View {
             if value == .zero { reader.clearCardDropPreview(); reader.cardDrag.finger = nil }
         }
         .onChange(of: rect) { _, _ in committed = nil }
+        .onChange(of: touching) { _, now in if !now { resetPress() } }
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
             if item.floating, Date().timeIntervalSince(lastTouch) > 2 {
                 lastTouch = Date()
@@ -595,10 +597,7 @@ struct ReaderNativePlacedCard: View {
         })
         .disabled(model.isPerforming("liveAction"))
         .confirmationDialog("仅移除这处书页卡片，原卡和学习记录会保留。", isPresented: $confirmRemoval, titleVisibility: .visible) {
-            Button("移除", role: .destructive) {
-                if item.nativeOnly { Task { _ = await reader.deleteNativeNote(noteID: item.noteID) } }
-                else { run("remove") }
-            }
+            Button("移除", role: .destructive) { run("remove") }
         }
         .alert("卡片操作未完成", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
             Button("好") { operationError = nil }
@@ -615,103 +614,149 @@ struct ReaderNativePlacedCard: View {
         return CGPoint(x: window.x - frame.minX, y: window.y - frame.minY)
     }
 
-    private var moveGesture: some Gesture {
-        // ⚠ coordinateSpace: .global —— 投放区判据要的是**手指在屏幕上哪儿**。
-        //   默认坐标系是手势所在那个小视图，拿来跟屏幕边缘比毫无意义。
-        DragGesture(minimumDistance: 6, coordinateSpace: space)
-            .updating($translation) { value, state, _ in state = value.translation }
-            .onChanged { value in
-                // 两个探测点，故意不同（原版就是这么分的）：
-                // · 投放区（删除/收藏）看**手指**；
-                // · 落点预览看**卡左上角**（+1 避开自身边框）—— 那才是钉入点。
-                //   写成同一个会出现"看着在删除区、松手却钉在正文上"。
-                reader.cardDrag.finger = toWindow(value.location)
-                reader.previewCardDrop(windowPoint: dropPoint(value.translation))
+    /// 卡头 / 圆点的按压手势 —— 照原版 onHandleDown / onHandleMove / onHandleUp 的蓄力链：
+    ///   按下 → 蓄力（卡片轻轻按进去，420ms）→ 蓄满触感一下、卡片弹起浮出 → 才跟手拖；
+    ///   蓄力前移动超过 8pt = 取消（快划不会误拖、也不会误切形态）；
+    ///   没蓄满就松手 = 普通点按（onTap）；蓄满后原地松手 = 什么都不做。
+    /// ⚠ 2026-09-23 用户："关于卡片移动，原来版本是有做一个按住几秒后可以移动的机制"。
+    ///   上一版一碰就拖，想点卡头收起 / 切形态时手指稍一动，卡就被拖走了。
+    private func pressGesture(onTap: @escaping () -> Void) -> some Gesture {
+        // ⚠ 坐标系与卡片 rect 同一个（屏幕层 = 本层命名坐标系，文档层 = 文档坐标系），
+        //   投放区判据再经 toWindow 换到窗口坐标 —— 手指在屏幕上哪儿。
+        DragGesture(minimumDistance: 0, coordinateSpace: space)
+            .updating($touching) { _, state, _ in state = true }
+            .onChanged { value in pressChanged(value) }
+            .onEnded { value in pressEnded(value, onTap: onTap) }
+    }
+
+    private func pressChanged(_ value: DragGesture.Value) {
+        let distance = hypot(value.translation.width, value.translation.height)
+        switch press {
+        case .idle:
+            guard !pressCancelled else { return }
+            setPress(.charging)
+            pressToken &+= 1
+            let token = pressToken
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(Self.holdSeconds * 1_000_000_000))
+                guard token == pressToken, press == .charging else { return }
+                setPress(.ready)
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()   // 原版 navigator.vibrate(8)
             }
-            .onEnded { value in
-                reader.clearCardDropPreview()
-                let released = screenLocal(toWindow(value.location))
-                reader.cardDrag.finger = nil
-                let scope = model.scope
-                let point = dropPoint(value.translation)
-                // 删除区 / 收藏区优先于"钉到正文"（原版 onHandleUp 的顺序）。
-                if ReaderNativeCardDropZone.inTrash(released), let action = item.controls["trash"] {
-                    committed = nil
-                    Task {
-                        if await model.perform("liveAction", parameters: ["actionId": action]) == false {
-                            reader.showTransientNotice(model.error ?? "没能删除这张卡。")
-                        }
-                    }
-                    return
-                }
-                if ReaderNativeCardDropZone.inTrash(released), item.nativeOnly {
-                    committed = nil
-                    Task { _ = await reader.deleteNativeNote(noteID: item.noteID) }
-                    return
-                }
-                if ReaderNativeCardDropZone.inDock(released, screenHeight: reader.cardDrag.screenFrame.height),
-                   let action = item.controls["favorite"] {
-                    // 收藏是**复制**：原卡回原位，不改锚点（原版同一条注释）。
-                    committed = nil
-                    Task {
-                        if await model.perform("liveAction", parameters: ["actionId": action]) == false {
-                            reader.showTransientNotice(model.error ?? "这张卡没能加入收藏夹。")
-                        } else {
-                            reader.showTransientNotice("已收入收藏夹")
-                        }
-                    }
-                    return
-                }
-                if item.bound {
-                    // 钉在词上的卡：拖到哪个词就改绑到哪个词（原版规则），但**词由原生认**，
-                    // 连同页内坐标一起交给网页的移动动作。
-                    // ⚠ 以前交的是网页视口坐标，网页按它自己的视口找页 —— 与屏幕上的页对不上，
-                    //   词锚被改到了别的词上（2026-09-23 实录：「インフルエンザ」「よっ」）。
-                    guard let action = item.controls["move"],
-                          let target = reader.nativeDropTarget(windowPoint: point) else {
-                        committed = nil
-                        if item.nativeOnly { reader.showTransientNotice("这张卡还没载入完整，暂时只能收起或删除。") }
-                        return
-                    }
-                    committed = value.translation
-                    Task {
-                        if await model.perform("liveAction", parameters: ["actionId": action, "value": target]) == false {
-                            reader.showTransientNotice(model.error ?? "这张卡没能挪到这里。")
-                        }
-                        try? await Task.sleep(nanoseconds: 1_200_000_000)
-                        committed = nil
-                    }
-                    return
-                }
-                committed = value.translation
-                Task {
-                    // 原生正文接管时走原生锚点：落点要换成**页内**归一化坐标。
-                    // 网页那条路把它当网页视口坐标，而接管后视口里没有那一页 ——
-                    // 卡会飞到别处。原生写失败才退回去。
-                    if await reader.moveNativeCard(id: item.noteID, windowPoint: point) {
-                        // ⚠ 兜一手：暂态位移本来靠"新几何到了"来清（onChange(of: rect)）。
-                        //   可要是落点跟原位几乎一样，rect 不变、那一下就永远不会来，
-                        //   卡片会一直画在偏移后的位置上。等一拍还没来就自己清。
-                        try? await Task.sleep(nanoseconds: 1_200_000_000)
-                        committed = nil
-                        return
-                    }
-                    // ⚠ 这里以前是 `guard … else { return }`：拖了一下、卡弹回去、
-                    //   一个字都没有。用户看到的就是"拖不动"，而我们连它为什么
-                    //   没动都不知道。落点定不下来就说出来。
-                    guard let action = item.controls["move"] else {
-                        committed = nil
-                        reader.showTransientNotice("这张卡不能挪到这里。")
-                        return
-                    }
-                    await reader.placeNativeConversationCard(actionID: action, scope: scope, windowPoint: point)
-                    guard model.scope == scope else { return }
-                    if let failure = model.error {
-                        committed = nil
-                        operationError = failure
-                    }
+        case .charging:
+            if distance > Self.holdTolerance { setPress(.idle); pressCancelled = true }
+        case .ready:
+            // 起拖阈值 4pt（原版 onHandleMove 同值）：蓄满后原地松手不算拖。
+            guard moved || distance > 4 else { return }
+            moved = true
+            translation = value.translation
+            // 两个探测点，故意不同（原版就是这么分的）：
+            // · 投放区（删除/收藏）看**手指**；
+            // · 落点预览看**卡左上角**（+1 避开自身边框）—— 那才是钉入点。
+            //   写成同一个会出现"看着在删除区、松手却钉在正文上"。
+            reader.cardDrag.finger = toWindow(value.location)
+            reader.previewCardDrop(windowPoint: dropPoint(value.translation))
+        }
+    }
+
+    private func pressEnded(_ value: DragGesture.Value, onTap: () -> Void) {
+        let state = press, dragged = moved, cancelled = pressCancelled
+        resetPress()
+        if state == .ready {
+            if dragged { finishDrag(value) }
+            return
+        }
+        if !cancelled { onTap() }
+    }
+
+    /// 蓄力态的切换都带动画：按进去随按住的时长线性走完，浮起用弹簧，松开/取消快速回位。
+    private func setPress(_ value: Press) {
+        guard press != value else { return }
+        let animation: Animation = switch value {
+        case .charging: .easeInOut(duration: Self.holdSeconds)
+        case .ready: .spring(response: 0.3, dampingFraction: 0.6)
+        case .idle: .easeOut(duration: 0.15)
+        }
+        withAnimation(animation) { press = value }
+    }
+
+    private func resetPress() {
+        pressToken &+= 1
+        setPress(.idle)
+        pressCancelled = false
+        moved = false
+        translation = .zero
+    }
+
+    /// 松手：删除区 / 收藏区 / 钉到正文。
+    private func finishDrag(_ value: DragGesture.Value) {
+        reader.clearCardDropPreview()
+        let released = screenLocal(toWindow(value.location))
+        reader.cardDrag.finger = nil
+        let scope = model.scope
+        let point = dropPoint(value.translation)
+        // 删除区 / 收藏区优先于"钉到正文"（原版 onHandleUp 的顺序）。
+        if ReaderNativeCardDropZone.inTrash(released), let action = item.controls["trash"] {
+            committed = nil
+            Task {
+                if await model.perform("liveAction", parameters: ["actionId": action]) == false {
+                    reader.showTransientNotice(model.error ?? "没能删除这张卡。")
                 }
             }
+            return
+        }
+        if ReaderNativeCardDropZone.inDock(released, screenHeight: reader.cardDrag.screenFrame.height),
+           let action = item.controls["favorite"] {
+            // 收藏是**复制**：原卡回原位，不改锚点（原版同一条注释）。
+            committed = nil
+            Task {
+                if await model.perform("liveAction", parameters: ["actionId": action]) == false {
+                    reader.showTransientNotice(model.error ?? "这张卡没能加入收藏夹。")
+                } else {
+                    reader.showTransientNotice("已收入收藏夹")
+                }
+            }
+            return
+        }
+        if item.bound || item.fromNote {
+            // 落点由原生算：页码 + 页内归一化坐标 + 原生认出的词。钉词的卡拖到哪个词就
+            // 改绑到哪个词（原版规则）；自由卡只改位置，不会因为拖了一下就钉上词。
+            // ⚠ 以前交的是网页视口坐标，网页按它自己的视口找页 —— 与屏幕上的页对不上，
+            //   词锚被改到了别的词上（2026-09-23 实录：「インフルエンザ」「よっ」）。
+            guard let action = item.controls["move"],
+                  let target = reader.nativeDropTarget(windowPoint: point) else {
+                committed = nil
+                reader.showTransientNotice("请放到书页正文上。")
+                return
+            }
+            committed = value.translation
+            Task {
+                if await model.perform("liveAction", parameters: ["actionId": action, "value": target]) == false {
+                    reader.showTransientNotice(model.error ?? "这张卡没能挪到这里。")
+                }
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                committed = nil
+            }
+            return
+        }
+        committed = value.translation
+        Task {
+            // 只剩网页在渲页（原生正文没挂上）时网页挂的那几张卡会走到这里。
+            // ⚠ 这里以前是 `guard … else { return }`：拖了一下、卡弹回去、
+            //   一个字都没有。用户看到的就是"拖不动"，而我们连它为什么
+            //   没动都不知道。落点定不下来就说出来。
+            guard let action = item.controls["move"] else {
+                committed = nil
+                reader.showTransientNotice("这张卡不能挪到这里。")
+                return
+            }
+            await reader.placeNativeConversationCard(actionID: action, scope: scope, windowPoint: point)
+            guard model.scope == scope else { return }
+            if let failure = model.error {
+                committed = nil
+                operationError = failure
+            }
+        }
     }
 
     private var resizeGesture: some Gesture {
@@ -736,12 +781,22 @@ struct ReaderNativePlacedCard: View {
         let scope = model.scope, value = boundedSize(value)
         resizing = value
         Task {
-            // 原生接管时按卡片自身单位存（屏幕尺寸 ÷ 页宽/base_w 的比例）；
+            // 便签来源的卡按卡片自身单位存（屏幕尺寸 ÷ 页宽/base_w 的比例）；
             // 否则每缩放一次书，卡片尺寸就被记错一次。
-            if await reader.resizeNativeCard(id: item.noteID,
-                                             size: CGSize(width: value.width * unitScale,
-                                                          height: value.height * unitScale)) {
-                if scope == model.scope { resizing = nil }
+            if item.fromNote {
+                let screen = CGSize(width: value.width * unitScale, height: value.height * unitScale)
+                guard let action = item.controls["resize"],
+                      let units = reader.nativeCardUnits(id: item.noteID, screenSize: screen) else {
+                    if scope == model.scope { resizing = nil }
+                    reader.showTransientNotice("这张卡的尺寸暂时改不了。")
+                    return
+                }
+                let saved = await model.perform("liveAction", parameters: [
+                    "actionId": action, "value": ["w": Double(units.width), "h": Double(units.height)]])
+                if scope == model.scope {
+                    resizing = nil
+                    if !saved { operationError = model.error ?? "尺寸尚未保存，请重试。" }
+                }
                 return
             }
             guard let action = item.controls["resize"] else {
@@ -752,6 +807,23 @@ struct ReaderNativePlacedCard: View {
             if scope == model.scope {
                 resizing = nil
                 if !saved { operationError = model.error ?? "尺寸尚未保存，请重试。" }
+            }
+        }
+    }
+
+    /// 「锚定到正文」：原生按卡角认词（原版 resolveFreeCardBind 的"就近词"那一条），
+    /// 连同词一起交给卡片自己的 anchor 控件。网页在渲页时仍走网页那条。
+    private func anchorToText() {
+        guard item.fromNote else { run("anchor"); return }
+        guard let action = item.controls["anchor"],
+              let target = reader.nativeDropTarget(windowPoint: toWindow(CGPoint(x: rect.minX + 1, y: rect.minY + 1))),
+              target["bind"] != nil else {
+            reader.showTransientNotice("请先把卡片移到要锚定的词旁边。")
+            return
+        }
+        Task {
+            if await model.perform("liveAction", parameters: ["actionId": action, "value": target]) == false {
+                operationError = model.error ?? "没能锚定到正文，请重试。"
             }
         }
     }

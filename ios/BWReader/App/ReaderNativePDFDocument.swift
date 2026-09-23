@@ -582,7 +582,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
 
     /// Resolve saved anchors through PDFKit and the original character-binding
     /// rules. No DOM frame, CSS zoom or newly assigned card identity is involved.
-    func noteGeometry(_ note: [String: Any], presentationSize: CGSize? = nil, in target: UIView? = nil) -> NoteGeometry? {
+    /// `expanded`：按完全展开的尺寸算（点锁定框打开的词锚卡总是完全展开，见原版 forceOpenCardFull）。
+    func noteGeometry(_ note: [String: Any], presentationSize: CGSize? = nil, in target: UIView? = nil,
+                      expanded: Bool = false) -> NoteGeometry? {
         guard let id = note["id"] as? String, let anchor = note["anchor"] as? [String: Any],
               anchor["kind"] as? String == "pdf", let number = anchor["page"] as? NSNumber,
               number.doubleValue == Double(number.intValue),
@@ -594,7 +596,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let h = (note["h"] as? NSNumber)?.doubleValue ?? 180
         let base = (payload["base_w"] as? NSNumber)?.doubleValue ?? 0
         guard [x, y, w, h, base].allSatisfy(\.isFinite), w > 0, h > 0 else { return nil }
-        let collapsed = note["collapsed"] as? Bool == true || ["dot", "min"].contains(payload["form"] as? String ?? "")
+        let collapsed = !expanded && (note["collapsed"] as? Bool == true || ["dot", "min"].contains(payload["form"] as? String ?? ""))
         let ratio = base > 0 ? pageRect.width / base : 1
         let preferred = presentationSize ?? CGSize(width: max(140, w * ratio), height: h * ratio)
         guard preferred.width.isFinite, preferred.height.isFinite, preferred.width > 0, preferred.height > 0 else { return nil }
@@ -865,7 +867,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     ///
     /// ⚠ 不要改走网页的 `anchorFromPoint`：那条路把落点当网页视口坐标，
     ///   原生接管正文后视口里根本没有那一页 —— 会出现"预览说钉这儿、
-    ///   松手却钉别处"。这里跟 `moveNativeCard` 一样先 `canonicalPoint` 定页，
+    ///   松手却钉别处"。这里跟 `nativeDropTarget` 一样先 `canonicalPoint` 定页，
     ///   再用**同一份** pdf-selection-core 认词，判据一字不差。
     ///
     /// 语义沿用网页那版（rc-stickynote #51）：认得出词就给词框（光带＝绑定内容），

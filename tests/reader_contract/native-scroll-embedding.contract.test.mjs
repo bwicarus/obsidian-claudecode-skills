@@ -85,3 +85,25 @@ test("屏幕层：拖动手势与卡片位置同一坐标系，换窗口坐标�
   assert.match(CARDS, /toWindow: \{ point in CGPoint\(x: point\.x \+ frame\.minX, y: point\.y \+ frame\.minY\) \}/);
   assert.doesNotMatch(CARDS, /toWindow: \{ point in point \}/);
 });
+
+test("卡片移动要先按住蓄力（原版 CARD_DRAG_HOLD_MS = 420 / CARD_DRAG_TOL = 8）", () => {
+  // 2026-09-23 用户："关于卡片移动，原来版本是有做一个按住几秒后可以移动的机制"。
+  const STICKY = read("_server_deploy/static/pdf/rc-stickynote.js");
+  assert.match(STICKY, /var CARD_DRAG_HOLD_MS = 420;/);
+  assert.match(STICKY, /var CARD_DRAG_TOL = 8;/);
+  assert.match(CARDS, /private static let holdSeconds: Double = 0\.42/);
+  assert.match(CARDS, /private static let holdTolerance: CGFloat = 8/);
+  const press = CARDS.slice(CARDS.indexOf("private func pressChanged("), CARDS.indexOf("private func pressEnded("));
+  // 蓄满前不跟手：只有 .ready 才写位移。
+  const charging = press.slice(press.indexOf("case .charging:"), press.indexOf("case .ready:"));
+  assert.doesNotMatch(charging, /translation = /);
+  assert.match(charging, /distance > Self\.holdTolerance/);
+  assert.match(press.slice(press.indexOf("case .ready:")), /translation = value\.translation/);
+  // 卡头与圆点都走这条；不再有一碰就拖的手势。
+  assert.match(CARDS, /\.gesture\(pressGesture\(onTap: tapHeader\)\)/);
+  assert.match(CARDS, /\.gesture\(pressGesture\(onTap: \{ runForm\(nextForm\) \}\)\)/);
+  assert.doesNotMatch(code(CARDS), /DragGesture\(minimumDistance: 6/);
+  // 没蓄满就松手 = 点按。
+  const ended = CARDS.slice(CARDS.indexOf("private func pressEnded("), CARDS.indexOf("private func resetPress("));
+  assert.match(ended, /if !cancelled \{ onTap\(\) \}/);
+});

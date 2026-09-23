@@ -90,10 +90,10 @@ test("⑦ 原生解锚一律用便签 id，不用界面上的 placement id", () 
   // placement id 是 'placement-' + hash(...)，跟便签 id 永远对不上：拿它比，
   // 页内锁定框点了就是"还没加载好"，卡身也一直退回网页坐标。
   assert.match(CARDS, /nativePageCardGeometry\(\s*id: item\.noteID/);
-  assert.match(CARDS, /moveNativeCard\(id: item\.noteID/);
-  assert.match(CARDS, /resizeNativeCard\(id: item\.noteID/);
+  assert.match(CARDS, /nativeCardUnits\(id: item\.noteID/);
   assert.match(WEBVIEW, /placements\.first\(where: \{ \$0\.noteID == noteID \}\)/);
   assert.match(SCRIPT, /return \[\{ id, noteId: item\.id,/);
+  assert.match(SCRIPT, /return \[\{ id, noteId: item\.id, source: 'note',/);
 });
 
 test("⑧ 锁定框观感照原版 _bindTone：色调混深底，展开态加深 + 外晕，带序号", () => {
