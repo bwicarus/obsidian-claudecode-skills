@@ -354,8 +354,13 @@ check((createdReceipt["result"] as? [String: Any])?["id"] as? String == stickyID
 let createdNotes = try createRead.state("document-notes-legacy", bookID: book).payload as! [[String: Any]]
 check(createdNotes.count == 1 && createdNotes[0]["color"] as? String == "#ffffff", "native default note differs from original")
 let creationPending = try ReaderNativeReplicationOutbox(store: createStore).pending()
-check(creationPending.count == 1, "creation failed to queue exactly one sync")
-let sentCreation = String(decoding: creationPending[0].envelope, as: UTF8.self)
+check(creationPending.count == 2, "first creation must queue pairing and exactly one note command")
+let creationPaths = try creationPending.map { entry -> String in
+    let envelope = try JSONSerialization.jsonObject(with: entry.envelope) as! [String: Any]
+    return (envelope["op"] as! [String: Any])["url"] as! String
+}
+check(creationPaths == ["/replication/pair", "/pdf/api/notes"], "pairing must precede the only creation command")
+let sentCreation = String(decoding: creationPending[1].envelope, as: UTF8.self)
 check(sentCreation.contains(stickyID) && sentCreation.contains("/pdf/api/notes"), "outgoing note lost its local identity")
 let creationCursor = try createStore.cursor()
 _ = try createWriter.perform(stickyRequest)

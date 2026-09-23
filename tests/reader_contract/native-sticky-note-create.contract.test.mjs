@@ -23,11 +23,10 @@ const body = (source, from, to) => source.slice(source.indexOf(from), source.ind
 const code = (source) =>
   source.split(/\r?\n/).filter((line) => !/^\s*(\/\/|\/\*|\*|\/\/\/)/.test(line)).join("\n");
 
-test("① 落库仍走 RC.stickynote.createAt，只是锚点由原生给", () => {
+test("① 浏览器兼容入口仍走 RC.stickynote.createAt", () => {
   const entry = WORDPOP.slice(WORDPOP.indexOf("window.__bwReaderCreateNote = function"));
   assert.match(entry, /sticky\.createAt\(\{ kind: 'pdf', page: page, x: x, y: y \}\)/);
-  // 锚定、代次校验、渲染、失败提示都在 createAt 那条路上，绕过去会得到一张
-  // 存下来却不显示、或显示了却没存的便签。
+  // 网页端保持自己的事务和渲染入口；App 顶栏已直接调用 Swift。
   assert.doesNotMatch(code(entry), /fetch\(|createRecord\(/);
   assert.doesNotMatch(code(entry), /elementFromPoint/, "落点不该再回网页问");
   assert.match(READER, /__bwReaderCreateNote/, "改完 reader.src 要拼合");
@@ -48,16 +47,19 @@ test("② 顶栏按钮有 id，原生才认得出它", () => {
 });
 
 test("③ 位置由 PDFKit 给，并且失败要出声", () => {
-  const create = body(WEBVIEW, "func createNativeStickyNote()", "/// 点了已有划线");
+  const create = body(WEBVIEW, "func createNativeStickyNote()", "/// 选区菜单里点了「OCR」");
   assert.match(create, /document\.position\.visiblePages/);
   assert.match(create, /"x": 0\.5, "y": 0\.5/);
   // ⚠ 原来这条路是彻底静默的 —— 原生路径的失败必须自己出声。
   assert.match(create, /nativeConversation\.report\(/);
   assert.match(MODEL, /func report\(_ message: String\)/);
-  assert.match(create, /scheduleNativePDFProjectionRefresh\(\)/, "建完要重取才看得见");
+  assert.match(create, /"operation": "note-create"/, "保存和同步命令走原生事务");
+  assert.match(create, /nativeReplicationService\?\.wake\(\)/);
+  assert.match(create, /await self\.refreshNativePDFProjection\(\)/, "落库后刷新原生显示");
+  assert.doesNotMatch(create, /requestNativeConversationCommand/, "不能再调用网页创建一次");
 });
 
-test("④ 命令过两道闸，参数有界", () => {
+test("④ 保留的网页兼容命令过两道闸，参数有界", () => {
   const handler = body(SCRIPT, "} else if (action === 'nativeCreateNote') {",
                        "} else if (action === 'nativePhraseFav') {");
   assert.match(handler, /Number\.isSafeInteger\(value\.page\) && value\.page < 1|Number\.isSafeInteger\(value\.page\)/);
