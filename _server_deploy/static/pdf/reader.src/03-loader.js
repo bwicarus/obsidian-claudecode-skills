@@ -234,6 +234,14 @@ async function loadPdf() {
     loadBookFig();          // 拉本书「插图描述/徽标」开关(默认关 → 不画徽标不烧 AI)
     _loadPhraseFavs();      // 拉收藏词组（词组按钮收藏态 + 分词依据）
     _maybeRestoreLastPos();   // URL 未带 page 时跳到上次位置
+    if (_NATIVE_LOCAL_PDF) {
+      // Metadata/preferences are ready for nativeState(). The App must never
+      // bootstrap web page images, text DOM, ink canvases or image prefetch.
+      if (deferredNativeCrop) await deferredNativeCrop;
+      _pdfInitDone = true;
+      pdfLoadHide();
+      return;
+    }
     if (readMode !== 'single') {   // 连续 / 双页 都走 setupContinuousMode(内部按 spread 分行)
       await setupContinuousMode();
     } else {

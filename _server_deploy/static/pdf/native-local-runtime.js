@@ -15749,6 +15749,14 @@
         if (typeof root.dlog === 'function') root.dlog('本机启动:PDF 恢复检查已完成');
         return attachPreferenceStore();
       }).then(function () {
+        if (!nativeStoreEnabled()) return;
+        // Publish readiness only after migration AND pending mutation recovery.
+        // Swift may now read the same SQLite records without exporting through
+        // a hidden webpage for every annotation/ink update.
+        return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
+          action: 'readingStoreReady', bookID: bookId
+        });
+      }).then(function () {
         bootState = 'ready';
         if (typeof root.dlog === 'function') root.dlog('本机启动:运行时已就绪');
         // 复制出箱：开书先冲一次积压。之后的节奏是"入队即触发 +

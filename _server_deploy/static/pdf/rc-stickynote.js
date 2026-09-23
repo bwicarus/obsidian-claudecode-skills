@@ -2242,7 +2242,7 @@
   /// 永远对不上 —— 2026-09-23 那一串"框与词分离 / 改绑到别的词 / 开了不显示"全出自这里。
   /// 用户："所有旧的渲染在有新的功能代替后都应该把旧的给去掉"。
   function _nativeOwnsPageCards() {
-    try { return !!(window.RC && RC.readerNavigation && RC.readerNavigation.nativeViewport); }
+    try { return window.__BW_NATIVE_LOCAL_READER__ === true && !!window.__PDF_CFG || !!(window.RC && RC.readerNavigation && RC.readerNavigation.nativeViewport); }
     catch (_) { return false; }
   }
   function _releaseWebPageCards() {

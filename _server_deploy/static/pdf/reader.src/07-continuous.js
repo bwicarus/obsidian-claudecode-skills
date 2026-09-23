@@ -1,4 +1,5 @@
 async function setupContinuousMode() {
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   const container = document.getElementById('page-container');
   container.innerHTML = '';
   if (_contIO) { _contIO.disconnect(); _contIO = null; }

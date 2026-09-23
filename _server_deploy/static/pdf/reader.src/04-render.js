@@ -30,6 +30,9 @@ async function renderPage(num) {
     if (receipt.position.sequence > nativeOwner.sequence) RC.readerNavigation.acceptNativePosition(nativeOwner.token, receipt.position);
     return;
   }
+  // App PDF pixels belong to PDFKit from boot, including before its first layout.
+  // Keep the requested position for nativeState(), never create a hidden page.
+  if (_NATIVE_LOCAL_PDF) { currentPage = num; return; }
   currentPage = num;
   { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(num) : num); }
   window._refreshVocabIfPage?.();   // 离散翻页(◀▶/滑块/跳页)也刷新「本页」单词本(连续模式下 loadPageNodes 只靠滚动触发,会漏)
@@ -112,7 +115,7 @@ function _bucketReqW(cw) {
 }
 const _prefetched = new Set();
 function _prefetchAround(num, radius) {
-  if (!_imgMode) return;
+  if (!_imgMode || _NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   const meta = window.__imgMeta; if (!meta) return;
   const cw = Math.floor(meta.page_w * scale);
   const baseW = _bucketReqW(cw);   // 跟 _renderPageImg 同一公式(此前预取用 cw×dpr、渲染用 max(natW,…),首次预取会取错档)
@@ -135,6 +138,7 @@ window._prefetchAround = _prefetchAround;
 // 图片模式渲染:用服务端渲染好的页图(<img>)代替 PDF.js canvas。叠层(选词 char 层/高亮/振假名/墨迹)
 // 全是按坐标定位,跟 canvas 路径一样工作。只取这一页的图(几百 KB),不下载整本 PDF。
 async function _renderPageImg(num, wrap, viewport) {
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   const _gen = (wrap.__imgGen = (wrap.__imgGen || 0) + 1);   // 重入守卫:并发/IO 重渲时,旧渲染 decode 完别覆盖新渲染(最后发起的赢)
   const cw = Math.floor(viewport.width);
   let ch = Math.floor(viewport.height);   // 初值用 meta(page1)高,decode 后改用本页图的真实宽高比(见下)
@@ -148,7 +152,7 @@ async function _renderPageImg(num, wrap, viewport) {
   img.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt;
   // **先把新页图 decode 好再换**:旧内容/旧图一直可见到此刻 → 去边/缩放/侧栏等重渲染无空白闪烁(cache 命中=秒回)
   try { await img.decode(); } catch (_) {}
-  if (!wrap.isConnected || wrap.__imgGen !== _gen) return;   // 解码期间该页已被释放 / 已有更新的渲染 → 放弃
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport || !wrap.isConnected || wrap.__imgGen !== _gen) return;
   if (img.naturalWidth === 0) return;   // decode 失败(catch 吞掉)→ 别换入空/坏图,留旧内容;loaded 仍 0,IO 滚到时重试
   // 自愈:decode 这段异步窗口里全局 scale 变了(缩放/切模式与渲染赛跑)→ 别用旧 scale 的图换入,否则本页
   // 定格在旧 scale(其它页已新 scale → 行间大小不一)。按当前 scale 重渲;__imgGen 守卫防叠加,scale 稳定后
@@ -219,10 +223,11 @@ async function _renderPageImg(num, wrap, viewport) {
 // 拿到「模糊近似图」后,等服务端后台补渲精确宽完成,再把这一页的 <img> 原地换成清晰图(只换图、不重渲整页)。
 // cache-bust 绕开浏览器缓存(近似图返回 no-store,本就不缓存;busted url 取磁盘上已渲好的精确图)。最多重试 3 次。
 async function _scheduleSharpen(num, wrap, reqW, mt, gen, tries) {
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   tries = tries || 0;
   if (tries > 3) return;
   setTimeout(async () => {
-    if (!wrap.isConnected || wrap.__imgGen !== gen) return;   // 页已释放 / 已有更新渲染 → 放弃
+    if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport || !wrap.isConnected || wrap.__imgGen !== gen) return;
     const im = document.createElement('img'); im.decoding = 'async';
     im.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt + '&sharp=' + Date.now();
     try { await im.decode(); } catch (_) { return _scheduleSharpen(num, wrap, reqW, mt, gen, tries + 1); }
@@ -233,9 +238,11 @@ async function _scheduleSharpen(num, wrap, reqW, mt, gen, tries) {
   }, 1600 + tries * 1600);
 }
 async function _renderPageInto(num, wrap) {
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   if (!pdfDoc) return;
   if (wrap.dataset.loaded === '1') return;
   const page = await pdfDoc.getPage(num);
+  if (_NATIVE_LOCAL_PDF || window.RC?.readerNavigation?.nativeViewport) return;
   const viewport = page.getViewport({scale});
   if (_imgMode) { await _renderPageImg(num, wrap, viewport); return; }   // 图片模式:渲染服务端页图,不用 canvas/PDF.js
   // 清空 wrap（placeholder 内容或上次的渲染），不动 wrap 本身的 className/dataset

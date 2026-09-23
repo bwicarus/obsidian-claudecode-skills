@@ -453,6 +453,48 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         ]
     }
 
+    /// Text/source requests do not need a visible PDFPage, a raster image or a
+    /// web text layer. Load the same authoritative sidecar used by selection.
+    func sourceCharacters(page: Int) async throws -> [String: Any] {
+        guard let access, page > 0, page <= (view.document?.pageCount ?? 0) else {
+            throw NativeBookOCRError.pageUnavailable
+        }
+        let ticket = generation, expectedDigest = digest
+        let value = try await NativeBookOCRManager.shared.readerPageCharacters(
+            book: access, expectedContentSHA256: expectedDigest, page: page)
+        guard generation == ticket, self.access === access, !Task.isCancelled else {
+            throw ReaderBookUserStateWebAdapterError.contextChanged
+        }
+        guard let value, value.contentSHA256.lowercased() == expectedDigest,
+              value.status == .ready || value.status == .readyEmpty else {
+            throw NativeBookOCRError.pageUnavailable
+        }
+        let raw = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any] ?? [:]
+        return ["ok": true, "page": page, "chars": raw["chars"] ?? [],
+                "pageWidth": value.pageWidth, "pageHeight": value.pageHeight,
+                "revision": value.engineRevision + ":" + value.geometryDigest,
+                "source": value.source?.rawValue ?? "embedded",
+                "characterGeometry": value.characterGeometry.rawValue]
+    }
+
+    func prepareBinding(page: Int, text: String) async throws -> [String: Any]? {
+        guard let access, page > 0, page <= (view.document?.pageCount ?? 0) else {
+            throw NativeBookOCRError.pageUnavailable
+        }
+        let ticket = generation, expectedDigest = digest
+        let value = try await NativeBookOCRManager.shared.readerPageCharacters(
+            book: access, expectedContentSHA256: expectedDigest, page: page)
+        guard generation == ticket, self.access === access, !Task.isCancelled else {
+            throw ReaderBookUserStateWebAdapterError.contextChanged
+        }
+        guard let value, value.contentSHA256.lowercased() == expectedDigest, value.status == .ready else {
+            throw NativeBookOCRError.pageUnavailable
+        }
+        characterPages[page] = value
+        selectionCores[page] = try ReaderNativePDFSelection(value)
+        return resolveBinding(page: page, text: text)
+    }
+
     private var characterPages: [Int: NativeBookOCRPageCharacters] = [:]
     private var selectionCores: [Int: ReaderNativePDFSelection] = [:]
     private var characterReads: [Int: Task<Void, Never>] = [:]
@@ -534,6 +576,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     }
 
     deinit {
+        lookupPulse?.invalidate()
+        settleTask?.cancel()
         observations.forEach(NotificationCenter.default.removeObserver)
         selectionTask?.cancel()
         characterReads.values.forEach { $0.cancel() }
@@ -558,6 +602,10 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
 
     func close() {
         generation = UUID()
+        lookupPulse?.invalidate(); lookupPulse = nil
+        pendingLookups = []
+        settleTask?.cancel(); settleTask = nil
+        lastLookupAnchor = nil; lastLookupPage = 0; lastLookupRects = []
         selectionTask?.cancel(); selectionTask = nil
         scrollObservation = nil; offsetObservation = nil; observedScroll = nil
         view.document = nil
@@ -589,8 +637,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         guard Set(selected.map(\.name)) == required, selected.count == required.count else {
             throw ReaderBookUserStateWebAdapterError.invalidResponse
         }
-        var nextInk: [Int: [ReaderNativeCardStroke]] = [:]
-        var nextHighlights: [Int: [Highlight]] = [:]
+        var changed = false
         for domain in selected {
             _ = try ReaderBookUserStatePackageCodec.validateDomainPayload(domain, localExport: true)
             if let previous = domainHeaders[domain.name] {
@@ -599,6 +646,17 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                     throw ReaderBookUserStateWebAdapterError.contextChanged
                 }
             }
+            if domainHeaders[domain.name]?.digest != domain.digest { changed = true }
+        }
+        // A position/selection event may arrive with the same data. Validate
+        // the envelope, then avoid reparsing and invalidating every PDF overlay.
+        if !changed {
+            for domain in selected { domainHeaders[domain.name] = (domain.revision, domain.digest) }
+            return
+        }
+        var nextInk: [Int: [ReaderNativeCardStroke]] = [:]
+        var nextHighlights: [Int: [Highlight]] = [:]
+        for domain in selected {
             let data = try JSONSerialization.jsonObject(with: Data(domain.payloadJson.utf8)) as? [String: Any] ?? [:]
             if domain.name == .highlights {
                 for value in data["pdf"] as? [[String: Any]] ?? [] {
@@ -687,6 +745,10 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             guard domain.revision >= previous.revision,
                   domain.revision != previous.revision || domain.digest == previous.digest else {
                 throw ReaderBookUserStateWebAdapterError.contextChanged
+            }
+            if domain.digest == previous.digest {
+                domainHeaders[.notes] = (domain.revision, domain.digest)
+                return
             }
         }
         guard let records = try JSONSerialization.jsonObject(with: Data(domain.payloadJson.utf8)) as? [[String: Any]] else {

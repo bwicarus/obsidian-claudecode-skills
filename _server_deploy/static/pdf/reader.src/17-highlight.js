@@ -229,7 +229,7 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
     }
     _allHighlights.push(d.highlight);
     (_hlByPage[pageNum] ||= []).push(d.highlight);
-    renderHighlightsOnPage(pw, pageNum);
+    if (!pw.__nativeSource) renderHighlightsOnPage(pw, pageNum);
     _lastHlColor = color;
     localStorage.setItem('pdf-hl-last-color', color);
     return d.highlight;
@@ -243,7 +243,7 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
       _hlByPage[pageNum] = (_hlByPage[pageNum] || []).filter((item) => item && item.id !== cid);
       _allHighlights.push(h);
       (_hlByPage[pageNum] ||= []).push(h);
-      renderHighlightsOnPage(pw, pageNum);
+      if (!pw.__nativeSource) renderHighlightsOnPage(pw, pageNum);
       _lastHlColor = color;
       try { localStorage.setItem('pdf-hl-last-color', color); } catch (_) {}
       RC.outbox.send('hl', cid, '/pdf/api/highlights', Object.assign({ id: cid }, payload));
@@ -545,6 +545,18 @@ function _pdfExactTextRange(chars, sourceText) {
 async function _pdfExactTextPage(targetPage) {
   const page = Number(targetPage);
   if (!Number.isInteger(page) || page < 1 || !pdfDoc || page > pdfDoc.numPages) throw new Error('BW_READER_HIGHLIGHT_PAGE_INVALID');
+  if (_NATIVE_LOCAL_PDF) {
+    const sink = window.webkit?.messageHandlers?.bwNativeReaderGeometry;
+    if (!sink?.postMessage) throw new Error('BW_NATIVE_GEOMETRY_UNAVAILABLE');
+    const value = await sink.postMessage({ action: 'characters', page });
+    if (!value?.ok || !Array.isArray(value.chars)) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
+    // Data object, deliberately not a DOM element. No page image/canvas or
+    // text-layer layout is needed to validate a quote or mint a range snapshot.
+    return { __nativeSource: true, dataset: { pageNum: String(page) },
+      __charBoxes: _mapCharBoxes(value.chars, 1, value.source, value.revision, value.characterGeometry),
+      __pageWPt: value.pageWidth, __pageHPt: value.pageHeight,
+      __pageTextRevision: value.revision };
+  }
   const readyPage = () => {
     const pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
     return pw && pw.dataset.loaded === '1' && Array.isArray(pw.__charBoxes) && pw.__charBoxes.length
@@ -557,20 +569,7 @@ async function _pdfExactTextPage(targetPage) {
   if (current) return current;
   let navigationError = null;
   try {
-    // ⚠ 原生正文接管时 goToPage 会被 renderPage 直接转给原生并 return，
-    //   网页这一页**永远不会渲**，于是下面轮询 9.6 秒后必然抛
-    //   BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE（AI 精确划线因此是坏的）。
-    //   这种情况下绕开导航，直接把这一页渲进隐藏的 DOM —— 只渲这一页，
-    //   不恢复批量渲染。
-    if (window.RC?.readerNavigation?.nativeViewport) {
-      const ph = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
-      if (!ph) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
-      if (ph.dataset.loaded !== '1') {
-        Promise.resolve(_renderPageInto(page, ph)).catch((error) => { navigationError = error; });
-      }
-    } else {
-      Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
-    }
+    Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
   } catch (error) {
     navigationError = error;
   }
@@ -586,6 +585,9 @@ async function _pdfExactTextPage(targetPage) {
 }
 
 async function _pdfWaitForHighlightVisible(pw, page, id) {
+  // Native overlays are refreshed by the successful storage mutation event.
+  // Waiting for a hidden .hl-saved node would reintroduce a web renderer.
+  if (pw.__nativeSource) return;
   for (let tries = 0; tries < 40; tries++) {
     renderHighlightsOnPage(pw, page);
     const rendered = Array.from(pw.querySelectorAll('.hl-saved')).find((node) =>
@@ -707,9 +709,11 @@ async function _nativeExactHighlight(request, colorValue) {
   try {
     located = await sink.postMessage({ action: 'binding', page, text: String(request.text || '') });
   } catch (_) {
+    if (_NATIVE_LOCAL_PDF) throw new Error('BW_NATIVE_GEOMETRY_UNAVAILABLE');
     return null;   // 通道不在（桌面/扩展表面）→ 退回网页路径
   }
   if (!located || located.ok !== true || !Array.isArray(located.rects) || !located.rects.length) {
+    if (_NATIVE_LOCAL_PDF) throw new Error('BW_READER_HIGHLIGHT_TEXT_NOT_FOUND');
     return null;   // 原生说不可用或没命中 → 退回网页路径，别在这里下结论
   }
   const saved = await runtime.savePDFHighlight({

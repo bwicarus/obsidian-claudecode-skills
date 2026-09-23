@@ -389,6 +389,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 本机数据库。⚠ 懒开：没开启新存储的用户不该因为装了这个版本就多出一个
     /// SQLite 文件 —— 第一次真有请求进来才建。
     private lazy var nativeDataStoreHost = ReaderNativeDataStoreHost()
+    private var nativeReadingStoreBookID: String?
+
+    private func readingDomains(localBookID: String) async throws -> [ReaderBookUserStateDomainPayload] {
+        if nativeReadingStoreBookID == localBookID {
+            let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+            return try ReaderNativeBookProjection(store: store).exportReadingDomains(bookID: localBookID)
+        }
+        guard let adapter = bookUserStateWebAdapter else { throw ReaderBookUserStateWebAdapterError.unavailable }
+        return try await adapter.exportPackage(localBookId: localBookID)
+    }
     private var nativePDFMountTask: Task<Void, Never>?
     var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
@@ -1292,13 +1302,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     func prepareNativePDFDocument() async throws -> ReaderNativePDFDocument {
         guard !isLoading, let access = currentLocalBookAccess, access.record.format == .pdf,
               isFinishedLocalBookURL(webView.url, bookID: access.record.id),
-              let bridge = nativePDFNavigationBridge, let adapter = bookUserStateWebAdapter else {
+              let bridge = nativePDFNavigationBridge, bookUserStateWebAdapter != nil else {
             throw ReaderBookUserStateWebAdapterError.contextChanged
         }
         let generation = bookUserStateContextGeneration
         let digest = try await currentLocalContentDigest(localBookId: access.record.id, generation: generation)
         let position = try await bridge.initialPosition()
-        let domains = try await adapter.exportPackage(localBookId: access.record.id)
+        let domains = try await readingDomains(localBookID: access.record.id)
         guard generation == bookUserStateContextGeneration, currentLocalBookAccess === access,
               let page = (position["page"] as? NSNumber)?.intValue,
               let notes = domains.first(where: { $0.name == .notes }) else {
@@ -1770,11 +1780,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         guard let document = nativePDFDocument, !isLoading,
               let access = currentLocalBookAccess, access.record.format == .pdf,
               let digest = currentLocalBookContentSHA256,
-              let adapter = bookUserStateWebAdapter,
+              bookUserStateWebAdapter != nil,
               document.matches(bookID: access.record.id, contentSHA256: digest) else { return }
         let generation = bookUserStateContextGeneration
         do {
-            let domains = try await adapter.exportPackage(localBookId: access.record.id)
+            let domains = try await readingDomains(localBookID: access.record.id)
             guard generation == bookUserStateContextGeneration,
                   self.nativePDFDocument === document,
                   document.matches(bookID: access.record.id, contentSHA256: digest),
@@ -2978,6 +2988,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func resetBookUserStateContext(baseURL: URL) {
+        nativeReadingStoreBookID = nil
         bookUserStateImportTask?.cancel()
         bookUserStateImportTask = nil
         localPDFContentIdentityTask?.cancel()
@@ -5842,6 +5853,21 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 replyHandler(nil, "数据库请求来源无效")
                 return
             }
+            if body["action"] as? String == "readingStoreReady" {
+                guard let bookID = body["bookID"] as? String, bookID == currentLocalBook?.id else {
+                    replyHandler(nil, "数据库所属书籍已切换")
+                    return
+                }
+                do {
+                    let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+                    guard try store.meta("legacyImport") == "done" else {
+                        throw ReaderBookUserStateWebAdapterError.unavailable
+                    }
+                    nativeReadingStoreBookID = bookID
+                    replyHandler(["ok": true], nil)
+                } catch { replyHandler(nil, error.localizedDescription) }
+                return
+            }
             // ⚠ 安全阀：搬家失败时网页那侧会请求把开关关回去。不让它
             //   关的话，下次启动还会撞同一堵墙（“App 再也打不开了”），而设置里
             //   还写着“已开启”—— 一个迁移 bug 不该有这种后果。
@@ -5871,27 +5897,45 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 isTrustedReaderURL(webView.url),
                 isTrustedReaderURL(message.frameInfo.request.url),
                 let body = message.body as? [String: Any],
-                Set(body.keys) == ["action", "page", "text"],
-                body["action"] as? String == "binding",
-                let page = (body["page"] as? NSNumber)?.intValue, page > 0,
-                let text = body["text"] as? String, !text.isEmpty, text.count <= 16000
+                Set(body.keys).isSubset(of: ["action", "page", "text"]),
+                let action = body["action"] as? String, ["binding", "characters"].contains(action),
+                let number = body["page"] as? NSNumber,
+                CFGetTypeID(number) != CFBooleanGetTypeID(),
+                number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                number.doubleValue > 0, number.doubleValue < 10_000_000,
+                action == "characters" || ((body["text"] as? String).map { !$0.isEmpty && $0.count <= 16000 } ?? false)
             else {
                 replyHandler(nil, "原生定位请求无效")
                 return
             }
             guard let document = nativePDFDocument else {
-                // ⚠ 没挂原生正文时要**明确说不可用**，让调用方退回网页那条老路；
-                //   回成"定位失败"会让它以为这段文字不在书里。
+                // Unavailable is distinct from a text miss; neither authorizes
+                // recreating a hidden webpage renderer.
                 replyHandler(["ok": false, "code": "BW_NATIVE_GEOMETRY_UNAVAILABLE"], nil)
                 return
             }
-            guard let value = document.resolveBinding(page: page, text: text) else {
-                replyHandler(["ok": false, "code": "BW_NATIVE_GEOMETRY_MISS"], nil)
-                return
+            Task { @MainActor [weak self, weak document] in
+                do {
+                    guard let self, let document, self.nativePDFDocument === document else {
+                        throw ReaderBookUserStateWebAdapterError.contextChanged
+                    }
+                    let value: [String: Any]?
+                    if action == "characters" {
+                        value = try await document.sourceCharacters(page: number.intValue)
+                    } else {
+                        value = try await document.prepareBinding(page: number.intValue, text: body["text"] as? String ?? "")
+                    }
+                    guard self.nativePDFDocument === document else {
+                        throw ReaderBookUserStateWebAdapterError.contextChanged
+                    }
+                    guard var payload = value else {
+                        replyHandler(["ok": false, "code": "BW_NATIVE_GEOMETRY_MISS"], nil)
+                        return
+                    }
+                    payload["ok"] = true
+                    replyHandler(payload, nil)
+                } catch { replyHandler(nil, error.localizedDescription) }
             }
-            var payload = value
-            payload["ok"] = true
-            replyHandler(payload, nil)
             return
         }
         guard message.name == nativeLocalNotesMessageName else {

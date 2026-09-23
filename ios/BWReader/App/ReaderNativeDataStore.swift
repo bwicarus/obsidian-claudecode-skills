@@ -141,6 +141,13 @@ final class ReaderNativeDataStore {
                     bind: [.text(collection), .int(Int64(max(0, limit))), .int(Int64(max(0, offset)))])
     }
 
+    /// Read one document's split records without decoding every other book.
+    /// substr uses a bound literal prefix, so '%' and '_' are not wildcards.
+    func records(collection: String, idPrefix: String) throws -> [Record] {
+        try records(matching: "collection = ? AND substr(id, 1, length(?)) = ? ORDER BY id",
+                    bind: [.text(collection), .text(idPrefix), .text(idPrefix)])
+    }
+
     func recordCount(collection: String) throws -> Int {
         var result = 0
         try query("SELECT COUNT(*) FROM records WHERE collection = ?", bind: [.text(collection)]) { statement in
