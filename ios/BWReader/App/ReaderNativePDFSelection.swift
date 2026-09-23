@@ -1,9 +1,8 @@
 import Foundation
-import JavaScriptCore
 import CoreGraphics
 
-/// Original block, table-cell, reading-order and word-boundary rules, evaluated
-/// locally as data. No WebView, HTML renderer, host bridge or remote script.
+/// Native text geometry. No per-page JavaScript VM, webpage raster or DOM
+/// participates in a native gesture.
 @MainActor
 final class ReaderNativePDFSelection {
     struct Value {
@@ -14,54 +13,31 @@ final class ReaderNativePDFSelection {
         let quality: String?
         let matches: Int
     }
-    private let context: JSContext
-    private let page: JSValue
-    private let count: Int
-    private let width: Double
-    private let height: Double
-    private static let source: String? = {
-        guard let root = Bundle.main.url(forResource: "ReaderBundle", withExtension: nil) else { return nil }
-        return try? String(contentsOf: root.appendingPathComponent("native/pdf-selection-core.js"), encoding: .utf8)
-    }()
+    private let geometry: ReaderNativePDFTextGeometry
 
     init(_ characters: NativeBookOCRPageCharacters) throws {
-        guard let context = JSContext(), let source = Self.source,
-              characters.pageWidth.isFinite, characters.pageHeight.isFinite,
-              characters.pageWidth > 0, characters.pageHeight > 0 else { throw NativeBookOCRError.pageUnavailable }
-        context.evaluateScript(source)
-        guard context.exception == nil else { throw NativeBookOCRError.pageUnavailable }
-        let input = try JSONSerialization.jsonObject(with: JSONEncoder().encode(characters))
-        guard let constructor = context.objectForKeyedSubscript("BWNativePDFSelection"),
-              let page = constructor.call(withArguments: [input]), context.exception == nil,
-              !page.isUndefined, !page.isNull else { throw NativeBookOCRError.pageUnavailable }
-        self.context = context; self.page = page
-        count = characters.chars.count; width = characters.pageWidth; height = characters.pageHeight
+        guard let page = try JSONSerialization.jsonObject(with: JSONEncoder().encode(characters)) as? [String: Any] else {
+            throw NativeBookOCRError.pageUnavailable
+        }
+        geometry = try ReaderNativePDFTextGeometry(page: page)
     }
 
     func hit(_ point: CGPoint, anchor: Int? = nil, exactOnly: Bool = true) -> Int? {
-        context.exception = nil
-        let raw = page.invokeMethod("hit", withArguments: [Double(point.x) * width, Double(point.y) * height,
-                                                          anchor ?? -1, exactOnly])
-        guard context.exception == nil, let index = raw?.toNumber()?.intValue, index >= 0, index < count else { return nil }
-        return index
+        geometry.hit(x: Double(point.x) * geometry.width, y: Double(point.y) * geometry.height,
+                     anchor: anchor, exactOnly: exactOnly)
     }
 
-    func range(from start: Int, to end: Int) throws -> Value? { try invoke("range", arguments: [start, end]) }
-    func exact(_ indexes: [Int]) throws -> Value? { try invoke("exact", arguments: [indexes]) }
-    func sentence(_ indexes: [Int]) throws -> Value? { try invoke("sentence", arguments: [indexes]) }
-    func binding(_ value: [String: Any]) throws -> Value? { try invoke("binding", arguments: [value]) }
+    func range(from start: Int, to end: Int) throws -> Value? { value(try geometry.range(from: start, to: end)) }
+    func exact(_ indexes: [Int]) throws -> Value? { value(try geometry.exact(indexes)) }
+    func sentence(_ indexes: [Int]) throws -> Value? { value(try geometry.sentence(indexes)) }
+    func binding(_ input: [String: Any]) throws -> Value? { value(try geometry.binding(input)) }
 
-    private func invoke(_ method: String, arguments: [Any]) throws -> Value? {
-        context.exception = nil
-        let result = page.invokeMethod(method, withArguments: arguments)
-        guard context.exception == nil, let result, !result.isUndefined else { throw NativeBookOCRError.pageUnavailable }
-        if result.isNull { return nil }
-        guard let value = result.toDictionary(), let indexes = value["indexes"] as? [Int],
-              indexes.allSatisfy({ $0 >= 0 && $0 < count }), let text = value["text"] as? String,
-              let sentence = value["sentence"] as? String, let rects = value["rects"] as? [[Double]],
-              rects.allSatisfy({ $0.count == 4 && $0.allSatisfy(\.isFinite) }) else { throw NativeBookOCRError.pageUnavailable }
-        return Value(indexes: indexes, text: text, sentence: sentence, rects: rects.map {
-            CGRect(x: $0[0] / width, y: $0[1] / height, width: ($0[2]-$0[0]) / width, height: ($0[3]-$0[1]) / height)
-        }, quality: value["quality"] as? String, matches: (value["matches"] as? NSNumber)?.intValue ?? 1)
+    private func value(_ result: ReaderNativePDFTextGeometry.Result?) -> Value? {
+        guard let result else { return nil }
+        return Value(indexes: result.indexes, text: result.text, sentence: result.sentence,
+                     rects: result.rects.map {
+                         CGRect(x: $0.minX / geometry.width, y: $0.minY / geometry.height,
+                                width: $0.width / geometry.width, height: $0.height / geometry.height)
+                     }, quality: result.quality, matches: result.matches)
     }
 }
