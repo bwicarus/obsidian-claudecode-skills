@@ -4471,13 +4471,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"ok": False, "msg": clean(str(e) or type(e).__name__)})
 
 
+class ExclusiveHTTPServer(ThreadingHTTPServer):
+    """独占端口的 HTTP 服务。
+
+    ⚠ http.server 默认 allow_reuse_address = True，而 Windows 上 SO_REUSEADDR 的意思是
+      「允许别的进程同时绑同一个端口」—— 于是"先绑端口、绑不上就退出"这道单实例闸
+      形同虚设。2026-09-23 实录：ReaderPC 在同一秒拉起两个运行器，两个都绑上了；
+      一个续接了原对话线程，另一个撞上"线程已被占用"就**新开了一条空线程**，
+      用户的通话落在空线程上 —— 他刚打字发过去的内容，后台说"没看到"。
+    """
+    if sys.platform == "win32":
+        allow_reuse_address = False
+
+    def server_bind(self):
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def main():
     BASE.mkdir(parents=True, exist_ok=True)
     loop = asyncio.new_event_loop()
     runner = Runner(loop)
     Handler.runner = runner
     try:
-        httpd = ThreadingHTTPServer(LISTEN, Handler)
+        httpd = ExclusiveHTTPServer(LISTEN, Handler)
     except OSError as e:
         print(json.dumps({"kind": "bind_failed", "message": str(e)}), flush=True)
         return 2

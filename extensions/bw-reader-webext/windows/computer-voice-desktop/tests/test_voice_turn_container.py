@@ -123,6 +123,22 @@ class TranscriptSeedTest(unittest.TestCase):
         self.assertEqual(s.delta("user", "在如何", "rt3")["text"], "现在如何")
 
 
+class SingleRunnerTest(unittest.TestCase):
+    """同一个端口只能有一个运行器（2026-09-23：两个运行器同时绑上，对话分叉到空线程）。"""
+
+    def test_second_bind_on_same_port_fails(self):
+        import sys as _sys
+        first = vcr.ExclusiveHTTPServer(("127.0.0.1", 0), vcr.BaseHTTPRequestHandler)
+        try:
+            port = first.server_address[1]
+            if _sys.platform != "win32":
+                self.skipTest("独占绑定只在 Windows 上需要单独处理")
+            with self.assertRaises(OSError):
+                vcr.ExclusiveHTTPServer(("127.0.0.1", port), vcr.BaseHTTPRequestHandler).server_close()
+        finally:
+            first.server_close()
+
+
 class StreamOwnerTest(unittest.TestCase):
     """改投是单向的：v- → 后台轮可以，后台轮 → v- 绝对不行。"""
 
