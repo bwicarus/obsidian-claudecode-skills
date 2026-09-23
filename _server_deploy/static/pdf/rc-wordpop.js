@@ -1254,6 +1254,20 @@
     } catch (e0) {}
     return out;
   }
+  // 这个词绑着哪些卡（小框顶部的卡段 + 原生词典的卡段共用这一处查询）。
+  function _queryWordCards(word, key, wordKeys) {
+    var native = !!(window.BWReaderRuntime && window.BWReaderRuntime.nativeLocalRuntime);
+    // @interaction wordcard.index.sync
+    var query = native
+      ? fetch('/pdf/api/word-card-index?lemma=' + encodeURIComponent(_nwKey(key)) +
+          '&word=' + encodeURIComponent(_nwKey(word)))
+        .then(function (r) { return r.ok ? r.json() : null; }, function () { return null; })
+      : Promise.resolve(null);
+    return query.then(function (d) {
+      var cards = (d && d.ok === true && Array.isArray(d.cards)) ? d.cards : null;
+      return cards === null ? _localBoundCards(wordKeys) : cards;
+    });
+  }
   function _attachWordCards(pop, word, lemma, rect) {
     try {
       var key = String(lemma || word || '').trim().toLowerCase();
@@ -1263,17 +1277,8 @@
       wordKeys[_nwKey(word)] = true;
       if (_wordPopState) _wordPopState.cardsRect = rect || null;
       var seq = ++_wordCardsSeq;
-      var native = !!(window.BWReaderRuntime && window.BWReaderRuntime.nativeLocalRuntime);
-      // @interaction wordcard.index.sync
-      var query = native
-        ? fetch('/pdf/api/word-card-index?lemma=' + encodeURIComponent(_nwKey(key)) +
-            '&word=' + encodeURIComponent(_nwKey(word)))
-          .then(function (r) { return r.ok ? r.json() : null; }, function () { return null; })
-        : Promise.resolve(null);
-      query.then(function (d) {
+      _queryWordCards(word, key, wordKeys).then(function (cards) {
         if (seq !== _wordCardsSeq) return;   // 期间又查了一次 → 只认最新
-        var cards = (d && d.ok === true && Array.isArray(d.cards)) ? d.cards : null;
-        if (cards === null) cards = _localBoundCards(wordKeys);
         // 竞态守卫：回来时框已切到别的词 → 丢弃。
         if (!_wordPopState || _wordPopState.word !== word) return;
         var old = pop.querySelector('.wp-cards');
@@ -2034,5 +2039,95 @@
     else dictStream(word, opts.ctx || '');
   }
 
-  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls, prewarm: prewarm, clearCache: clearDictCache, injectCss: injectCss, jpInflectHtml: _jpInflectHtml, jpExamples: _jpExamples, lookupData: lookupData, peekCache: peekCache, meaningText: _jpMeaningText };   // injectCss 供 rc-phrasepop 复用同一套小框样式(用户 2026-09-03:所有查词框统一成单词框的版式)   // clearHls:清查词高亮;prewarm(words):翻页后台预热释义;clearCache:切书/失效释放
+  // ─────────────────────────── 原生词典（App 原生小框）的数据入口 ───────────────────────────
+  // 2026-09-24 用户："现在的词典内容也和之前不一样，少了很多元素 …… 应该在旧的基础上改动，
+  // 进行一定美化而不是现在这样的阉割"。原生小框此前自己挑了几样字段，于是音调线、变形/源词、
+  // 母语例句的中文、汉字音训、词锚卡、AI 深度解释、加入 Anki 全没了。
+  // 这里把**这个小框和完整字典框用到的每一样**按同一套判据算好交出去（同一个 lookupData、
+  // 同一个 _jpMeaningText / _jpExamples / 变形行 / 掌握态），原生那侧只管排版。
+  function _plain(html) {
+    if (!html) return '';
+    var box = document.createElement('div');
+    box.innerHTML = String(html);
+    return String(box.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+  }
+  function _strings(list, max) {
+    return (Array.isArray(list) ? list : []).map(function (x) { return String(x || '').trim(); })
+      .filter(Boolean).slice(0, max || 12);
+  }
+  async function nativeEntry(word, ctx, opts) {
+    word = String(word || '').trim();
+    var d = await lookupData(word, ctx, opts);
+    var jp = _isJaWord(word) || !!(d && d.jp);
+    var missing = !d || d.ok !== true;
+    if (missing && !jp) return null;   // 英语 ecdict 没有 → 调用方走完整三源
+    d = d || {};
+    var meta = { jp: jp, lemma: d.lemma || word, word: word, forms: Array.isArray(d.forms) ? d.forms : [] };
+    var mastered = _repoMastery(d.lemma || d.word || word, meta);
+    if (mastered == null) {
+      try {
+        var k = String(d.lemma || d.word || '').toLowerCase();
+        if (window.__vocabOverride && window.__vocabOverride.has(k)) mastered = window.__vocabOverride.get(k);
+        else if (window.__masteredLocal) mastered = window.__masteredLocal.has(k);
+      } catch (_) {}
+    }
+    var meaning = jp ? _jpMeaningText(d) : String(d.translation || '');
+    var source = '';
+    if (d.meaning_source === 'pc-codex-cli') source = '电脑 ReaderPC · Codex CLI 上下文中文释义' + (d.cli_cached ? ' · 本地缓存' : '');
+    else if (d.source === 'local-jmdict') source = 'App 本地 JMdict' + (d.local_zh ? ' · 中文 Wiktionary 释义' : ' · 暂无本地中文释义');
+    return {
+      jp: jp, missing: missing,
+      word: word, lemma: String(d.lemma || ''),
+      reading: String(d.reading || ''), accent: (jp && d.accent != null && isFinite(d.accent)) ? Number(d.accent) : null,
+      phonetic: String(d.phonetic || ''), freq: Number(d.freq_bnc) || 0,
+      // 日语小框与完整框都不出词性（用户划掉过）；英语保留。
+      pos: jp ? '' : String(d.pos || ''),
+      meaning: meaning,
+      definition: jp ? '' : String(d.definition || '').slice(0, 4000),
+      inflect: _plain(jp ? _jpInflectHtml(d.inflect, word, d.lemma) : _enFormsHtml(d.lemma || word, d.forms, word)),
+      origin: _plain(_jpSourceHtml(d)),
+      source: source,
+      examples: jp ? _jpExamples(d).slice(0, 8).map(function (e) {
+        return { ja: String(e.ja || ''), zh: String(e.zh || '') };   // 中文缺了就空着，绝不拿英文冒充
+      }) : [],
+      kanji: (Array.isArray(d.kanji) ? d.kanji : []).slice(0, 12).map(function (k) {
+        return { kanji: String(k && k.kanji || ''), on: _strings(k && k.on, 8), kun: _strings(k && k.kun, 8),
+                 meaning: String(k && k.meanings_zh || '') };
+      }).filter(function (k) { return k.kanji; }),
+      mastered: !!mastered
+    };
+  }
+  // 原生小框里那几个按需动作：母语例句补中文 / AI 深度解释 / 加入 Anki / 词锚卡。
+  async function nativeAction(kind, text, ctx) {
+    text = String(text || '').trim();
+    if (kind === 'example-zh') {
+      return { zh: await _requestJapaneseExampleZh(text, function () { return true; }) };
+    }
+    if (kind === 'jp-ai') {
+      var res = await _aiStream('/pdf/api/dict-jp-ai?word=' + encodeURIComponent(text) + '&context=' + encodeURIComponent(ctx || ''), { method: 'GET' });
+      if (!res || !res.ok) throw new Error('AI 深度解释失败' + (res && res.error ? '：' + String(res.error).slice(0, 80) : ''));
+      return { body: String(res.text || '').slice(0, 20000) };
+    }
+    if (kind === 'vocab-anki') {
+      var a = await RC.reqJson('POST', '/pdf/api/vocab-anki', { word: text });
+      if (!a || !a.ok) throw new Error((a && a.error) || '加入 Anki 失败');
+      return { action: a.action || 'created' };
+    }
+    if (kind === 'word-cards') {
+      var keys = {};
+      keys[_nwKey(text)] = true;
+      if (ctx) keys[_nwKey(ctx)] = true;
+      var cards = await _queryWordCards(ctx || text, text, keys);
+      return { cards: (cards || []).filter(function (c) { return c && c.content; }).slice(0, 12).map(function (c) {
+        var box = document.createElement('div');
+        box.innerHTML = String(c.content || '');
+        try { Array.prototype.forEach.call(box.querySelectorAll('.rc-note-dict,.rc-note-dict-note,script,style'), function (n) { n.remove(); }); } catch (_) {}
+        return { cid: String(c.cid || ''), label: String(c.label || '卡片'),
+                 text: String(box.innerText || box.textContent || '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 1200) };
+      }) };
+    }
+    throw new Error('BW_READER_LOOKUP_ACTION');
+  }
+
+  RC.wordpop = { nativeEntry: nativeEntry, nativeAction: nativeAction, show: show, openFull: openFull, clearHls: _removeAllWordHls, prewarm: prewarm, clearCache: clearDictCache, injectCss: injectCss, jpInflectHtml: _jpInflectHtml, jpExamples: _jpExamples, lookupData: lookupData, peekCache: peekCache, meaningText: _jpMeaningText };   // injectCss 供 rc-phrasepop 复用同一套小框样式(用户 2026-09-03:所有查词框统一成单词框的版式)   // clearHls:清查词高亮;prewarm(words):翻页后台预热释义;clearCache:切书/失效释放
 })();

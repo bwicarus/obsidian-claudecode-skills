@@ -1080,6 +1080,12 @@ window.__bwReaderLookupData = async function (request) {
   //   （2026-09-23 用户截图：点词查词直接报错）。
   const phrase = request.mode === 'phrase';
   const isJa = _isJaWord(text);
+  // 原生小框的按需动作（母语例句补中文 / AI 深度解释 / 加入 Anki / 词锚卡）：
+  // 判据与端点都在共享层 RC.wordpop.nativeAction 一处，这里只转交。
+  if (['example-zh', 'jp-ai', 'vocab-anki', 'word-cards'].includes(request.mode)) {
+    if (!(window.RC && RC.wordpop && typeof RC.wordpop.nativeAction === 'function')) throw new Error('BW_READER_LOOKUP_ACTION');
+    return Object.assign({mode: request.mode}, await RC.wordpop.nativeAction(request.mode, text, context));
+  }
   if (request.mode === 'translate' || (phrase && !isJa)) {
     const r = await (await fetch('/pdf/api/translate-sentence', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1131,6 +1137,17 @@ window.__bwReaderLookupData = async function (request) {
             examples: (full.examples || []).slice(0, 6),
             synonyms: (full.synonyms || []).slice(0, 8),
             antonyms: (full.antonyms || []).slice(0, 8)};
+  }
+  // 单词 / 日语词组：与网页小框**同一个数据入口**（RC.wordpop.nativeEntry → lookupData：
+  // App 本地 JMdict 优先、缺中文接回远端、再缺请 ReaderPC 按句境补），字段是小框 +
+  // 完整字典框用到的全部（音调、变形/源词、母语例句、汉字音训、掌握态）。
+  // 2026-09-24 用户："词典内容也和之前不一样，少了很多元素"—— 以前这里自己挑字段。
+  if (window.RC && RC.wordpop && typeof RC.wordpop.nativeEntry === 'function') {
+    const entry = await RC.wordpop.nativeEntry(text, context,
+      {file: FILE_REL || '', page, langs: BOOK_LANGS || []});
+    if (entry) return Object.assign({mode: phrase ? 'phrase' : 'dict', zh: entry.meaning,
+                                     translation: entry.meaning}, entry,
+                                    phrase ? _phraseStateOf(text) : {});
   }
   // 「词组」= 把选中当成一个词：日语走中日词典（读音/音调/汉字拆解都有），
   // 其它语言走整句翻译。**两条都是现成分支**，这里只是把路由改一下并带上

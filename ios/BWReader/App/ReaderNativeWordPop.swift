@@ -29,22 +29,18 @@ struct ReaderNativeWordPop: View {
     @ObservedObject var model: ReaderNativeLookupModel
     let onClose: () -> Void
 
-    private static let surface = Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255)
-    private static let accent = Color(red: 10 / 255, green: 132 / 255, blue: 1)
-
     var body: some View {
+        // 内边距由正文各段自己给（原版各段 padding 14，底部按钮条黑底通栏），这里只管外框。
         ScrollView {
             ReaderNativeLookupContent(model: model)
-                .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 12)
-                .padding(.trailing, 18)   // 给右上角 × 让位
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollBounceBehavior(.basedOnSize)
         .frame(width: 340)
-        .frame(maxHeight: 400)
-        .dynamicTypeSize(.small)
-        .background(Self.surface.opacity(0.97), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Self.accent.opacity(0.45), lineWidth: 1))
+        .frame(maxHeight: 540)   // 原版 max-height:80vh：例句 / 汉字 / AI 解释都在框里，别截得太矮
+        .background(WordPopStyle.surface.opacity(0.98))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(WordPopStyle.accentBorder, lineWidth: 1))
         .overlay(alignment: .topTrailing) {
             Button(action: onClose) {
                 Image(systemName: "xmark")

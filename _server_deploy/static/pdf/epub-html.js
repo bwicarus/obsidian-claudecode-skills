@@ -5976,6 +5976,11 @@
     var text = String(request.text || '').trim();
     if (!text || text.length > 2000) throw new Error('BW_READER_LOOKUP_TEXT');
     var context = String(request.context || '').slice(0, 320);
+    // 原生小框的按需动作：与 PDF 那侧同一处（RC.wordpop.nativeAction）。
+    if (['example-zh', 'jp-ai', 'vocab-anki', 'word-cards'].indexOf(request.mode) >= 0) {
+      if (!(window.RC && RC.wordpop && typeof RC.wordpop.nativeAction === 'function')) throw new Error('BW_READER_LOOKUP_ACTION');
+      return Object.assign({mode: request.mode}, await RC.wordpop.nativeAction(request.mode, text, context));
+    }
     if (request.mode === 'translate') {
       var t = await (await fetch('/pdf/api/translate-sentence', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -5994,6 +5999,12 @@
       })).json();
       if (!e || e.ok !== true) throw new Error('BW_READER_EXPLAIN_FAILED');
       return {mode: 'explain', text: subject, body: String(e.text || e.answer || '').slice(0, 20000)};
+    }
+    // 与网页小框同一个数据入口、同一组字段（音调/变形/例句/汉字音训/掌握态…）。
+    if (window.RC && RC.wordpop && typeof RC.wordpop.nativeEntry === 'function') {
+      var entry = await RC.wordpop.nativeEntry(text, context, { file: FREL, page: 0, langs: bookLangsArr() });
+      if (entry) return Object.assign({mode: request.mode === 'phrase' ? 'phrase' : 'dict',
+                                       zh: entry.meaning, translation: entry.meaning}, entry);
     }
     if (!(window.RC && RC.wordpop && RC.wordpop.lookupData)) throw new Error('BW_READER_LOOKUP_MISS');
     var d = await RC.wordpop.lookupData(text, context,

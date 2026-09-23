@@ -205,9 +205,35 @@ test("查词：phrase/isJa 在第一个用到它们的分支之前声明；面�
   assert.match(fn, /inflect: _lookupPlain\(_jpInflectHtml\(/);
   assert.match(fn, /inflect: _lookupPlain\(_enFormsHtml\(/);
   const VIEW = read("ios/BWReader/App/ReaderNativeLookupView.swift");
-  assert.match(VIEW, /Label\("语法", systemImage:/);
+  assert.match(VIEW, /barButton\("语法", icon:/);
   assert.match(VIEW, /model\.inflection/);
   assert.match(VIEW, /model\.partOfSpeech/);
+});
+
+test("原生词典不阉割：小框 + 完整字典框的每一样都在，且与网页同一个数据入口", () => {
+  // 2026-09-24 用户："词典内容也和之前不一样，少了很多元素 …… 应该在旧的基础上改动，
+  // 进行一定美化而不是现在这样的阉割"。
+  const SHARED = read("_server_deploy/static/pdf/rc-wordpop.js");
+  const entry = SHARED.slice(SHARED.indexOf("async function nativeEntry("), SHARED.indexOf("async function nativeAction("));
+  for (const use of ["lookupData(word, ctx, opts)", "_jpMeaningText(d)", "_jpExamples(d)", "_jpInflectHtml(", "_jpSourceHtml(d)", "_repoMastery("])
+    assert.ok(entry.includes(use), "同一套判据：" + use);
+  assert.doesNotMatch(entry, /e\.zh \|\| e\.en/, "例句中文缺了就空着补，绝不拿英文冒充");
+  const action = SHARED.slice(SHARED.indexOf("async function nativeAction("), SHARED.indexOf("RC.wordpop = {"));
+  for (const kind of ["example-zh", "jp-ai", "vocab-anki", "word-cards"]) assert.ok(action.includes(`'${kind}'`), kind);
+  assert.match(action, /_queryWordCards\(/, "词锚卡与小框同一处查询");
+  const SRC = read("_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js");
+  const EPUB = read("_server_deploy/static/pdf/epub-html.js");
+  for (const source of [SRC, EPUB]) {
+    assert.match(source, /RC\.wordpop\.nativeEntry\(text, context/);
+    assert.match(source, /RC\.wordpop\.nativeAction\(request\.mode, text, context\)/);
+  }
+  const VIEW = read("ios/BWReader/App/ReaderNativeLookupView.swift");
+  for (const piece of ["ReaderNativePitchView(reading: model.reading, accent: accent)", "model.origin", "boundCards",
+                       "kanjiSection", "readingRow(\"音\"", "readingRow(\"訓\"", "aiSection", "model.meaningSource",
+                       "model.exampleZh[index]", "model.addToAnki()", "点这里展开完整字典"])
+    assert.ok(VIEW.includes(piece), piece);
+  const SCRIPT = read("ios/BWReader/App/ReaderNativeConversationScript.swift");
+  assert.match(SCRIPT, /'example-zh', 'jp-ai', 'vocab-anki', 'word-cards'\]\.includes\(value\.mode\)/);
 });
 
 test("侧栏卡能长按拖起：会话列表的滚动检测不在手指落下时就认领触摸", () => {

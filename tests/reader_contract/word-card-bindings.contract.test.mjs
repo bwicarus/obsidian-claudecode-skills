@@ -82,10 +82,11 @@ test("词卡整理直接写回各书便签本体，撤销用单独的 prev 记�
 });
 
 test("单词框只信索引，并订阅绑定变化即时重取卡片段", () => {
-  const attach = bodyOf(WORDPOP, "_attachWordCards");
+  // 查询抽成 _queryWordCards 一处（小框卡段与 App 原生词典的卡段共用）。
+  const attach = bodyOf(WORDPOP, "_queryWordCards") + bodyOf(WORDPOP, "_attachWordCards");
   assert.match(attach, /\/pdf\/api\/word-card-index\?lemma=' \+ encodeURIComponent\(_nwKey\(key\)\) \+\n\s*'&word=' \+ encodeURIComponent\(_nwKey\(word\)\)/);
   // 索引路由不存在的宿主才退回本书便签扫描；在 App 内不得用本地扫描盖过索引
-  assert.match(attach, /if \(cards === null\) cards = _localBoundCards\(wordKeys\)/);
+  assert.match(attach, /return cards === null \? _localBoundCards\(wordKeys\) : cards;/);
   // 旧卡片段先摘掉再放新的（不再"已有就返回"，否则解绑后旧段留着）
   assert.match(attach, /var old = pop\.querySelector\('\.wp-cards'\);\n\s*if \(old\) old\.remove\(\);/);
   assert.doesNotMatch(attach, /excludeCids/, "本地知识覆盖索引的补丁已无必要");
