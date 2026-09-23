@@ -239,6 +239,7 @@ WINDOWS_SOURCE_FILES = (
     "computer-voice-desktop/tests/test_situation_triggers.py",
     "computer-voice-desktop/tests/test_voice_turn_container.py",
     "computer-voice-desktop/tests/test_voice_say_gate.py",
+    "computer-voice-desktop/tests/test_typed_to_backend.py",
     "computer-voice-desktop/tests/test_replication_activity.py",
     "computer-voice-desktop/tests/test_replication_apply.py",
     "computer-voice-desktop/tests/test_replication_book_links.py",

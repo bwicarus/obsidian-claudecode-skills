@@ -17,6 +17,7 @@ const BINDCARD = read("_server_deploy/static/pdf/reader.src/34-bindcard.js");
 const CARDS = read("ios/BWReader/App/ReaderNativePageCards.swift");
 const WEBVIEW = read("ios/BWReader/App/ReaderWebView.swift");
 const PDFDOC = read("ios/BWReader/App/ReaderNativePDFDocument.swift");
+const SCRIPT = read("ios/BWReader/App/ReaderNativeConversationScript.swift");
 
 const body = (source, from, to) => source.slice(source.indexOf(from), source.indexOf(to));
 
@@ -74,8 +75,8 @@ test("⑤ 锁定框画在**每一页自己的 overlay view** 里，跟着页面�
   // 子视图**，跟着页面一起滚，一帧都不用重算。
   assert.match(PDFDOC, /func cardMarkers\(page: Int\) -> \[CardMarker\]/);
   // 给归一化框，由 overlay 自己 project —— 给 view 坐标就又回到"每帧重算"。
-  assert.match(PDFDOC, /return value\.rects\.isEmpty \? nil : CardMarker\(id: id, rects: value\.rects\)/);
-  const overlay = PDFDOC.slice(PDFDOC.indexOf("var cardMarkers: [(id: String, rects: [CGRect])]"));
+  assert.match(PDFDOC, /return CardMarker\(id: id, rects: value\.rects,/);
+  const overlay = PDFDOC.slice(PDFDOC.indexOf("var cardMarkers: [ReaderNativePDFDocument.CardMarker]"));
   assert.match(overlay, /for marker in cardMarkers[\s\S]*project\?\(normalized\)/);
   // 点击也在这一层：命中的就是屏幕上看到的那个框。
   assert.match(overlay, /if let id = cardMarkerAt\(location\) \{ onOpenCard\?\(id\); return \}/);
@@ -85,4 +86,25 @@ test("⑤ 锁定框画在**每一页自己的 overlay view** 里，跟着页面�
     viewport.split(String.fromCharCode(10)).filter((l) => !/^\s*\/\//.test(l)).join(String.fromCharCode(10)),
     /cardMarkers|onOpenCard/,
   );
+});
+
+test("⑥ 原生正文下，页卡层一个网页标记都不画（那份按窗口坐标摆，必然拖影）", () => {
+  // 2026-09-23 用户截图：框"太细颜色太浅、滚动有残影"——那条细青线加序号正是
+  // 这层画的网页标记，它在原生正文模式下原来没有被挡住。
+  assert.match(CARDS, /reader\.nativePDFDocument == nil \? item\.markers : \[\]/);
+});
+
+test("⑦ 原生解锚一律用便签 id，不用界面上的 placement id", () => {
+  // placement id 是 'placement-' + hash(...)，跟便签 id 永远对不上：拿它比，
+  // 页内锁定框点了就是"还没加载好"，卡身也一直退回网页坐标。
+  assert.match(CARDS, /nativePageCardGeometry\(\s*id: item\.noteID/);
+  assert.match(CARDS, /nativePageMarkerRects\(\s*id: item\.noteID/);
+  assert.match(WEBVIEW, /placements\.first\(where: \{ \$0\.noteID == noteID \}\)/);
+  assert.match(SCRIPT, /return \[\{ id, noteId: item\.id,/);
+});
+
+test("⑧ 锁定框观感照原版 _bindTone：色调混深底，展开态加深 + 外晕，带序号", () => {
+  assert.match(PDFDOC, /border = Self\.mix\(tone, 0\.60, Self\.hex\(0x2a2440\)\)/);
+  assert.match(PDFDOC, /ink = Self\.mix\(tone, 0\.22, Self\.hex\(0x14101f\)\)/);
+  assert.match(PDFDOC, /func numberedMarkers\(\)/);
 });

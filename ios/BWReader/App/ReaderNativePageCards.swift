@@ -2,6 +2,11 @@ import SwiftUI
 
 struct ReaderNativePagePlacement: Identifiable {
     let id: String
+    /// 便签自己的 id —— 原生正文解锚（卡位 / 锁定框 / 点框开卡）用它。
+    /// ⚠ 不能拿 `id` 去比：那是按代际哈希出来的 `placement-…`，跟便签 id
+    /// 永远对不上。2026-09-23 之前就是这么比的，于是页内锁定框一点就是
+    /// "还没加载好"，卡身也一直退回网页坐标（滚动不跟手）。
+    let noteID: String
     let title: String
     let rect: CGRect
     let bound: Bool
@@ -16,19 +21,16 @@ struct ReaderNativePagePlacement: Identifiable {
     let inkAspectRatio: CGFloat
     let inkGeometry: String
     let size: CGSize?
-    /// 卡面本身的用色与磨砂强度 —— 跟网页那版 applyColor 同一组值。
-    let surfaceColor: Color
-    let surfaceHex: String
-    let surfaceOpacity: Double
-    let surfaceBlur: Double
+    /// 卡片色调（原版 `--vc-tc`）。卡面、描边、辉光、卡头字色全由它推出。
+    ///
+    /// ⚠ **不是便签色。** 卡片式便签在网页里便签壳是全透明的（rc-stickynote：
+    /// `.rc-note-hascard .rc-note-body{background:transparent!important}`），
+    /// 看得见的是里面那张 `.vc-card.vc-typed`。上一版拿便签色当卡面，
+    /// 于是卡是近乎纯黑的一块（2026-09-23 用户截图："和我原来做的完全不一样"）。
+    let tone: UIColor
     /// 'dot'（圆角方标记）/ 'min'（长条）/ 'full'（方块）。
     /// ⚠ 不能只看 collapsed —— 那把三态压成两态，圆点和长条就长得一样了。
     let form: String
-    /// 便签色板。⚠ 唯一来源是 rc-stickynote 的 COLORS —— 原生不另抄一份，
-    /// 抄了迟早会漂（同一张卡在两个表面上可选的颜色不一样）。
-    /// ⚠ 具名类型而不是元组：`ForEach(_:id: \.hex)` 的 keypath 在元组标签上
-    /// 根本不成立（编译不过）。今天在 CardMarker 上已经栽过一次。
-    let palette: [Swatch]
     /// 钉在正文上。⚠ 钉住的卡**不进长条态**（用户 2026-08-18 拍板：概要与锚点
     /// 重复），所以它的形态循环是 标记 ⇄ 方块 两态，不是三态。
     let pinned: Bool
@@ -40,6 +42,7 @@ struct ReaderNativePagePlacement: Identifiable {
               let w = box["width"]?.doubleValue, let h = box["height"]?.doubleValue,
               [x, y, w, h].allSatisfy({ $0.isFinite }), w >= 0, h >= 0 else { return nil }
         self.id = id
+        noteID = value["noteId"] as? String ?? ""
         title = value["title"] as? String ?? "卡片"
         rect = CGRect(x: x, y: y, width: w, height: h)
         bound = value["bound"] as? Bool ?? false
@@ -58,71 +61,44 @@ struct ReaderNativePagePlacement: Identifiable {
            let h = size["height"]?.doubleValue, w.isFinite, h.isFinite, w > 0, h > 0 {
             self.size = CGSize(width: w, height: h)
         } else { self.size = nil }
-        // ⚠ 卡面 = rgba(便签色, α) + 磨砂，**卡片本身就是那层玻璃**。
-        //   不能在一个不透明底色后面再套一层玻璃：什么都透不出来，还要付
-        //   实时背景重采样的钱（2026-09-22 用户："我的卡片本身就是半透明的，
-        //   你直接改造卡片本身"）。
-        let surface = value["surface"] as? [String: Any] ?? [:]
-        surfaceHex = surface["color"] as? String ?? "#ffffff"
-        surfaceColor = ReaderNativePagePlacement.color(surface["color"] as? String)
-        surfaceOpacity = min(1, max(0.3, (surface["opacity"] as? NSNumber)?.doubleValue ?? 0.72))
-        surfaceBlur = min(24, max(0, (surface["blur"] as? NSNumber)?.doubleValue ?? 10))
+        tone = ReaderNativePagePlacement.hex(value["tone"] as? String)
+            ?? UIColor(red: 0xbf / 255, green: 0x5a / 255, blue: 0xf2 / 255, alpha: 1)
         let raw = value["form"] as? String ?? (value["collapsed"] as? Bool == true ? "dot" : "full")
         form = ["dot", "min", "full"].contains(raw) ? raw : "full"
         pinned = value["pinned"] as? Bool ?? (value["bound"] as? Bool ?? false)
-        palette = (value["palette"] as? [[String: Any]] ?? []).compactMap { entry in
-            guard let hex = entry["c"] as? String, !hex.isEmpty else { return nil }
-            return Swatch(hex: hex, name: entry["n"] as? String ?? hex)
-        }
     }
 
-    /// 长条态的摘要 —— 照原版 `_cardForm`：没摘要就从正文摘一行，
-    /// 压掉连续空白、取 42 字。
-    var summary: String? {
-        let body = parts.compactMap { part -> String? in
-            let text = part.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty ? nil : text
-        }.joined(separator: " ")
-        let squeezed = body.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        return squeezed.isEmpty ? nil : String(squeezed.prefix(42))
-    }
-
-    /// 深底 → 浅字。判据与网页那版 `isDarkBg` **逐字一致**：W3C 相对亮度，
-    /// 阈值 0.55，hex 解析失败按浅底（＝深字，也是它的现状语义）。
-    /// 差一点就会出现"同一张卡在两个表面上字色相反"。
-    var prefersLightText: Bool {
-        guard let rgb = ReaderNativePagePlacement.rgb(surfaceHex) else { return false }
-        func channel(_ value: Double) -> Double {
-            let v = value / 255
-            return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
-        }
-        return 0.2126 * channel(rgb.0) + 0.7152 * channel(rgb.1) + 0.0722 * channel(rgb.2) < 0.55
-    }
-
-    private static func rgb(_ hex: String) -> (Double, Double, Double)? {
-        var text = hex.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
-        if text.count == 3 { text = text.map { "\($0)\($0)" }.joined() }
-        guard text.count == 6, let value = UInt32(text, radix: 16) else { return nil }
-        return (Double((value >> 16) & 255), Double((value >> 8) & 255), Double(value & 255))
-    }
-
-    /// `#rgb` / `#rrggbb` → Color。解不出来用网页那边的默认白便签色。
-    private static func color(_ hex: String?) -> Color {
-        var text = (hex ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "# "))
-        if text.count == 3 { text = text.map { "\($0)\($0)" }.joined() }
-        guard text.count == 6, let value = UInt32(text, radix: 16) else { return .white }
-        return Color(red: Double((value >> 16) & 255) / 255,
-                     green: Double((value >> 8) & 255) / 255,
-                     blue: Double(value & 255) / 255)
+    /// `#rrggbb` / `#rgb` → UIColor；解不出来返回 nil。
+    private static func hex(_ text: String?) -> UIColor? {
+        var value = (text ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        if value.count == 3 { value = value.map { "\($0)\($0)" }.joined() }
+        guard value.count == 6, let number = UInt32(value, radix: 16) else { return nil }
+        return UIColor(red: CGFloat((number >> 16) & 255) / 255, green: CGFloat((number >> 8) & 255) / 255,
+                       blue: CGFloat(number & 255) / 255, alpha: 1)
     }
 }
 
-extension ReaderNativePagePlacement {
-    /// 色板里的一格。
-    struct Swatch: Identifiable, Hashable {
-        let hex: String
-        let name: String
-        var id: String { hex }
+/// 原版 `.vc-card.vc-typed` 的配方（rc-voicecall）：
+///   背景 = color-mix(色调 15%, rgba(28,30,34,.9))；描边 = 色调 42%；
+///   阴影 = 0 16px 42px rgba(0,0,0,.5) + 0 0 22px -8px 色调 55%；卡头字色 = 色调。
+struct ReaderNativeCardFinish {
+    let tone: Color
+    let fill: Color
+    let border: Color
+    let glow: Color
+
+    init(_ tone: UIColor) {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        tone.getRed(&r, green: &g, blue: &b, alpha: &a)
+        // color-mix 在带透明度时按预乘插值，再除回去。
+        let alpha = 0.15 + 0.9 * 0.85
+        func channel(_ t: CGFloat, _ base: CGFloat) -> Double {
+            Double((0.15 * t + 0.85 * 0.9 * base / 255) / alpha)
+        }
+        self.tone = Color(uiColor: tone)
+        fill = Color(red: channel(r, 28), green: channel(g, 30), blue: channel(b, 34)).opacity(alpha)
+        border = Color(uiColor: tone).opacity(0.42)
+        glow = Color(uiColor: tone).opacity(0.55)
     }
 }
 
@@ -163,6 +139,14 @@ struct ReaderNativePageCards: View {
             }
         }
         .clipped()
+        // 展开着的词锚卡 → 页内锁定框画成「打开」态（原版 .pgmark.on）。
+        .onChange(of: openBoundIDs, initial: true) { _, ids in
+            reader.nativePDFDocument?.openCardIDs = ids
+        }
+    }
+
+    private var openBoundIDs: Set<String> {
+        Set(model.placements.filter { $0.bound && $0.open }.map(\.noteID))
     }
 
     /// 打开/收起一张词锚卡。
@@ -196,8 +180,13 @@ struct ReaderNativePageCards: View {
                     //   DOM 推的，而接管后网页不渲页、滚动也不同步，它已经不对应
                     //   屏幕上的任何东西。拿不到才退回网页那条路。
                     let nativeMarkers = reader.nativePageMarkerRects(
-                        id: item.id, in: geometry.frame(in: .global))
-                    ForEach(Array(item.markers.enumerated()), id: \.element.id) { index, marker in
+                        id: item.noteID, in: geometry.frame(in: .global))
+                    // ⚠ 原生正文接管时**一个标记都不在这层画**：锁定框与序号都由 PDFKit
+                    //   页内 overlay 画（ReaderNativePDFTextOverlay），跟着页面一起滚。
+                    //   这层是按窗口坐标摆的，滚动时永远慢一帧 —— 2026-09-23 用户截图里
+                    //   那条"细、浅、带残影"的青线加序号就是这里画的网页那份标记。
+                    ForEach(Array((reader.nativePDFDocument == nil ? item.markers : []).enumerated()),
+                            id: \.element.id) { index, marker in
                         let box = nativeMarkers.map { index < $0.count ? $0[index] : .zero }
                             ?? reader.nativePageCardRect(marker.rect, in: geometry.frame(in: .global))
                         Button { openBoundCard(item) } label: {
@@ -242,7 +231,7 @@ struct ReaderNativePageCards: View {
                     // 卡身同理：原生接管时用 PDFKit 解出来的位置和尺寸
                     // （noteGeometry 会按页宽/base_w 的比例缩放，并处理折叠态）。
                     let rect = reader.nativePageCardGeometry(
-                        id: item.id, size: item.size, in: geometry.frame(in: .global))
+                        id: item.noteID, size: item.size, in: geometry.frame(in: .global))
                         ?? reader.nativePageCardRect(item.rect, in: geometry.frame(in: .global))
                     if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < geometry.size.width && rect.minY < geometry.size.height {
                         ReaderNativePlacedCard(item: item, reader: reader, model: model,
@@ -327,31 +316,26 @@ private struct ReaderNativePlacedCard: View {
         }
     }
 
-    /// 形态标记：40×40 圆角方（半径 13），坐落在卡片**左上角**，
-    /// 永远是形态控制按钮 —— 照原版 `.vc-card-dot`。
+    private var finish: ReaderNativeCardFinish { ReaderNativeCardFinish(item.tone) }
+
+    /// 圆点态的那枚标记：40×40 圆角方（半径 13），照原版 `.vc-card-dot`：
+    /// 底 = 色调 14% 混 rgba(22,26,38,.38)，图标用色调。
+    /// ⚠ 只在圆点态出现 —— 原版展开后「左上角那枚标记按钮**不再显示**（用户要求）；
+    ///   形态切换改点头部」（rc-voicecall 那条注释原话）。
     private var formMarker: some View {
         Button { runForm(nextForm) } label: {
             Image(systemName: item.bound ? "pin.fill" : "rectangle.on.rectangle")
                 .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(ReaderNativeCardMarkerTint.color)
+                .foregroundStyle(finish.tone)
                 .frame(width: 40, height: 40)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13))
-                .overlay(RoundedRectangle(cornerRadius: 13)
-                    .stroke(.white.opacity(0.16), lineWidth: 0.5))
+                .background(finish.tone.opacity(0.14), in: RoundedRectangle(cornerRadius: 13))
+                .background(Color(red: 22 / 255, green: 26 / 255, blue: 38 / 255).opacity(0.38),
+                            in: RoundedRectangle(cornerRadius: 13))
+                .overlay(RoundedRectangle(cornerRadius: 13).stroke(finish.border, lineWidth: 0.5))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("切换卡片形态")
+        .accessibilityLabel("展开卡片")
         .accessibilityHint(item.pinned ? "在标记与展开之间切换" : "圆 / 长条 / 方块")
-    }
-
-    private func runColor(_ hex: String) {
-        guard let action = item.controls["color"] else { return }
-        Task {
-            if await model.perform("liveAction",
-                                   parameters: ["actionId": action, "value": hex]) == false {
-                reader.showTransientNotice(model.error ?? "没能换颜色，请重试。")
-            }
-        }
     }
 
     private func runForm(_ value: String) {
@@ -367,6 +351,11 @@ private struct ReaderNativePlacedCard: View {
         }
     }
 
+    /// 点卡头：词锚卡 = 收起回词上（原版点标记同一动作）；自由卡 = 形态循环。
+    private func tapHeader() {
+        if item.bound { run("collapse") } else { runForm(nextForm) }
+    }
+
     private var savedSize: CGSize? {
         item.size.map { reader.nativePageCardRect(CGRect(origin: .zero, size: $0), in: .zero).size }
     }
@@ -378,32 +367,26 @@ private struct ReaderNativePlacedCard: View {
         default: return min(max(180, (resizing ?? savedSize)?.width ?? rect.width), max(44, available.width))
         }
     }
-    /// 圆角：圆点态 13（与 .vc-card-dot 同值），其余 14。
-    private var corner: CGFloat { item.form == "dot" ? 13 : 14 }
+    /// 圆角：圆点态 13（与 .vc-card-dot 同值），其余 16（.vc-card{border-radius:16px}）。
+    private var corner: CGFloat { item.form == "dot" ? 13 : 16 }
     private var bodyHeight: CGFloat? {
-        (resizing ?? savedSize).map { max(64, min($0.height, available.height) - 36) }
+        (resizing ?? savedSize).map { max(64, min($0.height, available.height) - 41) }
     }
 
-    /// 正在拖。⚠ 这一刻**不要搬活卡片**：它里面有富文本（UITextView + SwiftSoup）、
-    /// 墨迹层，外面还套着 Liquid Glass（实时背景重采样）。每帧搬一次就是每帧
-    /// 重算这些东西 —— 2026-09-22 用户："手指拖动移动距离 10，他实际移动 3"。
-    ///
-    /// 系统自己的拖动（UIDragInteraction，股票/文件那种）搬的是**事先截好的快照**，
-    /// 跟视图多贵无关。我们这里做同一件事的最省办法：拖动期间换成一张影子
-    /// —— 跟网页那版 `vc-drag-ghost`（克隆 + 源卡淡到 .22）是同一个设计。
+    /// 正在拖。⚠ 这一刻**不要搬活卡片**：它里面有富文本（UITextView + SwiftSoup）
+    /// 和墨迹层，每帧搬一次就是每帧重算这些 —— 2026-09-22 用户："手指拖动移动
+    /// 距离 10，他实际移动 3"。系统自己的拖动搬的是事先截好的快照；这里做同一件事：
+    /// 拖动期间换成一张影子 —— 跟网页那版 `vc-drag-ghost`（克隆 + 源卡淡到 .22）同一个设计。
     private var dragging: Bool { translation != .zero }
 
     @ViewBuilder private var ghost: some View {
-        Label(item.title, systemImage: item.bound ? "pin.fill" : "line.3.horizontal")
-            .font(.caption.weight(.medium)).lineLimit(1)
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .frame(width: width, alignment: .leading)
-            .foregroundStyle(item.prefersLightText ? Color.white : Color.black.opacity(0.88))
-            // 影子用**不透明**的便签色：拖动时它在正文上飞，半透明反而看不清自己。
-            .background(item.surfaceColor.opacity(max(0.85, item.surfaceOpacity)),
-                        in: RoundedRectangle(cornerRadius: corner))
-            .overlay(RoundedRectangle(cornerRadius: corner)
-                .stroke(Color.black.opacity(0.28), lineWidth: 1))
+        Text(item.title)
+            .font(.system(size: 12)).lineLimit(1)
+            .foregroundStyle(finish.tone)
+            .padding(.horizontal, 13)
+            .frame(width: width, height: 40, alignment: .leading)
+            .background(finish.fill, in: RoundedRectangle(cornerRadius: corner))
+            .overlay(RoundedRectangle(cornerRadius: corner).stroke(finish.border, lineWidth: 0.5))
             // 浮起特效照原版 .rc-note-lift：微放大 + 轻微透明 + 更深的影。
             .scaleEffect(1.03, anchor: .topLeading)
             .opacity(0.92)
@@ -423,56 +406,65 @@ private struct ReaderNativePlacedCard: View {
         }
     }
 
-    private var card: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                if item.form == "dot" {
-                    // 收起态：**整张卡就是那枚标记**（原版 `.vc-card.vc-dot`）。
-                    formMarker.simultaneousGesture(moveGesture)
-                } else {
-                    // 展开态：标记留在左上角，仍然是形态按钮（原版同一枚）。
-                    formMarker.scaleEffect(0.7, anchor: .center).frame(width: 28, height: 28)
-                    Label(item.title, systemImage: item.bound ? "pin.fill" : "line.3.horizontal")
-                        .font(.caption.weight(.medium)).lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .gesture(moveGesture)
-                    Button { run("collapse") } label: { Image(systemName: "minus") }
-                        .accessibilityLabel("收起卡片")
-                    Menu {
-                        if !item.bound && !item.floating {
-                            Button("锚定到正文", systemImage: "pin") { run("anchor") }
-                        }
-                        if !item.palette.isEmpty, item.controls["color"] != nil {
-                            Menu("卡片颜色") {
-                                ForEach(item.palette) { entry in
-                                    Button {
-                                        runColor(entry.hex)
-                                    } label: {
-                                        Label(entry.name,
-                                              systemImage: entry.hex.caseInsensitiveCompare(item.surfaceHex) == .orderedSame
-                                                ? "checkmark.circle.fill" : "circle.fill")
-                                    }
-                                }
-                            }
-                        }
-                        Button(item.floating ? "关闭浮动卡片" : "移除这处卡片", systemImage: "trash", role: .destructive) { confirmRemoval = true }
-                    } label: { Image(systemName: "ellipsis").frame(width: 28, height: 32) }
+    /// 卡头 `.vc-card-hd`：12px、色调字、左距 13，最小高 40。
+    /// 右侧只放原版在这个状态下真有的那一个按钮：
+    /// 词锚展开卡 = 右上角圆形垃圾桶（`.rc-note-word-open .rc-note-del`：26×26，
+    /// 底 rgba(64,35,42,.82)，图标 #ffd8de）；自由卡 = 一枚同尺寸的「更多」。
+    private var header: some View {
+        HStack(spacing: 6) {
+            Text(item.title)
+                .font(.system(size: 12)).lineLimit(1)
+                .foregroundStyle(finish.tone)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if item.bound {
+                Button { confirmRemoval = true } label: {
+                    Image(systemName: "trash.fill").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color(red: 1, green: 0xd8 / 255, blue: 0xde / 255))
+                        .frame(width: 26, height: 26)
+                        .background(Color(red: 64 / 255, green: 35 / 255, blue: 42 / 255).opacity(0.82), in: Circle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("删除这张卡片")
+            } else if item.form != "dot" {
+                Menu {
+                    if !item.floating {
+                        Button("锚定到正文", systemImage: "pin") { run("anchor") }
+                    }
+                    Button(item.floating ? "关闭浮动卡片" : "移除这处卡片", systemImage: "trash", role: .destructive) {
+                        confirmRemoval = true
+                    }
+                } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color(red: 0xe8 / 255, green: 0xe8 / 255, blue: 0xee / 255))
+                        .frame(width: 26, height: 26)
+                        .background(Color.white.opacity(0.14), in: Circle())
+                }
+                .accessibilityLabel("卡片操作")
             }
-            .padding(.horizontal, item.form == "dot" ? 0 : 10)
-            .frame(minHeight: item.form == "dot" ? 40 : 36)
-            if item.form == "min", let summary = item.summary {
-                // 长条：没摘要就从正文摘一行（原版 _cardForm 里那一手，42 字）。
-                Text(summary).font(.caption).lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 13).padding(.bottom, 9)
-                    .opacity(0.75)
+        }
+        .padding(.leading, 13).padding(.trailing, 7)
+        .frame(minHeight: 40)
+        .contentShape(Rectangle())
+        .onTapGesture { tapHeader() }
+        .gesture(moveGesture)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(item.bound ? "收起到正文" : "切换卡片形态")
+    }
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if item.form == "dot" {
+                // 收起态：**整张卡就是那枚标记**（原版 `.vc-card.vc-dot`）。
+                formMarker.simultaneousGesture(moveGesture)
+            } else {
+                header
             }
             if item.form == "full" {
-                Divider()
+                // 原版卡头下那条分隔线（截图里贯穿卡宽的细线）。
+                Rectangle().fill(Color.white.opacity(0.12)).frame(height: 0.5)
                 ScrollView {
-                    ReaderNativeConversationArtifacts(parts: item.parts, model: model).padding(8)
+                    ReaderNativePageCardBody(parts: item.parts, model: model)
+                        .padding(.horizontal, 13).padding(.top, 9).padding(.bottom, 12)
                 }
                 .frame(height: bodyHeight)
                 .frame(maxHeight: bodyHeight ?? max(120, min(460, min(rect.height, available.height - 40))))
@@ -484,17 +476,16 @@ private struct ReaderNativePlacedCard: View {
             }
         }
         .frame(width: width)
-        // 卡面 = 便签色 + 磨砂，**卡片本身就是那层玻璃**（见 readerNoteSurface）。
-        .readerNoteSurface(item.surfaceColor, opacity: item.surfaceOpacity, blur: item.surfaceBlur,
-                           in: RoundedRectangle(cornerRadius: corner))
-        // 描边照原版 .rc-note-body：一道近黑的细边，不是主题强调色。
+        .foregroundStyle(Color(uiColor: ReaderNativeCardInk.text))
+        // 卡面：原版 .vc-card.vc-typed —— 色调 15% 混深灰、**不磨砂**
+        // （`--vc-cardblur:none`，注释原话"去 blur 后加实"）。圆点态照 .vc-dot 近乎透明。
+        .background(item.form == "dot" ? Color.clear : finish.fill, in: RoundedRectangle(cornerRadius: corner))
         .overlay(RoundedRectangle(cornerRadius: corner)
-            .stroke(Color.black.opacity(0.22), lineWidth: 1))
+            .stroke(item.form == "dot" ? Color.clear : finish.border, lineWidth: 0.5))
         // 选中环照原版 .vc-picked：1.5pt 的 rgba(123,108,255,.85)。
         .overlay(RoundedRectangle(cornerRadius: corner)
-            .stroke(ReaderNativeCardDropZone.dock.opacity(contextSelected ? 0.85 : 0),
-                    lineWidth: 1.5))
-        .foregroundStyle(item.prefersLightText ? Color.white : Color.black.opacity(0.88))
+            .stroke(ReaderNativeCardDropZone.dock.opacity(contextSelected ? 0.85 : 0), lineWidth: 1.5))
+        .clipShape(RoundedRectangle(cornerRadius: corner))
         // 长按＝带入/移出对话。⚠ 阈值取原版的 LP_MS = 600ms；
         //   用 simultaneousGesture 才不会把卡内按钮的点击吃掉。
         .simultaneousGesture(
@@ -504,9 +495,9 @@ private struct ReaderNativePlacedCard: View {
         .overlay(alignment: .bottomTrailing) {
             if item.form == "full", item.controls["resize"] != nil {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
-                    .frame(width: 36, height: 36)
-                    .background(ReaderNativeTheme.card.opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.45))
+                    .frame(width: 30, height: 30)
                     .contentShape(Rectangle()).gesture(resizeGesture)
                     .accessibilityLabel("调整卡片大小")
                     .accessibilityAdjustableAction { direction in
@@ -516,11 +507,11 @@ private struct ReaderNativePlacedCard: View {
                     }
             }
         }
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+        // 阴影 + 色调辉光（.vc-card.vc-typed 的两层 box-shadow）。
+        .shadow(color: .black.opacity(item.form == "dot" ? 0 : 0.45), radius: 18, y: 12)
+        .shadow(color: item.form == "dot" ? .clear : finish.glow.opacity(0.6), radius: 7)
         // 拖动中位移加在**影子**上（见 body），这里只保留松手到新几何之间的暂态位移。
         .offset(committed ?? .zero)
-        // 手势被打断时 GestureState 会自己归零，而 onEnded 不一定来 ——
-        // 不擦的话预览会留在屏幕上，看着像"钉在那儿了"。
         // 手势被打断时 GestureState 自己归零而 onEnded 不一定来 —— 预览和投放区
         // 都得在这里擦掉，不然会留在屏幕上（红区一直亮着尤其吓人）。
         .onChange(of: translation) { _, value in
@@ -670,12 +661,6 @@ private struct ReaderNativePlacedCard: View {
             }
         }
     }
-}
-
-/// 形态标记的色调。原版 `--vc-tc` 的默认值是 #bf5af2（紫）——
-/// 它不跟随便签色，是"这是个控制件"的固定标识。
-enum ReaderNativeCardMarkerTint {
-    static let color = Color(red: 0.749, green: 0.353, blue: 0.949)
 }
 
 /// 落点预览。单独一层、单独一个模型 —— 见 ReaderNativeDropPreviewModel 的说明。

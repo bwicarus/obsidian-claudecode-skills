@@ -13,6 +13,10 @@ struct ReaderNativeRichText: UIViewRepresentable {
     let content: String
     var format = "markdown"
     var onSelection: ((String) -> Void)?
+    /// 页卡正文按原版 CSS 给字号与字色（结论 15/600、细节 12 #b8c6e2…）。
+    /// 不给就是侧栏的默认：subheadline + 系统 label 色。
+    var font: UIFont? = nil
+    var color: UIColor? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(onSelection: onSelection) }
 
@@ -33,14 +37,18 @@ struct ReaderNativeRichText: UIViewRepresentable {
     func updateUIView(_ view: ReaderNativeTextView, context: Context) {
         let coordinator = context.coordinator
         coordinator.onSelection = onSelection
-        let font = UIFont.preferredFont(forTextStyle: .subheadline)
-        guard coordinator.source != content || coordinator.format != format || coordinator.fontSize != font.pointSize else { return }
+        let font = self.font ?? UIFont.preferredFont(forTextStyle: .subheadline)
+        let color = self.color ?? UIColor.label
+        guard coordinator.source != content || coordinator.format != format || coordinator.fontSize != font.pointSize
+                || coordinator.font != font || coordinator.color != color else { return }
         coordinator.source = content
         coordinator.format = format
         coordinator.fontSize = font.pointSize
+        coordinator.font = font
+        coordinator.color = color
         coordinator.updating = true
         let selected = view.selectedRange
-        let rendered = ReaderNativeTextParser.render(content, format: format, font: font)
+        let rendered = ReaderNativeTextParser.render(content, format: format, font: font, color: color)
         view.attributedText = rendered
         view.textContainerInset = UIEdgeInsets(top: rendered.hasRuby ? font.pointSize * 0.6 : 0, left: 0, bottom: 0, right: 0)
         if selected.location != NSNotFound, NSMaxRange(selected) <= rendered.length { view.selectedRange = selected }
@@ -63,6 +71,8 @@ struct ReaderNativeRichText: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         var source = "", format = ""
         var fontSize: CGFloat = 0
+        var font: UIFont?
+        var color: UIColor?
         var updating = false
         var onSelection: ((String) -> Void)?
         private var selectionWork: DispatchWorkItem?
@@ -174,9 +184,9 @@ private extension NSAttributedString {
 
 @MainActor
 enum ReaderNativeTextParser {
-    static func render(_ content: String, format: String, font: UIFont) -> NSAttributedString {
+    static func render(_ content: String, format: String, font: UIFont, color: UIColor = .label) -> NSAttributedString {
         let output = NSMutableAttributedString(string: "")
-        let base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.label]
+        let base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
         if format != "html", let parsed = try? AttributedString(markdown: content, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
             for run in parsed.runs {
                 var attributes = base

@@ -439,7 +439,7 @@ enum ReaderNativeConversationScript {
           //   表现就是"绑定到元素后卡片就打不开了"（2026-09-22 用户实报）。
           //   现在挪到控件注册之后，toggleBound 是真的。
           if (!supported) {
-            return [{ id, title: item.html?.label || '学习卡',
+            return [{ id, noteId: item.id, title: item.html?.label || '学习卡',
               bound: item.bound, collapsed: item.collapsed, visible: false, open: item.open,
               controls: { toggleBound: controls.toggleBound }, parts: [],
               surface: { color: item.color, opacity: item.opacity, blur: item.blur },
@@ -458,11 +458,13 @@ enum ReaderNativeConversationScript {
           // Reuse the same learning-card and selection services as sidebar cards.
           liveArtifacts([{ parts }]);
           parts.forEach(part => { part.data.dragId = controls.move; });
-          return [{ id, title: item.html?.label || (item.card?.cards.length > 1 ? '学习卡组' : '学习卡'),
+          // noteId：便签自己的 id。原生正文用它去 PDFKit 解锚（卡位、锁定框、点框开卡）；
+          // 上面那个 id 是按代际哈希出来的界面身份，**跟便签 id 对不上**。
+          return [{ id, noteId: item.id, title: item.html?.label || (item.card?.cards.length > 1 ? '学习卡组' : '学习卡'),
             bound: item.bound, collapsed: item.collapsed, visible: item.visible, open: item.open, controls, parts,
             // 卡面本身的用色与磨砂强度（原版 applyColor 的同一组值）。
             surface: { color: item.color, opacity: item.opacity, blur: item.blur },
-            form: item.form, pinned: item.pinned, palette: item.palette,
+            form: item.form, pinned: item.pinned, palette: item.palette, tone: item.tone || '',
             ink: { strokes: item.strokes, aspectRatio: item.iar, geometry: item.inkGeometry },
             size: item.presentationSize ? { width: item.presentationSize.w / innerWidth, height: item.presentationSize.h / innerHeight } : null,
             markers,

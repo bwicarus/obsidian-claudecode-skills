@@ -135,6 +135,9 @@ private struct ReaderNativeConversationTools: View {
 struct ReaderNativeConversationArtifacts: View {
     let parts: [ReaderNativeConversationPart]
     @ObservedObject var model: ReaderNativeConversationModel
+    /// 页卡里用：只要内容，不要侧栏生成物那层外壳（图标标题行 / 带入对话 / 底板）。
+    /// 页卡自己就是那张卡，再套一层就是"卡里套卡"（2026-09-23 用户截图）。
+    var bare = false
     @State private var visibleID: String?
 
     private var position: Int { (parts.firstIndex { $0.id == visibleID } ?? 0) + 1 }
@@ -152,7 +155,7 @@ struct ReaderNativeConversationArtifacts: View {
                 ScrollView(.horizontal) {
                     HStack(alignment: .top, spacing: 12) {
                         ForEach(parts) { part in
-                            ReaderNativeConversationArtifactCard(part: part, model: model)
+                            ReaderNativeConversationArtifactCard(part: part, model: model, bare: bare)
                                 .containerRelativeFrame(.horizontal)
                                 .id(part.id)
                         }
@@ -163,7 +166,7 @@ struct ReaderNativeConversationArtifacts: View {
                 .scrollPosition(id: $visibleID)
                 .scrollIndicators(.hidden)
             } else if let part = parts.first {
-                ReaderNativeConversationArtifactCard(part: part, model: model)
+                ReaderNativeConversationArtifactCard(part: part, model: model, bare: bare)
             }
         }
     }
@@ -173,6 +176,7 @@ struct ReaderNativeConversationArtifacts: View {
 private struct ReaderNativeConversationArtifactCard: View {
     let part: ReaderNativeConversationPart
     @ObservedObject var model: ReaderNativeConversationModel
+    var bare = false
     @State private var editing = false
 
     private var isAnki: Bool { part.kind == "anki" || part.kind == "flashcard" }
@@ -196,6 +200,7 @@ private struct ReaderNativeConversationArtifactCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if !bare {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: icon)
                     .foregroundStyle(ReaderNativeTheme.accent)
@@ -215,7 +220,9 @@ private struct ReaderNativeConversationArtifactCard: View {
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(ReaderNativeTheme.accent.opacity(0.45)))
             }
             .accessibilityHint("长按卡片标题，拖到书页正文放置")
-            if !part.string("pinId").isEmpty {
+            }
+            // 页卡上「带入对话」是**长按卡片**（原版 LP_MS 600），不要再摆一个按钮。
+            if !bare, !part.string("pinId").isEmpty {
                 Button {
                     Task { await model.perform("liveAction", parameters: ["actionId": part.string("pinId")]) }
                 } label: {
@@ -292,10 +299,10 @@ private struct ReaderNativeConversationArtifactCard: View {
             }
             ReaderNativeConversationAction(part: part, model: model)
         }
-        .padding(14)
+        .padding(bare ? 0 : 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(ReaderNativeTheme.accent.opacity(0.12), lineWidth: 1))
+        .background(bare ? Color.clear : ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(ReaderNativeTheme.accent.opacity(bare ? 0 : 0.12), lineWidth: 1))
         .sheet(isPresented: $editing) {
             ReaderNativeCardEditor(fields: fields, model: model)
         }

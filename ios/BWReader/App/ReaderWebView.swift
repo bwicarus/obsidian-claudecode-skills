@@ -490,7 +490,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// ⚠ 走的是页卡自己的 `toggleBound` 控件 id，跟侧栏里点开是同一条路。
     /// 找不到就**出声** —— "点了没反应"是这块地方已经栽过一次的坑。
     func openNativeBoundCard(noteID: String) {
-        guard let placement = nativeConversation.placements.first(where: { $0.id == noteID }) else {
+        guard !noteID.isEmpty,
+              let placement = nativeConversation.placements.first(where: { $0.noteID == noteID }) else {
             showTransientNotice("这段绑定的卡片还没加载好，请稍后再点。")
             return
         }

@@ -10,6 +10,8 @@ struct ReaderNativeRichDocument: View {
     var onSelection: ((String) -> Void)?
     var inlineImages: [String: String] = [:]
     var imageModel: ReaderNativeConversationModel?
+    var font: UIFont? = nil
+    var color: UIColor? = nil
 
     var body: some View {
         if format == "html", content.range(of: "<(table|img)\\b", options: [.regularExpression, .caseInsensitive]) != nil,
@@ -18,7 +20,7 @@ struct ReaderNativeRichDocument: View {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     switch block {
                     case .text(let html):
-                        ReaderNativeRichText(content: html, format: "html", onSelection: onSelection)
+                        ReaderNativeRichText(content: html, format: "html", onSelection: onSelection, font: font, color: color)
                     case .table(let table):
                         ReaderNativeTable(table: table, onSelection: onSelection, inlineImages: inlineImages, imageModel: imageModel)
                     case .image(let source, let title):
@@ -33,7 +35,7 @@ struct ReaderNativeRichDocument: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            ReaderNativeRichText(content: content, format: format, onSelection: onSelection)
+            ReaderNativeRichText(content: content, format: format, onSelection: onSelection, font: font, color: color)
         }
     }
 }

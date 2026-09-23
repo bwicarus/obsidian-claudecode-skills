@@ -46,6 +46,10 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     struct CardMarker: Identifiable {
         let id: String
         let rects: [CGRect]
+        /// 分类色调 —— 原版 `WORD_CARD_TONES`（rc-stickynote）四选一。
+        let tone: UIColor
+        /// 这张卡正展开着（原版 `.pgmark.on`：描边加深 + 外晕）。
+        let open: Bool
     }
 
     struct NoteGeometry {
@@ -531,7 +535,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     /// 才出现（翻回来才看得见，等于"有时有有时没有"）。
     private func refreshCardMarkers() {
         for (number, overlay) in textOverlays {
-            overlay.cardMarkers = cardMarkers(page: number).map { ($0.id, $0.rects) }
+            overlay.cardMarkers = cardMarkers(page: number)
         }
     }
 
@@ -611,8 +615,17 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                   let value = try? core.binding(bind) else { return nil }
             // ⚠ 给**归一化**框，不给 view 坐标：消费方是页面自己的 overlay view，
             //   它用 project 投影到自己的坐标系，然后跟着页面一起滚。
-            return value.rects.isEmpty ? nil : CardMarker(id: id, rects: value.rects)
+            guard !value.rects.isEmpty else { return nil }
+            let slot = note["card"] is [String: Any] ? "card" : "html"
+            return CardMarker(id: id, rects: value.rects,
+                              tone: ReaderNativeMarkerStyle.tone(payload, slot: slot),
+                              open: openCardIDs.contains(id))
         }
+    }
+
+    /// 正展开着的词锚卡。由页卡层按 placement.open 推进来；变了就重画锁定框。
+    var openCardIDs: Set<String> = [] {
+        didSet { if openCardIDs != oldValue { refreshCardMarkers() } }
     }
 
     func setSpread(_ enabled: Bool, firstPageAlone: Bool) {
@@ -892,7 +905,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             guard let self, let overlay else { return nil }
             return self.viewRect(normalized: rect, page: number, in: overlay)
         }
-        overlay.cardMarkers = cardMarkers(page: number).map { ($0.id, $0.rects) }
+        overlay.cardMarkers = cardMarkers(page: number)
         overlay.onOpenCard = { [weak self] id in self?.onOpenCard?(id) }
         overlay.onSelect = { [weak self] value in self?.acceptOCRSelection(value, page: number) }
         overlay.onError = { [weak self] in self?.error = "当前文字层无法确认这段选区的位置。" }
@@ -974,7 +987,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                     textOverlays[number]?.selectionCore = core
                     // 字符层到位了，这一页的锁定框才解得出来 —— 立刻补上，
                     // 否则要等下次挂 overlay 才出现。
-                    textOverlays[number]?.cardMarkers = cardMarkers(page: number).map { ($0.id, $0.rects) }
+                    textOverlays[number]?.cardMarkers = cardMarkers(page: number)
                 } catch {
                     guard generation == ticket, !Task.isCancelled else { return }
                     unavailableCharacterPages.insert(number)
@@ -1020,7 +1033,7 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     /// ReaderNativePageCards（按窗口坐标）和 ReaderNativePDFViewport 的 Canvas
     /// （按 geometryRevision 重画）—— 都是"滚动时不断重新渲染"，于是留残影
     /// （2026-09-22 用户连报三次）。
-    var cardMarkers: [(id: String, rects: [CGRect])] = [] { didSet { setNeedsDisplay() } }
+    var cardMarkers: [ReaderNativePDFDocument.CardMarker] = [] { didSet { setNeedsDisplay() } }
     /// 点锁定框 → 展开那张卡。
     var onOpenCard: ((String) -> Void)?
     private var start: Int?
@@ -1225,18 +1238,37 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
         // 锁定框先画：选区高亮压在它上面才看得出"这一段既绑着卡、又正被选中"。
-        // ⚠ 观感对齐网页那份 .pgmark：实心描边 + 淡底，不是一条几乎看不见的细线
-        //   （2026-09-22 用户："颜色太浅线太细"）。
+        // ⚠ 观感逐项照原版 .pgmark / .pgmark-n（pdf-styles.css + 34-bindcard 的 _bindTone）：
+        //   透明底、2pt 分类色描边、框外放 2pt；展开时描边加深 + 2.5pt 外晕；
+        //   右上角外侧一枚序号，白色光晕而不是实心底（实心块会盖住相邻字）。
+        //   上一版是"淡填充 + 固定青色细线"，用户："太细颜色太浅"。
+        let pad = ReaderNativeMarkerStyle.pad
         for marker in cardMarkers {
+            let style = ReaderNativeMarkerStyle(tone: marker.tone)
             for normalized in marker.rects {
                 guard let box = project?(normalized) else { continue }
-                let path = UIBezierPath(roundedRect: box.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 3)
-                context.setFillColor(ReaderNativeMarkerStyle.fill.cgColor)
-                context.addPath(path.cgPath); context.fillPath()
-                context.setStrokeColor(ReaderNativeMarkerStyle.stroke.cgColor)
+                if marker.open {
+                    let halo = UIBezierPath(roundedRect: box.insetBy(dx: -(pad + 3.25), dy: -(pad + 3.25)),
+                                            cornerRadius: 6.25)
+                    context.setStrokeColor(style.halo.cgColor)
+                    context.setLineWidth(2.5)
+                    context.addPath(halo.cgPath); context.strokePath()
+                }
+                let path = UIBezierPath(roundedRect: box.insetBy(dx: -(pad + 1), dy: -(pad + 1)), cornerRadius: 4)
+                context.setStrokeColor((marker.open ? style.ink : style.border).cgColor)
                 context.setLineWidth(2)
                 context.addPath(path.cgPath); context.strokePath()
             }
+        }
+        let digits = UIFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .bold)
+        for (marker, number) in numberedMarkers() {
+            guard let last = marker.rects.last, let box = project?(last) else { continue }
+            let style = ReaderNativeMarkerStyle(tone: marker.tone)
+            let label = String(number) as NSString
+            let origin = CGPoint(x: box.maxX + pad + 1, y: box.minY - pad - 4)
+            // 白色光晕：先描一圈粗白边再填字，等价于原版那串 text-shadow。
+            label.draw(at: origin, withAttributes: [.font: digits, .strokeColor: UIColor.white, .strokeWidth: 7])
+            label.draw(at: origin, withAttributes: [.font: digits, .foregroundColor: style.ink])
         }
         guard let selected else { return }
         context.setFillColor(UIColor.systemTeal.withAlphaComponent(0.22).cgColor)
@@ -1247,6 +1279,20 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
 
     /// 点中了哪个锁定框。⚠ 命中范围放宽 6pt：一行字的框只有十几点高，
     /// 按原尺寸判定基本点不中。
+    /// 本页序号：按被锚词的**顶边**先行后列排 —— 照原版 `_renumberMarks`。
+    /// 同行判据取行高一半（至少 6pt），固定阈值会把同一行判成上下关系。
+    private func numberedMarkers() -> [(ReaderNativePDFDocument.CardMarker, Int)] {
+        let placed: [(ReaderNativePDFDocument.CardMarker, CGRect)] = cardMarkers.compactMap { marker in
+            guard let last = marker.rects.last, let box = project?(last) else { return nil }
+            return (marker, box)
+        }
+        let tolerance = max(6, (placed.map { $0.1.height }.max() ?? 0) * 0.5)
+        let sorted = placed.sorted { a, b in
+            abs(a.1.minY - b.1.minY) > tolerance ? a.1.minY < b.1.minY : a.1.minX < b.1.minX
+        }
+        return sorted.enumerated().map { ($0.element.0, $0.offset + 1) }
+    }
+
     private func cardMarkerAt(_ point: CGPoint) -> String? {
         for marker in cardMarkers {
             for normalized in marker.rects {
@@ -1552,15 +1598,63 @@ final class ReaderNativeDropPreviewModel: ObservableObject {
     @Published var preview: ReaderNativeDropPreview?
 }
 
-/// 卡片锁定框的观感。⚠ 单独拎出来是因为它被用户否过一次：
-/// "颜色太浅线太细"。这是唯一来源，两处（绘制与将来可能的别处）都从这里取。
-enum ReaderNativeMarkerStyle {
-    static var stroke: UIColor {
-        UIColor { traits in
-            traits.userInterfaceStyle == .dark
-                ? UIColor(red: 0.48, green: 0.78, blue: 0.73, alpha: 1)
-                : UIColor(red: 0.13, green: 0.40, blue: 0.38, alpha: 1)
-        }
+/// 卡片锁定框的观感 —— 照原版 `_bindTone`（34-bindcard.js）的配方：
+///   --pm-b = 色调 60% 混 #2a2440（平时描边）
+///   --pm-i = 色调 22% 混 #14101f（展开描边 / 序号字色）
+///   --pm-h = 色调 30% 透明（展开外晕）
+/// ⚠ 不直接用色调原色：在纸上只有 1.6~2.5:1，够不到图形元素的 3:1。
+struct ReaderNativeMarkerStyle {
+    static let pad: CGFloat = 2
+    /// 原版 WORD_CARD_TONES。
+    static let tones: [String: UIColor] = [
+        "text": hex(0xbf5af2), "qa": hex(0x7dd3fc), "image": hex(0x34d399), "number": hex(0xff9f0a),
+    ]
+
+    let border: UIColor
+    let ink: UIColor
+    let halo: UIColor
+
+    init(tone: UIColor) {
+        border = Self.mix(tone, 0.60, Self.hex(0x2a2440))
+        ink = Self.mix(tone, 0.22, Self.hex(0x14101f))
+        halo = tone.withAlphaComponent(0.30)
     }
-    static var fill: UIColor { stroke.withAlphaComponent(0.14) }
+
+    /// 分类 —— 逐条照原版 `wordCardPresentation` + `wordCardCategory`：
+    /// 学习卡（card 槽）结构本身就是问答，默认 qa；通用 HTML 卡默认 text。
+    static func tone(_ payload: [String: Any], slot: String) -> UIColor {
+        let raw = ((payload["category"] as? String) ?? (payload["kind"] as? String) ?? "").lowercased()
+        let label = slot == "card" ? "🎴 卡片" : ((payload["label"] as? String) ?? "卡片")
+        let text = raw + " " + label
+        func has(_ pattern: String) -> Bool { text.range(of: pattern, options: .regularExpression) != nil }
+        let category: String
+        if has("image|images|video|配图|图片|图像|视频") { category = "image" }
+        else if has("number|numeric|metric|weather|数值|数字|数据|统计|温度|价格") { category = "number" }
+        else if has("qa|question|anki|quiz|问答|考点|出题|题目|学习卡") { category = "qa" }
+        else if has("text|文字|背景|辨析|摘要|翻译|解释|新闻") { category = "text" }
+        else {
+            switch ((payload["type"] as? String) ?? "").lowercased() {
+            case "#c77dff", "#34d399", "#ff7a59": category = "image"
+            case "#39d98a", "#7dd3fc": category = "qa"
+            case "#2dd4bf", "#ff9f0a": category = "number"
+            default: category = slot == "card" ? "qa" : "text"
+            }
+        }
+        return tones[category] ?? hex(0xbf5af2)
+    }
+
+    private static func hex(_ value: UInt32) -> UIColor {
+        UIColor(red: CGFloat((value >> 16) & 255) / 255, green: CGFloat((value >> 8) & 255) / 255,
+                blue: CGFloat(value & 255) / 255, alpha: 1)
+    }
+
+    /// CSS `color-mix(in srgb, a p%, b)`。
+    private static func mix(_ a: UIColor, _ p: CGFloat, _ b: UIColor) -> UIColor {
+        var ar: CGFloat = 0, ag: CGFloat = 0, ab: CGFloat = 0, aa: CGFloat = 0
+        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        a.getRed(&ar, green: &ag, blue: &ab, alpha: &aa)
+        b.getRed(&br, green: &bg, blue: &bb, alpha: &ba)
+        return UIColor(red: ar * p + br * (1 - p), green: ag * p + bg * (1 - p),
+                       blue: ab * p + bb * (1 - p), alpha: 1)
+    }
 }

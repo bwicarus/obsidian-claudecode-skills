@@ -3798,6 +3798,10 @@
         form: String(note[slot].form || 'full'), pinned: !!wordBindOf(note),
         // 色板唯一来源就是上面的 COLORS —— 原生不另抄一份，抄了就会漂。
         palette: COLORS.map(function (item) { return { c: item.c, n: item.n }; }),
+        // 卡片色调（--vc-tc）：卡面 / 描边 / 辉光 / 卡头字色全由它推出（.vc-card.vc-typed）。
+        // 取法与下面 renderInto 那两处逐字一致 —— 原生不自己猜一个。
+        tone: wordBindOf(note) ? wordCardPresentation(note).tone
+          : (slot === 'card' ? (note.card.type || '#bf5af2') : (note.html.type || '')),
         visible: rect.width > 0 && rect.height > 0, markers: markers, open: !!ctl._bindOpen,
         rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
     }).filter(Boolean);
