@@ -43,3 +43,18 @@ test("打不开要出声：原因 + 重试，而不是一块白或悄悄换回�
   assert.match(WEBVIEW, /func retryNativePDFOpen\(\)/);
   assert.match(APP, /Button\("重试"\) \{ reader\.retryNativePDFOpen\(\) \}/);
 });
+
+test("从没写过的数据域（版本 0）不能让原生正文打不开", () => {
+  // 2026-09-23 实报：一本没划过线的书打开就是"highlights 的版本或摘要无效"。
+  // 本机导出里从没写过的域版本就是 0（导出解析本来就收 0...max），只有「发布出去的包」才要求 ≥ 1。
+  const CODEC = read("ios/BWReader/App/ReaderBookUserStatePackage.swift");
+  const DOC = read("ios/BWReader/App/ReaderNativePDFDocument.swift");
+  const ADAPTER = read("ios/BWReader/App/ReaderBookUserStateWebAdapter.swift");
+  assert.match(ADAPTER, /\(0\.\.\.ReaderBookUserStatePackageCodec\.maximumRevision\)\s*\.contains\(revision\)/);
+  assert.match(CODEC, /\? \(0\.\.\.maximumRevision\)\.contains\(domain\.revision\)\s*: validRevision\(domain\.revision\)/);
+  const calls = DOC.match(/validateDomainPayload\([^)]*\)/g) || [];
+  assert.ok(calls.length >= 2);
+  for (const call of calls) assert.match(call, /localExport: true/);
+  // 发布出去的包仍然严格（validate 走默认参数）。
+  assert.match(CODEC, /rawBytes \+= try validateDomainPayload\(domain\)/);
+});

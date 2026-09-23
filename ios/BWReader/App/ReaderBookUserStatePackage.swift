@@ -271,10 +271,20 @@ enum ReaderBookUserStatePackageCodec {
 
     /// Internal bridge entry points can revalidate a selected transaction
     /// domain without manufacturing a fake complete package around it.
+    ///
+    /// `localExport`：本机 runtime 刚导出的域（原生正文拿来画），不是发布出去的包。
+    /// 本机**从没写过**的域版本就是 0 —— 导出解析（parseExportResponse）本来就收
+    /// `0...maximumRevision`。⚠ 2026-09-23 实报：一本从没划过线的书，原生正文打开就报
+    /// "highlights 的版本或摘要无效"；以前开关开着时这个失败被静默吞掉、退回网页渲页，
+    /// 所以一直没露出来。只放宽版本下限，摘要 / 大小 / 结构的校验一条不松。
     static func validateDomainPayload(
-        _ domain: ReaderBookUserStateDomainPayload
+        _ domain: ReaderBookUserStateDomainPayload,
+        localExport: Bool = false
     ) throws -> Int {
-        guard validRevision(domain.revision),
+        let revisionOK = localExport
+            ? (0...maximumRevision).contains(domain.revision)
+            : validRevision(domain.revision)
+        guard revisionOK,
               isSHA256(domain.digest),
               let maximum = domainMaximumBytes[domain.name] else {
             throw ReaderBookUserStatePackageError.invalidPackage(

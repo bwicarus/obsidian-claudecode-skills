@@ -469,7 +469,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         var nextInk: [Int: [ReaderNativeCardStroke]] = [:]
         var nextHighlights: [Int: [Highlight]] = [:]
         for domain in selected {
-            _ = try ReaderBookUserStatePackageCodec.validateDomainPayload(domain)
+            _ = try ReaderBookUserStatePackageCodec.validateDomainPayload(domain, localExport: true)
             if let previous = domainHeaders[domain.name] {
                 guard domain.revision >= previous.revision,
                       domain.revision != previous.revision || domain.digest == previous.digest else {
@@ -559,7 +559,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     func applyNotes(_ domain: ReaderBookUserStateDomainPayload, bookID: String, contentSHA256: String) throws {
         guard domain.name == .notes, access?.record.id == bookID,
               digest == contentSHA256.lowercased(), ready else { throw ReaderBookUserStateWebAdapterError.contextChanged }
-        _ = try ReaderBookUserStatePackageCodec.validateDomainPayload(domain)
+        _ = try ReaderBookUserStatePackageCodec.validateDomainPayload(domain, localExport: true)
         if let previous = domainHeaders[.notes] {
             guard domain.revision >= previous.revision,
                   domain.revision != previous.revision || domain.digest == previous.digest else {
