@@ -4258,6 +4258,12 @@
   }
 
   function _assistantPaneVisible() {
+    // 原生侧栏接管时，"开没开"以原生为准 —— 网页抽屉永远不会再被打开。
+    // ⚠ 不认它的话，通话里每一轮落库后的历史刷新都被挂起（"保留批次，真正打开
+    //   助手时同批刷新"），而那个"真正打开"在 App 里永远不会来（2026-09-23 实报：
+    //   通话时侧栏也不显示对话历史了）。
+    if (window.__bwNativeAssistantOpen === true) return true;
+    if (window.__bwNativeAssistantOpen === false) return false;
     if (!pane || !pane.classList || !pane.classList.contains('active')) return false;
     try { return !RC.sidedrawer || !RC.sidedrawer.isOpen || RC.sidedrawer.isOpen(); } catch (_) { return true; }
   }
@@ -4389,7 +4395,17 @@
   if (RC.review && RC.review.mode && RC.review.mode() === 'review') {
     setAssistantMode('review');
   } else {
-    reloadHistory({ reason: 'initial-history', immediate: true, allowHidden: true });
+    // 首次载入历史失败要**再试**。原来只试一次：App 里页面起来那一刻网关可能还没就绪，
+    // 那一次失败之后侧栏就一直是空的，直到有人碰巧触发别的刷新（2026-09-23 实报：
+    // 装新包后服务器一次历史请求都没收到，不开语音时侧栏直接为空）。
+    (function initialHistory(attempt) {
+      reloadHistory({ reason: 'initial-history', immediate: true, allowHidden: true }).then(function (result) {
+        if (result && result.ok) return;
+        if (result && result.stale) return;
+        var waits = [2000, 5000, 15000, 30000];
+        if (attempt < waits.length) setTimeout(function () { initialHistory(attempt + 1); }, waits[attempt]);
+      });
+    })(0);
   }
   };
 })();

@@ -99,6 +99,30 @@ class UserTranscriptIdentityTest(unittest.TestCase):
         self.assertEqual(r._stream_latest, {})
 
 
+class TranscriptSeedTest(unittest.TestCase):
+    """turn.created 自带的第一段转写必须进流式字幕（2026-09-23：「最前面两个字丢失」）。"""
+
+    def test_seed_then_deltas_keep_the_opening(self):
+        s = vcr.VoiceTranscriptStreams(("th", "se"))
+        s.start("user", "rt1")
+        self.assertEqual(s.seed("user", "现在", "rt1")["text"], "现在")
+        self.assertEqual(s.delta("user", "如何", "rt1")["text"], "现在如何")
+
+    def test_delta_repeating_the_seed_is_not_doubled(self):
+        s = vcr.VoiceTranscriptStreams(("th", "se"))
+        s.start("assistant", "rt2")
+        s.seed("assistant", " 还", "rt2")
+        self.assertEqual(s.delta("assistant", " 还在确认", "rt2")["text"], " 还在确认")
+        self.assertEqual(s.delta("assistant", "，马上好。", "rt2")["text"], " 还在确认，马上好。")
+
+    def test_delta_split_inside_the_seed(self):
+        s = vcr.VoiceTranscriptStreams(("th", "se"))
+        s.start("user", "rt3")
+        s.seed("user", "现在", "rt3")
+        self.assertEqual(s.delta("user", "现", "rt3")["text"], "现在")
+        self.assertEqual(s.delta("user", "在如何", "rt3")["text"], "现在如何")
+
+
 class StreamOwnerTest(unittest.TestCase):
     """改投是单向的：v- → 后台轮可以，后台轮 → v- 绝对不行。"""
 

@@ -593,9 +593,12 @@ enum ReaderNativeConversationScript {
         //   而原生接管后抽屉永远不再被打开 → 它恒为 false →
         //   `__setFocusSel` 恒短路 → **选中永远钉不进对话，AI 看不到用户选了什么**。
         //   没接管时置 undefined，让网页自己判 —— 不拿原生的“没开”去盖网页的“开了”。
+        //   ⚠⚠ 必须写在 **window** 上：`__asstOpen()` 读的是 window.__bwNativeAssistantOpen。
+        //   这里原来写成 `root.`（= document.documentElement），于是它一次都没生效 ——
+        //   侧栏明明开着，选中的文字仍然进不了对话，输入框上方永远空着（2026-09-23 实报）。
         try {
-          if (nativeOwnsAssistant()) root.__bwNativeAssistantOpen = nativeAssistantOpen;
-          else delete root.__bwNativeAssistantOpen;
+          if (nativeOwnsAssistant()) window.__bwNativeAssistantOpen = nativeAssistantOpen;
+          else delete window.__bwNativeAssistantOpen;
         } catch (_) {}
       }
       function setLegacy(visible) {
@@ -802,6 +805,12 @@ enum ReaderNativeConversationScript {
             if (nativeOwnsAssistant()) {
               nativeAssistantOpen = !nativeAssistantOpen;
               if (nativeAssistantOpen) { try { drawer().setTab('asst'); } catch (_) {} }
+              // 打开侧栏 = 要看最新记录。网页抽屉的 onDrawerTabChanged 在原生接管后永远
+              // 不会触发（抽屉不再真的打开），所以由这里补那一次刷新。
+              if (nativeAssistantOpen) {
+                applyVisualMode();
+                try { rc().assistant?.onDrawerTabChanged?.('asst', true); } catch (_) {}
+              }
               // 立刻同步，不等下一次快照 —— 用户开完侧栏马上选词是常态。
               applyVisualMode();
               schedule();

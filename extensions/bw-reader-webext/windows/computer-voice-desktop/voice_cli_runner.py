@@ -937,11 +937,41 @@ class VoiceTranscriptStreams:
             return self.start(role, source)
         return self.entries.get(self.current.get(role)) or self.start(role, source)
 
+    def seed(self, role, text, source=None):
+        """数据通道 turn.created 自带的**第一段**转写。
+
+        ⚠ 之后 stdio 的 transcript/delta 从第二段开始 —— 不把这段放进来，侧栏的流式
+        字幕就永远缺开头（实录 2026-09-23：turn.created 带「现在」，delta 只有「如何」，
+        侧栏先显示「如何」，定稿后才变「现在如何」；用户：「最前面两个字丢失」）。
+        万一哪天 delta 也从头给，靠 seed_pending 去掉重叠，不会出现「现在现在如何」。
+        """
+        entry = self.get(role, source)
+        text = str(text or "")
+        if not entry or entry["final"] or not text or entry["delta"] or entry["segments"]:
+            return None
+        entry["delta"] = text[:32000]
+        entry["seed_pending"] = text
+        entry["text"] = entry["delta"]
+        return entry
+
     def delta(self, role, text, source=None):
         entry = self.get(role, source)
         if not entry or entry["final"] or not text:
             return None
-        entry["delta"] = (entry["delta"] + str(text))[:32000]
+        text = str(text)
+        pending = entry.get("seed_pending") or ""
+        if pending:
+            if text.startswith(pending):
+                text = text[len(pending):]
+                entry["seed_pending"] = ""
+            elif pending.startswith(text):
+                entry["seed_pending"] = pending[len(text):]
+                return entry
+            else:
+                entry["seed_pending"] = ""
+        if not text:
+            return entry
+        entry["delta"] = (entry["delta"] + text)[:32000]
         entry["text"] = "\n".join(entry["segments"] + [entry["delta"]])[:32000]
         return entry
 
@@ -1319,6 +1349,9 @@ class Runner:
             if self._subtitle_mode() and turn.get("role") in ("user", "assistant"):
                 if t == "turn.created":
                     self._transcript_state().start(turn["role"], turn.get("id"))
+                    if turn.get("transcript"):
+                        self._transcript_publish(self._transcript_state().seed(
+                            turn["role"], turn.get("transcript"), turn.get("id")))
                 else:
                     self._transcript_final(turn["role"], turn.get("transcript"), turn.get("id"))
             if turn.get("role") == "user":

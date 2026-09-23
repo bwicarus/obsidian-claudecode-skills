@@ -129,6 +129,11 @@ struct ReaderNativeConversationView: View {
                         .frame(width: 6, height: 6)
                 }
                 Text(statusText).lineLimit(1)
+                if model.showingCachedMessages {
+                    // 让人知道眼前这些是本机存的那份，最新的还没拉到。
+                    Label("本机缓存", systemImage: "internaldrive").labelStyle(.titleAndIcon)
+                        .accessibilityLabel("正在显示本机缓存的对话记录")
+                }
                 Spacer(minLength: 0)
                 if model.busy { Text("正在处理").foregroundStyle(ReaderNativeTheme.accent) }
             }
@@ -159,7 +164,7 @@ struct ReaderNativeConversationView: View {
                 // ⚠ 旧界面的入口（“完整功能”）已删除，连带能力本身也不再上报。
                 //   菜单的出现条件改成"它自己有东西可点"，而不是"能不能召唤旧界面"。
                 if ["openReview", "openModels", "openSettings", "openSearch",
-                    "toggleVoice", "toggleComputerVoice"].contains(where: model.supports) {
+                    "toggleVoice", "toggleComputerVoice", "clearConversation"].contains(where: model.supports) {
                     Menu {
                         if model.supports("openReview") {
                             Button(isReview ? "结束复习" : "打开复习", systemImage: "rectangle.on.rectangle") {
@@ -179,6 +184,13 @@ struct ReaderNativeConversationView: View {
                         if model.supports("openHistory") {
                             Button("历史对话", systemImage: "clock") {
                                 Task { await model.perform("openHistory") }
+                            }
+                        }
+                        // 清空对话常驻在这里。⚠ 原来它排在「带入的卡片」那一排里，于是
+                        // 只有带着卡片时才看得见 —— 其余时候根本找不到（2026-09-23 用户实报）。
+                        if model.supports("clearConversation") {
+                            Button("清空当前对话", systemImage: "trash", role: .destructive) {
+                                resetsRecall = false; confirmsClear = true
                             }
                         }
                         if !voiceActive && !voiceBusy {
@@ -365,11 +377,6 @@ struct ReaderNativeConversationView: View {
                                 .accessibilityLabel("移除\(item.title)")
                             }
                             .padding(9).background(ReaderNativeTheme.accentWash, in: RoundedRectangle(cornerRadius: 10))
-                        }
-                        if model.supports("clearConversation") {
-                            Button("清空当前对话", systemImage: "trash", role: .destructive) {
-                                resetsRecall = false; confirmsClear = true
-                            }
                         }
                     }
                 }.scrollIndicators(.hidden)

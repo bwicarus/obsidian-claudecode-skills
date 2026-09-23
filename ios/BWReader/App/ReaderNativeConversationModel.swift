@@ -137,6 +137,14 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var attachments: [ReaderNativeContextAttachment] = []
     @Published private(set) var readingTools: [ReaderNativeControl] = []
     @Published private(set) var messages: [ReaderNativeConversationMessage] = []
+    /// 正在显示的是本机缓存（页面还没交来历史，或历史取不到）。
+    @Published private(set) var showingCachedMessages = false
+    private var lastCachedAt = Date.distantPast
+    private var lastCachedSignature = ""
+    /// 读过一次就留在内存里：空快照一秒能来好几次，不能每次读盘。
+    private var cachedByMode: [String: [ReaderNativeConversationMessage]] = [:]
+    /// 刚清空过的模式：在出现新对话之前不再拿缓存回填（删盘是异步的，会有竞态）。
+    private var cacheSuppressed = Set<String>()
     @Published private(set) var capabilities = Set<String>()
     @Published private(set) var voice = ReaderNativeConversationVoice()
     @Published private(set) var pendingActions = Set<String>()
@@ -227,14 +235,26 @@ final class ReaderNativeConversationModel: ObservableObject {
             visibleMessageID = nil
         }
         var seen = Set<String>()
-        let nextMessages = (payload["messages"] as? [[String: Any]] ?? [])
+        let rawMessages = payload["messages"] as? [[String: Any]] ?? []
+        var nextMessages = rawMessages
             .compactMap(ReaderNativeConversationMessage.init)
             .filter { seen.insert($0.id).inserted }
+        let nextMode = payload["conversationMode"] as? String == "review" ? "review" : "normal"
+        if ReaderNativeConversationCache.hasConversation(rawMessages) {
+            cacheSuppressed.remove(nextMode)
+            rememberConversation(rawMessages, mode: nextMode)
+            showingCachedMessages = false
+        } else if !cacheSuppressed.contains(nextMode) {
+            // 页面还没把历史交过来（或取失败）：先给本机缓存，别让侧栏空着。
+            let cached = cachedMessages(nextMode)
+            showingCachedMessages = !cached.isEmpty
+            if !cached.isEmpty { nextMessages = cached + nextMessages.filter { $0.role != "user" && $0.role != "assistant" } }
+        }
         // Publish the revision last: observers scroll only after the entire
         // snapshot is available, never after a partially replaced message list.
         scope = nextScope
         title = (payload["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "阅读助手"
-        conversationMode = payload["conversationMode"] as? String == "review" ? "review" : "normal"
+        conversationMode = nextMode
         review = payload["review"] as? [String: Any] ?? [:]
         ready = payload["ready"] as? Bool ?? false
         busy = payload["busy"] as? Bool ?? false
@@ -251,6 +271,29 @@ final class ReaderNativeConversationModel: ObservableObject {
         messages = nextMessages
         revision = nextRevision
         noteSnapshotCost(payload["payloadBytes"] as? Int ?? 0)
+    }
+
+    /// 写本机缓存。⚠ 节流：快照一秒能来好几次；内容没变或 3 秒内写过就跳过。
+    /// 流式回复还在长的时候不写（写进去的是半句话）。
+    private func rememberConversation(_ raw: [[String: Any]], mode: String) {
+        guard !raw.contains(where: { $0["streaming"] as? Bool == true }) else { return }
+        let last = raw.last
+        let signature = "\(mode)|\(raw.count)|\(last?["id"] as? String ?? "")|\((last?["text"] as? String ?? "").count)"
+        guard signature != lastCachedSignature, Date().timeIntervalSince(lastCachedAt) > 3 else { return }
+        lastCachedSignature = signature
+        lastCachedAt = Date()
+        cachedByMode[mode] = nil
+        ReaderNativeConversationCache.save(raw, mode: mode)
+    }
+
+    private func cachedMessages(_ mode: String) -> [ReaderNativeConversationMessage] {
+        if let hit = cachedByMode[mode] { return hit }
+        var seen = Set<String>()
+        let loaded = ReaderNativeConversationCache.load(mode)
+            .compactMap(ReaderNativeConversationMessage.init)
+            .filter { seen.insert($0.id).inserted }
+        cachedByMode[mode] = loaded
+        return loaded
     }
 
     /// 快照有多大、多久来一次。
@@ -423,6 +466,14 @@ final class ReaderNativeConversationModel: ObservableObject {
             //   面包屑是内存里的环形缓冲，够便宜；真出事时它会跟着崩溃报告一起走。
             ReaderNativeFaultReporter.shared.note("fail", action + ":" + (error ?? ""))
             return false
+        }
+        if action == "clearConversation" {
+            // 清空就连本机缓存一起清，否则下一次快照为空时缓存又把旧对话摆回来。
+            ReaderNativeConversationCache.clear(conversationMode)
+            cachedByMode[conversationMode] = []
+            cacheSuppressed.insert(conversationMode)
+            lastCachedSignature = ""
+            showingCachedMessages = false
         }
         return true
     }
