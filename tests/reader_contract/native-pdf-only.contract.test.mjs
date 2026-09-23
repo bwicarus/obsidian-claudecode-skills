@@ -158,6 +158,35 @@ test("卡片收藏夹：原生按钮 + 面板，数据仍走 rc-voicecall 的收
   assert.match(APP, /ReaderNativeFavoritesButton\(reader: reader, model: reader\.nativeConversation\)/);
 });
 
+test("卡片收藏夹是原版的样子：圆钮 + 底部横向时间轴，不是列表面板", () => {
+  // 2026-09-23 用户："收藏夹和我之前设计的完全不同，我还是更喜欢原来的设计"。
+  const FAV = read("ios/BWReader/App/ReaderNativeFavorites.swift");
+  const APP = read("ios/BWReader/App/BWReaderNativeApp.swift");
+  assert.match(APP, /ReaderNativeFavoritesPanelLayer\(reader: reader\)/);
+  assert.doesNotMatch(FAV, /\.sheet\(|List \{|NavigationStack/, "不是系统列表 sheet");
+  assert.match(FAV, /卡片收藏夹（向上拖出=复制到屏幕）/);
+  assert.match(FAV, /ScrollView\(\.horizontal/);
+  assert.match(FAV, /level == 0 \? min\(screenWidth \* 0\.76, 330\) : level == 1 \? 180 : 112/);
+  for (const call of ["placeNativeFavorite(item, windowPoint:", "deleteNativeFavorites(", "loadNativeFavoritesTrash()",
+                      "restoreNativeFavorite(", "toggleNativeFavoritePin("]) assert.ok(FAV.includes(call), call);
+  const SCRIPT = read("ios/BWReader/App/ReaderNativeConversationScript.swift");
+  for (const action of ["favoritesTrash", "favoritesRestore", "favoritesPin"]) {
+    assert.match(SCRIPT, new RegExp(`action === '${action}'`));
+    assert.match(WEBVIEW, new RegExp(`"${action}"`));
+  }
+});
+
+test("慢词查词：不弹挡人的框，而是那个词呼吸高亮；回来了再弹或等人点", () => {
+  // 2026-09-23 用户："没有命中时应该用之前我们的那个闪烁逻辑，不然挡在这里什么都干不了"。
+  const DOC = read("ios/BWReader/App/ReaderNativePDFDocument.swift");
+  assert.match(DOC, /struct PendingLookup/);
+  assert.match(DOC, /item\.ready \? 0\.38 : 0\.12 \+ 0\.28 \* pulse/);
+  assert.match(DOC, /if let id = pendingLookupAt\?\(location\) \{ onOpenPendingLookup\?\(id\); return \}/);
+  assert.match(WEBVIEW, /func presentWordLookup\(/);
+  assert.match(WEBVIEW, /document\.addPendingLookup\(id: id/);
+  assert.match(WEBVIEW, /nativeLookupCancelSeq \+= 1/);
+});
+
 test("侧栏卡拖到书页：PDFKit 自带的 drop 交互拆掉；每一步出声", () => {
   const DOC = read("ios/BWReader/App/ReaderNativePDFDocument.swift");
   assert.match(DOC, /interaction is UIDropInteraction/);
@@ -192,7 +221,7 @@ test("侧栏卡能长按拖起：会话列表的滚动检测不在手指落下�
 test("点词查词贴着词弹小框（原版 #word-pop），不走底部面板", () => {
   const APP = read("ios/BWReader/App/BWReaderNativeApp.swift");
   assert.match(APP, /ReaderNativeWordPopLayer\(reader: reader\)/);
-  assert.match(WEBVIEW, /if \["dict", "phrase"\]\.contains\(mode\), let anchor = nativePDFDocument\?\.lastLookupAnchor \{/);
+  assert.match(WEBVIEW, /if \["dict", "phrase"\]\.contains\(mode\), let document = nativePDFDocument,\s+let anchor = document\.lastLookupAnchor \{/);
   const POP = read("ios/BWReader/App/ReaderNativeWordPop.swift");
   assert.match(POP, /ReaderNativeLookupContent\(model: model\)/);
   assert.match(POP, /\.task \{ await model\.load\(\) \}/);

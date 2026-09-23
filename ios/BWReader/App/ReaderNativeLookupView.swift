@@ -53,7 +53,12 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
             .filter { !$0.isEmpty }
     }
 
+    /// 只查一次：阅读器可能先在后台开查（等不等得到决定弹不弹小框），小框出现时不再重查。
+    private var loadStarted = false
+
     func load() async {
+        guard !loadStarted else { return }
+        loadStarted = true
         loading = true
         error = nil
         defer { loading = false }

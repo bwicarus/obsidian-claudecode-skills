@@ -345,6 +345,54 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
 
     /// 最近一次查词时那个词在窗口里的框（贴词小框按它摆）。
     private(set) var lastLookupAnchor: CGRect?
+    /// 最近一次查词的那个词：页码 + 页内归一化矩形（慢词的等待高亮画在这里）。
+    private(set) var lastLookupPage = 0
+    private(set) var lastLookupRects: [CGRect] = []
+
+    /// 查词等待高亮（原版 15-phrase-wordpop「单击查词的等待表现」）：
+    /// 慢词不弹挡视线的"查词中"框，而是让那个词**呼吸**；结果到了转常亮，点它才出小框。
+    /// 多个可并存，各查各的。
+    struct PendingLookup: Equatable { let id: UUID; let page: Int; let rects: [CGRect]; var ready: Bool }
+    private(set) var pendingLookups: [PendingLookup] = [] {
+        didSet { refreshDecorations(); updateLookupPulse() }
+    }
+    var onOpenPendingLookup: ((UUID) -> Void)?
+    private var lookupPulse: Timer?
+
+    func addPendingLookup(id: UUID, page: Int, rects: [CGRect]) {
+        guard !rects.isEmpty else { return }
+        pendingLookups.append(PendingLookup(id: id, page: page, rects: rects, ready: false))
+    }
+    func markPendingLookupReady(_ id: UUID) {
+        guard let index = pendingLookups.firstIndex(where: { $0.id == id }) else { return }
+        pendingLookups[index].ready = true
+    }
+    func removePendingLookup(_ id: UUID) { pendingLookups.removeAll { $0.id == id } }
+
+    /// 这条等待高亮此刻在窗口里的框（点开时小框贴着它摆 —— 可能已经滚过）。
+    func pendingLookupWindowRect(_ id: UUID) -> CGRect? {
+        guard let item = pendingLookups.first(where: { $0.id == id }) else { return nil }
+        var union = CGRect.null
+        for rect in item.rects {
+            if let box = viewRect(normalized: rect, page: item.page) { union = union.union(box) }
+        }
+        return union.isNull ? nil : view.convert(union, to: nil)
+    }
+
+    /// 还在查的那几个词要一直呼吸：只重画它们所在的页，约 12 帧/秒。
+    private func updateLookupPulse() {
+        let breathing = Set(pendingLookups.filter { !$0.ready }.map(\.page))
+        if breathing.isEmpty { lookupPulse?.invalidate(); lookupPulse = nil; return }
+        guard lookupPulse == nil else { return }
+        lookupPulse = Timer.scheduledTimer(withTimeInterval: 1.0 / 12, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                for page in Set(self.pendingLookups.filter { !$0.ready }.map(\.page)) {
+                    self.textOverlays[page]?.setNeedsDisplay()
+                }
+            }
+        }
+    }
     /// 贴在正文上的临时东西（查词小框）该收起了：开始滚动 / 点了空白处。
     var onDismissTransient: (() -> Void)?
 
@@ -763,6 +811,18 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                 context.setStrokeColor(stroke.withAlphaComponent(0.45).cgColor)
                 context.setLineWidth(0.8)
                 context.stroke(rect)
+            }
+        }
+        // 查词等待高亮：还在查 = 呼吸（淡入淡出 1.2s 一周），查好了 = 常亮等人点。
+        let pulse = 0.5 + 0.5 * sin(Date().timeIntervalSinceReferenceDate * 2 * .pi / 1.2)
+        for item in pendingLookups where item.page == number {
+            let alpha = item.ready ? 0.38 : 0.12 + 0.28 * pulse
+            context.setFillColor(UIColor(red: 0.04, green: 0.52, blue: 1, alpha: alpha).cgColor)
+            for normalized in item.rects {
+                if let rect = project(normalized) {
+                    context.addPath(UIBezierPath(roundedRect: rect.insetBy(dx: -1.5, dy: -1), cornerRadius: 3).cgPath)
+                    context.fillPath()
+                }
             }
         }
         // 搜索命中：黄底。
@@ -1223,6 +1283,15 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                 page: number, text: value.text, sentence: value.sentence, color: color,
                 rects: rects, pageWidth: chars.pageWidth, pageHeight: chars.pageHeight))
         }
+        overlay.pendingLookupAt = { [weak self] point in
+            guard let self, let canonical = overlay.canonicalPoint?(point),
+                  let size = self.characterPageSize(number), size.width > 0, size.height > 0 else { return nil }
+            let normalized = CGPoint(x: canonical.x / size.width, y: canonical.y / size.height)
+            return self.pendingLookups.last(where: { item in
+                item.page == number && item.rects.contains { $0.insetBy(dx: -0.004, dy: -0.004).contains(normalized) }
+            })?.id
+        }
+        overlay.onOpenPendingLookup = { [weak self] id in self?.onOpenPendingLookup?(id) }
         overlay.highlightAt = { [weak self] point in
             guard let self, let canonical = overlay.canonicalPoint?(point),
                   let size = self.characterPageSize(number), size.width > 0, size.height > 0 else { return nil }
@@ -1245,6 +1314,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         overlay.onLookup = { [weak self, weak overlay] value, mode in
             // 记下这个词在屏幕上的位置：查词结果按原版那样贴着词弹小框。
             self?.lastLookupAnchor = overlay?.selectionWindowRect()
+            self?.lastLookupPage = number
+            self?.lastLookupRects = value.rects
             self?.onLookup?(number, value.text, value.sentence, mode)
         }
         // 有字符数据的页一律由原生文字层接选区（我们自己的选区菜单）；PDFKit 自带的选择
@@ -1479,6 +1550,9 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     }
     /// 点到已有划线时返回它的 id。接管后 .hl-layer 不存在，原生是唯一能点到划线的地方。
     var highlightAt: ((CGPoint) -> String?)?
+    /// 点到查词等待高亮时返回它的 id（点它 = 打开那个词的结果）。
+    var pendingLookupAt: ((CGPoint) -> UUID?)?
+    var onOpenPendingLookup: ((UUID) -> Void)?
     var onEditHighlight: ((String) -> Void)?
 
     @objc private func tapText(_ gesture: UITapGestureRecognizer) {
@@ -1488,6 +1562,7 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         // 弹出来了，编辑面板会叠在它上面。
         // 点在卡片锁定框上 → 展开那张卡。⚠ 排在划线之前：绑卡的那一段往往同时
         //   也划了线，先判划线的话卡永远打不开。
+        if let id = pendingLookupAt?(location) { onOpenPendingLookup?(id); return }
         if let id = cardMarkerAt(location) { onOpenCard?(id); return }
         if let id = highlightAt?(location) { onEditHighlight?(id); return }
         guard let index = hit(location) else { return }

@@ -5554,6 +5554,33 @@ if (window.__bwPwaProviderOnly) return;
         _dockBtn(); if (_dock.open) _dockPanel(true);
         return true;
       },
+      // 回收站（1 天内可恢复）与恢复：与收藏夹面板里「回收站 / 点卡=恢复」同一条端点。
+      trash: function () {
+        return fetch('/api/assistant/voice-cards?trash=1').then(function (r) { return r.json(); })
+          .then(function (d) { return (d && d.cards) || []; }).catch(function () { return []; });
+      },
+      restore: function (id) {
+        return fetch('/api/assistant/voice-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ op: 'restore', id: String(id || '') }) }).then(function () {
+            _dock.loaded = false;
+            return new Promise(function (resolve) { _dockLoad(function () { resolve(true); }); });
+          });
+      },
+      // 长按 = 带入/移出对话（收藏夹面板里 _pinBind 那一条；按 cid 认卡，同号卡处处同步）。
+      pinned: function (id) {
+        var rec = null; _dock.list.forEach(function (x) { if (x.id === id) rec = x; });
+        var cid = rec && (rec.cid || rec.gid);
+        return !!(cid && _pins.cids[cid] && _pins.map[_pins.cids[cid]]);
+      },
+      togglePin: function (id) {
+        var rec = null; _dock.list.forEach(function (x) { if (x.id === id) rec = x; });
+        if (!rec) return null;
+        if (!rec.cid) { rec.cid = rec.gid || _mkCid(); _favSave(rec); }
+        var el = document.createElement('div');
+        _pinReg(el, rec.cid);
+        _pinToggle(el, rec.label || '收藏卡片', function () { return rec.text || ''; });
+        return !!(_pins.cids[rec.cid] && _pins.map[_pins.cids[rec.cid]]);
+      },
       // 放到书页：收藏是**复制**，收藏夹里那张不动（与拖出收藏夹同一语义）。anchor 由原生按 PDFKit 算好。
       place: function (id, anchor) {
         var rec = null;

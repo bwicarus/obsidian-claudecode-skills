@@ -663,7 +663,8 @@ enum ReaderNativeConversationScript {
         //   'hideLegacy' 留着：还没原生化的那几个面（下面几处 setLegacy(true) 的
         //   fallback）掉进去以后，得有路回来。
         const out = ['refresh', 'snapshot', 'hideLegacy', 'liveAction'];
-        if (rc().voiceCard?.favorite?.load) out.push('favoritesList', 'favoritesPlace', 'favoritesDelete');
+        if (rc().voiceCard?.favorite?.load) out.push('favoritesList', 'favoritesPlace', 'favoritesDelete',
+          'favoritesTrash', 'favoritesRestore', 'favoritesPin');
         if (typeof window.__clearFocusSel === 'function') out.push('clearSelection');
         if (typeof drawer()?.setTab === 'function') out.push('toggleAssistant');
         if (typeof window.__asstSend === 'function') out.push('send');
@@ -943,7 +944,8 @@ enum ReaderNativeConversationScript {
              'nativeFigureAttach', 'nativeGrammar',
              'nativeHighlightEdit', 'nativePhraseFav',
              'nativeCreateNote', 'nativeOcrSelection',
-             'nativeEpubHighlight', 'favoritesPlace', 'favoritesDelete'].includes(command.action)) parameterKeys.push('value');
+             'nativeEpubHighlight', 'favoritesPlace', 'favoritesDelete', 'favoritesRestore',
+             'favoritesPin'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -1116,8 +1118,25 @@ enum ReaderNativeConversationScript {
                 kind: cards ? 'cards' : 'html', isHtml: !!item.isHtml,
                 content: cards ? '' : text(item.raw || item.text || '', 20000),
                 cards: cards ? cards.slice(0, 20).map(card => safeFields(card, ['front', 'back', 'question', 'answer', 'cloze', 'text'])) : [],
-                page: text(item.meta?.page, 20), file: text(item.meta?.file, 200) };
+                page: text(item.meta?.page, 20), file: text(item.meta?.file, 200),
+                ts: Number(item.ts) || 0, text: text(item.text || '', 600),
+                pinned: !!favorite.pinned?.(item.id) };
             }) };
+          } else if (action === 'favoritesTrash') {
+            const favorite = rc().voiceCard?.favorite;
+            if (!favorite?.trash) return { ok: false, error: '回收站尚未就绪' };
+            const list = await favorite.trash();
+            return { ok: true, value: list.slice(0, 200).map(item => ({ id: text(item.id, 160),
+              label: text(item.label, 200) || '收藏卡片', ts: Number(item.ts) || 0, text: text(item.text || '', 600),
+              page: text(item.meta?.page, 20), file: text(item.meta?.file, 200) })) };
+          } else if (action === 'favoritesRestore' || action === 'favoritesPin') {
+            const favorite = rc().voiceCard?.favorite, value = command.value;
+            if (!favorite || !value || typeof value.id !== 'string') return { ok: false, error: '参数无效' };
+            if (action === 'favoritesRestore') { await favorite.restore(value.id); return { ok: true }; }
+            const on = favorite.togglePin?.(value.id);
+            if (on == null) return { ok: false, error: '这张卡已不在收藏夹里' };
+            schedule();
+            return { ok: true, value: { pinned: on } };
           } else if (action === 'favoritesPlace') {
             const favorite = rc().voiceCard?.favorite, value = command.value;
             if (!favorite?.place || !value || typeof value.id !== 'string' || !Number.isSafeInteger(value.page) ||

@@ -242,12 +242,15 @@ private struct ReaderRootView: View {
                 // 卡片收藏夹按钮（原版 #vc-dock-btn：右下角，有存货才出现）。
                 ReaderNativeFavoritesButton(reader: reader, model: reader.nativeConversation)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                    .padding(.trailing, 16).padding(.bottom, 24)
+                    .padding(.trailing, 14).padding(.bottom, 96)
                 // 侧栏关着时的通话字幕（原版 #vc-cap：底部居中，离底 76）。
                 ReaderNativeCaptionBar(model: reader.nativeConversation)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .padding(.bottom, 76)
                     .allowsHitTesting(false)
+                // 收藏夹面板（原版 #vc-dock-panel：从屏幕底边升起的一条横向时间轴）。
+                ReaderNativeFavoritesPanelLayer(reader: reader)
+                    .ignoresSafeArea(edges: .bottom)
             }
 
             NativePencilLiveOverlay(

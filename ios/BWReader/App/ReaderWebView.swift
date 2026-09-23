@@ -1109,35 +1109,65 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return (receipt["value"] as? [[String: Any]] ?? []).compactMap(ReaderNativeFavorite.init)
     }
 
-    /// 放到当前页（收藏是复制，收藏夹里那张不动）。落点：当前页上方偏左 —— 与拖出收藏夹同一语义，
-    /// 放下后可以再按住拖到想要的地方。
-    func placeNativeFavorite(_ favorite: ReaderNativeFavorite) async -> Bool {
-        guard let document = nativePDFDocument else {
+    /// 收藏夹面板开着没有（原版 #vc-dock-panel：从屏幕底边升起的一条）。
+    @Published var nativeFavoritesOpen = false
+
+    /// 拖出收藏夹放到书页（收藏是复制，收藏夹里那张不动）。落点由 PDFKit 定页。
+    func placeNativeFavorite(_ favorite: ReaderNativeFavorite, windowPoint: CGPoint) async -> Bool {
+        guard nativePDFDocument != nil else {
             showTransientNotice("只有 PDF 原生正文里能把收藏卡放到书页上。")
+            return false
+        }
+        guard let target = nativeDropTarget(windowPoint: windowPoint),
+              let page = target["page"] as? Int, let x = target["x"] as? Double, let y = target["y"] as? Double else {
+            showTransientNotice("请放到书页正文上。")
             return false
         }
         let receipt = await requestNativeConversationCommand([
             "action": "favoritesPlace", "scope": nativeConversation.scope,
-            "value": ["id": favorite.id, "page": document.position.page, "x": 0.08, "y": 0.12],
+            "value": ["id": favorite.id, "page": page, "x": x, "y": y],
         ])
         guard receipt["ok"] as? Bool == true else {
             showTransientNotice(receipt["error"] as? String ?? "没能放到书页上。")
             return false
         }
         scheduleNativePDFProjectionRefresh()
-        showTransientNotice("已放到第 \(document.position.page) 页")
         return true
     }
 
-    func deleteNativeFavorite(_ favorite: ReaderNativeFavorite) async -> Bool {
+    func deleteNativeFavorites(_ ids: [String]) async -> Bool {
         let receipt = await requestNativeConversationCommand([
-            "action": "favoritesDelete", "scope": nativeConversation.scope, "value": ["ids": [favorite.id]],
+            "action": "favoritesDelete", "scope": nativeConversation.scope, "value": ["ids": ids],
         ])
         if receipt["ok"] as? Bool != true {
             showTransientNotice(receipt["error"] as? String ?? "没能删除。")
             return false
         }
         return true
+    }
+
+    func loadNativeFavoritesTrash() async -> [ReaderNativeFavorite] {
+        let receipt = await requestNativeConversationCommand(["action": "favoritesTrash", "scope": nativeConversation.scope])
+        return (receipt["value"] as? [[String: Any]] ?? []).compactMap(ReaderNativeFavorite.init)
+    }
+
+    func restoreNativeFavorite(_ id: String) async -> Bool {
+        let receipt = await requestNativeConversationCommand([
+            "action": "favoritesRestore", "scope": nativeConversation.scope, "value": ["id": id],
+        ])
+        return receipt["ok"] as? Bool == true
+    }
+
+    /// 长按 = 带入/移出对话。返回之后是否在对话里；失败返回 nil。
+    func toggleNativeFavoritePin(_ id: String) async -> Bool? {
+        let receipt = await requestNativeConversationCommand([
+            "action": "favoritesPin", "scope": nativeConversation.scope, "value": ["id": id],
+        ])
+        guard receipt["ok"] as? Bool == true else {
+            showTransientNotice(receipt["error"] as? String ?? "没能带入对话。")
+            return nil
+        }
+        return (receipt["value"] as? [String: Any])?["pinned"] as? Bool
     }
 
     /// 最近一次原生选区（选区窗口「对话」时要重新送一遍）。
@@ -1307,8 +1337,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         activeNativePDFDocument = document
         document.onDismissTransient = { [weak self] in
             Task { @MainActor [weak self] in
+                // 滚动 / 点空白：小框收起；还在查的词回来后不再自动弹（原版 _wordPopCancelSeq）。
+                self?.nativeLookupCancelSeq += 1
                 if self?.nativeWordPop != nil { self?.nativeWordPop = nil }
             }
+        }
+        document.onOpenPendingLookup = { [weak self] id in
+            Task { @MainActor [weak self] in self?.openPendingLookup(id) }
         }
         nativePlacementsCancellable = nativeConversation.$placements.sink { [weak self] items in
             Task { @MainActor [weak self] in self?.reconcileNativeNotePlacements(items) }
@@ -1500,13 +1535,64 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             }
         }
         // 点词 / 词组：贴着那个词弹小框（原版 #word-pop）；翻译、解释这类长结果仍走面板。
-        if ["dict", "phrase"].contains(mode), let anchor = nativePDFDocument?.lastLookupAnchor {
-            nativeWordPopAnchor = anchor
-            nativeWordPop = panel
+        if ["dict", "phrase"].contains(mode), let document = nativePDFDocument,
+           let anchor = document.lastLookupAnchor {
+            presentWordLookup(panel, anchor: anchor, document: document)
         } else {
             nativeWordPop = nil
             nativeLookup = panel
         }
+    }
+
+    // MARK: - 查词的等待表现（原版 15-phrase-wordpop「单击查词的等待表现」）
+    //
+    // 2026-09-23 用户："没有命中时应该用之前我们的那个闪烁逻辑，不然挡在这里什么都干不了"
+    // （此前是一个转圈的框挡在正文上）。原版规则：
+    //   · 400ms 内回来（已缓存 / 快词）→ 直接弹小框；
+    //   · 慢了 → 不弹框，那个词呼吸高亮；可以接着读、接着点别的词（多个并存）；
+    //   · 结果到了：期间没滚动、也没点别的词 → 自动弹小框；否则转常亮，点它才出结果。
+    private var nativeLookupCancelSeq = 0
+    private var pendingLookupPanels: [UUID: ReaderNativeLookupModel] = [:]
+
+    private func presentWordLookup(_ panel: ReaderNativeLookupModel, anchor: CGRect,
+                                   document: ReaderNativePDFDocument) {
+        nativeLookupCancelSeq += 1
+        let seq = nativeLookupCancelSeq
+        let page = document.lastLookupPage, rects = document.lastLookupRects
+        nativeWordPop = nil
+        Task { @MainActor [weak self, weak document] in
+            let loading = Task { await panel.load() }
+            for _ in 0..<8 where panel.loading { try? await Task.sleep(nanoseconds: 50_000_000) }
+            guard let self, let document, self.nativePDFDocument === document else { return }
+            if !panel.loading {
+                if seq == self.nativeLookupCancelSeq {
+                    self.nativeWordPopAnchor = anchor
+                    self.nativeWordPop = panel
+                }
+                return
+            }
+            let id = UUID()
+            self.pendingLookupPanels[id] = panel
+            document.addPendingLookup(id: id, page: page, rects: rects)
+            await loading.value
+            guard self.nativePDFDocument === document else { return }
+            if seq == self.nativeLookupCancelSeq, panel.error == nil,
+               let now = document.pendingLookupWindowRect(id) {
+                self.openPendingLookup(id, anchor: now)
+            } else {
+                document.markPendingLookupReady(id)
+            }
+        }
+    }
+
+    private func openPendingLookup(_ id: UUID, anchor: CGRect? = nil) {
+        guard let document = nativePDFDocument, let panel = pendingLookupPanels.removeValue(forKey: id) else { return }
+        let place = anchor ?? document.pendingLookupWindowRect(id)
+        document.removePendingLookup(id)
+        guard let place else { return }
+        nativeWordPopAnchor = place
+        nativeWordPop = panel
+        Task { await panel.load() }   // 还没查完的话接着等（load 只查一次）
     }
 
     /// 顶栏 🗒 新建便签。
@@ -1712,7 +1798,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // "openArtifact" / "action" 一并删除：它们唯一的实现是把旧网页界面
             // 端出来（reveal→setLegacy），而原生界面从来没有地方会去点它们。
             "hideLegacy", "refresh", "snapshot", "openTOC", "openSearch",
-            "favoritesList", "favoritesPlace", "favoritesDelete",
+            "favoritesList", "favoritesPlace", "favoritesDelete", "favoritesTrash", "favoritesRestore", "favoritesPin",
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）
