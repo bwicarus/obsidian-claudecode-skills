@@ -165,3 +165,18 @@ test("侧栏卡拖到书页：PDFKit 自带的 drop 交互拆掉；每一步出�
   assert.doesNotMatch(place, /else \{ return \}/, "条件不满足不能一声不吭地 return");
   assert.match(place, /\[card-drop\]/);
 });
+
+test("查词：phrase/isJa 在第一个用到它们的分支之前声明；面板带原版小框的按钮与字段", () => {
+  // 2026-09-23 用户截图："Cannot access 'phrase' before initialization" —— 每一次查词都抛。
+  const SRC = read("_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js");
+  const fn = SRC.slice(SRC.indexOf("window.__bwReaderLookupData = async function"), SRC.indexOf("function _phraseStateOf("));
+  const declared = fn.indexOf("const phrase = request.mode === 'phrase';");
+  assert.ok(declared > 0 && declared < fn.indexOf("(phrase && !isJa)"), "声明必须在第一次使用之前");
+  assert.ok(fn.indexOf("const isJa = _isJaWord(text);") < fn.indexOf("(phrase && !isJa)"));
+  assert.match(fn, /inflect: _lookupPlain\(_jpInflectHtml\(/);
+  assert.match(fn, /inflect: _lookupPlain\(_enFormsHtml\(/);
+  const VIEW = read("ios/BWReader/App/ReaderNativeLookupView.swift");
+  assert.match(VIEW, /Label\("语法", systemImage:/);
+  assert.match(VIEW, /model\.inflection/);
+  assert.match(VIEW, /model\.partOfSpeech/);
+});

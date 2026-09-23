@@ -177,6 +177,15 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
             return (source, pair["zh"] as? String ?? "")
         }
     }
+    /// 原版单词小框里的几样：词性小标签、变形/语法标签行、BNC 词频。
+    var partOfSpeech: String { string("pos") }
+    var inflection: String { string("inflect") }
+    var frequency: Int { (value["freq"] as? NSNumber)?.intValue ?? 0 }
+
+    /// 「语法」（原版小框的 `_wordPopGrammar`）：对这个词所在的整句做语法分析，焦点是这个词。
+    var onGrammar: ((String, String) -> Void)?
+    func grammar() { onGrammar?(context.isEmpty ? headword : context, headword) }
+
     var synonyms: [String] { (value["synonyms"] as? [Any] ?? []).compactMap { $0 as? String } }
     var antonyms: [String] { (value["antonyms"] as? [Any] ?? []).compactMap { $0 as? String } }
 }
@@ -260,13 +269,30 @@ struct ReaderNativeLookupView: View {
                             if !model.phonetic.isEmpty {
                                 Text(model.phonetic).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
                             }
+                            if model.frequency > 0 {
+                                Text("BNC#\(model.frequency)").font(.caption2.monospacedDigit())
+                                    .foregroundStyle(ReaderNativeTheme.muted)
+                            }
+                        }
+                        if !model.inflection.isEmpty {
+                            // 变形：日语=原形 + 语法标签（过去た/否定ない/て形…）；英语=各种屈折变形。
+                            Text(model.inflection).font(.footnote).foregroundStyle(ReaderNativeTheme.muted)
                         }
                         if !model.lemma.isEmpty, model.lemma != model.headword {
                             Text("原形 " + model.lemma).font(.footnote)
                                 .foregroundStyle(ReaderNativeTheme.muted)
                         }
                         if !model.chinese.isEmpty {
-                            Text(model.chinese).font(.body).textSelection(.enabled)
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                if !model.partOfSpeech.isEmpty {
+                                    // 词性单独做暗色小标签（原版 .wp-pos-tag）。
+                                    Text(model.partOfSpeech).font(.caption2)
+                                        .padding(.horizontal, 5).padding(.vertical, 1)
+                                        .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 4))
+                                        .foregroundStyle(ReaderNativeTheme.muted)
+                                }
+                                Text(model.chinese).font(.body).textSelection(.enabled)
+                            }
                         }
                         if !model.kanji.isEmpty {
                             // 日语汉字拆解：网页那侧也是这么列的。
@@ -314,15 +340,25 @@ struct ReaderNativeLookupView: View {
                             .disabled(model.expanding)
                         }
                         Divider()
-                        Button {
-                            Task { await model.markMastered() }
-                        } label: {
-                            Label(model.mastered ? "已掌握（点此取消）" : "标记掌握",
-                                  systemImage: model.mastered ? "checkmark.circle.fill" : "star")
+                        // 原版小框底部那一排：标记掌握 + 语法。
+                        HStack(spacing: 10) {
+                            Button {
+                                Task { await model.markMastered() }
+                            } label: {
+                                Label(model.mastered ? "已掌握 100" : "标记掌握",
+                                      systemImage: model.mastered ? "checkmark.circle.fill" : "star")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(model.mastered ? .green : nil)
+                            .disabled(model.marking)
+                            .accessibilityHint("标记掌握后这个词不再画生词下划线；再点取消")
+                            Button { model.grammar() } label: {
+                                Label("语法", systemImage: "chart.bar.doc.horizontal")
+                            }
+                            .buttonStyle(.bordered)
+                            .accessibilityHint("对这个词所在的整句做语法分析")
                         }
-                        .buttonStyle(.borderless)
-                        .disabled(model.marking)
-                        .accessibilityHint("标记掌握后这个词不再画生词下划线")
+                        .font(.footnote)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

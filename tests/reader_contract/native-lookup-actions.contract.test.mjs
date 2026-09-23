@@ -74,7 +74,7 @@ test("⑤ 展开完整词典复用网页那条端点，不另开一个", () => {
   assert.match(entry, /request\.mode === 'dict-full'/);
   // ⚠ dict-full 必须排在 isJa 之前：反了的话日语词先被 dict-jp 接走，
   // 「展开」什么都不多出来却把状态翻成已展开 —— 静默无效。
-  assert.ok(entry.indexOf("request.mode === 'dict-full'") < entry.indexOf("const isJa ="),
+  assert.ok(entry.indexOf("request.mode === 'dict-full'") < entry.indexOf("if (isJa) {"),
     "dict-full 分支要在语言分流之前");
   assert.match(entry, /BW_READER_LOOKUP_JP_FULL/, "日语走到这儿要出声，不要返回旧数据");
   assert.match(PANEL, /if !model\.expanded, !model\.isJapanese \{/,

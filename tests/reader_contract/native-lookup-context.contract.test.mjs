@@ -32,7 +32,7 @@ test("① 整句一路传到面板，不是拿选中串充数", () => {
 });
 
 test("② 解释的短选区换整句，与网页同一条规则", () => {
-  const entry = body(WORDPOP, "if (request.mode === 'explain')", "const phrase = request.mode");
+  const entry = body(WORDPOP, "if (request.mode === 'explain')", "if (request.mode === 'dict-full')");
   assert.match(entry, /text\.length < 50 && context && context\.length > text\.length/);
   assert.match(entry, /body: \{text: subject, context\}/);
   // 网页那侧的规则还在原处（这条测试防的是两边分头改）。

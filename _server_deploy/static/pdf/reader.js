@@ -7454,6 +7454,11 @@ window.__bwReaderLookupData = async function (request) {
   const context = String(request.context || '').slice(0, 320);
   const page = Number(request.page) || (typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0;
   const file = encodeURIComponent(FILE_REL || '');
+  // ⚠ 这两个必须在第一个分支之前声明：翻译分支就要用它们。以前声明在下面，
+  //   const 的暂时性死区让**每一次**查询都抛 "Cannot access 'phrase' before initialization"
+  //   （2026-09-23 用户截图：点词查词直接报错）。
+  const phrase = request.mode === 'phrase';
+  const isJa = _isJaWord(text);
   if (request.mode === 'translate' || (phrase && !isJa)) {
     const r = await (await fetch('/pdf/api/translate-sentence', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -7509,8 +7514,6 @@ window.__bwReaderLookupData = async function (request) {
   // 「词组」= 把选中当成一个词：日语走中日词典（读音/音调/汉字拆解都有），
   // 其它语言走整句翻译。**两条都是现成分支**，这里只是把路由改一下并带上
   // 收藏/掌握状态 —— 词组不该多出一条自己的端点。
-  const phrase = request.mode === 'phrase';
-  const isJa = _isJaWord(text);
   if (isJa) {
     // @interaction dictionary.jp.read
     const d = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
@@ -7521,6 +7524,11 @@ window.__bwReaderLookupData = async function (request) {
     return Object.assign({mode: phrase ? 'phrase' : 'dict', jp: true, word: text, zh: d.zh || '',
             reading: d.reading || '', accent: (d.accent != null ? d.accent : null),
             kanji: Array.isArray(d.kanji) ? d.kanji.slice(0, 12) : [],
+            // 原版单词小框里有、原生面板以前没带的几样：词性、变形/语法标签、母语例句。
+            // 变形行用小框同一个函数生成再去掉标记 —— 不另写一份判据。
+            pos: d.pos || '', inflect: _lookupPlain(_jpInflectHtml(d.inflect, text)),
+            examples: (Array.isArray(d.examples) ? d.examples : []).slice(0, 2)
+              .map(e => ({ ja: String(e.ja || ''), zh: String(e.zh || e.en || '') })),
             // ⚠ 掌握态必须带上：不带的话面板永远显示「未掌握」，点一下反而把
             // 已经掌握的词取消掉了。
             mastered: !!d.mastered},
@@ -7533,8 +7541,18 @@ window.__bwReaderLookupData = async function (request) {
   return {mode: 'dict', jp: false, word: d.word || text, lemma: d.lemma || '',
           phonetic: d.phonetic || '', translation: d.translation || '',
           definition: String(d.definition || '').slice(0, 4000),
+          // 同上：词性、屈折变形行、BNC 词频（原版小框卡头右边那个 BNC#）。
+          pos: d.pos || '', freq: Number(d.freq_bnc) || 0,
+          inflect: _lookupPlain(_enFormsHtml(d.lemma || text, d.forms, text)),
           mastered: !!d.mastered};
 };
+// 小框那几段是拼好的 HTML；原生面板要纯文字（去标记、并空白）。
+function _lookupPlain(html) {
+  if (!html) return '';
+  const box = document.createElement('div');
+  box.innerHTML = String(html);
+  return String(box.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+}
 
 // 词组的收藏/掌握状态。⚠ 归一化（去空白）与 _phraseFav 保持同一条规则 ——
 // 跨行选中带换行，不归一化会存成另一个词组，表现是「收藏了却没生效」。

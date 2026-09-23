@@ -1478,6 +1478,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         // 标了掌握就重取一次叠加数据：否则这一页的下划线要翻页才消失。
         panel.onMarked = { [weak self] in self?.refreshNativePageOverlays(force: true) }
+        panel.onGrammar = { [weak self] sentence, focus in
+            guard let self else { return }
+            self.nativeLookup = nil
+            // 等词典面板收起再开语法面板（两个 sheet 不能同时出）。
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                self?.openNativeGrammar(sentence: sentence, focus: focus)
+            }
+        }
         nativeLookup = panel
     }
 
