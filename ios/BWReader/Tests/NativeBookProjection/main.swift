@@ -335,3 +335,31 @@ _ = try positionWriter.perform(["bookID":book,"mutationId":"remote-position","op
 let clampedPosition = try ReaderNativeReadingPosition.restore(store:positionStore,bookID:book,total:90)!
 check(clampedPosition["page"] as? Int == 90 && clampedPosition["fraction"] as? Int == 0,"remote page reused previous page fraction or exceeded document")
 print("Native reading position: durable continuation, scroll coalescing, atomic replication and remote-page arbitration passed")
+
+let createStore = try ReaderNativeDataStore(path: ":memory:")
+let createWriter = ReaderNativeBookStore(store: createStore, bookID: book, deviceID: "create", now: { 700_000 })
+let createRead = ReaderNativeBookProjection(store: createStore)
+let stickyID = "c_" + String(repeating: "a", count: 32)
+let stickyBody: [String: Any] = ["file": "localbook:" + book, "id": stickyID,
+    "anchor": ["kind": "pdf", "page": 3, "x": 0.5, "y": 0.5], "color": "#ffffff", "w": 260, "h": 180]
+let stickyRequest: [String: Any] = ["bookID": book, "mutationId": "native-create", "operation": "note-create",
+    "value": ["method": "POST", "body": stickyBody]]
+try createStore.execute("CREATE TRIGGER fail_note_send BEFORE INSERT ON records WHEN NEW.collection = 'native-replication-outbox' BEGIN SELECT RAISE(ABORT, 'send failed'); END")
+do { _ = try createWriter.perform(stickyRequest); fatalError("creation outbox failure swallowed") } catch ReaderNativeDataStore.StoreError.sql {}
+check(try createRead.state("document-notes-legacy", bookID: book).payload == nil, "created note survived failed transaction")
+check(try createStore.cursor() == 0, "creation failure left partial index writes")
+try createStore.execute("DROP TRIGGER fail_note_send")
+let createdReceipt = try createWriter.perform(stickyRequest)
+check((createdReceipt["result"] as? [String: Any])?["id"] as? String == stickyID, "local creation changed stable note ID")
+let createdNotes = try createRead.state("document-notes-legacy", bookID: book).payload as! [[String: Any]]
+check(createdNotes.count == 1 && createdNotes[0]["color"] as? String == "#ffffff", "native default note differs from original")
+let creationPending = try ReaderNativeReplicationOutbox(store: createStore).pending()
+check(creationPending.count == 1, "creation failed to queue exactly one sync")
+let sentCreation = String(decoding: creationPending[0].envelope, as: UTF8.self)
+check(sentCreation.contains(stickyID) && sentCreation.contains("/pdf/api/notes"), "outgoing note lost its local identity")
+let creationCursor = try createStore.cursor()
+_ = try createWriter.perform(stickyRequest)
+check(try createStore.cursor() == creationCursor, "creation replay created a second note or queued twice")
+var collision = stickyRequest; collision["mutationId"] = "collision"
+do { _ = try createWriter.perform(collision); fatalError("same note ID replaced on creation") } catch ReaderNativeBookStore.MutationError.invalid {}
+print("Native note creation: stable ID, white default, atomic replication, rollback and replay passed")

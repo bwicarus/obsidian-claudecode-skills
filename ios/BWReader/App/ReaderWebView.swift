@@ -1832,23 +1832,40 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 接管后一页都不在 DOM 里，七个候选点全落空 —— 便签没建，连"放不了"的
     /// toast 也看不见（toast 也在被藏的那层里）。页面位置此时只有 PDFKit 知道。
     func createNativeStickyNote() {
-        guard let document = nativePDFDocument else { return }
+        guard let document = nativePDFDocument, let book = currentLocalBook, let access = currentLocalBookAccess,
+              let digest = currentLocalBookContentSHA256, let deviceID = nativeReadingStoreDeviceID,
+              nativeReadingStoreBookID == book.id, document.matches(bookID: book.id, contentSHA256: digest) else { return }
         // 落在视野中央那一页的正中。中央恰好在页缝时退到下一个可见页 ——
         // 与网页那侧「中央落空就试附近候选」是同一个意思。
         let pages = document.position.visiblePages
         guard let page = pages.first(where: { document.characterPageSize($0) != nil }) ?? pages.first else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let receipt = await self.requestNativeConversationCommand([
-                "action": "nativeCreateNote", "scope": self.nativeConversation.scope,
-                "value": ["page": page, "x": 0.5, "y": 0.5],
-            ])
-            if receipt["ok"] as? Bool == true {
-                self.scheduleNativePDFProjectionRefresh()
-            } else {
-                // 出声：原来这条路是彻底静默的，什么都不说才是真正的坑。
-                self.nativeConversation.report(receipt["error"] as? String ?? "便签没有建成。")
-            }
+            do {
+                let generation = self.bookUserStateContextGeneration
+                guard self.nativePDFMutationCommandDepth == 0 else { throw ReaderNativeBookStore.MutationError.unavailable }
+                let pending = try await self.nativePDFMutationActor.hasUnfinishedMutation(book: access)
+                guard !pending, self.nativePDFMutationCommandDepth == 0,
+                      generation == self.bookUserStateContextGeneration, self.currentLocalBookAccess === access,
+                      self.nativePDFDocument === document, document.matches(bookID: book.id, contentSHA256: digest) else {
+                    throw ReaderNativeBookStore.MutationError.unavailable
+                }
+                let store = try self.nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+                let id = "c_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                let body: [String: Any] = ["file": "localbook:" + book.id, "id": id,
+                    "anchor": ["kind": "pdf", "page": page, "x": 0.5, "y": 0.5],
+                    "color": "#ffffff", "w": 260, "h": 180]
+                _ = try ReaderNativeBookStore(store: store, bookID: book.id, deviceID: deviceID, displayName: book.title, contentSHA256: digest)
+                    .perform(["bookID": book.id, "mutationId": "create-note-" + id, "operation": "note-create",
+                              "value": ["method": "POST", "body": body]])
+                self.nativeReplicationService?.wake()
+                self.markCloudSyncDirty()
+                await self.refreshNativePDFProjection()
+                if self.currentLocalBookAccess === access {
+                    self.webView.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('bw:native-book-committed',{detail:value})); return true;",
+                        arguments: ["value": ["bookID": book.id]], in: nil, in: .page, completionHandler: nil)
+                }
+            } catch { self.nativeConversation.report("便签没有建成：" + error.localizedDescription) }
         }
     }
 
