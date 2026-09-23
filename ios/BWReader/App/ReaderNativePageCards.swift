@@ -443,10 +443,19 @@ struct ReaderNativePlacedCard: View {
     /// 底 rgba(64,35,42,.82)，图标 #ffd8de）；自由卡 = 一枚同尺寸的「更多」。
     private var header: some View {
         HStack(spacing: 6) {
+            // 点按 / 按住拖动只认**标题这一段**（含左边距）。右边的删除、「…」按钮不在里面 ——
+            // ⚠ 以前手势挂在整条卡头上，点「…」先被当成点卡头，卡直接收起、菜单用不了
+            //   （2026-09-23 用户实报）。
             Text(item.title)
                 .font(.system(size: 12)).lineLimit(1)
                 .foregroundStyle(finish.tone)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                .padding(.leading, 13)
+                .contentShape(Rectangle())
+                .gesture(pressGesture(onTap: tapHeader))
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint(item.bound ? "收起到正文" : "切换卡片形态")
+                .accessibilityAction { tapHeader() }
             if item.bound {
                 Button { confirmRemoval = true } label: {
                     Image(systemName: "trash.fill").font(.system(size: 11, weight: .semibold))
@@ -474,14 +483,8 @@ struct ReaderNativePlacedCard: View {
                 .accessibilityLabel("卡片操作")
             }
         }
-        .padding(.leading, 13).padding(.trailing, 7)
+        .padding(.trailing, 7)
         .frame(minHeight: 40)
-        .contentShape(Rectangle())
-        // 点按 = 收起/切形态；按住 420ms 蓄满才能拖（见 pressGesture）。
-        .gesture(pressGesture(onTap: tapHeader))
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { tapHeader() }
-        .accessibilityHint(item.bound ? "收起到正文" : "切换卡片形态")
     }
 
     private var card: some View {

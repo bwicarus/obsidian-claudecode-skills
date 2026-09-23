@@ -1740,7 +1740,31 @@ private final class ReaderNativePDFSelectionHandle: UIView {
 @MainActor
 final class ReaderNativePDFView: PDFView {
     var onLayout: (() -> Void)?
-    override func layoutSubviews() { super.layoutSubviews(); onLayout?() }
+    private var dropStrippedAt = Date.distantPast
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        stripDropInteractions()
+        onLayout?()
+    }
+
+    /// 拆掉 PDFKit 自带的放置（drop）处理。
+    /// ⚠ 侧栏卡拖到书页靠的是外层阅读区的 dropDestination；PDFKit 在自己的内部视图上装了
+    ///   drop 交互，放下的卡片先被它接住又拒掉，根本到不了外层 —— 网页渲页时没有这一层，
+    ///   所以"以前能拖"（2026-09-23 用户："侧边栏中的卡片无法和以前一样拖动到页面上"）。
+    ///   我们不用 PDFKit 的放置功能。页面视图随滚动增减，布局时顺手清（至多每秒一次）。
+    private func stripDropInteractions() {
+        let now = Date()
+        guard now.timeIntervalSince(dropStrippedAt) > 1 else { return }
+        dropStrippedAt = now
+        func strip(_ view: UIView, depth: Int) {
+            for interaction in view.interactions where interaction is UIDropInteraction {
+                view.removeInteraction(interaction)
+            }
+            guard depth < 6 else { return }
+            for child in view.subviews { strip(child, depth: depth + 1) }
+        }
+        strip(self, depth: 0)
+    }
 }
 
 private struct ReaderNativePDFSurface: UIViewRepresentable {

@@ -132,3 +132,36 @@ test("选区照原版：单击查词；拖选/长按出 #sel-toolbar 那种窗�
   const APP = read("ios/BWReader/App/BWReaderNativeApp.swift");
   assert.match(APP, /ReaderNativePDFSelectionPanelLayer\(document: document\)/);
 });
+
+test("卡头只有标题段认点按/拖动；「…」与删除不在状态切换范围里", () => {
+  // 2026-09-23 用户："直接点击右上角三个点的按钮会关闭整个卡片导致按钮菜单无法使用"。
+  const CARDS = read("ios/BWReader/App/ReaderNativePageCards.swift");
+  const header = CARDS.slice(CARDS.indexOf("private var header: some View {"), CARDS.indexOf("private var card: some View {"));
+  const gestureAt = header.indexOf(".gesture(pressGesture(onTap: tapHeader))");
+  assert.ok(gestureAt > 0 && gestureAt < header.indexOf("if item.bound {"), "手势挂在标题 Text 上，不挂整条卡头");
+  assert.equal((header.match(/pressGesture\(/g) || []).length, 1);
+});
+
+test("卡片收藏夹：原生按钮 + 面板，数据仍走 rc-voicecall 的收藏夹", () => {
+  // 2026-09-23 用户："卡片收藏进收藏夹后也没有显示收藏夹的图标按钮"。
+  const VC = read("_server_deploy/static/pdf/rc-voicecall.js");
+  assert.match(VC, /window\.dispatchEvent\(new Event\('rc:favorites-changed'\)\)/);
+  for (const api of ["count: function", "load: function", "remove: function", "place: function"]) assert.ok(VC.includes(api), api);
+  const SCRIPT = read("ios/BWReader/App/ReaderNativeConversationScript.swift");
+  assert.match(SCRIPT, /favoritesCount:/);
+  assert.match(SCRIPT, /'rc:favorites-changed'/);
+  for (const action of ["favoritesList", "favoritesPlace", "favoritesDelete"]) {
+    assert.match(SCRIPT, new RegExp(`action === '${action}'`));
+    assert.match(WEBVIEW, new RegExp(`"${action}"`));
+  }
+  const APP = read("ios/BWReader/App/BWReaderNativeApp.swift");
+  assert.match(APP, /ReaderNativeFavoritesButton\(reader: reader, model: reader\.nativeConversation\)/);
+});
+
+test("侧栏卡拖到书页：PDFKit 自带的 drop 交互拆掉；每一步出声", () => {
+  const DOC = read("ios/BWReader/App/ReaderNativePDFDocument.swift");
+  assert.match(DOC, /interaction is UIDropInteraction/);
+  const place = WEBVIEW.slice(WEBVIEW.indexOf("func placeNativeConversationCard("), WEBVIEW.indexOf("func resizeNativeConversationCard("));
+  assert.doesNotMatch(place, /else \{ return \}/, "条件不满足不能一声不吭地 return");
+  assert.match(place, /\[card-drop\]/);
+});

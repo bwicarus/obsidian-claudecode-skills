@@ -85,6 +85,7 @@ struct ReaderNativeWorkspace<Document: View>: View {
                             .dropDestination(for: ReaderNativeCardTransfer.self) { values, location in
                                 // ⚠ 这里以前一律 `return false` 就完事：拖过去、卡飞回侧栏、
                                 //   一个字都没有。放不下也要说是为什么。
+                                reader.postClientLog("[card-drop] received n=\(values.count)")
                                 guard let payload = values.first, page.size.width > 0, page.size.height > 0 else {
                                     reader.showTransientNotice("没能读出这张卡，请重试。")
                                     return false

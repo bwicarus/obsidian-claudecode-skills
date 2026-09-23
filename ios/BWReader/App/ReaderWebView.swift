@@ -521,8 +521,22 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // 原生正文下：开合只是原生自己的状态，卡由文档层按便签数据画。
         // 内容还没到（快照只带当前页前后几页）就说出来，不静默。
         guard placement != nil || nativeOpenBoundNotes.contains(noteID) else {
-            showTransientNotice("这张卡的内容还没同步到本机，请稍后再点。")
+            // 快照可能只是旧了：便签在网页那侧已经载入，只是还没有事件触发下一次快照
+            // （2026-09-23 实录：网页交得出 14 张、含这一张，原生这边却是 0 张）。
+            // 先要一次新快照再判，别直接说"没同步"。
             probeNoteCards(noteID: noteID)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                _ = await self.nativeConversation.perform("snapshot")
+                for _ in 0..<10 where !self.nativeConversation.placements.contains(where: { $0.noteID == noteID }) {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                if self.nativeConversation.placements.contains(where: { $0.noteID == noteID }) {
+                    self.nativeOpenBoundNotes = [noteID]
+                } else {
+                    self.showTransientNotice("这张卡的内容还没同步到本机，请稍后再点。")
+                }
+            }
             return
         }
         if nativeOpenBoundNotes.contains(noteID) { nativeOpenBoundNotes.remove(noteID) }
@@ -992,8 +1006,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     func placeNativeConversationCard(actionID: String, scope: String, windowPoint: CGPoint) async {
-        guard scope == nativeConversation.scope, webView.window != nil,
-              webView.bounds.width > 0, webView.bounds.height > 0 else { return }
+        // ⚠ 以前这里条件不满足就一声不吭地 return —— 侧栏卡拖过去、什么都没发生
+        //   （2026-09-23 用户："侧边栏中的卡片无法和以前一样拖动到页面上"）。每一步都说出来。
+        postClientLog("[card-drop] place x=\(Int(windowPoint.x)) y=\(Int(windowPoint.y)) scopeOK=\(scope == nativeConversation.scope) native=\(nativePDFDocument != nil)")
+        guard scope == nativeConversation.scope else {
+            showTransientNotice("对话已切换，请从当前侧栏重新拖一次。")
+            return
+        }
+        guard webView.window != nil, webView.bounds.width > 0, webView.bounds.height > 0 else {
+            showTransientNotice("阅读页还没准备好，请稍后再放。")
+            return
+        }
         // Convert the native drop into the same WKWebView viewport used by the
         // existing anchor resolver; safe-area/Pencil overlays add no offset.
         let point = webView.convert(windowPoint, from: nil)
@@ -1008,8 +1031,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         if let document = nativePDFDocument,
            let placed = document.canonicalPoint(document.view.convert(windowPoint, from: nil), from: document.view) {
             parameters["value"] = ["page": placed.page, "x": placed.point.x, "y": placed.point.y]
+        } else if nativePDFDocument != nil {
+            postClientLog("[card-drop] no page under drop point")
+            showTransientNotice("请放到书页正文上。")
+            return
         }
-        await nativeConversation.perform("liveAction", parameters: parameters)
+        let ok = await nativeConversation.perform("liveAction", parameters: parameters)
+        postClientLog("[card-drop] result ok=\(ok) error=" + (nativeConversation.error ?? "-"))
+        if ok { scheduleNativePDFProjectionRefresh() }
     }
 
     func resizeNativeConversationCard(actionID: String, scope: String, size: CGSize) async -> Bool {
@@ -1060,6 +1089,52 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             postClientLog("[native-sel] report failed: " + String(describing: receipt["error"] ?? "unknown"))
         }
         return receipt["ok"] as? Bool == true
+    }
+
+    // MARK: - 卡片收藏夹（原版 #vc-dock-btn / #vc-dock-panel）
+    //
+    // 网页层在原生外壳里被藏着，原版右下角那个收藏夹按钮与面板也就看不见了
+    // （2026-09-23 用户："卡片收藏进收藏夹后也没有显示收藏夹的图标按钮"）。
+    // 按钮与面板由原生画；数据与写入仍走 rc-voicecall 的收藏夹（同一份 _dock）。
+
+    func loadNativeFavorites() async -> [ReaderNativeFavorite] {
+        let receipt = await requestNativeConversationCommand(["action": "favoritesList", "scope": nativeConversation.scope])
+        guard receipt["ok"] as? Bool == true else {
+            showTransientNotice(receipt["error"] as? String ?? "收藏夹没能打开。")
+            return []
+        }
+        return (receipt["value"] as? [[String: Any]] ?? []).compactMap(ReaderNativeFavorite.init)
+    }
+
+    /// 放到当前页（收藏是复制，收藏夹里那张不动）。落点：当前页上方偏左 —— 与拖出收藏夹同一语义，
+    /// 放下后可以再按住拖到想要的地方。
+    func placeNativeFavorite(_ favorite: ReaderNativeFavorite) async -> Bool {
+        guard let document = nativePDFDocument else {
+            showTransientNotice("只有 PDF 原生正文里能把收藏卡放到书页上。")
+            return false
+        }
+        let receipt = await requestNativeConversationCommand([
+            "action": "favoritesPlace", "scope": nativeConversation.scope,
+            "value": ["id": favorite.id, "page": document.position.page, "x": 0.08, "y": 0.12],
+        ])
+        guard receipt["ok"] as? Bool == true else {
+            showTransientNotice(receipt["error"] as? String ?? "没能放到书页上。")
+            return false
+        }
+        scheduleNativePDFProjectionRefresh()
+        showTransientNotice("已放到第 \(document.position.page) 页")
+        return true
+    }
+
+    func deleteNativeFavorite(_ favorite: ReaderNativeFavorite) async -> Bool {
+        let receipt = await requestNativeConversationCommand([
+            "action": "favoritesDelete", "scope": nativeConversation.scope, "value": ["ids": [favorite.id]],
+        ])
+        if receipt["ok"] as? Bool != true {
+            showTransientNotice(receipt["error"] as? String ?? "没能删除。")
+            return false
+        }
+        return true
     }
 
     /// 最近一次原生选区（选区窗口「对话」时要重新送一遍）。
@@ -1582,7 +1657,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // "showLegacy" 已删除：旧网页界面不再是一个可以被请求的目的地。
             // "openArtifact" / "action" 一并删除：它们唯一的实现是把旧网页界面
             // 端出来（reveal→setLegacy），而原生界面从来没有地方会去点它们。
-            "hideLegacy", "refresh", "openTOC", "openSearch",
+            "hideLegacy", "refresh", "snapshot", "openTOC", "openSearch",
+            "favoritesList", "favoritesPlace", "favoritesDelete",
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
             // 原生选区菜单的划线：转交阅读器自己的划线路径（见 highlightFromNativeSelection）

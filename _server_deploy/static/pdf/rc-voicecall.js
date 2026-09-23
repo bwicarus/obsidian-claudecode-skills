@@ -5533,7 +5533,42 @@
       hint: function (on) { try { _dockHint(on); } catch (e) {} },
       inZone: function (x, y) { try { return _inDockZone(x, y); } catch (e) { return false; } },
       save: function (rec) { try { rec = rec || {}; rec.meta = rec.meta || _favMeta(); _dockLoad(function () { _favSave(rec); }); if (typeof _toast === 'function') _toast('已收入收藏夹'); return true; } catch (e) { return false; } },
-      prepare: function (rec) { try { return _favPrepare(rec || {}); } catch (e) { return { ok: false, error: '学习卡数据不完整，未加入收藏夹' }; } }   // 合同/宿主可预检；真正保存仍唯一走 save
+      prepare: function (rec) { try { return _favPrepare(rec || {}); } catch (e) { return { ok: false, error: '学习卡数据不完整，未加入收藏夹' }; } },   // 合同/宿主可预检；真正保存仍唯一走 save
+      // ── 原生外壳用：网页层被藏着时，收藏夹按钮与面板由原生画，数据与写入仍走这里（_dock 同一份）──
+      count: function () { return _dock.loaded ? _dock.list.length : 0; },
+      load: function () {
+        return new Promise(function (resolve) {
+          try { _dockLoad(function () { resolve(_dock.list.slice()); }); } catch (e) { resolve([]); }
+        });
+      },
+      // 删除：与收藏夹面板「删除所选」同一条（服务端进回收站，1 天内可恢复）。
+      remove: function (ids) {
+        ids = (Array.isArray(ids) ? ids : []).map(String).filter(Boolean);
+        if (!ids.length) return false;
+        fetch('/api/assistant/voice-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ op: 'del', ids: ids }) }).catch(function () {});
+        _dock.list = _dock.list.filter(function (x) { return ids.indexOf(x.id) < 0; });
+        _dockBtn(); if (_dock.open) _dockPanel(true);
+        return true;
+      },
+      // 放到书页：收藏是**复制**，收藏夹里那张不动（与拖出收藏夹同一语义）。anchor 由原生按 PDFKit 算好。
+      place: function (id, anchor) {
+        var rec = null;
+        _dock.list.forEach(function (x) { if (x.id === id) rec = x; });
+        if (!rec) return Promise.reject(new Error('这张卡已不在收藏夹里'));
+        var S = window.RC && RC.stickynote;
+        if (!S) return Promise.reject(new Error('书页卡片尚未就绪'));
+        var cards = rec.payload && Array.isArray(rec.payload.cards) ? rec.payload.cards : null;
+        if (!cards && (rec.kind === 'cards' || rec.gid) && typeof rec.raw === 'string') {
+          try { cards = JSON.parse(rec.raw); } catch (e) { cards = null; }
+        }
+        if (cards && S.placeCardAt) return Promise.resolve(S.placeCardAt(0, 0, cards, rec.gid || rec.cid, anchor));
+        if (!S.placeHtmlAt) return Promise.reject(new Error('书页卡片尚未就绪'));
+        return Promise.resolve(S.placeHtmlAt(0, 0, {
+          content: String(rec.raw || rec.text || ''), contextText: String(rec.text || ''),
+          isHtml: !!rec.isHtml, label: rec.label || '收藏卡片', cid: rec.cid || ''
+        }, anchor));
+      }
     },
     push: function (text, label, isHtml, force, cid, opts) { try { return _cardPush(text, label, isHtml, force, cid, opts); } catch (e) { return null; } },
     close: function (c) { try { _cardClose(c); } catch (e) {} },
@@ -6205,6 +6240,8 @@
     }
     b.querySelector('.vc-dk-n').textContent = String(_dock.list.length);
     b.style.display = _dock.list.length ? 'flex' : 'none';
+    // 收藏夹一变就说一声：原生外壳的收藏夹按钮（网页层被藏着时唯一看得见的那个）靠它更新数目。
+    try { window.dispatchEvent(new Event('rc:favorites-changed')); } catch (e) {}
   }
   function _dockHint(on) {
     var h = document.getElementById('vc-dock-hint');

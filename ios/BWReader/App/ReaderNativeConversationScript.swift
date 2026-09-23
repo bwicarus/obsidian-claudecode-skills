@@ -645,7 +645,8 @@ enum ReaderNativeConversationScript {
         //   （2026-09-22 用户："我要的是把旧的内容用原生功能直接代替后把原版删除"）。
         //   'hideLegacy' 留着：还没原生化的那几个面（下面几处 setLegacy(true) 的
         //   fallback）掉进去以后，得有路回来。
-        const out = ['refresh', 'hideLegacy', 'liveAction'];
+        const out = ['refresh', 'snapshot', 'hideLegacy', 'liveAction'];
+        if (rc().voiceCard?.favorite?.load) out.push('favoritesList', 'favoritesPlace', 'favoritesDelete');
         if (typeof window.__clearFocusSel === 'function') out.push('clearSelection');
         if (typeof drawer()?.setTab === 'function') out.push('toggleAssistant');
         if (typeof window.__asstSend === 'function') out.push('send');
@@ -789,6 +790,7 @@ enum ReaderNativeConversationScript {
           readerSelection: (typeof window.__bwReaderEpubSelection === 'function'
             ? (window.__bwReaderEpubSelection() || { text: '' }) : { text: '' }),
           attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, captions: captionState(),
+          favoritesCount: (() => { try { return Number(rc().voiceCard?.favorite?.count?.()) || 0; } catch (_) { return 0; } })(),
           sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
@@ -924,7 +926,7 @@ enum ReaderNativeConversationScript {
              'nativeFigureAttach', 'nativeGrammar',
              'nativeHighlightEdit', 'nativePhraseFav',
              'nativeCreateNote', 'nativeOcrSelection',
-             'nativeEpubHighlight'].includes(command.action)) parameterKeys.push('value');
+             'nativeEpubHighlight', 'favoritesPlace', 'favoritesDelete'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -1013,6 +1015,8 @@ enum ReaderNativeConversationScript {
             setLegacy(false);
           } else if (action === 'refresh') {
             rc().assistant?.reloadHistory?.();
+          } else if (action === 'snapshot') {
+            // 只要一份新快照（末尾统一 schedule）；不重载对话历史。
           } else if (action === 'nativePageSelection') {
             const value = command.value;
             if (!value || !Number.isSafeInteger(value.sequence) || value.sequence <= nativePageSelectionSequence ||
@@ -1084,6 +1088,29 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换，请在原书核对结果' };
             if (!saved || saved.ok !== true) return { ok: false, error: '划线未落库' };
             return { ok: true, value: { id: (saved.highlight && saved.highlight.id) || saved.id || '', page: value.page } };
+          } else if (action === 'favoritesList') {
+            // 原生收藏夹面板：数据与写入都走 rc-voicecall 的 _dock（与网页收藏夹同一份）。
+            const favorite = rc().voiceCard?.favorite;
+            if (!favorite?.load) return { ok: false, error: '收藏夹尚未就绪' };
+            const list = await favorite.load();
+            return { ok: true, value: list.slice(0, 200).map(item => {
+              const cards = item.payload && Array.isArray(item.payload.cards) ? item.payload.cards : null;
+              return { id: text(item.id, 160), label: text(item.label, 200) || (cards ? '学习卡片' : '收藏卡片'),
+                kind: cards ? 'cards' : 'html', isHtml: !!item.isHtml,
+                content: cards ? '' : text(item.raw || item.text || '', 20000),
+                cards: cards ? cards.slice(0, 20).map(card => safeFields(card, ['front', 'back', 'question', 'answer', 'cloze', 'text'])) : [],
+                page: text(item.meta?.page, 20), file: text(item.meta?.file, 200) };
+            }) };
+          } else if (action === 'favoritesPlace') {
+            const favorite = rc().voiceCard?.favorite, value = command.value;
+            if (!favorite?.place || !value || typeof value.id !== 'string' || !Number.isSafeInteger(value.page) ||
+                ![value.x, value.y].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) return { ok: false, error: '落点无效' };
+            const placed = await favorite.place(value.id, { kind: 'pdf', page: value.page, x: value.x, y: value.y });
+            if (!placed) return { ok: false, error: '没能放到书页上' };
+          } else if (action === 'favoritesDelete') {
+            const favorite = rc().voiceCard?.favorite, value = command.value;
+            if (!favorite?.remove || !value || !Array.isArray(value.ids) || !value.ids.length) return { ok: false, error: '参数无效' };
+            if (!favorite.remove(value.ids.map(String))) return { ok: false, error: '没能删除' };
           } else if (action === 'nativeEpubHighlight') {
             // EPUB 选区条的「划线」。落库、锚点解析、就地上色、记住上次用的颜色
             // 都在底座 saveHl 那条路上，这里只转交。
@@ -1411,7 +1438,7 @@ enum ReaderNativeConversationScript {
         if (!thread || !thread.isConnected || records.some(record => Array.from(record.addedNodes).some(node => node.nodeType === 1 && (['asst-thread', 'asst-input', 'asst-computer', 'asst-call'].includes(node.id) || node.querySelector?.('#asst-thread,#asst-input,#asst-computer,#asst-call'))))) schedule();
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
-      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'rc:review-presentation-changed', 'rc:placement-changed', 'rc:native-document-position', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
+      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'rc:review-presentation-changed', 'rc:placement-changed', 'rc:native-document-position', 'rc:favorites-changed', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
       window.addEventListener('scroll', schedule, { capture: true, passive: true });
       window.addEventListener('resize', schedule, { passive: true });
       window.addEventListener('pointerup', schedule, { capture: true, passive: true });
