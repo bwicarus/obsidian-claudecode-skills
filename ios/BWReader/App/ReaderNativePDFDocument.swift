@@ -344,6 +344,14 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     private var characterReads: [Int: Task<Void, Never>] = [:]
     private var characterReadTickets: [Int: UUID] = [:]
     private var unavailableCharacterPages = Set<Int>()
+    /// 这一页暂时没读到字符（空 / 还在处理 / 读失败）时的退避重试。
+    /// ⚠ 以前第一次没读到就永久记进 unavailableCharacterPages：原生正文比网页挂得早，
+    ///   刚打开那几秒 OCR 管理器还没激活这本书的摘要，问什么都是空 —— 于是一开始看见的
+    ///   那几页整个会话都没有原生文字层，选中只能落到 PDFKit 的系统菜单上。
+    ///   网页那侧同一条数据对 idle/pending 也是不缓存、下次再问（native-local-runtime
+    ///   nativePageForPage 那段注释）。
+    private var characterRetry: [Int: (attempts: Int, after: Date)] = [:]
+    private var characterRetryScheduled = false
     private var textOverlays: [Int: ReaderNativePDFTextOverlay] = [:]
     private var ocrUpdates: AnyCancellable?
     private var customSelection = false
@@ -448,6 +456,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         characterReads.values.forEach { $0.cancel() }; characterReads = [:]
         characterReadTickets = [:]
         characterPages = [:]; selectionCores = [:]; textOverlays = [:]; unavailableCharacterPages = []; customSelection = false
+        characterRetry = [:]
         onSelection?([])
     }
 
@@ -1147,8 +1156,11 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         overlay.onLookup = { [weak self] value, mode in
             self?.onLookup?(number, value.text, value.sentence, mode)
         }
-        // PDFKit owns embedded text selection. The overlay supplies native
-        // interaction only for scanned pages or a user-selected OCR override.
+        // 有字符数据的页一律由原生文字层接选区（我们自己的选区菜单）；PDFKit 自带的选择
+        // 只在这一页拿不到字符数据时兜底。
+        // ⚠ 以前是"有嵌入文字层就交给 PDFKit"：OCR 结果嵌成隐形文字层的书每一页都算
+        //   "有嵌入文字"，于是整本书弹的都是系统菜单（Copy / Look Up / Translate），
+        //   我们的查词、翻译、划线、解释一个都没有（2026-09-23 用户截图）。
         overlay.embeddedText = !(page.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         textOverlays[number] = overlay
         return overlay
@@ -1169,7 +1181,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             characterPages = characterPages.filter { visible.contains($0.key) }
             selectionCores = selectionCores.filter { visible.contains($0.key) }
         }
-        for number in visible where characterPages[number] == nil && characterReads[number] == nil && !unavailableCharacterPages.contains(number) {
+        let now = Date()
+        for number in visible where characterPages[number] == nil && characterReads[number] == nil
+            && !unavailableCharacterPages.contains(number) && (characterRetry[number]?.after ?? .distantPast) <= now {
             let readTicket = UUID()
             characterReadTickets[number] = readTicket
             characterReads[number] = Task { @MainActor [weak self] in
@@ -1183,9 +1197,10 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                     let value = try await NativeBookOCRManager.shared.readerPageCharacters(book: access, expectedContentSHA256: digest, page: number)
                     guard generation == ticket, self.access === access, characterReadTickets[number] == readTicket, !Task.isCancelled else { return }
                     guard let value, value.contentSHA256.lowercased() == digest, value.status == .ready else {
-                        unavailableCharacterPages.insert(number); return
+                        characterReadFailed(number); return
                     }
                     let core = try ReaderNativePDFSelection(value)
+                    characterRetry[number] = nil
                     characterPages[number] = value; selectionCores[number] = core
                     textOverlays[number]?.characters = value
                     textOverlays[number]?.selectionCore = core
@@ -1194,11 +1209,39 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                     textOverlays[number]?.cardMarkers = cardMarkers(page: number)
                 } catch {
                     guard generation == ticket, !Task.isCancelled else { return }
-                    unavailableCharacterPages.insert(number)
-                    self.error = "本页文字层读取失败：\(error.localizedDescription)"
+                    if characterReadFailed(number) {
+                        self.error = "本页文字层读取失败：\(error.localizedDescription)"
+                    }
                 }
             }
         }
+    }
+
+    /// 记一次没读到；返回 true = 这一页放弃了（重试到上限）。
+    /// 退避 1.5s → 3s → 6s → 12s → 24s，第 6 次仍没有才判定这一页没有文字层。
+    @discardableResult
+    private func characterReadFailed(_ number: Int) -> Bool {
+        let attempts = (characterRetry[number]?.attempts ?? 0) + 1
+        guard attempts < 6 else {
+            characterRetry[number] = nil
+            unavailableCharacterPages.insert(number)
+            return true
+        }
+        let delay = 1.5 * pow(2, Double(attempts - 1))
+        characterRetry[number] = (attempts, Date().addingTimeInterval(delay))
+        // 页面停着不动也要重试：不排这一下的话，只有下次滚动/布局才会再问。
+        if !characterRetryScheduled {
+            characterRetryScheduled = true
+            let ticket = generation
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self else { return }
+                self.characterRetryScheduled = false
+                guard self.generation == ticket else { return }
+                self.loadVisibleCharacterPages()
+            }
+        }
+        return false
     }
 
     private func acceptOCRSelection(_ selected: ReaderNativePDFSelection.Value, page: Int) {
@@ -1321,7 +1364,7 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         //   一律点不到（点击直接落到 PDFKit）。
         if buttonViews.contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return true }
         if cardMarkerAt(point) != nil { return true }
-        guard let characters, !embeddedText || characters.textAuthority == .localOverride else { return false }
+        guard characters != nil else { return false }
         if [leadingHandle, trailingHandle].contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return true }
         return hit(point) != nil
     }

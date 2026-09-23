@@ -71,3 +71,29 @@ test("原生正文只接管一次：并发的布局回调不能互相拆台", ()
   assert.match(mount, /guard self\.nativePDFDocument === document else \{ return \}/);
   assert.match(WEBVIEW, /@MainActor\nfinal class ReaderNativeActivationClaim \{/);
 });
+
+test("翻页不改会话 scope；原生视口的接管只认书的身份；选区用当下的 scope", () => {
+  // 2026-09-23 实录：地址里的 ?page= 随翻页被改，scope 跟着变 → 原生视口接管随即失效
+  // （翻页请求已过期或无效）、页码不再同步、选区每页被清、翻过去的卡"没同步"。
+  const SCRIPT = read("ios/BWReader/App/ReaderNativeConversationScript.swift");
+  const search = SCRIPT.slice(SCRIPT.indexOf("function identitySearch()"), SCRIPT.indexOf("function getScopeKey()"));
+  assert.match(search, /params\.delete\('page'\)/);
+  assert.doesNotMatch(SCRIPT, /\[navigationID, location\.pathname, location\.search/);
+  const activate = WEBVIEW.slice(WEBVIEW.indexOf("func activateNativePDFDocument("), WEBVIEW.indexOf("activeNativePDFDocument = document"));
+  assert.doesNotMatch(activate, /nativeConversation\.scope == scope/);
+  assert.match(WEBVIEW, /scope: self\.nativeConversation\.scope\)/);
+});
+
+test("有字符数据的页一律走我们的选区菜单；读不到字符会退避重试而不是永久放弃", () => {
+  // 2026-09-23 用户截图：选中弹的是系统菜单（Copy / Look Up / Translate）。
+  const DOC = read("ios/BWReader/App/ReaderNativePDFDocument.swift");
+  const inside = DOC.slice(DOC.indexOf("override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {\n        // 锁定框"));
+  assert.match(inside.slice(0, 900), /guard characters != nil else \{ return false \}/);
+  assert.doesNotMatch(DOC, /!embeddedText \|\| characters\.textAuthority == \.localOverride/);
+  const load = DOC.slice(DOC.indexOf("private func loadVisibleCharacterPages()"), DOC.indexOf("private func acceptOCRSelection("));
+  assert.doesNotMatch(load.slice(0, load.indexOf("private func characterReadFailed")), /unavailableCharacterPages\.insert/,
+    "第一次没读到不能直接判死");
+  assert.match(load, /characterReadFailed\(number\)/);
+  assert.match(load, /guard attempts < 6 else/);
+  assert.match(load, /self\.loadVisibleCharacterPages\(\)/, "页面停着不动也要重试");
+});

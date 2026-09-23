@@ -1144,12 +1144,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               let bridge = nativePDFNavigationBridge, document.matches(bookID: bookID, contentSHA256: digest) else {
             throw ReaderBookUserStateWebAdapterError.contextChanged
         }
-        let generation = bookUserStateContextGeneration, scope = nativeConversation.scope
+        let generation = bookUserStateContextGeneration
+        // ⚠ 接管是否有效只看**书的身份**（加载代际 / 书 / 内容摘要），不看侧栏会话的 scope。
+        //   scope 会合理地变化（切复习模式、账号上下文更新……）；以前把它算进来，再加上
+        //   scope 曾随翻页变化，接管在第一次翻页后就失效了（2026-09-23 实录）。
         try await bridge.attach(document, bookID: bookID, contentSHA256: digest) { [weak self] in
             guard let self else { return false }
             return !self.isLoading && self.bookUserStateContextGeneration == generation
                 && self.currentLocalBook?.id == bookID && self.currentLocalBookContentSHA256 == digest
-                && self.nativeConversation.scope == scope
         }
         activeNativePDFDocument = document
         document.onHighlight = { [weak self] request in
@@ -1183,7 +1185,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         refreshNativePageOverlays()
         document.onSelection = { [weak self] values in
             Task { @MainActor [weak self] in
-                _ = await self?.updateNativePDFSelection(values, bookID: bookID, contentSHA256: digest, scope: scope)
+                // 用**当下**的会话 scope：接管那一刻的 scope 一旦过期，每次选中都会被悄悄丢掉。
+                guard let self else { return }
+                _ = await self.updateNativePDFSelection(values, bookID: bookID, contentSHA256: digest,
+                                                        scope: self.nativeConversation.scope)
             }
         }
         setNativeDocumentCaptureViewport(document.view)

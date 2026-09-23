@@ -615,17 +615,30 @@ enum ReaderNativeConversationScript {
             rect: { x: rect.left / innerWidth, y: rect.top / innerHeight, width: rect.width / innerWidth, height: rect.height / innerHeight } }];
         });
       }
+      // 地址里的 ?page= 随翻页被 replaceState 改掉（reader.js 四处，都只改 page），它不是身份。
+      // ⚠ 2026-09-23：把它算进 scope 的后果 —— 原生正文每翻一页 scope 就变：
+      //   ① 原生视口的接管随即被判失效，页码再也不同步给网页、网页的翻页请求全被拒；
+      //   ② 选区与已登记的操作每翻一页被清一次（"它看不到我的选中"）；
+      //   ③ 页卡按当前页取，网页以为还停在第一页，于是翻过去的卡都"没同步"。
+      //   书的身份另有 navigationID（每次页面加载一个）与 pathname。
+      function identitySearch() {
+        try {
+          const params = new URLSearchParams(location.search);
+          params.delete('page');
+          return params.toString();
+        } catch (_) { return location.search; }
+      }
       function getScopeKey() {
         let identity = '', history = '', mode = pane()?.dataset.assistantMode || 'normal';
         try { const state = account()?.snapshot(); identity = [state?.contextId || '', state?.namespace || '', state?.generation ?? '', state?.active || false].join(':'); } catch (_) {}
         try { history = String(window.__asstHistUrl?.() || ''); } catch (_) {}
         // Scope is opaque. Never send file paths, account namespaces, routes or credentials.
-        return [navigationID, location.pathname, location.search, identity, history, mode].join('|');
+        return [navigationID, location.pathname, identitySearch(), identity, history, mode].join('|');
       }
       function getPlacementScopeKey() {
         let identity = '';
         try { const state = account()?.snapshot(); identity = [state?.contextId || '', state?.namespace || '', state?.generation ?? '', state?.active || false].join(':'); } catch (_) {}
-        return [navigationID, location.pathname, location.search, identity].join('|');
+        return [navigationID, location.pathname, identitySearch(), identity].join('|');
       }
       function capabilities() {
         // ⚠ 没有 'showLegacy'。旧网页界面不再是用户能主动进去的地方
