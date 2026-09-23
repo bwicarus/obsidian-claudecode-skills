@@ -44,9 +44,14 @@
 
 ## 现在能用的（原生 PDF 主阅读区）
 
-开关在 **阅读设置 → 原生阅读区（迁移中）**，`@AppStorage("reader.nativePDFRenderer")`，
-**默认关**。打开后 `ReaderWebView` 留在层级里当数据层（opacity 0、不接触摸），
-正文由 PDFKit 画。⚠ 「显示旧界面」时原生正文会让开 —— 否则是个没有出路的空白屏。
+**没有开关了（2026-09-23）**：本机 PDF 书一律由 PDFKit 画（`nativePDFExpected` 按书的
+格式判定）。`ReaderWebView` 从头到尾留在层级里当数据层（opacity 0、不接触摸）——
+**挂上之前也不露面**：原生占位显示「正在打开」，打不开显示原因 + 重试
+（`nativePDFOpenFailure` / `retryNativePDFOpen`），**不退回网页渲页**。
+页卡同理：原生正文下网页一张卡都不挂（rc-stickynote `_nativeOwnsPageCards`），
+内容来自便签数据出口 `nativeNoteCards` → 脚本 `notePlacements`，只在文档层画。
+用户原话："不能就把网页的渲染直接彻底删掉么 app 里不需要啊"。
+⚠ 「显示旧界面」时原生正文会让开 —— 否则是个没有出路的空白屏。
 
 | 能力 | 做法 |
 |---|---|
