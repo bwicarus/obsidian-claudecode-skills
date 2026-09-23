@@ -1021,6 +1021,8 @@ if (window.__bwPwaProviderOnly) return;
             '<option value="opus">opus（最强）</option>' +
             '<option value="fable">fable（Claude 5.1，比 opus 更强）</option>' +
             '<option value="gpt-6-astra">gpt-6-astra（OpenAI 最新）</option>' +
+            '<option value="gpt-6-sol">gpt-6-sol</option>' +
+            '<option value="gpt-6-luna">gpt-6-luna</option>' +
             '<option value="gpt-5.6-sol">gpt-5.6-sol</option>' +
             '<option value="gpt-5.6-terra">gpt-5.6-terra</option>' +
             '<option value="gpt-5.6-luna">gpt-5.6-luna</option>' +

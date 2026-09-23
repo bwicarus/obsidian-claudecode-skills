@@ -8265,17 +8265,25 @@ _AP_PATH = CLAUDE_DIR / "state" / "assistant-action-prefs.json"
 _ap_lock = threading.Lock()
 _BACKENDS = ("claude", "gemini", "codex")
 _CLAUDE_VARIANTS = ("haiku", "sonnet", "opus", "fable")   # fable=Claude 5.1(opus 之上),CLI 2.1.263 起可用(2026-09-07)
-_CODEX_VARIANTS = ("gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5",
+# ⚠ 这是**白名单**：不在里面的型号会被静默换回 gpt-5.6-luna（见 _codex_text 调用处）。
+#   Codex CLI 0.156（2026-09-23）的 model/list 新增 gpt-6-sol / gpt-6-luna。
+_CODEX_VARIANTS = ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5",
                    "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark")
 # 最近一次开发期实测只作为无法探测时的展示顺序，不作为 Fast
 # 能力真值。Spark 是 CLI 的兼容型号：普通调用可尝试；只有 model/list
 # 明确声明 priority 时才允许 Fast，二者不能混为一个 available 开关。
 _CODEX_FAST_MODELS = frozenset(
-    ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4")
+    ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+     "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4")
 )
 _CODEX_DEPTHS = ("low", "medium", "high", "xhigh", "max", "ultra")
+# 探测不到 model/list 时的兜底深度表。取值照 2026-09-23 实测 model/list：
+# luna 系没有 ultra，gpt-5.5 止于 xhigh —— 不写的话兜底会给它们列出不存在的档位。
 _CODEX_COMPAT_DEPTHS = {
     "gpt-5.3-codex-spark": ("low", "medium", "high", "xhigh"),
+    "gpt-6-luna": ("low", "medium", "high", "xhigh", "max"),
+    "gpt-5.6-luna": ("low", "medium", "high", "xhigh", "max"),
+    "gpt-5.5": ("low", "medium", "high", "xhigh"),
 }
 _CODEX_CATALOG_TTL = 5 * 60
 _codex_catalog_lock = threading.Lock()
@@ -8655,7 +8663,8 @@ _AP_LABELS = {   # 设置面板给每个阅读器 action 显示的中文名
     "grammar": "语法分析(长句结构 / 语法点)", "pick_video": "找视频(拟搜索词 + 相关性筛选)",
     "web_search": "联网搜索(天气/新闻/事实 结构卡)", "route_text": "路由详答(语音转文字长回答引擎)",
 }
-_VARIANT_SHORT = {"gpt-6-astra": "6-astra", "gpt-5.6-luna": "5.6-luna", "gpt-5.6-terra": "5.6-terra",
+_VARIANT_SHORT = {"gpt-6-astra": "6-astra", "gpt-6-sol": "6-sol", "gpt-6-luna": "6-luna",
+                  "gpt-5.6-luna": "5.6-luna", "gpt-5.6-terra": "5.6-terra",
                   "gpt-5.6-sol": "5.6-sol", "gpt-5.4-mini": "5.4-mini",
                   "gpt-5.5-codex": "5.5-codex", "gpt-5.5": "5.5",
                   "gpt-5.3-codex-spark": "5.3 Spark",
@@ -10209,7 +10218,12 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid, fast=False):
     每轮只发新内容(工具结果),不重拼历史(与 Anthropic 前缀缓存同解)。同一套工具协议/系统提示/
     SSE 事件。Codex 的编程 agent 本性由三重锁驯服:read-only 沙盒 + 空 untrusted cwd + prompt 明令
     只用我们的 JSON 工具协议。首轮失败(app-server 挂/无响应)自动回退 Claude,保证有答。"""
-    model = variant if variant in _CODEX_VARIANTS else "gpt-5.6-luna"
+    # ⚠ 认 CLI 自己报的 model/list，写死的元组只是探测不到时的兜底。
+    #   原来只认元组：CLI 升级带来新型号后，设置面板（目录是探测出来的）
+    #   看得到、选得上，执行时却被静默换回 gpt-5.6-luna（2026-09-23 用户：
+    #   "不能把 cli 相关的列表变成自动更新的么"）。
+    known = variant in _CODEX_VARIANTS or _codex_selectable(_codex_capability(variant))
+    model = variant if known else "gpt-5.6-luna"
     eff = depth if depth in _CODEX_DEPTHS else "medium"
     tier = "priority" if fast is True and _codex_fast_ok(model) else ""
     trace = [{"label": "编排+回答", "model": f"{model}·{eff}" + ("·Fast" if tier else ""),
