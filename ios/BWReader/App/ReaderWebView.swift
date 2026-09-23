@@ -928,15 +928,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 拖卡时告诉用户"松手会锁在哪"。
     ///
     /// ⚠ 判据必须与 `nativeDropTarget` **同源**，否则预览与落点会各说各话：
-    ///   有原生文档就走 PDFKit + pdf-selection-core（同步，跟手不掉帧）；
+    ///   有原生文档就走 PDFKit + Swift 字符几何；
     ///   没有（EPUB / 网页渲染的 PDF）才问网页那份 —— 那种情形下正文确实
     ///   由网页渲染，视口坐标是对的。
     func previewCardDrop(windowPoint: CGPoint) {
-        // ⚠⚠ **必须限流。** 原生那条看着是"同步的、很便宜"，其实每次都要跑一趟
-        //   JavaScriptCore（pdf-selection-core 的 hit + exact）。挂在拖动的
-        //   onChanged 上就是**每帧一次**，手指走 10 卡片只跟出 3
-        //   —— 2026-09-22 用户原话"移动完全不跟着手指"。
-        //   预览是给眼睛看的，隔几十毫秒更新一次完全够。
+        // 字符命中与精确匹配已搬到 Swift；预览仍限流，避免每个触点都扫描
+        // 多栏/表格的字符。PDFKit 卡片移动本身不受这个提示更新频率限制。
         let dx = windowPoint.x - dropPreviewPoint.x, dy = windowPoint.y - dropPreviewPoint.y
         guard dx * dx + dy * dy > 36, Date().timeIntervalSince(dropPreviewStamp) > 0.09 else { return }
         dropPreviewPoint = windowPoint

@@ -1,6 +1,6 @@
 """Exercise the exact packaged selection source in a DOM-free engine.
 
-The native viewport uses the same source through JavaScriptCore. Fixtures cover
+The native viewport uses Swift; this web reference supplies parity fixtures. Fixtures cover
 original raw indexes after sorting, table isolation and explicit PDF selections.
 """
 import json

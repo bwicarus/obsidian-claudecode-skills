@@ -117,7 +117,12 @@ struct ReaderNativeBookStore {
         let record: [String: Any] = ["schema": 1, "collection": collection, "id": id, "rev": revision+1,
             "updatedAt": at, "updatedBy": deviceID, "deleted": false,
             "value": ["id": id, "documentId": bookID, "payload": payload, "updatedAt": at]]
-        let json = try Self.string(record), mutationID = "native-" + mutation
+        // Journal mutation IDs are database-wide, whereas callers reuse IDs
+        // within a book. Scope the key to book and record so another book or a
+        // delimiter inside an item ID cannot alias this committed write.
+        let mutationKey = try Self.bytes([bookID, collection, id, mutation])
+        let mutationID = "native-" + SHA256.hash(data: mutationKey).map { String(format: "%02x", $0) }.joined()
+        let json = try Self.string(record)
         let change: [String: Any] = ["mutationId": mutationID, "operation": "put", "collection": collection, "record": record]
         _ = try Self.bytes(change)
         try store.commitWithinTransaction(record: .init(collection: collection, id: id, rev: revision+1,

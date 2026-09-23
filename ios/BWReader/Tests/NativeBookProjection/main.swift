@@ -130,3 +130,8 @@ check((try read.state("word-bindings", bookID:book).payload as! [[String: Any]])
 do { _ = try business.perform(patchRequest("api-missing", ["text":"x"])); fatalError("editing a deleted note recreated it") }
 catch ReaderNativeNoteRules.NoteError.missing { }
 print("Native note API: create/patch/delete, replay, validation, virtual pages and binding changes passed")
+let otherBook = book + "-second"
+let otherBusiness = ReaderNativeBookStore(store: writing, bookID: otherBook, deviceID: "test-device", now: { 100_000 })
+var reused = save; reused["bookID"] = otherBook
+_ = try otherBusiness.perform(reused)
+check(try read.state("document-notes-legacy", bookID: otherBook).revision == 1, "same operation ID in another book was suppressed")

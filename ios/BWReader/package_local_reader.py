@@ -853,30 +853,13 @@ def copy_raw_static(root: Path) -> None:
         raise SystemExit("reader.src contains no renderer parts")
     reader = b"".join(part.read_bytes() for part in parts)
     write_bytes(root, "static/pdf/reader.js", reader)
-    write_bytes(root, "native/pdf-selection-core.js", native_pdf_selection_core().encode("utf-8"))
-    write_bytes(root, "native/user-state-merge.js", native_user_state_merge().encode("utf-8"))
-
-
-def native_user_state_merge() -> str:
-    """跨设备同步的三方合并规则，原样搬进包里在 JavaScriptCore 里跑。
-
-    ⚠ 不做任何裁剪或改写：它已经是纯函数模块（不读存储、不发网络、不认识
-    CloudKit），node 契约测试跑的就是这一份文件。复制一份改一改的话，
-    "两台设备各改各的怎么合" 就会有两种答案。
-    """
-    source = STATIC / "reader-runtime" / "user-state-merge.js"
-    text = source.read_text(encoding="utf-8")
-    if "mergeDomain" not in text or "user-state-merge/1" not in text:
-        raise SystemExit("native user-state merge source boundary changed")
-    return text
 
 
 def native_pdf_selection_core() -> str:
-    """Reuse the original pure selection algorithms in JavaScriptCore, without
-    loading a document, DOM, network bridge or any user-authored script.
+    """Web algorithm reference for cross-runtime parity fixtures only.
 
-    These boundaries are named functions already exercised by the web contracts.
-    Packaging fails if a source boundary changes instead of shipping a stale copy.
+    The App now uses ReaderNativePDFTextGeometry and does not ship this asset.
+    Named function boundaries fail loudly if the reference algorithm changes.
     """
     source = STATIC / "pdf" / "reader.src"
     mapping = (source / "08-charlayer.js").read_text(encoding="utf-8")
@@ -1885,12 +1868,9 @@ def validate_bundle(root: Path, *, require_manifest: bool = True) -> dict[str, o
         raise SystemExit("ReaderBundle DOMPurify differs from pinned dompurify@3.4.7")
     if not (root / "static/pdf/reader.js").is_file():
         raise SystemExit("ReaderBundle is missing the generated PDF renderer")
-    selection_core = root / "native/pdf-selection-core.js"
-    if not selection_core.is_file() or selection_core.read_text(encoding="utf-8") != native_pdf_selection_core():
-        raise SystemExit("ReaderBundle native PDF selection core differs from original algorithms")
-    merge_core = root / "native/user-state-merge.js"
-    if not merge_core.is_file() or merge_core.read_text(encoding="utf-8") != native_user_state_merge():
-        raise SystemExit("ReaderBundle user-state merge core differs from the tested module")
+    for retired in ("native/pdf-selection-core.js", "native/user-state-merge.js"):
+        if (root / retired).exists():
+            raise SystemExit(f"ReaderBundle contains retired JavaScriptCore asset: {retired}")
     if sha256_file(root / "static/qa/marked.js") != EXPECTED_MARKED_SHA256:
         raise SystemExit("ReaderBundle marked.js differs from pinned marked@9.1.6")
     for relative, expected in EXPECTED_PDFJS_FILES.items():

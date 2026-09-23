@@ -1,23 +1,7 @@
 import Foundation
-import JavaScriptCore
-
-/// 书籍用户状态的三方合并（本地 / 远端 / 共同祖先）。
-///
-/// ⚠ **规则不在这里**：这只是把 `ReaderBundle/native/user-state-merge.js` 放进
-/// JavaScriptCore 跑一遍。与 `ReaderNativePDFSelection` 同一个办法 —— 那份模块是
-/// node 契约测试真正执行的对象（`tests/reader_contract/user-state-merge.contract.test.mjs`
-/// 的 14 条用例），在 Swift 里照抄一遍规则等于把「两台设备各改各的怎么合」
-/// 变成两种答案，而这种分歧只在真撞上时才暴露，表现为数据丢失。
-///
-/// 为什么需要合并：`apply-atomically` 是**整域权威覆盖**（带 expectedLocalHeaders
-/// 的乐观并发）。两台设备各改各的时，后写的那次要么被拒、要么把对方整域盖掉。
-///
-/// ⚠ 这里**不做单例**：`init?` 可能失败（包里缺文件），而失败时正确的反应是
-/// **放弃这次同步**，不是退化成"整域取一边" —— 静默丢掉另一台设备的改动是这条
-/// 链上最贵的失败。让调用方持有实例，它就必须面对"拿不到合并器"这件事。
-///
-/// ⚠ 它带一个 JSContext，**不是线程安全的**。持有方必须保证串行使用：
-/// 同步引擎是个 actor，actor 的串行执行就是它的保护。别把实例递出那个隔离域。
+/// Native three-way merge. Existing cloud callers retain their interface, but
+/// no longer load a JavaScript runtime or depend on a bundled script. Invalid
+/// data still aborts synchronization; it never falls back to replacing a side.
 final class ReaderUserStateMerge {
     enum MergeError: Error {
         case invalidPayload       // 传进来的不是合法 JSON
@@ -30,62 +14,19 @@ final class ReaderUserStateMerge {
         let unknown: Bool         // 模块不认识这个域名：保留了本地值
     }
 
-    private let context: JSContext
-    private let api: JSValue
-    private let mergeDomain: JSValue
-
-    init?() {
-        guard let root = Bundle.main.url(forResource: "ReaderBundle", withExtension: nil),
-              let source = try? String(
-                contentsOf: root.appendingPathComponent("native/user-state-merge.js"),
-                encoding: .utf8),
-              let context = JSContext() else { return nil }
-        context.evaluateScript(source)
-        guard context.exception == nil,
-              let runtime = context.objectForKeyedSubscript("BWReaderRuntime"),
-              let api = runtime.objectForKeyedSubscript("userStateMerge"),
-              !api.isUndefined, !api.isNull,
-              let function = api.objectForKeyedSubscript("mergeDomain"),
-              !function.isUndefined, !function.isNull else { return nil }
-        self.context = context
-        self.api = api
-        self.mergeDomain = function
-    }
+    init?() { }
 
     /// domain 取 USER_STATE_DOMAINS 里的名字；三个值都是已解析的 JSON
     /// （`[String: Any]` / `[Any]` / `NSNull`）。
     func merge(domain: String, base: Any?, mine: Any?, theirs: Any?) throws -> Result {
-        context.exception = nil
-        let arguments: [Any] = [domain, base ?? NSNull(), mine ?? NSNull(), theirs ?? NSNull()]
-        let output = mergeDomain.call(withArguments: arguments)
-        if let exception = context.exception {
-            throw MergeError.failed(exception.toString() ?? "merge 抛出异常")
-        }
-        guard let output, output.isObject else { throw MergeError.invalidPayload }
-        guard let changed = output.objectForKeyedSubscript("changed")?.toBool() else {
-            throw MergeError.invalidPayload
-        }
-        let unknown = output.objectForKeyedSubscript("unknown")?.toBool() ?? false
-        let value = output.objectForKeyedSubscript("value")?.toObject() ?? NSNull()
-        return Result(value: value, changed: changed, unknown: unknown)
+        let output = try ReaderNativeBookMerge.merge(domain: domain, base: base, mine: mine, theirs: theirs)
+        return Result(value: output.value, changed: output.changed, unknown: output.unknown)
     }
 
-    /// 域是不是"空"。
-    ///
-    /// ⚠ 往回写的事务里每个域都要带 `empty`，而 runtime 会用它**自己那份**
-    /// `userStateDomainEmpty` 重算一遍来核对；对不上整笔事务被拒，而表面上
-    /// 只是"同步没生效"。所以这里也不自己算 —— 调的是合并模块里那个逐字副本
-    /// （有闸门盯着它和 runtime 那份逐字一致）。
+    /// Empty-domain flags have the same semantics as the browser contract.
     func domainEmpty(domain: String, value: Any) throws -> Bool {
-        context.exception = nil
-        guard let function = api.objectForKeyedSubscript("domainEmpty"),
-              !function.isUndefined, !function.isNull else { throw MergeError.invalidPayload }
-        let output = function.call(withArguments: [domain, value])
-        if let exception = context.exception {
-            throw MergeError.failed(exception.toString() ?? "domainEmpty 抛出异常")
-        }
-        guard let output, output.isBoolean else { throw MergeError.invalidPayload }
-        return output.toBool()
+        _ = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])
+        return ReaderNativeBookMerge.empty(domain: domain, value: value)
     }
 
     /// 便利入口：三边都给规范化 JSON 字符串（`payloadJson` 就是这个形状），

@@ -490,6 +490,7 @@ async function harness(options = {}) {
     },
     __BW_NATIVE_LOCAL_READER__: true,
     __BW_NATIVE_COMPUTER_VOICE__: options.nativeComputerVoice === true,
+    __BW_NATIVE_DATA_STORE__: !!options.nativeBookReply,
     __BW_NATIVE_LOCAL_BOOK_ID__: options.bookId || DEFAULT_LOCAL_BOOK_ID,
     __BW_NATIVE_LOCAL_BASE_PATH__: "/r/" + "a".repeat(64),
     __BW_NATIVE_INTERFACE_MANIFEST__: clone(
@@ -550,6 +551,13 @@ async function harness(options = {}) {
     },
     webkit: {
       messageHandlers: {
+        ...(options.nativeBookReply ? {
+          bwNativeDataStore: {
+            postMessage: async (message) => message.action === 'readingStoreReady'
+              ? { ok: true, nativeBookWrites: true }
+              : options.nativeBookReply(clone(message)),
+          },
+        } : {}),
         bwNativeServerGateway: {
           postMessage(message) {
             gatewayMessages.push(clone(message));
@@ -583,6 +591,10 @@ async function harness(options = {}) {
       },
     },
     BWReaderRuntime: {
+      ...(options.nativeBookReply ? {
+        nativeStoreBridgePort: { available: () => true, createBridgePort: () => ({}) },
+        nativeStore: { createNativeDataStore: () => pendingStores.shift() },
+      } : {}),
       indexedDBStore: {
         createIndexedDBDataStore: () => pendingStores.shift(),
       },
@@ -597,6 +609,7 @@ async function harness(options = {}) {
           codec: "string",
         }],
         collection: () => ({ status: "ready" }),
+        collections: () => ({}),
       },
       storageRouter: {
         createStorageRouter: () => router,
@@ -2027,6 +2040,39 @@ test("native local reading position persists through the local document store", 
   const get = await context.fetch("/pdf/api/reading-pos");
   const payload = await get.json();
   assert.equal(payload.positions["localbook:localbook-" + "b".repeat(64)].pos, 12);
+});
+
+test("ready App note requests use Swift business commands and never retry a rejected native write in JS", async () => {
+  const commands = [];
+  let rejected = false;
+  const { context, dataStoresState } = await harness({
+    nativeBookReply(message) {
+      commands.push(message);
+      if (rejected) return { ok: false, code: 'BW_LOCAL_NOTES', status: 404, error: '未找到便签' };
+      const { body, method } = message.request.value;
+      assert.equal(method, 'POST');
+      return { ok: true, revision: 1, result: { ok: true, id: body.id, note: body },
+        bindingChanges: [{ cid: 'sars', before: '', after: 'sars' }] };
+    },
+  });
+  const note = { file: DEFAULT_LOCAL_FILE, id: 'c_12345678', anchor: { kind: 'pdf', page: 45 },
+    html: { cid: 'sars', content: 'SARS 原卡', bind: { kind: 'page-chars', page: 45, text: 'SARS' } } };
+  const response = await context.fetch('/pdf/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(note) });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).note, note);
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].action, 'bookMutation');
+  assert.equal(commands[0].request.operation, 'note-api');
+  assert.equal(commands[0].request.bookID, DEFAULT_LOCAL_BOOK_ID);
+  assert.equal('expectedRevision' in commands[0].request, false, 'API operates on latest records inside Swift transaction');
+  assert.equal(dataStoresState.document.values.has('native-document-notes-legacy:' + DEFAULT_LOCAL_BOOK_ID + ':document-notes-legacy'), false,
+    'web runtime must not duplicate the native write');
+  rejected = true;
+  const failure = await context.fetch('/pdf/api/notes', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, id: 'c_12345678', text: '改' }) });
+  assert.equal(failure.status, 404);
+  assert.equal(commands.length, 2);
+  assert.equal(dataStoresState.document.values.has('native-document-notes-legacy:' + DEFAULT_LOCAL_BOOK_ID + ':document-notes-legacy'), false,
+    'failure must not create a second owner or recreate a missing note');
 });
 
 test("local sidecar mutations serialize concurrent creates and retain every record", async () => {

@@ -281,6 +281,12 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativePDFTextGeometry.swift ios/BWReader/Tests/NativePDFTextGeometry/main.swift -o "$RUNNER_TEMP/native-geometry-test"
           "$RUNNER_TEMP/native-geometry-test" "$RUNNER_TEMP/native-geometry-fixtures.json"
 
+      - name: Verify native book merge parity
+        run: |
+          node ios/BWReader/Tests/NativeBookMerge/fixtures.mjs "$RUNNER_TEMP/native-merge-fixtures.json"
+          xcrun swiftc ios/BWReader/App/ReaderNativeBookMerge.swift ios/BWReader/App/ReaderUserStateMerge.swift ios/BWReader/Tests/NativeBookMerge/main.swift -o "$RUNNER_TEMP/native-merge-test"
+          "$RUNNER_TEMP/native-merge-test" "$RUNNER_TEMP/native-merge-fixtures.json"
+
       - name: Build unsigned simulator application
         shell: bash
         run: |
