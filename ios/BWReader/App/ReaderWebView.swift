@@ -2216,9 +2216,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard let self, let base = self.localRuntimeServer?.baseURL,
                   let referer = self.webView.url, self.isTrustedReaderURL(referer),
                   scope == self.nativeConversation.scope else { throw URLError(.resourceUnavailable) }
-            let result = await self.requestNativeConversationCommand([
-                "action": "mediaResource", "scope": scope, "actionId": id
-            ])
+            let result: [String: Any]
+            if id.hasPrefix("native-inline:") {
+                guard let route = self.nativeConversation.nativeInlineResource(id) else { throw URLError(.resourceUnavailable) }
+                result = ["ok": true, "resource": route]
+            } else {
+                result = await self.requestNativeConversationCommand([
+                    "action": "mediaResource", "scope": scope, "actionId": id
+                ])
+            }
             guard result["ok"] as? Bool == true, let route = result["resource"] as? String else {
                 throw URLError(.resourceUnavailable)
             }

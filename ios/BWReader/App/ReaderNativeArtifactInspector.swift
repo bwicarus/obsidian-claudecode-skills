@@ -34,7 +34,7 @@ struct ReaderNativeArtifactInspector: View {
                                     // 而不是把标签当纯文本摆出来。这是「打开原件」不再
                                     // 掉进旧网页界面之后，原件唯一的落脚处。
                                     if detail.kind == "html", let html = detail.content["html"] as? String, !html.isEmpty {
-                                        ReaderNativeRichDocument(content: html, format: "html")
+                                        ReaderNativeRichDocument(content: html, format: "html", imageModel: model)
                                     } else {
                                         ReaderNativeInspectionValue(value: detail.content)
                                     }

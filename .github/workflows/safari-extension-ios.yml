@@ -302,6 +302,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/native-markdown-checks"
           cp ios/BWReader/Tests/NativeMarkdown/*.swift "$RUNNER_TEMP/native-markdown-checks/"
           cp ios/BWReader/App/ReaderNativeMarkdown.swift ios/BWReader/App/ReaderNativeMathSyntax.swift "$RUNNER_TEMP/native-markdown-checks/"
+          cp ios/BWReader/App/ReaderNativeInlineMedia.swift ios/BWReader/App/ReaderNativeMediaRoute.swift "$RUNNER_TEMP/native-markdown-checks/"
           swift run --package-path "$RUNNER_TEMP/native-markdown-checks" NativeMarkdownChecks
 
       - name: Verify native stroke geometry parity

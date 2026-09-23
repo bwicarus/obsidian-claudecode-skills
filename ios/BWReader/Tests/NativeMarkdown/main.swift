@@ -25,5 +25,16 @@ await MainActor.run {
     precondition(ReaderNativeMarkdown.html("`$x$`").contains("<code>$x$</code>"))
     let again = ReaderNativeMarkdown.html("# Heading")
     precondition(again == ReaderNativeMarkdown.html("# Heading"))
+
+    let media = ReaderNativeInlineMedia()
+    let content = "![図](https://example.com/figure.png)\n\n| 図 |\n|---|\n| ![表](https://example.com/table.png) |"
+    let images = media.images(content: content, format: "markdown")
+    precondition(images.count == 2 && images == media.images(content: content, format: "markdown"))
+    let token = images["https://example.com/figure.png"]!
+    precondition(media.resource(token, isCurrent: { $0 == content }) == "/pdf/api/img-proxy?url=https%3A%2F%2Fexample.com%2Ffigure.png")
+    precondition(media.resource(token, isCurrent: { _ in false }) == nil, "removed content still authorized an image")
+    precondition(media.images(content: "<img src='javascript:bad'><img src='file:///tmp/private'><img src='/api/admin'>", format: "html").isEmpty)
+    media.reset()
+    precondition(media.resource(token, isCurrent: { _ in true }) == nil, "previous document generation retained authority")
 }
-print("Native Markdown: GFM tables, lists, code, ruby, math delimiters and cache passed")
+print("Native Markdown: GFM, math boundaries, native image routes and stale-token revocation passed")

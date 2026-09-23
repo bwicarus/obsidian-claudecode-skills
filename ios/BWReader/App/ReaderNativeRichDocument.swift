@@ -16,17 +16,19 @@ struct ReaderNativeRichDocument: View {
     private var html: String { format == "html" ? content : ReaderNativeMarkdown.html(content) }
 
     var body: some View {
-        if html.range(of: "<(table|img)\\b", options: [.regularExpression, .caseInsensitive]) != nil,
-           let blocks = ReaderNativeDocumentParser.blocks(html) {
+        let source = html
+        if source.range(of: "<(table|img)\\b", options: [.regularExpression, .caseInsensitive]) != nil,
+           let blocks = ReaderNativeDocumentParser.blocks(source) {
+            let images = inlineImages.merging(imageModel?.inlineImages(content: content, format: format) ?? [:]) { _, native in native }
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     switch block {
                     case .text(let html):
                         ReaderNativeRichText(content: html, format: "html", onSelection: onSelection, font: font, color: color)
                     case .table(let table):
-                        ReaderNativeTable(table: table, onSelection: onSelection, inlineImages: inlineImages, imageModel: imageModel)
+                        ReaderNativeTable(table: table, onSelection: onSelection, inlineImages: images, imageModel: imageModel)
                     case .image(let source, let title):
-                        if let id = inlineImages[source], let imageModel,
+                        if let id = images[source], let imageModel,
                            let item = ReaderNativeImageItem(["mediaID": id, "title": title]) {
                             ReaderNativeImageCard(item: item, model: imageModel)
                         } else {
@@ -37,7 +39,7 @@ struct ReaderNativeRichDocument: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            ReaderNativeRichText(content: html, format: "html", onSelection: onSelection, font: font, color: color)
+            ReaderNativeRichText(content: source, format: "html", onSelection: onSelection, font: font, color: color)
         }
     }
 }

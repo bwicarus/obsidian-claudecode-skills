@@ -233,6 +233,26 @@ final class ReaderNativeConversationModel: ObservableObject {
     var inspectionHandler: (([String: Any]) async -> [String: Any])?
     var imageHandler: ((String, String) async throws -> Data)?
 
+    private let inlineMedia = ReaderNativeInlineMedia()
+    private func containsMediaDocument(_ content: String) -> Bool {
+        func contains(_ value: Any) -> Bool {
+            if let text = value as? String { return text == content }
+            if let values = value as? [Any] { return values.contains(where: contains) }
+            if let values = value as? [String: Any] { return values.values.contains(where: contains) }
+            return false
+        }
+        return messages.contains { $0.text == content || $0.parts.contains { $0.text == content || contains($0.data) } }
+            || placements.contains { $0.parts.contains { $0.text == content || contains($0.data) } }
+            || contains(review) || (inspection.map { contains($0.content) } ?? false)
+    }
+    func inlineImages(content: String, format: String) -> [String: String] {
+        guard containsMediaDocument(content) else { return [:] }
+        return inlineMedia.images(content: content, format: format)
+    }
+    func nativeInlineResource(_ token: String) -> String? {
+        inlineMedia.resource(token, isCurrent: containsMediaDocument)
+    }
+
     func imageData(_ id: String) async throws -> Data {
         guard let imageHandler else { throw URLError(.resourceUnavailable) }
         let ticket = generation
@@ -302,6 +322,7 @@ final class ReaderNativeConversationModel: ObservableObject {
             rawMessages = []; changedMessages = false
         }
         if nextScope != scope {
+            inlineMedia.reset()
             inspection = nil
             settingsPanel = nil
             readingSettingsPanel = nil
@@ -426,6 +447,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     private(set) var lastCommandAt: Date?
 
     func resetForNavigation() {
+        inlineMedia.reset()
         conversationStore = ReaderNativeConversationStore(); messageResyncPending = false
         inspection = nil
         settingsPanel = nil

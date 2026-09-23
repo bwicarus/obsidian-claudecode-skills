@@ -6,7 +6,7 @@ enum ReaderNativeMathSyntax {
     struct Formula { let token: String, latex: String, original: String; let display: Bool }
     struct Prepared { let text: String; let formulas: [Formula] }
     static func prepare(_ source: String) -> Prepared {
-        let pattern = #"(?s:```.*?(?:```|\z)|~~~.*?(?:~~~|\z)|<code\b[^>]*>.*?</code>|<pre\b[^>]*>.*?</pre>)|`+[^`]*`+|<[^>\n]+>|(?<!\\)\\\(([\s\S]*?)\\\)|(?<!\\)\\\[([\s\S]*?)\\\]|(?<!\\)\$\$([\s\S]*?)\$\$|(?<![\\$])\$(?![\s$])([^\n$]*?\S)\$(?![\d$])"#
+        let pattern = #"(?s:```.*?(?:```|\z)|~~~.*?(?:~~~|\z)|<code\b[^>]*>.*?</code>|<pre\b[^>]*>.*?</pre>)|`+[^`]*`+|<[^>\n]+>|(?<!\\)\\\(([\s\S]*?)\\\)|(?<!\\)\\\[([\s\S]*?)\\\]|(?<!\\)\$\$([\s\S]*?)\$\$|(?<![\\$])\$(?![\s$])([^\n$]*?\S)(?<!\\)\$(?![\d$])"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return Prepared(text: source, formulas: []) }
         let ns = source as NSString, prefix = "BWNativeMath" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         var output = "", end = 0, formulas: [Formula] = []

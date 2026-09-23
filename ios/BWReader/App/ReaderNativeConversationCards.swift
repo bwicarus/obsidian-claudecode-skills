@@ -26,7 +26,7 @@ struct ReaderNativeConversationMessageView: View {
                 Text(message.progressSummary).font(.caption).foregroundStyle(.secondary)
             }
             if !message.text.isEmpty {
-                ReaderNativeConversationMarkdown(text: message.text)
+                ReaderNativeConversationMarkdown(text: message.text, model: model)
             } else if message.streaming {
                 ProgressView().controlSize(.small)
             }
@@ -66,9 +66,10 @@ struct ReaderNativeConversationMessageView: View {
 @MainActor
 private struct ReaderNativeConversationMarkdown: View {
     let text: String
+    var model: ReaderNativeConversationModel? = nil
 
     var body: some View {
-        ReaderNativeRichDocument(content: text)
+        ReaderNativeRichDocument(content: text, imageModel: model)
             .font(.subheadline).lineSpacing(4)
             .foregroundStyle(ReaderNativeTheme.ink)
             .textSelection(.enabled)

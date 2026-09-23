@@ -166,11 +166,11 @@ struct ReaderNativeReviewView: View {
                     // 把它套到邻卡上会提前泄题。
                     let showsAnswer = live && state["showingAnswer"] as? Bool == true
                     if !showsAnswer || card["reveal_mode"] as? String != "replace" {
-                        ReaderNativeRichDocument(content: card["front"] as? String ?? "", format: "html")
+                        ReaderNativeRichDocument(content: card["front"] as? String ?? "", format: "html", imageModel: model)
                     }
                     if showsAnswer {
                         if card["reveal_mode"] as? String != "replace" { Divider() }
-                        ReaderNativeRichDocument(content: card["back"] as? String ?? "", format: "html")
+                        ReaderNativeRichDocument(content: card["back"] as? String ?? "", format: "html", imageModel: model)
                     }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
@@ -263,13 +263,13 @@ struct ReaderNativeReviewView: View {
                 Section("草稿预览 · 尚未写入") {
                     ForEach(cards.indices, id: \.self) { index in
                         VStack(alignment: .leading, spacing: 8) {
-                            ReaderNativeRichDocument(content: cards[index]["front"] as? String ?? "", format: "html")
+                            ReaderNativeRichDocument(content: cards[index]["front"] as? String ?? "", format: "html", imageModel: model)
                             Divider()
-                            ReaderNativeRichDocument(content: cards[index]["back"] as? String ?? "", format: "html")
+                            ReaderNativeRichDocument(content: cards[index]["back"] as? String ?? "", format: "html", imageModel: model)
                         }.padding(.vertical, 6)
                     }
                     if let note = drafts["note"] as? [String: Any] {
-                        ReaderNativeRichDocument(content: note["content"] as? String ?? "")
+                        ReaderNativeRichDocument(content: note["content"] as? String ?? "", imageModel: model)
                     }
                 }
                 Section("确认写入") {
