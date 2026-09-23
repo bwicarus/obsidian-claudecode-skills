@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import UIKit
 
@@ -55,12 +56,14 @@ struct ReaderNativeCardInkLayer: View {
                     ReaderNativeInkDrawing.draw(stroke, in: box, context: &context)
                 }
             }
-            .onChange(of: frame, initial: true) { _, _ in register(frame, box: box, ratio: ratio) }
-            .onChange(of: item.inkAspectRatio) { _, _ in register(frame, box: box, ratio: ratio) }
-            .onChange(of: item.inkGeometry) { _, _ in register(frame, box: box, ratio: ratio) }
-            // 文档层滚动时本层坐标不变、窗口坐标在变：跟着页面几何重新登记。
-            .onChange(of: reader.nativePDFDocument?.geometryRevision ?? 0) { _, _ in
-                register(windowFrame(geometry.frame(in: space)), box: box, ratio: ratio)
+            .onChange(of: frame, initial: true) { _, _ in register(frame, box: box, ratio: ratio, size: geometry.size) }
+            .onChange(of: item.inkAspectRatio) { _, _ in register(frame, box: box, ratio: ratio, size: geometry.size) }
+            .onChange(of: item.inkGeometry) { _, _ in register(frame, box: box, ratio: ratio, size: geometry.size) }
+            // 文档层滚动时本层坐标不变、窗口坐标在变：**滚动停下来**后重新登记一次
+            // （逐帧登记是卡顿来源之一，滚动途中也不会用笔在卡上写）。
+            .onReceive(reader.nativePDFDocument?.$settledRevision.eraseToAnyPublisher()
+                       ?? Empty<Int, Never>().eraseToAnyPublisher()) { _ in
+                register(windowFrame(geometry.frame(in: space)), box: box, ratio: ratio, size: geometry.size)
             }
             .onDisappear { reader.registerNativeCardInk(id: actionID, windowRect: nil, aspectRatio: ratio, geometry: item.inkGeometry) }
         }.allowsHitTesting(false).clipped()
@@ -71,10 +74,10 @@ struct ReaderNativeCardInkLayer: View {
         return CGRect(x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y)
     }
 
-    private func register(_ frame: CGRect, box: CGRect, ratio: CGFloat) {
-        // box 是本层单位；文档层有缩放，要按窗口框与本层框的比例换过去。
-        let scale = toWindow(CGPoint(x: 1000, y: 0)).x - toWindow(.zero).x
-        let k = abs(scale) > 0.001 ? scale / 1000 : 1
+    private func register(_ frame: CGRect, box: CGRect, ratio: CGFloat, size: CGSize) {
+        // box 是本层（卡片自身）单位；窗口框与本层尺寸之比就是换算比例 ——
+        // 文档层的缩放、卡片自身的 1:1 抵消缩放都已经算在窗口框里了。
+        let k = size.width > 0.5 ? frame.width / size.width : 1
         let windowBox = CGRect(x: frame.minX + box.minX * k, y: frame.minY + box.minY * k,
                                width: box.width * k, height: box.height * k)
         reader.registerNativeCardInk(id: actionID, windowRect: windowBox,

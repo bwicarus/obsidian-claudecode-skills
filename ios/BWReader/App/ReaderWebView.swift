@@ -630,7 +630,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               // 不传 size：理由同上。按展开尺寸算 —— 打开的词锚卡总是完全展开。
               let geometry = document.noteGeometry(note, expanded: true),
               let word = geometry.bindingRects.last else { return nil }
-        _ = size
         // 词所在的页（可能跟卡片锚点不是同一页）。
         let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any]
         let bindPage = ((payload?["bind"] as? [String: Any])?["page"] as? NSNumber)?.intValue ?? geometry.page
@@ -639,7 +638,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         func doc(_ rect: CGRect) -> CGRect {
             content.convert(rect, from: document.view).offsetBy(dx: -content.bounds.minX, dy: -content.bounds.minY)
         }
-        let base = doc(geometry.rect), w = doc(word), frame = doc(page)
+        // size 给了就按卡片此刻在文档层里的真实大小摆（屏幕 1:1 画，见 nativeCardLayout）。
+        let raw = doc(geometry.rect)
+        let base = size.map { CGRect(origin: raw.origin, size: $0) } ?? raw
+        let w = doc(word), frame = doc(page)
         let gap: CGFloat = 10, margin: CGFloat = 8
         var left = w.maxX + gap
         if left + base.width > frame.maxX - margin { left = w.minX - base.width - gap }
@@ -699,18 +701,33 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 本地覆盖和服务端 label 的收敛顺序，判据留在网页那侧一处
     /// （`_vocabMarksForDisplay` / `mastered_furi`）。复制过来必然漂移。
     /// 一次取数同时服务两者：分两次会多打一次请求，还可能拿到不一致的快照。
-    private func refreshNativePageOverlays() {
+    /// 已经取过叠加数据的页（换文档即清）。`force` = 数据可能变了（点了阅读工具、标了生词），
+    /// 可见页全部重取；否则只取新露出来的页。
+    private var nativeOverlayPages: Set<Int> = []
+    private weak var nativeOverlayDocument: ReaderNativePDFDocument?
+
+    private func refreshNativePageOverlays(force: Bool = false) {
         guard let document = nativePDFDocument else { return }
-        for page in document.position.visiblePages.prefix(8) {
+        if nativeOverlayDocument !== document || force {
+            nativeOverlayDocument = document
+            nativeOverlayPages = []
+        }
+        for page in document.position.visiblePages.prefix(8) where !nativeOverlayPages.contains(page) {
+            nativeOverlayPages.insert(page)
             Task { @MainActor [weak self, weak document] in
                 guard let self, let document else { return }
                 let value = try? await self.webView.callAsyncJavaScript(
                     "return await window.__bwReaderPageOverlay?.(page);",
                     arguments: ["page": page], in: nil, contentWorld: .page)
                 // 跨过 await 后文档可能已经换了：身份要重新确认一次。
-                guard self.nativePDFDocument === document,
-                      let payload = value as? [String: Any],
-                      let size = document.characterPageSize(page) else { return }
+                guard self.nativePDFDocument === document else { return }
+                // 没取到（页面数据还没就绪 / 这一页的字符尺寸还没到）：别记成"取过了"，
+                // 下次停下来再取 —— 否则这一页的下划线整个会话都不出来。
+                guard let payload = value as? [String: Any],
+                      let size = document.characterPageSize(page) else {
+                    if self.nativeOverlayDocument === document { self.nativeOverlayPages.remove(page) }
+                    return
+                }
                 do {
                     let rows = payload["vocabMarks"] as? [[String: Any]] ?? []
                     let marks: [ReaderNativePDFDocument.VocabMark] = rows.compactMap { row in
@@ -809,15 +826,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// id 仍用 `page:N`，落库那一路（resolveSurface → byPage）完全不用改。
     /// 合并成一次：滚动时布局回调每帧都来，逐帧过一次 WebKit 没有意义。
     /// 与导航桥同一口径（180ms）。
+    /// 布局一变（滚动/缩放）就排一次；**滚动停下来**才真正做 —— 每来一次就把上一次的取消重排。
+    ///
+    /// ⚠ 以前是节流（滚动中每 180ms 做一次）：可见页的笔迹面、可见正文、生词下划线/振假名
+    ///   都在滚动途中一遍遍过 WebKit，下划线数据一到每页装饰整页重画（连振假名一起）——
+    ///   2026-09-23 用户报"卡顿还是没有解决"。停下来再做，滚动途中这些一件都不做。
     private func scheduleNativeInkSurfacePublish() {
-        guard nativeInkSurfaceTask == nil else { return }
+        nativeInkSurfaceTask?.cancel()
         nativeInkSurfaceTask = Task { @MainActor [weak self] in
-            defer { self?.nativeInkSurfaceTask = nil }
-            try? await Task.sleep(for: .milliseconds(180))
+            try? await Task.sleep(for: .milliseconds(250))
             guard let self, !Task.isCancelled else { return }
+            self.nativeInkSurfaceTask = nil
             self.publishNativeInkSurfaces()
             self.publishNativeVisibleText()
-            // 翻页后可见页变了，生词下划线也要跟着取 —— 同一个节流窗口里做完。
+            // 翻页后可见页变了，生词下划线也要跟着取 —— 已经取过的页不重取。
             self.refreshNativePageOverlays()
         }
     }
@@ -944,20 +966,29 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
-    /// 屏幕尺寸 → 卡片自身单位（便签 w/h）。比例与 noteGeometry 同一算法：页宽 / base_w。
-    /// ⚠ 两边算法一变就对不上：每缩放一次书，卡片尺寸就被记错一次。
-    func nativeCardUnits(id: String, screenSize size: CGSize) -> CGSize? {
+    /// 文档层里一张卡怎么摆：左上角（文档坐标）、卡片自身尺寸（卡片点 = 便签的 w/h）、
+    /// 以及卡片点 → 文档坐标的比例。
+    ///
+    /// 卡片按**屏幕 1:1** 画（比例 = 1/缩放）：字、按钮、间距都是正常的原生尺寸，
+    /// 不随页面缩小；只有位置钉在页上。
+    /// ⚠ 2026-09-23 用户：「字体大小有很大问题」「整个卡片所有元素都小过头了」——
+    ///   此前卡片跟着文档层一起缩放，页面缩到 0.34 时卡里 12pt 的字只剩 4pt。
+    ///   原版展开的词锚卡也是这样：portal 到 body，逃出页面缩放（rc-stickynote wordPortalIn）。
+    func nativeCardLayout(_ item: ReaderNativePagePlacement, zoom: CGFloat) -> (origin: CGPoint, size: CGSize, scale: CGFloat)? {
         guard let document = nativePDFDocument,
-              let note = document.notes.first(where: { $0["id"] as? String == id }),
-              let anchor = note["anchor"] as? [String: Any],
-              let page = (anchor["page"] as? NSNumber)?.intValue,
-              let pageRect = document.viewRect(normalized: CGRect(x: 0, y: 0, width: 1, height: 1), page: page),
-              pageRect.width > 0 else { return nil }
-        let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any] ?? [:]
-        let base = (payload["base_w"] as? NSNumber)?.doubleValue ?? 0
-        let ratio = base > 0 ? pageRect.width / base : 1
-        guard ratio > 0, size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return nil }
-        return CGSize(width: size.width / ratio, height: size.height / ratio)
+              let note = document.notes.first(where: { $0["id"] as? String == item.noteID }) else { return nil }
+        let scale = 1 / max(zoom, 0.01)
+        let w = (note["w"] as? NSNumber)?.doubleValue ?? 300
+        let h = (note["h"] as? NSNumber)?.doubleValue ?? 180
+        let size = CGSize(width: min(720, max(180, w.isFinite ? w : 300)),
+                          height: min(720, max(100, h.isFinite ? h : 180)))
+        let docSize = CGSize(width: size.width * scale, height: size.height * scale)
+        if item.bound, isBoundCardOpen(item),
+           let rect = nativeWordCardDocumentRect(id: item.noteID, size: docSize) {
+            return (rect.origin, size, scale)
+        }
+        guard let rect = nativePageCardDocumentRect(id: item.noteID, size: nil) else { return nil }
+        return (rect.origin, size, scale)
     }
 
     func placeNativeConversationCard(actionID: String, scope: String, windowPoint: CGPoint) async {
@@ -1006,7 +1037,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // 它们改的正是原生正文要画的东西。不在这儿重取一次，表现就是「点了译页没反应」
         // —— 网页那侧确实开了，只是原生没去拿新数据。
         if ok, command["action"] as? String == "liveAction" {
-            refreshNativePageOverlays()
+            refreshNativePageOverlays(force: true)
             // 卡片的开合 / 移动 / 形态 / 新建都会改便签 —— 立刻重取一次投影，
             // 否则原生的锁定框和卡位要等下一次别的写入才更新（翻页回来才变的那种）。
             scheduleNativePDFProjectionRefresh()
@@ -1342,7 +1373,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 ?? ["ok": false, "error": "阅读页已关闭"]
         }
         // 标了掌握就重取一次叠加数据：否则这一页的下划线要翻页才消失。
-        panel.onMarked = { [weak self] in self?.refreshNativePageOverlays() }
+        panel.onMarked = { [weak self] in self?.refreshNativePageOverlays(force: true) }
         nativeLookup = panel
     }
 

@@ -72,5 +72,5 @@ test("⑤ 点完顶栏那些工具按钮，原生要重取一次", () => {
                        "func updateNativePDFSelection");
   // 顶栏「阅读工具」点的是网页工具栏按钮；不重取的话表现是「点了译页没反应」。
   assert.match(perform, /command\["action"\] as\? String == "liveAction"/);
-  assert.match(perform, /refreshNativePageOverlays\(\)/);
+  assert.match(perform, /refreshNativePageOverlays\(force: true\)/, "数据可能变了：可见页全部重取");
 });

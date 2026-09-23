@@ -36,12 +36,17 @@ test("① 显示走 noteGeometry，拿不到才退回网页", () => {
   // native-bound-card-visibility ⑤），这层按窗口坐标摆必然拖影。
 });
 
-test("② 跟着 PDF 滚动/缩放重画", () => {
-  assert.match(CARDS, /ReaderNativeGeometryTracker\(document: document\)/);
-  assert.match(CARDS, /content\(document\.geometryRevision\)/,
-    "必须把 geometryRevision 读进 body，否则 SwiftUI 不知道 PDFView 动过");
-  assert.match(DOCUMENT, /geometryRevision &\+= 1/,
-    "document 那侧要真的在布局时 bump 它");
+test("② 缩放/重排才重算卡片，纯滚动一帧都不算（2026-09-23「卡顿」）", () => {
+  // 逐帧变的量不许 @Published：观察这份文档的 SwiftUI 视图会被每一帧唤醒。
+  assert.doesNotMatch(DOCUMENT, /@Published private\(set\) var geometryRevision/);
+  assert.doesNotMatch(DOCUMENT, /@Published private\(set\) var position/);
+  assert.match(DOCUMENT, /@Published private\(set\) var layoutRevision = 0/);
+  assert.match(DOCUMENT, /if layoutKey != lastLayoutKey \{ lastLayoutKey = layoutKey; layoutRevision &\+= 1 \}/);
+  const LAYER = read("ios/BWReader/App/ReaderNativeDocumentCardLayer.swift");
+  assert.match(LAYER, /let _ = document\.layoutRevision/);
+  assert.doesNotMatch(LAYER, /document\.geometryRevision/);
+  // 屏幕层（浮动卡、投放区）不跟页面几何。
+  assert.doesNotMatch(CARDS, /ReaderNativeGeometryTracker\(|document\.geometryRevision/);
 });
 
 const STICKY = read("_server_deploy/static/pdf/rc-stickynote.js");
@@ -66,14 +71,20 @@ test("③ 拖动写页内归一化锚点，经便签自己的写入路径，不�
   assert.match(SCRIPT, /bind: item\.bound \? \(v\.bind \|\| null\) : null/);
 });
 
-test("④ 改大小按卡片自身单位存", () => {
-  const units = body(WEBVIEW, "func nativeCardUnits(", "func placeNativeConversationCard(");
-  assert.match(units, /base > 0 \? pageRect\.width \/ base : 1/,
-    "ratio 要与 noteGeometry 同一算法，否则每缩放一次书尺寸就记错一次");
-  assert.match(units, /size\.width \/ ratio/);
-  // noteGeometry 那侧的同一算法：它变了，这里要跟着变。
-  assert.match(DOCUMENT, /let ratio = base > 0 \? pageRect\.width \/ base : 1/);
-  assert.match(CARDS, /reader\.nativeCardUnits\(id: item\.noteID, screenSize: screen\)/);
+test("④ 卡片按屏幕 1:1 画，尺寸就是便签自己的 w/h（2026-09-23「整个卡片所有元素都小过头了」）", () => {
+  const layout = body(WEBVIEW, "func nativeCardLayout(", "func placeNativeConversationCard(");
+  assert.match(layout, /let scale = 1 \/ max\(zoom, 0\.01\)/, "抵消文档层的缩放");
+  assert.match(layout, /note\["w"\]/);
+  const LAYER = read("ios/BWReader/App/ReaderNativeDocumentCardLayer.swift");
+  assert.match(LAYER, /reader\.nativeCardLayout\(item, zoom: layer\.scale\)/);
+  assert.match(LAYER, /\.scaleEffect\(f, anchor: \.topLeading\)/);
+  // 触摸框报的是缩放后的实际大小。
+  assert.match(LAYER, /width: proxy\.size\.width \* f, height: proxy\.size\.height \* f/);
+  // 卡内跟手位移要除回外层缩放，否则卡比手指走得快/慢。
+  assert.match(CARDS, /\.offset\(x: translation\.width \/ contentScale, y: translation\.height \/ contentScale\)/);
+  // 改尺寸：卡片点就是便签单位，直接存。
+  assert.match(CARDS, /let units = value/);
+  assert.doesNotMatch(WEBVIEW, /func nativeCardUnits/);
 });
 
 test("⑤ 钉在词上的卡：拖动时词由原生认，连同页内坐标交给卡片的 move 控件", () => {

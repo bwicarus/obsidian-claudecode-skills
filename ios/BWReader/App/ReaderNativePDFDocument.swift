@@ -66,10 +66,21 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     var onOpenCard: ((String) -> Void)?
 
     let view = ReaderNativePDFView()
-    @Published private(set) var position = Position(page: 1, scale: 1, visiblePages: [], fraction: 0, mode: "continuous", spreadOffset: 0, crop: nil)
+    /// ⚠ 不 @Published：它随滚动逐帧变（页内比例）。发布出去的话，所有观察这份文档的
+    ///   SwiftUI 视图每一帧都要重算 —— 2026-09-23 用户报"卡顿"，病根之一。
+    ///   要知道位置变了的（导航桥）走 onPosition。
+    private(set) var position = Position(page: 1, scale: 1, visiblePages: [], fraction: 0, mode: "continuous", spreadOffset: 0, crop: nil)
     @Published private(set) var error: String?
     @Published private(set) var ready = false
-    @Published private(set) var geometryRevision = 0
+    /// 每一次布局/滚动都 +1。⚠ 不 @Published，理由同 position。
+    private(set) var geometryRevision = 0
+    /// 只在**缩放或重排**时变（纯滚动不变）：文档层卡片按它重算 —— 它们按文档坐标摆，
+    /// 滚动时由宿主同帧平移，SwiftUI 什么都不用算。
+    @Published private(set) var layoutRevision = 0
+    /// 滚动停下来 0.25 秒后变一次：按窗口坐标登记的东西（卡片的笔迹面）按它重登。
+    @Published private(set) var settledRevision = 0
+    private var lastLayoutKey: [CGFloat] = []
+    private var settleTask: Task<Void, Never>?
     @Published private(set) var ink: [Int: [ReaderNativeCardStroke]] = [:] { didSet { refreshDecorations() } }
     @Published private(set) var highlights: [Int: [Highlight]] = [:] { didSet { refreshDecorations() } }
     /// 生词下划线。rects 是点坐标（与高亮同一空间），由网页那侧算好该画哪些 ——
@@ -1013,6 +1024,15 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         guard frames != lastPageFrames || view.bounds != lastViewBounds else { return }
         lastPageFrames = frames; lastViewBounds = view.bounds
         geometryRevision &+= 1; onGeometry?()
+        let content = view.documentView?.bounds.size ?? .zero
+        let layoutKey: [CGFloat] = [view.scaleFactor, content.width, content.height, view.bounds.width, view.bounds.height]
+        if layoutKey != lastLayoutKey { lastLayoutKey = layoutKey; layoutRevision &+= 1 }
+        settleTask?.cancel()
+        settleTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.settledRevision &+= 1
+        }
         loadVisibleCharacterPages()
         // Content offset can change within the same PDF page without a page
         // notification. Publish the page-relative reading anchor as well.
@@ -1226,6 +1246,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                     // 字符层到位了，这一页的锁定框才解得出来 —— 立刻补上，
                     // 否则要等下次挂 overlay 才出现。
                     textOverlays[number]?.cardMarkers = cardMarkers(page: number)
+                    // 这一页的字符尺寸到了，生词下划线/振假名这时才取得动 —— 让阅读器补一次
+                    // （页面停着不动时不会再有布局回调）。
+                    onGeometry?()
                 } catch {
                     guard generation == ticket, !Task.isCancelled else { return }
                     if characterReadFailed(number) {

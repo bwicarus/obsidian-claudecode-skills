@@ -50,7 +50,7 @@ test("③ 原生面板只发起，并在标完后让正文重取", () => {
   assert.match(PANEL, /"action": "nativeVocabMark"/);
   assert.doesNotMatch(code(PANEL), /vocab-mark|jp-vocab-mark/,
     "端点不该出现在面板里");
-  assert.match(WEBVIEW, /panel\.onMarked = \{ \[weak self\] in self\?\.refreshNativePageOverlays\(\) \}/,
+  assert.match(WEBVIEW, /panel\.onMarked = \{ \[weak self\] in self\?\.refreshNativePageOverlays\(force: true\) \}/,
     "标完要重取叠加数据，否则这一页的下划线要翻页才消失");
   // 命令要过两道闸。
   const allow = WEBVIEW.slice(WEBVIEW.indexOf("let allowed: Set<String>"),

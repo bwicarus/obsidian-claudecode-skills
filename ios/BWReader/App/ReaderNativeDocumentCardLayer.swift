@@ -172,9 +172,10 @@ struct ReaderNativeAnchoredCards: View {
     static let space = "reader-doc"
 
     var body: some View {
-        // 缩放/重排后位置会变，要重算 —— 读一次 geometryRevision 订阅它。
-        // （纯滚动时算出来的位置不变，SwiftUI 比较后什么都不会动。）
-        let _ = document.geometryRevision
+        // 缩放/重排后位置会变，要重算 —— 只订阅 layoutRevision（纯滚动不变）。
+        // ⚠ 以前读的是逐帧变的 geometryRevision：滚动时每一帧都把每张卡重算一遍
+        //   （含词锚解析、卡片视图重建）—— 2026-09-23 用户报"卡顿"。
+        let _ = document.layoutRevision
         ZStack(alignment: .topLeading) {
             Color.clear
             // 只画便签来源的页卡（内容来自便签数据，位置由 PDFKit 解锚）。
@@ -193,25 +194,24 @@ struct ReaderNativeAnchoredCards: View {
     @ViewBuilder
     private func card(_ item: ReaderNativePagePlacement) -> some View {
         // 词锚卡只在展开时画卡身（收起时只剩页内锁定框，由 PDF overlay 画）。
-        if !item.floating, !item.bound || reader.isBoundCardOpen(item), let rect = documentRect(item) {
-            ReaderNativePlacedCard(item: item, reader: reader, model: model, rect: rect,
-                                   available: layer.viewport, space: .named(Self.space),
-                                   unitScale: layer.scale, toWindow: layer.toWindow, inDocumentLayer: true)
+        if !item.floating, !item.bound || reader.isBoundCardOpen(item),
+           let layout = reader.nativeCardLayout(item, zoom: layer.scale) {
+            // 卡片按屏幕 1:1 画：自身按卡片点排版，再整体缩放 layout.scale（= 1/缩放）抵消文档层的缩放。
+            let f = layout.scale
+            ReaderNativePlacedCard(item: item, reader: reader, model: model,
+                                   rect: CGRect(origin: layout.origin, size: layout.size),
+                                   available: CGSize(width: layer.viewport.width / f, height: layer.viewport.height / f),
+                                   space: .named(Self.space), unitScale: layer.scale * f,
+                                   toWindow: layer.toWindow, inDocumentLayer: true, contentScale: f)
+                // 触摸只在卡上接（宿主按这些框判）：报的是**缩放后**在文档层里实际占的框。
                 .background(GeometryReader { proxy in
                     Color.clear.preference(key: ReaderNativeCardFramesKey.self,
-                                           value: [proxy.frame(in: .named(Self.space))])
+                                           value: [CGRect(x: layout.origin.x, y: layout.origin.y,
+                                                          width: proxy.size.width * f, height: proxy.size.height * f)])
                 })
-                .offset(x: rect.minX, y: rect.minY)
+                .scaleEffect(f, anchor: .topLeading)
+                .offset(x: layout.origin.x, y: layout.origin.y)
         }
-    }
-}
-
-extension ReaderNativeAnchoredCards {
-    /// 展开的词锚卡贴着词摆（原版 _placeWordCard）；其余按便签自己的锚点。
-    fileprivate func documentRect(_ item: ReaderNativePagePlacement) -> CGRect? {
-        if item.bound, reader.isBoundCardOpen(item),
-           let rect = reader.nativeWordCardDocumentRect(id: item.noteID, size: item.size) { return rect }
-        return reader.nativePageCardDocumentRect(id: item.noteID, size: item.size)
     }
 }
 

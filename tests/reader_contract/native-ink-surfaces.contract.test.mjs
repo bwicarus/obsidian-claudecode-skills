@@ -63,7 +63,9 @@ test("③ 原生按可见页算屏幕矩形，并在布局变化时重推", () =
     "布局一变就要重推，否则滚动后 Pencil 画在上一帧的位置");
   const schedule = body(WEBVIEW, "private func scheduleNativeInkSurfacePublish()",
                         "func publishNativeInkSurfaces()");
-  assert.match(schedule, /milliseconds\(180\)/, "合并成一次，别逐帧过 WebKit");
+  // 防抖而不是节流：滚动途中一次都不做，停下来 250ms 才做（2026-09-23「卡顿」）。
+  assert.match(schedule, /nativeInkSurfaceTask\?\.cancel\(\)/);
+  assert.match(schedule, /milliseconds\(250\)/);
 });
 
 test("④ 换书/关闭时把待推任务取消掉", () => {

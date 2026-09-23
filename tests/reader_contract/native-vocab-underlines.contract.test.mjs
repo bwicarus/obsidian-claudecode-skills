@@ -67,7 +67,7 @@ test("③ 原生只画，颜色与粗细跟 CSS 同源", () => {
 });
 
 test("④ 壳只搬运，不在这侧判该不该画", () => {
-  const refresh = body(WEBVIEW, "private func refreshNativePageOverlays()",
+  const refresh = body(WEBVIEW, "private func refreshNativePageOverlays(force: Bool = false)",
                        "/// 把可见页的屏幕矩形推给墨迹层");
   assert.match(refresh, /__bwReaderPageOverlay/);
   // ⚠ 判据 = 决定"该不该画"的那几个表达式。壳**搬运** masteredFuri 是对的

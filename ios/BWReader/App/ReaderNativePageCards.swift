@@ -133,14 +133,10 @@ struct ReaderNativePageCards: View {
 
     var body: some View {
         GeometryReader { geometry in
-            // ⚠ 原生正文滚动/缩放时页卡要跟着动，而 SwiftUI 观察不到 PDFView 内部的
-            //   变化。document 每次布局都会 bump geometryRevision —— 把它读进来，
-            //   这一层才会重算。没有原生文档时按原样渲染，行为不变。
-            if let document = reader.nativePDFDocument {
-                ReaderNativeGeometryTracker(document: document) { _ in cards(in: geometry) }
-            } else {
-                cards(in: geometry)
-            }
+            // ⚠ 不再逐帧订阅 PDF 的几何：原生正文下钉在页上的卡全在文档层（跟 PDF 同一帧滚），
+            //   这一层只剩浮动卡、投放区与落点预览，都按屏幕摆，跟页面滚动无关。
+            //   以前这里订阅 geometryRevision，滚动时每一帧整层重算 —— 卡顿的来源之一。
+            cards(in: geometry)
         }
         .clipped()
         // 展开着的词锚卡 → 页内锁定框画成「打开」态（原版 .pgmark.on）。
@@ -263,15 +259,6 @@ struct ReaderNativePageCards: View {
     }
 }
 
-/// 把 PDFView 内部的布局变化接到 SwiftUI 上。
-/// document 每次布局都会 bump `geometryRevision`；把它读进 body，这一层就会重算。
-@MainActor
-private struct ReaderNativeGeometryTracker<Content: View>: View {
-    @ObservedObject var document: ReaderNativePDFDocument
-    @ViewBuilder let content: (Int) -> Content
-    var body: some View { content(document.geometryRevision) }
-}
-
 @MainActor
 struct ReaderNativePlacedCard: View {
     let item: ReaderNativePagePlacement
@@ -287,6 +274,9 @@ struct ReaderNativePlacedCard: View {
     let toWindow: (CGPoint) -> CGPoint
     /// 在文档层里（跟 PDF 滚的那层）：rect 已按便签 w/h 算好，不再用网页那套尺寸。
     var inDocumentLayer = false
+    /// 外面给这张卡整体套的缩放（文档层按屏幕 1:1 画卡时 = 1/缩放）。
+    /// 手势量的是外层坐标，卡内的跟手位移要除回去，否则卡会比手指走得快/慢。
+    var contentScale: CGFloat = 1
     /// 卡头蓄力状态（原版 `.rc-card-drag-charging` / `-ready`）。
     private enum Press { case idle, charging, ready }
     @State private var press: Press = .idle
@@ -443,7 +433,7 @@ struct ReaderNativePlacedCard: View {
             .shadow(color: .black.opacity(dragging ? 0.28 : 0), radius: 18, y: 8)
             // ⚠ 动画全部走 setPress 里的显式 withAnimation，跟手位移不带动画 ——
             //   否则松手那一下会回弹。
-            .offset(translation)
+            .offset(x: translation.width / contentScale, y: translation.height / contentScale)
             .zIndex(dragging ? 100 : 0)
     }
 
@@ -583,7 +573,7 @@ struct ReaderNativePlacedCard: View {
         .shadow(color: dropShadow, radius: 22, y: 12)
         .shadow(color: toneGlow, radius: 14)
         // 拖动中位移加在**影子**上（见 body），这里只保留松手到新几何之间的暂态位移。
-        .offset(committed ?? .zero)
+        .offset(x: (committed ?? .zero).width / contentScale, y: (committed ?? .zero).height / contentScale)
         // 手势被打断时 GestureState 自己归零而 onEnded 不一定来 —— 预览和投放区
         // 都得在这里擦掉，不然会留在屏幕上（红区一直亮着尤其吓人）。
         .onChange(of: translation) { _, value in
@@ -788,9 +778,9 @@ struct ReaderNativePlacedCard: View {
             // 便签来源的卡按卡片自身单位存（屏幕尺寸 ÷ 页宽/base_w 的比例）；
             // 否则每缩放一次书，卡片尺寸就被记错一次。
             if item.fromNote {
-                let screen = CGSize(width: value.width * unitScale, height: value.height * unitScale)
-                guard let action = item.controls["resize"],
-                      let units = reader.nativeCardUnits(id: item.noteID, screenSize: screen) else {
+                // 文档层按卡片点排版（屏幕 1:1），卡片点就是便签自己的 w/h —— 直接存。
+                let units = value
+                guard let action = item.controls["resize"] else {
                     if scope == model.scope { resizing = nil }
                     reader.showTransientNotice("这张卡的尺寸暂时改不了。")
                     return

@@ -48,7 +48,7 @@ test("文档卡片层在滚动回调里同步跟随，不推到下一轮", () =>
 
 test("卡片拖动时整张卡跟手，不留淡掉的原卡", () => {
   assert.doesNotMatch(code(CARDS), /card\.opacity\(dragging \? 0\.22 : 1\)/);
-  assert.match(CARDS, /\.offset\(translation\)/);
+  assert.match(CARDS, /\.offset\(x: translation\.width \/ contentScale, y: translation\.height \/ contentScale\)/);
 });
 
 test("长按带入对话只在卡身，不在标题拖动条上", () => {
