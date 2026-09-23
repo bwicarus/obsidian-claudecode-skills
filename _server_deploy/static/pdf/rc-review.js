@@ -1055,6 +1055,19 @@
     var repository = _cardRepository();
     if (!repository) return null;
     _bindCardRepository(repository);
+    if (typeof repository.reviewQueue === 'function') {
+      var prepared = await repository.reviewQueue({ limit: Math.max(1, limit || 30) });
+      if (prepared !== null) {
+        if (!prepared || !Array.isArray(prepared.entries) || typeof prepared.hasLocalCards !== 'boolean' ||
+            !Number.isInteger(prepared.dueTotal) || prepared.dueTotal < 0) {
+          throw new Error('原生复习队列返回了无效数据');
+        }
+        return { hasLocalCards: prepared.hasLocalCards, dueTotal: prepared.dueTotal,
+          cards: prepared.entries.map(function (entry) {
+            return _localReviewCard(entry.record, entry.card, entry.state, entry.cardIndex, entry.due === true);
+          }) };
+      }
+    }
     var records = await repository.snapshot();
     if (!Array.isArray(records)) {
       throw new Error('本地卡库返回了无效快照');

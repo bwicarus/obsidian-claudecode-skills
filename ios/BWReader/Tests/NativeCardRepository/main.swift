@@ -100,3 +100,34 @@ let revealed = try ui.perform(command("reveal", "native-reveal"))["result"] as! 
 let revealedExact = ((revealed["states"] as! [String: Any])["0"] as! [String: Any])["exactState"] as! [String: Any]
 precondition(revealedExact["_showBack"] as? Bool == true && revealedExact["_ratingUnavailable"] as? Bool == true)
 precondition((revealed["cards"] as! [[String: Any]])[0]["back"] as? String == "答")
+
+let queueStore = try ReaderNativeDataStore(path: ":memory:")
+let queueRepo = ReaderNativeCardRepository(store: queueStore, deviceID: "queue", now: { 10000 })
+for id in ["card_bbbb", "card_aaaa"] {
+    _ = try queueRepo.perform(["operation": "registerDraft", "arguments": [["gid": id,
+        "cards": (0..<7).map { ["type": "basic", "front": "\(id)-\($0)", "back": "答"] },
+        "source": ["kind": "test", "documentId": "localbook:queue"]]], "mutationId": "draft-" + id])
+    for index in 0..<6 {
+        _ = try queueRepo.perform(["operation": "saveConfirmedCard", "arguments": [["gid": id, "cardIndex": index]], "mutationId": "confirm-\(id)-\(index)"])
+    }
+    for (index, patch) in [
+        (0, ["review": ["status": "review", "dueAt": 9999]] as [String: Any]),
+        (1, ["review": ["status": "review", "dueAt": 10001]]),
+        (2, ["review": ["status": "suspended"]]),
+        (3, ["flags": ["archived": true]]),
+        (4, ["review": ["status": "review", "dueAt": 10000]])
+    ] {
+        _ = try queueRepo.perform(["operation": "patchState", "arguments": [id, index, patch], "mutationId": "state-\(id)-\(index)"])
+    }
+}
+let queueCursor = try queueStore.cursor()
+let prepared = try queueRepo.perform(["operation": "reviewQueue", "arguments": [["limit": 5]]])["result"] as! [String: Any]
+let entries = prepared["entries"] as! [[String: Any]]
+let identities = entries.map { (($0["record"] as! [String: Any])["id"] as! String) + ":" + String($0["cardIndex"] as! Int) }
+precondition(identities == ["card_aaaa:0", "card_bbbb:0", "card_aaaa:4", "card_bbbb:4", "card_aaaa:5"])
+precondition(prepared["hasLocalCards"] as? Bool == true && prepared["dueTotal"] as? Int == 4)
+precondition(entries.last?["due"] as? Bool == false && (entries[0]["record"] as! [String: Any])["cards"] == nil)
+let queueCursorAfter = try queueStore.cursor()
+precondition(queueCursorAfter == queueCursor, "reading review queue wrote mutations")
+do { _ = try queueRepo.reviewQueue(limit: 201); preconditionFailure("unbounded queue accepted") } catch is R.Failure {}
+print("Native review queue: stable ordering, exact due boundary, states, limits and read-only transaction passed")

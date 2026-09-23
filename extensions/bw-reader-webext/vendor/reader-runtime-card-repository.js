@@ -1768,6 +1768,9 @@
       importLegacyBatch: importLegacyBatch,
       load: load,
       snapshot: snapshot,
+      reviewQueue: function (options) {
+        return nativeOwner ? nativeCommand('reviewQueue', [options || {}]) : Promise.resolve(null);
+      },
       subscribe: subscribe,
       tombstone: tombstone,
       status: function () {
@@ -1819,6 +1822,7 @@
     importLegacyBatch: delegate('importLegacyBatch'),
     load: delegate('load'),
     snapshot: delegate('snapshot'),
+    reviewQueue: delegate('reviewQueue'),
     tombstone: delegate('tombstone'),
     subscribe: function (listener, query) {
       return defaultRepository().subscribe(listener, query);

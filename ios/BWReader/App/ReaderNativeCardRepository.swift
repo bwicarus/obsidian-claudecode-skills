@@ -68,10 +68,59 @@ struct ReaderNativeCardRepository {
             try project(Pair(entity: entities[id], state: states[id]), includeDeleted: includeDeleted)
         }
     }
+    /// Read a coherent, bounded review batch directly from the canonical store.
+    /// The web compatibility observer receives only selected cards, never the
+    /// entire collection. Ordering matches rc-review: overdue first, then new.
+    func reviewQueue(limit: Int = 30) throws -> [String: Any] {
+        guard (1...200).contains(limit) else { throw R.fail("INPUT", "复习批次大小无效") }
+        return try store.inTransaction {
+            let stamp = Double(now())
+            var available = 0
+            var due: [(order: Double, id: String, index: Int, value: [String: Any])] = []
+            var fresh: [(order: Double, id: String, index: Int, value: [String: Any])] = []
+            for record in try snapshot() {
+                guard record["deleted"] as? Bool != true,
+                      let cards = record["cards"] as? [[String: Any]],
+                      let states = record["states"] as? [String: Any], let id = record["id"] as? String else { continue }
+                let identity = record.filter { ["id", "source", "entityRev", "stateRev"].contains($0.key) }
+                for (index, card) in cards.enumerated() {
+                    guard let state = states[String(index)] as? [String: Any], state["phase"] as? String == "confirmed",
+                          state["removed"] as? Bool != true, (state["flags"] as? [String: Any])?["archived"] as? Bool != true else { continue }
+                    available += 1
+                    let review = state["review"] as? [String: Any] ?? [:]
+                    let status = (review["status"] as? String ?? "new").lowercased()
+                    if ["unavailable", "suspended", "buried"].contains(status) { continue }
+                    let isNew = status == "new"
+                    let order = (try? R.number(isNew ? state["confirmedAt"] : review["dueAt"], "review order")) ?? 0
+                    if !isNew && order > stamp { continue }
+                    let entry: [String: Any] = ["record": identity, "card": card, "state": state, "cardIndex": index, "due": !isNew]
+                    if isNew { fresh.append((order, id, index, entry)) }
+                    else { due.append((order, id, index, entry)) }
+                }
+            }
+            func sorted(_ items: [(order: Double, id: String, index: Int, value: [String: Any])]) -> [[String: Any]] {
+                items.sorted { a, b in
+                    if a.order != b.order { return a.order < b.order }
+                    if a.id != b.id { return a.id < b.id }
+                    return a.index < b.index
+                }.map(\.value)
+            }
+            return ["hasLocalCards": available > 0, "dueTotal": due.count,
+                    "entries": Array((sorted(due) + sorted(fresh)).prefix(limit))]
+        }
+    }
     func perform(_ request: [String: Any]) throws -> [String: Any] {
         guard let operation = request["operation"] as? String, let args = request["arguments"] as? [Any],
               !deviceID.isEmpty, deviceID.utf16.count <= 240, !deviceID.contains("\0") else { throw R.fail("INPUT", "原生卡仓请求无效") }
         func arg(_ index: Int) -> Any? { args.indices.contains(index) ? args[index] : nil }
+        // reviewQueue owns its read transaction; do not nest SQLite BEGINs.
+        if operation == "reviewQueue" {
+            let options = arg(0) as? [String: Any] ?? [:]
+            try R.fields(options, ["limit"], "review queue")
+            let limit = try R.integer(options["limit"] ?? 30, "review limit")
+            guard (1...200).contains(limit) else { throw R.fail("INPUT", "复习批次大小无效") }
+            return ["ok": true, "result": try reviewQueue(limit: Int(limit)), "changes": []]
+        }
         return try store.inTransaction {
             if operation == "load" {
                 let options = arg(1) as? [String: Any] ?? [:]
