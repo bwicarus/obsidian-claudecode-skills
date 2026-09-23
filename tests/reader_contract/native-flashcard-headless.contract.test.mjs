@@ -59,3 +59,16 @@ test('headless draft success uses committed semantic state rather than existence
   assert.equal(h.RC.flashcard.interactionState(h.body, 0).fields[0].value, '更新題');
   assert.equal(h.RC.flashcard.presentationInput(h.body, 0).stateRev, 2);
 });
+
+test('desktop export delegates identity only and never runs the browser export or receipt path', async () => {
+  const h = harness();
+  const requests = [];
+  h.window.__bwNativeAnkiPC = { ownsExports: true, async request(body) { requests.push(body); return { ok: true, status: 'succeeded' }; } };
+  h.RC.computerVoice = { addLocalAnkiCard() { assert.fail('browser Anki transport used'); } };
+  h.RC.flashcard.mountReview(h.body, [{ type: 'basic', front: '題', back: '答' }], { gid: 'card_abcd' });
+  Object.assign(h.body.__fc.cards[0], { _st: 'learn', _showBack: true, _ratingUnavailable: true, _ratingUnavailableReason: 'not-exported', _pcExportStatus: 'failed' });
+  await h.RC.flashcard.performInteraction(h.body, 0, 'export-desktop');
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{ action: 'exportCard', gid: 'card_abcd', index: 0 }]);
+  assert.equal(h.body.__fc.cards[0]._pcExportStatus, 'failed', 'dispatch alone must not manufacture a success receipt');
+  assert.equal(h.counts().renders, 0);
+});

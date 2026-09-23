@@ -38,3 +38,11 @@ await MainActor.run {
     precondition(media.resource(token, isCurrent: { _ in true }) == nil, "previous document generation retained authority")
 }
 print("Native Markdown: GFM, math boundaries, native image routes and stale-token revocation passed")
+try await MainActor.run {
+    let exported = try ReaderNativeAnkiProjection.html("**題**\n\n<ruby>漢字<rt>かんじ</rt></ruby>\n\n\\(x^2\\)\n\n![図](https://example.com/image.png)\n\n<img src='existing.png' onerror='bad()'><script>bad()</script>")
+    for part in ["<strong>", "<ruby>", "\\(x^2\\)", "https://example.com/image.png", "existing.png"] { precondition(exported.contains(part), "Anki projection lost \(part): \(exported)") }
+    precondition(!exported.contains("onerror") && !exported.contains("<script") && !exported.contains("data-reader-math"))
+    for source in ["https://127.0.0.1/x", "https://localhost/x", "https://host.local/x", "https://user:password@example.com/x", "javascript:bad", "file:///tmp/x", "../private", "https://example.com:444/x"] {
+        do { try ReaderNativeAnkiProjection.validateImage(source); preconditionFailure("unsafe media accepted: \(source)") } catch is ReaderNativeAnkiProjection.Failure {}
+    }
+}

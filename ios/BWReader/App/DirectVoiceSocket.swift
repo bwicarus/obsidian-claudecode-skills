@@ -74,6 +74,15 @@ actor DirectVoiceSocket {
         return try await request(action:action,fields:input,timeoutNanoseconds:DirectVoiceProtocol.requestTimeoutNanoseconds)
     }
 
+    /// One export uses its own context socket; long Anki operations cannot
+    /// occupy the microphone or the reading-state replication receive loop.
+    func requestReaderAnki(fields: [String: DirectJSONValue]) async throws -> DirectJSONValue {
+        guard configuration == .readerContext, state == .ready, let sessionID = contextSessionID,
+              fields["sessionId"] == nil else { throw failure("BW_READER_CONTEXT_REQUEST", "Anki 数据连接未就绪", retryable: false) }
+        var input = fields; input["sessionId"] = .string(sessionID)
+        return try await request(action: "anki-add-cards-local", fields: input, timeoutNanoseconds: 45_000_000_000)
+    }
+
     /// Opens the fixed WSS and completes the protocol-v3 HELLO exchange.
     /// Calling it while already ready/active is a no-op.
     func connect() async throws {

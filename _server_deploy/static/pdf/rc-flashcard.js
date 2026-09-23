@@ -541,6 +541,7 @@
     var mobile = window.BWReaderRuntime && window.BWReaderRuntime.ankiMobileExport;
     return { card: card, gid: st.gid, cardIndex: i, readonly: !!st.readonly,
       entityRev: st.entityRev || 0, stateRev: st.stateRev || 0,
+      autoExportDesktop: !!(st.opts && st.opts.localDraft),
       controlledReview: !!st.controlledReview,
       canDesktop: !!(((st.opts && st.opts.localDraft) || entityIdOf(st.gid)) &&
         RC.computerVoice && typeof RC.computerVoice.addLocalAnkiCard === 'function'),
@@ -1441,6 +1442,16 @@
   //: ⚠ 两个入口共用这一份实现，别再复制一遍：状态字符串、可重试码表、
   //: 回执三态如果各写一遍，迟早只改一边。
   function runComputerExport(ctx) {
+    if (window.__bwNativeAnkiPC && window.__bwNativeAnkiPC.ownsExports === true) {
+      return Promise.resolve(window.__bwNativeAnkiPC.request({ action: 'exportCard', gid: ctx.gid, index: ctx.index }))
+        .then(function (result) {
+          if (!result || result.ok !== true) throw new Error(result && result.error || '电脑 Anki 导出未完成');
+          return true;
+        }).catch(function (error) {
+          if (!ctx.silent) RC.toast && RC.toast(String(error && error.message || error));
+          return false;
+        });
+    }
     var c = ctx.card;
     // 归属优先取**这张卡自己的**（2026-09-19：一次投递里各卡可以各绑各的），
     // 取不到才回落到整组的 source.kjNodes。
@@ -1598,6 +1609,10 @@
   //   幂等性早就有人管了。所以这里只补最后一步 —— 链路回来时把欠的补上。
   var _retryScheduled = false;
   function retryFailedComputerExports(reason) {
+    if (window.__bwNativeAnkiPC && window.__bwNativeAnkiPC.ownsExports === true) {
+      Promise.resolve(window.__bwNativeAnkiPC.request({ action: 'retry' })).catch(function () {});
+      return reason;
+    }
     if (_retryScheduled) return;
     var linked = false;
     try {
@@ -2192,7 +2207,7 @@
       });
       // The remaining external exporter observes an already committed card.
       // It cannot redo confirmation and keeps its pending/unknown receipt gate.
-      if (action === 'add' && containers.length) {
+      if (action === 'add' && containers.length && !(window.__bwNativeAnkiPC && window.__bwNativeAnkiPC.ownsExports === true)) {
         var owner = containers[0], card = owner.__fc.cards[index];
         if (card && !card._pcExportStatus && owner.__fc.opts.localDraft) exportToComputerAnki(owner, index, true);
       }
