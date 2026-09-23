@@ -74,9 +74,12 @@ struct ReaderNativeCaptions: Equatable {
     }
     var on = false
     var lines: [Line] = []
+    /// 原版字幕开关（语音设置卡里的 rc-voice-sub，默认开）：关了就什么字幕都不出。
+    var enabled = true
 
     init(_ value: [String: Any] = [:]) {
         on = value["on"] as? Bool ?? false
+        enabled = value["enabled"] as? Bool ?? true
         lines = (value["lines"] as? [[String: Any]] ?? []).enumerated().map { index, line in
             Line(id: index, kind: line["kind"] as? String ?? "line", user: line["user"] as? Bool ?? false,
                  previous: line["previous"] as? Bool ?? false, text: line["text"] as? String ?? "")

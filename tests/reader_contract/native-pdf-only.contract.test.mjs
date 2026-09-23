@@ -252,3 +252,16 @@ test("点词查词贴着词弹小框（原版 #word-pop），不走底部面板"
   assert.match(POP, /ReaderNativeLookupContent\(model: model\)/);
   assert.match(POP, /\.task \{ await model\.load\(\) \}/);
 });
+
+test("侧栏收起时 AI 回复出流式字幕（不只语音通话才有）", () => {
+  // 2026-09-24 用户："侧边栏收起时候的字幕还是没有显示 …… 就是显示ai回复那个，现在是流式传输
+  // 应该可以做成流式字幕"。网页 #vc-cap 只在语音链路活跃时才亮，打字问的回复永远不上字幕。
+  const BAR = read("ios/BWReader/App/ReaderNativeCaptionBar.swift");
+  assert.match(BAR, /private var replyLines: \[ReaderNativeCaptions\.Line\]/);
+  assert.match(BAR, /if model\.captions\.on, !model\.captions\.lines\.isEmpty \{ return model\.captions\.lines \}/, "语音字幕优先");
+  assert.match(BAR, /guard model\.captions\.enabled else \{ return \[\] \}/, "原版字幕开关仍然管用");
+  assert.match(BAR, /\.task\(id: replyKey\)/, "回复写完停几秒再收");
+  assert.match(BAR, /\.truncationMode\(line\.previous \? \.tail : \.head\)/, "正在长的那句留住最新的字");
+  const SCRIPT = read("ios/BWReader/App/ReaderNativeConversationScript.swift");
+  assert.match(SCRIPT, /enabled = localStorage\.getItem\('rc-voice-sub'\) !== '0'/);
+});

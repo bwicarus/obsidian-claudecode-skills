@@ -846,7 +846,9 @@ enum ReaderNativeConversationScript {
       /// 2026-09-23 用户："侧边栏关闭时 ai 回复的流式字幕没有正确显示"。
       function captionState() {
         const cap = document.getElementById('vc-cap');
-        if (!cap || !cap.classList.contains('on')) return { on: false, lines: [] };
+        let enabled = true;
+        try { enabled = localStorage.getItem('rc-voice-sub') !== '0'; } catch (_) {}
+        if (!cap || !cap.classList.contains('on')) return { enabled, on: false, lines: [] };
         const lines = Array.from(cap.children).slice(-4).map(node => {
           const cls = node.classList;
           const kind = cls.contains('vc-cap-st') ? (cls.contains('vc-st-err') ? 'error' : (cls.contains('vc-st-ok') ? 'ok' : 'status'))
@@ -854,7 +856,7 @@ enum ReaderNativeConversationScript {
           return { kind, user: cls.contains('vc-cap-u'), previous: cls.contains('vc-cap-prev'),
             text: text(node.textContent, 600) };
         }).filter(line => line.kind === 'wait' || line.text.trim());
-        return { on: true, lines };
+        return { enabled, on: true, lines };
       }
       function voiceState() {
         const computer = document.getElementById('asst-computer'), call = document.getElementById('asst-call');
