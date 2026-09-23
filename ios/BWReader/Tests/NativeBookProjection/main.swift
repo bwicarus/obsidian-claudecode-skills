@@ -294,3 +294,20 @@ let pendingReceipts: [[String:Any]] = [["id":"pending","contract":"reader-native
 let boundedReceipts = try ReaderNativeHighlightRules.boundedReceipts(pendingReceipts)
 check(boundedReceipts.count == 160 && boundedReceipts.first?["id"] as? String == "pending", "receipt pruning lost interrupted recovery authority")
 print("Native highlights: atomic undo/outbox, stable retry, field-preserving edits, color removal and tombstones passed")
+
+let outbound = ReaderNativeReplicationOutbox(store:highlightStore)
+let firstPending = try outbound.pending(limit:1).first!
+let outboundCursor = try highlightStore.cursor()
+try outbound.acknowledge(firstPending,mutationID:"wrong",outcome:"accepted",now:500_000)
+try outbound.acknowledge(firstPending,mutationID:firstPending.mutationID,outcome:"partial",now:500_000)
+check(try highlightStore.cursor() == outboundCursor, "wrong/partial acknowledgment consumed an envelope")
+try outbound.acknowledge(firstPending,mutationID:firstPending.mutationID,outcome:"accepted",now:500_000)
+let ackCursor = try highlightStore.cursor()
+try outbound.acknowledge(firstPending,mutationID:firstPending.mutationID,outcome:"accepted",now:500_001)
+check(try highlightStore.cursor() == ackCursor, "ack retry created another tombstone")
+check(try outbound.pending(limit:1).first?.row.id != firstPending.row.id, "tombstone hid later pending commands under LIMIT")
+let remaining = try outbound.pending()
+for entry in remaining { try outbound.acknowledge(entry,mutationID:entry.mutationID,outcome:"accepted",now:500_002) }
+check(try outbound.pending().isEmpty, "native queue retained accepted commands")
+check(try highlightStore.record(collection:ReaderNativeReplicationOutbox.collection,id:firstPending.row.id)?.deleted == true, "ack hard-deleted record instead of retaining tombstone")
+print("Native replication queue: exact acknowledgments, retry safety and live reads past tombstones passed")

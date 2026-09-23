@@ -21,6 +21,7 @@ actor DirectVoiceSocket {
     private var pending: [String: PendingRequest] = [:]
     private var state: DirectVoiceState = .disconnected
     private var intentionalClose = false
+    private var contextSessionID: String?
 
     private var activeSession: DirectVoiceSession?
     private var activeSessionBytes: Data?
@@ -42,6 +43,35 @@ actor DirectVoiceSocket {
 
     func currentState() -> DirectVoiceState {
         state
+    }
+
+    /// A dedicated data socket never acquires microphone/audio ownership.
+    /// The same strict request correlation, size limits and timeout handling
+    /// used by voice apply to native replication and other Reader data calls.
+    func openReaderContext() async throws -> String {
+        guard configuration == .readerContext else { throw failure("BW_READER_CONTEXT_ENDPOINT","数据请求需要独立连接",retryable:false) }
+        if let contextSessionID, state == .ready { return contextSessionID }
+        try await connect()
+        let sessionID = makeSession().id
+        let result = try await request(action:"context-open",fields:["sessionId":.string(sessionID)],timeoutNanoseconds:DirectVoiceProtocol.requestTimeoutNanoseconds)
+        let object = try requireObject(result,label:"CONTEXT-OPEN")
+        try object.requireExactKeys(["sessionId","state","mode"])
+        guard try object.requireString("sessionId",maximum:160) == sessionID,
+              try object.requireString("state",maximum:32) == "context-only",
+              try object.requireString("mode",maximum:32) == "snapshot-mcp" else {
+            throw failure("BW_READER_CONTEXT_RESPONSE","数据连接身份未确认",retryable:false)
+        }
+        contextSessionID = sessionID
+        return sessionID
+    }
+
+    func requestReaderData(action: String, fields: [String:DirectJSONValue]) async throws -> DirectJSONValue {
+        guard configuration == .readerContext, state == .ready, let sessionID = contextSessionID,
+              ["replication-command","replication-command-chunk"].contains(action), fields["sessionId"] == nil else {
+            throw failure("BW_READER_CONTEXT_REQUEST","数据连接请求未授权或已失效",retryable:false)
+        }
+        var input = fields; input["sessionId"] = .string(sessionID)
+        return try await request(action:action,fields:input,timeoutNanoseconds:DirectVoiceProtocol.requestTimeoutNanoseconds)
     }
 
     /// Opens the fixed WSS and completes the protocol-v3 HELLO exchange.
@@ -146,6 +176,7 @@ actor DirectVoiceSocket {
         appKind: DirectVoiceTargetApp = .codexDesktop,
         takeover: Bool = false
     ) async throws -> DirectVoiceSession {
+        guard configuration != .readerContext else { throw failure("BW_READER_CONTEXT_AUDIO","数据连接不能启动语音",retryable:false) }
         if state == .disconnected || state == .failed {
             try await connect()
         }
@@ -1075,6 +1106,7 @@ actor DirectVoiceSocket {
         urlSession = nil
         activeSession = nil
         activeSessionBytes = nil
+        contextSessionID = nil
         heartbeatSequence = 0
         uplinkSequence = 0
         uplinkTimestampBase = 0

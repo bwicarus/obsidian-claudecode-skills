@@ -45,12 +45,13 @@ enum DirectVoiceTargetApp: String, Sendable, Equatable {
 
 struct DirectVoiceConfiguration: Sendable, Equatable {
     static let production = DirectVoiceConfiguration()
+    static let readerContext = DirectVoiceConfiguration(contextOnly:true)
 
     let endpoint: URL
     let origin: String
 
-    private init() {
-        endpoint = DirectVoiceProtocol.endpoint
+    private init(contextOnly: Bool = false) {
+        endpoint = contextOnly ? URL(string:"wss://bwicarus-2.taile44d0c.ts.net/reader-context/v1")! : DirectVoiceProtocol.endpoint
         origin = DirectVoiceProtocol.origin
     }
 }

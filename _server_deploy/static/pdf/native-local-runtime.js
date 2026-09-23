@@ -728,6 +728,7 @@
   }
 
   var nativeBookWrites = false;
+  var nativeReplicationTransport = false;
   // This adapter carries commands, never derived records. Swift owns the
   // transaction and builds the indexes from the authoritative note payload.
   function nativeBookMutation(operation, value, expectedRevision, mutationIdentity) {
@@ -2013,6 +2014,9 @@
 
   var replicationDrainHadBacklog = false;
   function drainReplicationOutbox() {
+    if (nativeReplicationTransport) {
+      return root.webkit.messageHandlers.bwNativeDataStore.postMessage({action:'replicationWake'});
+    }
     if (replicationDraining || !replicationEligible()) return Promise.resolve();
     replicationDraining = true;
     replicationDrainHadBacklog = false;
@@ -2079,6 +2083,9 @@
   // This is only a transport wakeup; it must not recreate the command.
   root.addEventListener('bw:native-outbox-ready', function () {
     if (nativeBookWrites) scheduleReplicationDrain(0);
+  });
+  root.addEventListener('bw:native-outbox-drained',function () {
+    if (nativeReplicationTransport) maybeReconcileReplication();
   });
   root.addEventListener('bw:native-book-committed', function (event) {
     var value = event && event.detail;
@@ -15901,6 +15908,7 @@
           action: 'readingStoreReady', bookID: bookId, deviceID: deviceId
         }).then(function (response) {
           nativeBookWrites = !!(response && response.ok && response.nativeBookWrites);
+          nativeReplicationTransport = !!(response && response.ok && response.nativeReplicationTransport);
         });
       }).then(function () {
         bootState = 'ready';

@@ -391,6 +391,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private lazy var nativeDataStoreHost = ReaderNativeDataStoreHost()
     private var nativeReadingStoreBookID: String?
     private var nativeReadingStoreDeviceID: String?
+    private var nativeReplicationService: ReaderNativeReplicationService?
     private var nativeInkDocumentToken = UUID().uuidString
     private var nativeInkSyncTasks: [String: Task<Void, Never>] = [:]
     private var nativePDFMutationCommandDepth = 0
@@ -995,18 +996,23 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         guard nativeInkSyncTasks[business.bookID] == nil else { return }
         nativeInkSyncTasks[business.bookID] = Task { @MainActor [weak self] in
             defer { self?.nativeInkSyncTasks.removeValue(forKey:business.bookID) }
-            do {
-                while let due = try business.nextInkSyncTime() {
+            var backoff: UInt64 = 2
+            while !Task.isCancelled {
+                do {
+                    guard let due = try business.nextInkSyncTime() else { break }
                     let delay = max(0,Double(due) / 1000 - Date().timeIntervalSince1970)
                     if delay > 0 { try await Task.sleep(nanoseconds:UInt64(min(delay,60) * 1_000_000_000)); continue }
                     _ = try business.perform(["bookID":business.bookID,"mutationId":"ink-sync-" + UUID().uuidString,
                         "operation":"ink-sync","value":[:]])
-                    if self?.nativeReadingStoreBookID == business.bookID {
-                        self?.webView.evaluateJavaScript("window.dispatchEvent(new Event('bw:native-outbox-ready'));", completionHandler:nil)
-                    }
+                    self?.nativeReplicationService?.wake()
+                    backoff = 2
+                } catch is CancellationError { break }
+                catch {
+                    self?.postClientLog("原生笔迹同步仍保留待处理记录：" + error.localizedDescription)
+                    do { try await Task.sleep(nanoseconds:backoff * 1_000_000_000) } catch { break }
+                    backoff = min(backoff * 2,60)
                 }
-            } catch is CancellationError { }
-            catch { self?.postClientLog("原生笔迹同步仍保留待处理记录：" + error.localizedDescription) }
+            }
         }
     }
 
@@ -1109,6 +1115,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             input["opId"] = opID
             let receipt = try ReaderNativeBookStore(store:store,bookID:book.id,deviceID:deviceID,displayName:book.title,contentSHA256:digest)
                 .perform(["bookID":book.id,"mutationId":opID,"operation":"note-operation","value":input])
+            nativeReplicationService?.wake()
             markCloudSyncDirty()
             await refreshNativePDFProjection()
             if currentLocalBookAccess === access {
@@ -1945,6 +1952,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             let result = receipt["result"] as? [String:Any] ?? [:]
             let domains = try ReaderNativeBookProjection(store:store).exportReadingDomains(bookID:bookID)
             try document.applyOverlays(domains,bookID:bookID,contentSHA256:digest)
+            nativeReplicationService?.wake()
             markCloudSyncDirty()
             // Transitional legacy consumers observe a committed record only.
             // They no longer normalize, save, or render a hidden PDF page.
@@ -4707,6 +4715,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ) {
         let wasForeground = readerForeground
         readerForeground = foreground
+        nativeReplicationService?.setActive(foreground)
         if foreground {
             // 接线必须无条件(幂等):readerForeground 初始值就是 true,
             // 依赖"后台→前台转换"意味着首启动直读的会话永远接不上线,
@@ -6107,6 +6116,14 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     }
                     nativeReadingStoreBookID = bookID
                     nativeReadingStoreDeviceID = deviceID
+                    if nativeReplicationService == nil {
+                        nativeReplicationService = ReaderNativeReplicationService(store:store,report:{ [weak self] message in
+                            self?.postClientLog("原生复制队列：" + message)
+                        },settled:{ [weak self] in
+                            self?.webView.evaluateJavaScript("window.dispatchEvent(new Event('bw:native-outbox-drained'));",completionHandler:nil)
+                        })
+                    }
+                    nativeReplicationService?.setActive(readerForeground)
                     publishNativeInkSurfaces()
                     publishNativeHTMLNotes()
                     // Resume persisted pending pages, including books closed
@@ -6118,8 +6135,16 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                             displayName:pendingBookID == bookID ? currentLocalBook?.title : nil,
                             contentSHA256:pendingBookID == bookID ? currentLocalBookContentSHA256 : nil))
                     }
-                    replyHandler(["ok": true, "nativeBookWrites": true], nil)
+                    replyHandler(["ok": true, "nativeBookWrites": true, "nativeReplicationTransport":true], nil)
                 } catch { replyHandler(nil, error.localizedDescription) }
+                return
+            }
+            if body["action"] as? String == "replicationWake" {
+                guard nativeReadingStoreBookID == currentLocalBook?.id, nativeReplicationService != nil else {
+                    replyHandler(nil,"原生复制队列尚未准备好"); return
+                }
+                nativeReplicationService?.wake()
+                replyHandler(["ok":true],nil)
                 return
             }
             if body["action"] as? String == "bookMutation" {
@@ -6134,6 +6159,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
                     let receipt = try ReaderNativeBookStore(store: store, bookID: bookID, deviceID: deviceID,
                         displayName: currentLocalBook?.title, contentSHA256: currentLocalBookContentSHA256).perform(request)
+                    nativeReplicationService?.wake()
                     if request["operation"] as? String != "replication-enqueue" {
                         scheduleNativePDFProjectionRefresh()
                         markCloudSyncDirty()

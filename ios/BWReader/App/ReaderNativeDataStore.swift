@@ -147,6 +147,13 @@ final class ReaderNativeDataStore {
                     bind: [.text(collection), .text(idPrefix), .text(idPrefix)])
     }
 
+    /// Bounded queue reads skip tombstones in SQL. Filtering after LIMIT can
+    /// strand live work behind a page of already acknowledged records.
+    func liveRecords(collection: String, limit: Int) throws -> [Record] {
+        try records(matching:"collection = ? AND deleted = 0 ORDER BY id LIMIT ?",
+            bind:[.text(collection),.int(Int64(max(0,min(limit,1000))))])
+    }
+
     func recordCount(collection: String) throws -> Int {
         var result = 0
         try query("SELECT COUNT(*) FROM records WHERE collection = ?", bind: [.text(collection)]) { statement in
