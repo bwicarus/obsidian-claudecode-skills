@@ -5889,6 +5889,10 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     replyHandler(receipt, nil)
                 } catch ReaderNativeDataStore.StoreError.revisionConflict {
                     replyHandler(["ok": false, "code": "BW_DATA_CONFLICT"], nil)
+                } catch ReaderNativeNoteRules.NoteError.missing {
+                    replyHandler(["ok": false, "code": "BW_LOCAL_NOTES", "status": 404, "error": "未找到便签"], nil)
+                } catch let error as ReaderNativeNoteRules.NoteError {
+                    replyHandler(["ok": false, "code": "BW_LOCAL_NOTES", "status": 400, "error": error.localizedDescription], nil)
                 } catch { replyHandler(nil, String(describing: error)) }
                 return
             }

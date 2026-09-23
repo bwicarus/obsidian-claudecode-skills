@@ -2,10 +2,11 @@ import Foundation
 
 /// 把 `native-store.js` 那个 port 接到本机 SQLite 上。
 ///
-/// ⚠ **这里不做任何判据**：记录该长什么样是 `data-store.js` 算好的，这里只
-/// 存/取。哪天在这里看到「rev + 1」「要不要算墓碑」之类的东西，那就是分叉开始
-/// 的地方 —— 同一次写入会有两个答案，而这种分歧只在两边真跑过同一条数据时
-/// 才暴露。
+/// This compatibility port accepts already-formed records from remaining web
+/// callers. Native book commands instead use ReaderNativeBookStore, which owns
+/// record revisions, derived indexes and receipts in one SQLite transaction.
+/// Do not put business rules in this low-level port or execute both paths for
+/// the same operation. Both owners preserve the same record/journal schema.
 ///
 /// port 的动作与 `references/reader-native-datastore-plan-20260922.md` 一一对应：
 /// `read / readMany / listCollection / remembered / commit / journal / meta /

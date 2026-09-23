@@ -731,14 +731,14 @@
   // This adapter carries commands, never derived records. Swift owns the
   // transaction and builds the indexes from the authoritative note payload.
   function nativeBookMutation(operation, value, expectedRevision) {
+    var request = { bookID: bookId, operation: operation, value: clone(value), mutationId: 'book-' + randomHex(16) };
+    if (expectedRevision != null) request.expectedRevision = expectedRevision;
     return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
-      action: 'bookMutation', request: {
-        bookID: bookId, operation: operation, value: clone(value),
-        mutationId: 'book-' + randomHex(16), expectedRevision: expectedRevision
-      }
+      action: 'bookMutation', request: request
     }).then(function (receipt) {
       if (!receipt || receipt.ok !== true) {
-        throw new RuntimeError('原生书籍写入未确认', receipt && receipt.code || 'BW_NATIVE_BOOK_WRITE');
+        throw outgoingRequestError(receipt && receipt.error || '原生书籍写入未确认',
+          receipt && receipt.code || 'BW_NATIVE_BOOK_WRITE', receipt && receipt.status || 500);
       }
       return receipt;
     });
@@ -6792,6 +6792,34 @@
 
   function localNotes(input, init, url, method) {
     var code = 'BW_LOCAL_NOTES';
+    if (nativeBookWrites && method !== 'GET') {
+      return localJSONRoute(function () {
+        var bodyPromise;
+        if (method === 'DELETE') bodyPromise = deleteRecordRequest(input, init, url, code).then(function (value) {
+          return { file: localFileRef(), id: value.id };
+        });
+        else {
+          strictQuery(url, [], [], code);
+          bodyPromise = requestObject(input, init,
+            ['file', 'id', 'anchor', 'text', 'color', 'w', 'h', 'collapsed', 'strokes', 'video', 'card', 'html', 'iar'],
+            method === 'POST' ? ['file', 'anchor'] : ['file', 'id'], code);
+        }
+        return bodyPromise.then(function (body) {
+          requireLocalFile(body.file, code);
+          return nativeBookMutation('note-api', { method: method, body: body }).then(function (receipt) {
+            var result = receipt.result;
+            if (!result || result.ok !== true) throw outgoingRequestError('原生便签回执不完整', code, 500);
+            announceLocalNotesChanged('native-' + method.toLowerCase());
+            var changes = Array.isArray(receipt.bindingChanges) ? receipt.bindingChanges : [];
+            var keys = Array.from(new Set(changes.flatMap(function (c) { return [c.before, c.after]; }).filter(Boolean)));
+            dispatchWordBindingsChanged(keys, changes, 'native');
+            enqueueReplicationCommand('/pdf/api/notes', method, method === 'POST'
+              ? Object.assign({ file: localFileRef() }, clone(result.note)) : body);
+            return result;
+          });
+        });
+      }, code);
+    }
     if (method === 'GET') {
       return localJSONRoute(function () {
         localFileQuery(url, ['file'], ['file'], code);

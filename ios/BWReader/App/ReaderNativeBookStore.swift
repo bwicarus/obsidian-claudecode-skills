@@ -44,11 +44,30 @@ struct ReaderNativeBookStore {
                       number.doubleValue >= 0, number.doubleValue <= 9_007_199_254_740_991 else { throw MutationError.invalid("预期修订号") }
                 expected = number.int64Value
             } else {
-                guard operation == "reading-position" else { throw MutationError.invalid("缺少预期修订号") }
+                guard ["reading-position", "note-api"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
                 expected = nil
             }
             let revision: Int64
+            var result: [String: Any]? = nil
+            var bindingChanges: [[String: Any]] = []
             switch operation {
+            case "note-api":
+                guard let api = value as? [String: Any], let method = api["method"] as? String,
+                      let body = api["body"] as? [String: Any] else { throw MutationError.invalid("便签请求") }
+                let state = try projection.state("document-notes-legacy", bookID: bookID)
+                guard state.payload == nil || state.payload is [[String: Any]] else { throw MutationError.invalid("便签数据损坏") }
+                let notes = state.payload as? [[String: Any]] ?? []
+                let outcome = try ReaderNativeNoteRules.apply(method: method, body: body, notes: notes,
+                    file: "localbook:" + bookID, now: stamp,
+                    newID: { "n" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(11) })
+                revision = try writeNotes(outcome.notes, expected: state.revision, mutation: mutation, at: stamp)
+                result = outcome.result
+                let before = Dictionary(Self.wordBindings(notes).map { ($0["cid"] as! String, $0["key"] as! String) }, uniquingKeysWith: { _, last in last })
+                let after = Dictionary(Self.wordBindings(outcome.notes).map { ($0["cid"] as! String, $0["key"] as! String) }, uniquingKeysWith: { _, last in last })
+                bindingChanges = Set(before.keys).union(after.keys).sorted().compactMap { id in
+                    guard before[id] != after[id] else { return nil }
+                    return ["cid": id, "before": before[id] ?? "", "after": after[id] ?? ""]
+                }
             case "notes":
                 guard let notes = value as? [[String: Any]] else { throw MutationError.invalid("注解列表") }
                 var ids = Set<String>()
@@ -56,11 +75,7 @@ struct ReaderNativeBookStore {
                     guard let id = note["id"] as? String, !id.isEmpty, id.utf16.count <= 240,
                           ids.insert(id).inserted else { throw MutationError.invalid("注解编号") }
                 }
-                revision = try writeState("document-notes-legacy", value: notes, expected: expected, mutation: mutation + ":notes", at: stamp)
-                let placements = Self.placements(notes)
-                try writeState("card-placements", value: placements, mutation: mutation + ":placements", at: stamp)
-                try writeState("entity-references", value: Self.references(placements), mutation: mutation + ":references", at: stamp)
-                try writeState("word-bindings", value: Self.wordBindings(notes), mutation: mutation + ":words", at: stamp)
+                revision = try writeNotes(notes, expected: expected, mutation: mutation, at: stamp)
             case "pdf-highlights", "epub-highlights":
                 guard let items = value as? [[String: Any]] else { throw MutationError.invalid("划线列表") }
                 revision = try writeHighlights(operation == "pdf-highlights" ? "document-highlights" : "epub-highlights",
@@ -73,10 +88,20 @@ struct ReaderNativeBookStore {
                 revision = try writeState(operation, value: value, expected: expected, mutation: mutation, at: stamp)
             default: throw MutationError.invalid("未登记的操作")
             }
-            let receipt: [String: Any] = ["ok": true, "bookID": bookID, "mutationId": mutation, "revision": revision]
+            var receipt: [String: Any] = ["ok": true, "bookID": bookID, "mutationId": mutation, "revision": revision]
+            if let result { receipt["result"] = result; receipt["bindingChanges"] = bindingChanges }
             try store.rememberMutationWithinTransaction(key, json: Self.string(["fingerprint": fingerprint, "receipt": receipt]), now: stamp)
             return receipt
         }
+    }
+
+    private func writeNotes(_ notes: [[String: Any]], expected: Int64?, mutation: String, at: Int64) throws -> Int64 {
+        let revision = try writeState("document-notes-legacy", value: notes, expected: expected, mutation: mutation + ":notes", at: at)
+        let placements = Self.placements(notes)
+        try writeState("card-placements", value: placements, mutation: mutation + ":placements", at: at)
+        try writeState("entity-references", value: Self.references(placements), mutation: mutation + ":references", at: at)
+        try writeState("word-bindings", value: Self.wordBindings(notes), mutation: mutation + ":words", at: at)
+        return revision
     }
 
     @discardableResult

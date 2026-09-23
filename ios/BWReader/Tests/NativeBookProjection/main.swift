@@ -101,3 +101,32 @@ let tombstone = try writing.record(collection: "native-document-highlights-items
 let recordJSON = try JSONSerialization.jsonObject(with: Data(tombstone.json.utf8)) as! [String: Any]
 check(((recordJSON["value"] as? [String: Any])?["payload"] as? [String: Any])?["deleted"] as? Bool == true, "highlight deletion lost its tombstone")
 print("Native book mutations: atomic indexes, journal, retry identity, stale-write rejection and tombstones passed")
+
+let create: [String: Any] = ["bookID": book, "mutationId": "api-create", "operation": "note-api", "value": [
+    "method": "POST", "body": ["file": "localbook:" + book, "id": "c_12345678", "anchor": ["kind":"pdf", "page":45],
+        "html": ["cid":"card-sars", "content":"SARS 原卡", "bind":["kind":"page-chars", "page":45, "text":"SARS"]],
+        "w":"300", "strokes":NSNull()]]]
+let created = try business.perform(create)
+let newNote = (created["result"] as! [String: Any])["note"] as! [String: Any]
+check(newNote["id"] as? String == "c_12345678" && (newNote["w"] as? NSNumber)?.intValue == 300, "native API changed identity or legacy numeric width")
+check((created["bindingChanges"] as? [[String: Any]])?.first?["after"] as? String == "sars", "word binding event missing")
+let createCursor = try writing.cursor()
+check(try business.perform(create)["replayed"] as? Bool == true && writing.cursor() == createCursor, "native API retry created another note")
+func patchRequest(_ name: String, _ fields: [String: Any], method: String = "PATCH") -> [String: Any] {
+    var body: [String: Any] = ["file":"localbook:" + book, "id":"c_12345678"]
+    fields.forEach { body[$0.key] = $0.value }
+    return ["bookID":book, "mutationId":name, "operation":"note-api", "value":["method":method, "body":body]]
+}
+_ = try business.perform(patchRequest("api-patch", ["text":"补充", "anchor":["kind":"pdf", "page":"u_abcd", "x":0.5]]))
+let retained = (try read.state("document-notes-legacy", bookID: book).payload as! [[String: Any]]).first { $0["id"] as? String == "c_12345678" }!
+check((retained["html"] as? [String: Any])?["content"] as? String == "SARS 原卡", "patch discarded unmodified content")
+let badCursor = try writing.cursor()
+do { _ = try business.perform(patchRequest("api-bad", ["anchor":["kind":"pdf", "page":true]])); fatalError("boolean page accepted") }
+catch ReaderNativeNoteRules.NoteError.invalid { }
+check(try writing.cursor() == badCursor, "invalid patch left a journal record")
+let removed = try business.perform(patchRequest("api-delete", [:], method:"DELETE"))
+check((removed["bindingChanges"] as? [[String: Any]])?.first?["before"] as? String == "sars", "deletion did not invalidate word binding")
+check((try read.state("word-bindings", bookID:book).payload as! [[String: Any]]).isEmpty, "deleted note left a stale word index")
+do { _ = try business.perform(patchRequest("api-missing", ["text":"x"])); fatalError("editing a deleted note recreated it") }
+catch ReaderNativeNoteRules.NoteError.missing { }
+print("Native note API: create/patch/delete, replay, validation, virtual pages and binding changes passed")
