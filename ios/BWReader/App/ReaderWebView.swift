@@ -390,6 +390,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// SQLite 文件 —— 第一次真有请求进来才建。
     private lazy var nativeDataStoreHost = ReaderNativeDataStoreHost()
     private var nativeReadingStoreBookID: String?
+    private var nativeReadingStoreDeviceID: String?
 
     private func readingDomains(localBookID: String) async throws -> [ReaderBookUserStateDomainPayload] {
         if nativeReadingStoreBookID == localBookID {
@@ -2989,6 +2990,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func resetBookUserStateContext(baseURL: URL) {
         nativeReadingStoreBookID = nil
+        nativeReadingStoreDeviceID = nil
         bookUserStateImportTask?.cancel()
         bookUserStateImportTask = nil
         localPDFContentIdentityTask?.cancel()
@@ -5854,7 +5856,9 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 return
             }
             if body["action"] as? String == "readingStoreReady" {
-                guard let bookID = body["bookID"] as? String, bookID == currentLocalBook?.id else {
+                guard let bookID = body["bookID"] as? String, bookID == currentLocalBook?.id,
+                      let deviceID = body["deviceID"] as? String, !deviceID.isEmpty,
+                      deviceID.utf16.count <= 240 else {
                     replyHandler(nil, "数据库所属书籍已切换")
                     return
                 }
@@ -5864,8 +5868,28 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                         throw ReaderBookUserStateWebAdapterError.unavailable
                     }
                     nativeReadingStoreBookID = bookID
-                    replyHandler(["ok": true], nil)
+                    nativeReadingStoreDeviceID = deviceID
+                    replyHandler(["ok": true, "nativeBookWrites": true], nil)
                 } catch { replyHandler(nil, error.localizedDescription) }
+                return
+            }
+            if body["action"] as? String == "bookMutation" {
+                guard let request = body["request"] as? [String: Any],
+                      let bookID = nativeReadingStoreBookID, bookID == currentLocalBook?.id,
+                      let deviceID = nativeReadingStoreDeviceID,
+                      request["bookID"] as? String == bookID else {
+                    replyHandler(nil, "原生书籍写入上下文尚未准备好或已切换")
+                    return
+                }
+                do {
+                    let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+                    let receipt = try ReaderNativeBookStore(store: store, bookID: bookID, deviceID: deviceID).perform(request)
+                    scheduleNativePDFProjectionRefresh()
+                    markCloudSyncDirty()
+                    replyHandler(receipt, nil)
+                } catch ReaderNativeDataStore.StoreError.revisionConflict {
+                    replyHandler(["ok": false, "code": "BW_DATA_CONFLICT"], nil)
+                } catch { replyHandler(nil, String(describing: error)) }
                 return
             }
             // ⚠ 安全阀：搬家失败时网页那侧会请求把开关关回去。不让它

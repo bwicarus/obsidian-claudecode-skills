@@ -474,7 +474,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                 "pageWidth": value.pageWidth, "pageHeight": value.pageHeight,
                 "revision": value.engineRevision + ":" + value.geometryDigest,
                 "source": value.source?.rawValue ?? "embedded",
-                "characterGeometry": value.characterGeometry.rawValue]
+                "characterGeometry": value.characterGeometry.rawValue,
+                "layout": raw["layout"] ?? NSNull()]
     }
 
     func prepareBinding(page: Int, text: String) async throws -> [String: Any]? {
@@ -490,8 +491,12 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         guard let value, value.contentSHA256.lowercased() == expectedDigest, value.status == .ready else {
             throw NativeBookOCRError.pageUnavailable
         }
-        characterPages[page] = value
-        selectionCores[page] = try ReaderNativePDFSelection(value)
+        if characterPages[page]?.geometryDigest != value.geometryDigest
+            || characterPages[page]?.engineRevision != value.engineRevision || selectionCores[page] == nil {
+            characterPages[page] = value
+            selectionCores[page] = try ReaderNativePDFSelection(value)
+        }
+        trimCharacterCache(keeping: page)
         return resolveBinding(page: page, text: text)
     }
 
@@ -499,6 +504,14 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     private var selectionCores: [Int: ReaderNativePDFSelection] = [:]
     private var characterReads: [Int: Task<Void, Never>] = [:]
     private var characterReadTickets: [Int: UUID] = [:]
+
+    private func trimCharacterCache(keeping page: Int? = nil) {
+        guard characterPages.count > 12, let document = view.document else { return }
+        var keep = Set(view.visiblePages.map { document.index(for: $0) + 1 })
+        if let page { keep.insert(page) }
+        characterPages = characterPages.filter { keep.contains($0.key) }
+        selectionCores = selectionCores.filter { keep.contains($0.key) }
+    }
     private var unavailableCharacterPages = Set<Int>()
     /// 这一页暂时没读到字符（空 / 还在处理 / 读失败）时的退避重试。
     /// ⚠ 以前第一次没读到就永久记进 unavailableCharacterPages：原生正文比网页挂得早，
@@ -1401,10 +1414,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let ticket = generation, digest = digest
         let visible = Set(view.visiblePages.map { document.index(for: $0) + 1 })
         // Keep a small local working set. Cache eviction never deletes sidecars.
-        if characterPages.count > 12 {
-            characterPages = characterPages.filter { visible.contains($0.key) }
-            selectionCores = selectionCores.filter { visible.contains($0.key) }
-        }
+        trimCharacterCache()
         let now = Date()
         for number in visible where characterPages[number] == nil && characterReads[number] == nil
             && !unavailableCharacterPages.contains(number) && (characterRetry[number]?.after ?? .distantPast) <= now {

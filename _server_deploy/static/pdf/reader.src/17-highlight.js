@@ -552,8 +552,10 @@ async function _pdfExactTextPage(targetPage) {
     if (!value?.ok || !Array.isArray(value.chars)) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
     // Data object, deliberately not a DOM element. No page image/canvas or
     // text-layer layout is needed to validate a quote or mint a range snapshot.
+    const boxes = _mapCharBoxes(value.chars, 1, value.source, value.revision, value.characterGeometry);
+    if (value.layout) boxes.__layout = value.layout;
     return { __nativeSource: true, dataset: { pageNum: String(page) },
-      __charBoxes: _mapCharBoxes(value.chars, 1, value.source, value.revision, value.characterGeometry),
+      __charBoxes: boxes,
       __pageWPt: value.pageWidth, __pageHPt: value.pageHeight,
       __pageTextRevision: value.revision };
   }

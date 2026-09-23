@@ -727,6 +727,23 @@
               bridge.available() && typeof store.createNativeDataStore === 'function');
   }
 
+  var nativeBookWrites = false;
+  // This adapter carries commands, never derived records. Swift owns the
+  // transaction and builds the indexes from the authoritative note payload.
+  function nativeBookMutation(operation, value, expectedRevision) {
+    return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
+      action: 'bookMutation', request: {
+        bookID: bookId, operation: operation, value: clone(value),
+        mutationId: 'book-' + randomHex(16), expectedRevision: expectedRevision
+      }
+    }).then(function (receipt) {
+      if (!receipt || receipt.ok !== true) {
+        throw new RuntimeError('原生书籍写入未确认', receipt && receipt.code || 'BW_NATIVE_BOOK_WRITE');
+      }
+      return receipt;
+    });
+  }
+
   function createStores() {
     var registry = required('dataRegistry', 'syncCollections');
     var causal = registry.syncCollections();
@@ -1110,9 +1127,14 @@
 
   function mutateDocumentStateNow(kind, fallback, mutator, batchOptions) {
     var attempts = 0;
+    // Calls with an explicit PDF transaction deadline keep the existing batch
+    // boundary until that whole journaled operation has a native owner.
+    var nativeOperation = nativeBookWrites && !batchOptions
+      ? ({ 'document-notes-legacy': 'notes', 'reading-position': 'reading-position',
+          ink: 'ink', 'epub-ink': 'epub-ink' })[kind] : null;
     function attempt() {
       attempts += 1;
-      var relatedKinds = kind === 'document-notes-legacy'
+      var relatedKinds = kind === 'document-notes-legacy' && !nativeOperation
         ? ['document-notes-legacy', 'card-placements', 'entity-references', 'word-bindings']
         : [kind];
       return Promise.all(relatedKinds.map(function (relatedKind) {
@@ -1133,22 +1155,27 @@
         var mutations;
         if (kind === 'document-notes-legacy') {
           var notes = Array.isArray(outcome.payload) ? clone(outcome.payload) : [];
-          var placements = deriveCardPlacements(notes);
-          var references = deriveEntityReferences(placements);
           var bindingsBefore = deriveWordBindings(records[0].payload);
           var bindings = deriveWordBindings(notes);
-          mutations = [
+          if (!nativeOperation) {
+            var placements = deriveCardPlacements(notes);
+            var references = deriveEntityReferences(placements);
+            mutations = [
             stateRecordMutation(kind, notes, suffix + '-notes', records[0].rev),
             stateRecordMutation('card-placements', placements, suffix + '-cards', records[1].rev),
             stateRecordMutation('entity-references', references, suffix + '-entities', records[2].rev),
             stateRecordMutation('word-bindings', bindings, suffix + '-words', records[3].rev)
-          ];
+            ];
+          }
         } else {
           mutations = [stateRecordMutation(
             kind, outcome.payload, suffix, records[0].rev
           )];
         }
-        return stores.document.batch(mutations, batchOptions).then(function () {
+        var commit = nativeOperation
+          ? nativeBookMutation(nativeOperation, outcome.payload, records[0].rev)
+          : stores.document.batch(mutations, batchOptions);
+        return commit.then(function () {
           if (kind === 'document-notes-legacy') {
             // 只在 notes + 三个派生索引的事务确实提交后发信号。删除失败或 CAS
             // 仍未知时不发，旧 page.context 因而继续保留，不能提前把 CARD 擦掉。
@@ -2327,6 +2354,13 @@
   }
   // 跨书写回便签本体(词卡整理用):四条派生记录同批,与 mutateDocumentStateNow 同形
   function writeNotesAndIndexesFor(docId, notes, ifRev, source) {
+    if (nativeBookWrites && docId === bookId) {
+      return (ifRev == null
+        ? stores.document.get('native-document-notes-legacy', docId + ':document-notes-legacy').then(function (r) { return r ? r.rev : 0; })
+        : Promise.resolve(ifRev)).then(function (revision) {
+        return nativeBookMutation('notes', notes, revision);
+      }).then(function () { announceLocalNotesChanged(source || 'replace'); });
+    }
     var placements = deriveCardPlacements(notes);
     var references = deriveEntityReferences(placements);
     var bindings = deriveWordBindings(notes);
@@ -2442,19 +2476,23 @@
 
   function writeNotesAndIndexes(payload) {
     var notes = Array.isArray(payload) ? clone(payload) : [];
-    var placements = deriveCardPlacements(notes);
-    var references = deriveEntityReferences(placements);
+    var placements = nativeBookWrites ? null : deriveCardPlacements(notes);
+    var references = nativeBookWrites ? null : deriveEntityReferences(placements);
     var bindings = deriveWordBindings(notes);
     var suffix = randomHex(12);
     return stores.document.get('native-word-bindings', stateId('word-bindings')).then(function (prior) {
       return prior && prior.value && Array.isArray(prior.value.payload) ? prior.value.payload : [];
     }, function () { return []; }).then(function (before) {
-      return stores.document.batch([
+      var commit = nativeBookWrites
+        ? stores.document.get('native-document-notes-legacy', stateId('document-notes-legacy')).then(function (record) {
+          return nativeBookMutation('notes', notes, record ? record.rev : 0);
+        }) : stores.document.batch([
         stateRecordMutation('document-notes-legacy', notes, suffix + '-notes'),
         stateRecordMutation('card-placements', placements, suffix + '-cards'),
         stateRecordMutation('entity-references', references, suffix + '-entities'),
         stateRecordMutation('word-bindings', bindings, suffix + '-words')
-      ]).then(function () {
+      ]);
+      return commit.then(function () {
         announceLocalNotesChanged('replace');
         announceWordBindingsChanged(before, bindings, 'replace');
         return clone(notes);
@@ -15754,7 +15792,9 @@
         // Swift may now read the same SQLite records without exporting through
         // a hidden webpage for every annotation/ink update.
         return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
-          action: 'readingStoreReady', bookID: bookId
+          action: 'readingStoreReady', bookID: bookId, deviceID: deviceId
+        }).then(function (response) {
+          nativeBookWrites = !!(response && response.ok && response.nativeBookWrites);
         });
       }).then(function () {
         bootState = 'ready';
