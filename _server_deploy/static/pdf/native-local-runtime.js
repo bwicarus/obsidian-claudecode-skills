@@ -2075,6 +2075,11 @@
   }
 
   var replicationDrainTimer = null;
+  // Native Pencil commits its durable outbox without passing through fetch.
+  // This is only a transport wakeup; it must not recreate the command.
+  root.addEventListener('bw:native-outbox-ready', function () {
+    if (nativeBookWrites) scheduleReplicationDrain(0);
+  });
   function scheduleReplicationDrain(delayMs) {
     if (replicationDrainTimer != null) return;
     var timer = root.setTimeout(function () {

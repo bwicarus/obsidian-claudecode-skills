@@ -46,13 +46,20 @@ struct ReaderNativeBookStore {
                       number.doubleValue >= 0, number.doubleValue <= 9_007_199_254_740_991 else { throw MutationError.invalid("预期修订号") }
                 expected = number.int64Value
             } else {
-                guard ["reading-position", "note-api", "replication-enqueue"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
+                guard ["reading-position", "note-api", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
                 expected = nil
             }
             let revision: Int64
             var result: [String: Any]? = nil
             var bindingChanges: [[String: Any]] = []
             switch operation {
+            case "ink-operation":
+                guard let input = value as? [String: Any] else { throw MutationError.invalid("手写操作") }
+                let outcome = try mutateInk(input, mutation: mutation, at: stamp)
+                revision = outcome.revision; result = outcome.result
+            case "ink-sync":
+                revision = try flushInk(mutation: mutation, at: stamp)
+                result = ["ok": true]
             case "replication-enqueue":
                 guard let command = value as? [String: Any] else { throw MutationError.invalid("复制命令") }
                 let queued = try enqueueReplication(command, mutation: mutation, at: stamp)
@@ -100,6 +107,111 @@ struct ReaderNativeBookStore {
             try store.rememberMutationWithinTransaction(key, json: Self.string(["fingerprint": fingerprint, "receipt": receipt]), now: stamp)
             return receipt
         }
+    }
+
+    /// Reading the latest strokes and saving undo, ink and the deferred sync
+    /// marker are one transaction. Unknown replies are safe to retry by ID.
+    private func mutateInk(_ input: [String: Any], mutation: String, at: Int64) throws -> (revision: Int64, result: [String: Any]) {
+        guard let action = input["action"] as? String else { throw MutationError.invalid("手写动作") }
+        let state = try projection.state("ink", bookID: bookID)
+        guard state.payload == nil || state.payload is NSNull || state.payload is [String: [[String: Any]]] else { throw MutationError.invalid("笔迹记录损坏") }
+        let original = state.payload as? [String: [[String: Any]]] ?? [:]
+        var output = original, before: [String: [[String: Any]]] = [:]
+        var written = 0, removed = 0
+        if ["undo", "redo", "clear"].contains(action) {
+            guard let page = input["page"] as? NSNumber, CFGetTypeID(page) != CFBooleanGetTypeID(),
+                  page.doubleValue > 0, page.doubleValue < 10_000_000,
+                  page.doubleValue.rounded() == page.doubleValue else { throw MutationError.invalid("手写页码") }
+            let key = String(page.intValue), current = original[key] ?? []
+            var history = try inkHistory(page: key, matching: current)
+            var undo = history["undo"] as? [[[String: Any]]] ?? [], redo = history["redo"] as? [[[String: Any]]] ?? []
+            let next: [[String: Any]]
+            if action == "undo" {
+                guard let value = undo.popLast() else { return (state.revision, ["ok":true,"persisted":true,"changes":[]]) }
+                redo.append(current); next = value
+            } else if action == "redo" {
+                guard let value = redo.popLast() else { return (state.revision, ["ok":true,"persisted":true,"changes":[]]) }
+                undo.append(current); next = value
+            } else { undo.append(current); redo = []; next = [] }
+            before[key] = current
+            if next.isEmpty { output.removeValue(forKey:key) } else { output[key] = next }
+            history = ["undo":undo,"redo":redo,"current":next]
+            try writeInkHistory(history, page:key, mutation:mutation, at:at)
+        } else {
+            let outcome = try ReaderNativeStrokeRules.apply(action:action, input:input, surfaces:original, now:at)
+            output = outcome.surfaces; before = outcome.before; written = outcome.written; removed = outcome.removed
+            for page in before.keys.sorted() {
+                let prior = before[page]!, next = output[page] ?? []
+                if try Self.bytes(prior) == Self.bytes(next) { continue }
+                var history = try inkHistory(page:page, matching:prior)
+                var undo = history["undo"] as? [[[String: Any]]] ?? []
+                undo.append(prior); history = ["undo":undo,"redo":[[[String:Any]]](),"current":next]
+                try writeInkHistory(history, page:page, mutation:mutation, at:at)
+            }
+        }
+        let changes: [[String:Any]] = try before.keys.sorted().compactMap { page in
+            let next = output[page] ?? []
+            return try Self.bytes(before[page]!) == Self.bytes(next) ? nil : ["page":Int(page)!,"strokes":next]
+        }
+        if !changes.isEmpty {
+            var pending = try pendingInk()
+            for change in changes { pending[String(change["page"] as! Int)] = at + 60_000 }
+            try writeState("ink-pending", value:pending, mutation:mutation + ":pending", at:at)
+        }
+        let revision = changes.isEmpty ? state.revision : try writeState("ink", value:output, expected:state.revision, mutation:mutation, at:at)
+        return (revision, ["ok":true,"persisted":true,"written":written,"removed":removed,"changes":changes])
+    }
+
+    private func inkHistory(page: String, matching strokes: [[String:Any]]) throws -> [String:Any] {
+        let value = try projection.state("ink-history-" + page, bookID:bookID).payload as? [String:Any]
+        // Cloud imports and page mutations may replace strokes; do not let an
+        // old local undo stack overwrite those changes.
+        guard let value, let current = value["current"] as? [[String:Any]],
+              try Self.bytes(current) == Self.bytes(strokes) else { return [:] }
+        return value
+    }
+
+    private func writeInkHistory(_ input: [String:Any], page:String, mutation:String, at:Int64) throws {
+        var value = input
+        var undo = Array((value["undo"] as? [[[String:Any]]] ?? []).suffix(40))
+        var redo = Array((value["redo"] as? [[[String:Any]]] ?? []).suffix(40))
+        while true {
+            value["undo"] = undo; value["redo"] = redo
+            if try Self.bytes(value).count <= 8 * 1024 * 1024 || (undo.isEmpty && redo.isEmpty) { break }
+            if undo.count >= redo.count && !undo.isEmpty { undo.removeFirst() } else { redo.removeFirst() }
+        }
+        try writeState("ink-history-" + page, value:value, mutation:mutation + ":history:" + page, at:at)
+    }
+
+    private func pendingInk() throws -> [String:Int64] {
+        guard let value = try projection.state("ink-pending", bookID:bookID).payload else { return [:] }
+        guard let rows = value as? [String:NSNumber] else { throw MutationError.invalid("笔迹待同步记录损坏") }
+        var result: [String:Int64] = [:]
+        for (key, n) in rows {
+            guard key.range(of:"^[1-9][0-9]{0,7}$",options:.regularExpression) != nil,
+                  CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue.isFinite,
+                  n.doubleValue >= 0, n.doubleValue <= 9_007_199_254_740_991,
+                  n.doubleValue.rounded() == n.doubleValue else { throw MutationError.invalid("笔迹待同步时间") }
+            result[key] = n.int64Value
+        }
+        return result
+    }
+
+    func nextInkSyncTime() throws -> Int64? { try pendingInk().values.min() }
+
+    private func flushInk(mutation:String, at:Int64) throws -> Int64 {
+        var pending = try pendingInk()
+        let due = pending.keys.filter { pending[$0]! <= at }.sorted()
+        guard !due.isEmpty else { return 0 }
+        let state = try projection.state("ink", bookID:bookID)
+        guard state.payload == nil || state.payload is NSNull || state.payload is [String:[[String:Any]]] else { throw MutationError.invalid("笔迹记录损坏") }
+        let strokes = state.payload as? [String:[[String:Any]]] ?? [:]
+        for page in due {
+            _ = try enqueueReplication(["url":"/pdf/api/ink","method":"POST","body":["file":"localbook:" + bookID,
+                "page":Int(page)!,"strokes":strokes[page] ?? []]], mutation:mutation + ":ink:" + page, at:at)
+            pending.removeValue(forKey:page)
+        }
+        return try writeState("ink-pending",value:pending,mutation:mutation + ":settled",at:at)
     }
 
     /// The durable outbox uses the existing wire protocol. Creating the book

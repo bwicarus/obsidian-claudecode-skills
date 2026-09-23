@@ -391,6 +391,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private lazy var nativeDataStoreHost = ReaderNativeDataStoreHost()
     private var nativeReadingStoreBookID: String?
     private var nativeReadingStoreDeviceID: String?
+    private var nativeInkDocumentToken = UUID().uuidString
+    private var nativeInkSyncTasks: [String: Task<Void, Never>] = [:]
+    private var nativePDFMutationCommandDepth = 0
+    @Published private(set) var nativeInkHistoryBusy = false
 
     private func readingDomains(localBookID: String) async throws -> [ReaderBookUserStateDomainPayload] {
         if nativeReadingStoreBookID == localBookID {
@@ -910,6 +914,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                          "height": local.height / webView.bounds.height],
             ])
         }
+        if nativeReadingStoreBookID == currentLocalBook?.id, nativeReadingStoreBookID != nil {
+            nativePencilInk.updateLayout(from: ["type":"layout", "documentToken":nativeInkDocumentToken, "surfaces":surfaces])
+            return
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: surfaces),
               let json = String(data: data, encoding: .utf8) else { return }
         Task { @MainActor [weak self] in
@@ -917,6 +925,83 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 "window.__bwNativeInkSurfaces = JSON.parse(value);"
                 + "window.__bwNativeInkSurfacesChanged?.();",
                 arguments: ["value": json], in: nil, contentWorld: .page)
+        }
+    }
+
+    /// Page strokes never need a webpage element. EPUB keeps its own adapter
+    /// until its document model has migrated; a failed native PDF write must
+    /// not silently fall back to a second writer.
+    func performNativePDFInk(_ action: String, payload: [String: Any]) async throws -> Bool {
+        guard let document = nativePDFDocument else { return false }
+        guard let book = currentLocalBook, let access = currentLocalBookAccess,
+              nativeReadingStoreBookID == book.id, let deviceID = nativeReadingStoreDeviceID,
+              let digest = currentLocalBookContentSHA256,
+              document.matches(bookID:book.id,contentSHA256:digest),
+              payload["documentToken"] as? String == nativeInkDocumentToken,
+              let opID = payload["opId"] as? String, nativePDFMutationCommandDepth == 0 else {
+            throw ReaderNativeBookStore.MutationError.unavailable
+        }
+        let generation = bookUserStateContextGeneration
+        let pending = try await nativePDFMutationActor.hasUnfinishedMutation(book:access)
+        guard !pending, nativePDFMutationCommandDepth == 0,
+              generation == bookUserStateContextGeneration, currentLocalBookAccess === access,
+              document.matches(bookID:book.id,contentSHA256:digest) else {
+            throw ReaderNativeBookStore.MutationError.unavailable
+        }
+        // No await between the final identity/barrier check and commit.
+        let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+        let business = ReaderNativeBookStore(store:store,bookID:book.id,deviceID:deviceID,
+            displayName:book.title,contentSHA256:digest)
+        var input = payload; input["action"] = action
+        let receipt = try business.perform(["bookID":book.id,"mutationId":opID,"operation":"ink-operation","value":input])
+        // The durable receipt, not a DOM redraw, releases the Pencil queue.
+        let result = receipt["result"] as? [String:Any] ?? [:]
+        let changes = result["changes"] as? [[String:Any]] ?? []
+        if !changes.isEmpty {
+            let domains = try ReaderNativeBookProjection(store:store).exportReadingDomains(bookID:book.id)
+            try document.applyOverlays(domains,bookID:book.id,contentSHA256:digest)
+            markCloudSyncDirty()
+        }
+        resumeNativeInkSync(business)
+        // Transitional consumers only observe this receipt; they do not save
+        // it again. Native side remains the owner of strokes and the outbox.
+        let event: [String:Any] = ["source":"native-pencil","opId":opID,"changes":changes,
+            "surfaceIds":changes.compactMap { ($0["page"] as? NSNumber).map { "page:" + $0.stringValue } }]
+        webView.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('rc:inkchange',{detail:value})); return true;",
+            arguments:["value":event],in:nil,contentWorld:.page,completionHandler:nil)
+        return true
+    }
+
+    func performNativeInkHistory(_ action: String) {
+        guard ["undo","redo","clear"].contains(action), !nativeInkHistoryBusy,
+              !nativePencilInk.hasPendingOperations, let document = nativePDFDocument else { return }
+        nativeInkHistoryBusy = true
+        let payload: [String:Any] = ["opId":"ink-" + UUID().uuidString,
+            "documentToken":nativeInkDocumentToken,"page":document.position.page]
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.nativeInkHistoryBusy = false }
+            do { _ = try await self.performNativePDFInk(action,payload:payload) }
+            catch { self.nativePencilInk.report(error) }
+        }
+    }
+
+    private func resumeNativeInkSync(_ business: ReaderNativeBookStore) {
+        guard nativeInkSyncTasks[business.bookID] == nil else { return }
+        nativeInkSyncTasks[business.bookID] = Task { @MainActor [weak self] in
+            defer { self?.nativeInkSyncTasks.removeValue(forKey:business.bookID) }
+            do {
+                while let due = try business.nextInkSyncTime() {
+                    let delay = max(0,Double(due) / 1000 - Date().timeIntervalSince1970)
+                    if delay > 0 { try await Task.sleep(nanoseconds:UInt64(min(delay,60) * 1_000_000_000)); continue }
+                    _ = try business.perform(["bookID":business.bookID,"mutationId":"ink-sync-" + UUID().uuidString,
+                        "operation":"ink-sync","value":[:]])
+                    if self?.nativeReadingStoreBookID == business.bookID {
+                        self?.webView.evaluateJavaScript("window.dispatchEvent(new Event('bw:native-outbox-ready'));", completionHandler:nil)
+                    }
+                }
+            } catch is CancellationError { }
+            catch { self?.postClientLog("原生笔迹同步仍保留待处理记录：" + error.localizedDescription) }
         }
     }
 
@@ -2986,6 +3071,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func resetBookUserStateContext(baseURL: URL) {
+        nativeInkDocumentToken = UUID().uuidString
         nativeReadingStoreBookID = nil
         nativeReadingStoreDeviceID = nil
         bookUserStateImportTask?.cancel()
@@ -3578,6 +3664,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func handleNativePDFMutation(
         _ command: ReaderNativePDFMutationCommand
     ) async throws -> [String: Any] {
+        // Set before the first suspension; native ink cannot enter while PDF
+        // page indexes and sidecars are being changed by another command.
+        nativePDFMutationCommandDepth += 1
+        defer { nativePDFMutationCommandDepth -= 1 }
         switch command {
         case .prepare(let request):
             guard let book = currentLocalBook,
@@ -5799,7 +5889,9 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 }
                 return
             }
-            nativePencilInk.updateLayout(from: body)
+            if nativePDFDocument == nil || nativeReadingStoreBookID == nil {
+                nativePencilInk.updateLayout(from: body)
+            }
         } else if message.name == nativeReadingProjectionMessageName {
             guard
                 message.frameInfo.isMainFrame,
@@ -5866,6 +5958,16 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     }
                     nativeReadingStoreBookID = bookID
                     nativeReadingStoreDeviceID = deviceID
+                    publishNativeInkSurfaces()
+                    // Resume persisted pending pages, including books closed
+                    // before the quiet period elapsed.
+                    let pending = try store.records(collection:"native-ink-pending",idPrefix:"")
+                    for row in pending where !row.deleted && row.id.hasSuffix(":ink-pending") {
+                        let pendingBookID = String(row.id.dropLast(":ink-pending".count))
+                        resumeNativeInkSync(ReaderNativeBookStore(store:store,bookID:pendingBookID,deviceID:deviceID,
+                            displayName:pendingBookID == bookID ? currentLocalBook?.title : nil,
+                            contentSHA256:pendingBookID == bookID ? currentLocalBookContentSHA256 : nil))
+                    }
                     replyHandler(["ok": true, "nativeBookWrites": true], nil)
                 } catch { replyHandler(nil, error.localizedDescription) }
                 return

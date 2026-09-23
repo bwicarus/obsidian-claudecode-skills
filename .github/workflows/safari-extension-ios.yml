@@ -272,8 +272,14 @@ jobs:
         # Reading projection uses the actual SQLite records and package codec;
         # verify data identity before compiling the full UI.
         run: |
-          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderBookUserStatePackage.swift ios/BWReader/App/ReaderNativeBookProjection.swift ios/BWReader/App/ReaderNativeNoteRules.swift ios/BWReader/App/ReaderNativeBookStore.swift ios/BWReader/Tests/NativeBookProjection/main.swift -o "$RUNNER_TEMP/native-book-projection-test"
+          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderBookUserStatePackage.swift ios/BWReader/App/ReaderNativeBookProjection.swift ios/BWReader/App/ReaderNativeNoteRules.swift ios/BWReader/App/ReaderNativeStrokeRules.swift ios/BWReader/App/ReaderNativeBookStore.swift ios/BWReader/Tests/NativeBookProjection/main.swift -o "$RUNNER_TEMP/native-book-projection-test"
           "$RUNNER_TEMP/native-book-projection-test"
+
+      - name: Verify native stroke geometry parity
+        run: |
+          node ios/BWReader/Tests/NativeStrokeRules/fixtures.mjs "$RUNNER_TEMP/native-stroke-fixtures.json"
+          xcrun swiftc ios/BWReader/App/ReaderNativeStrokeRules.swift ios/BWReader/Tests/NativeStrokeRules/main.swift -o "$RUNNER_TEMP/native-stroke-test"
+          "$RUNNER_TEMP/native-stroke-test" "$RUNNER_TEMP/native-stroke-fixtures.json"
 
       - name: Verify native text geometry parity
         run: |

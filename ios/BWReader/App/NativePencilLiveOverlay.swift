@@ -418,6 +418,17 @@ struct NativePencilLiveOverlay: View {
                                 Slider(value: $controller.width, in: 1...16)
                                     .frame(width: 130)
                             }
+                            if reader.nativePDFDocument != nil {
+                                HStack(spacing: 16) {
+                                    Button { reader.performNativeInkHistory("undo") } label: {
+                                        Image(systemName:"arrow.uturn.backward")
+                                    }.accessibilityLabel("撤销本页笔迹")
+                                    Button { reader.performNativeInkHistory("redo") } label: {
+                                        Image(systemName:"arrow.uturn.forward")
+                                    }.accessibilityLabel("重做本页笔迹")
+                                }
+                                .disabled(controller.hasPendingOperations || reader.nativeInkHistoryBusy)
+                            }
                         }
                         .padding(12)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
@@ -1379,6 +1390,7 @@ fileprivate extension ReaderWebViewModel {
               JSONSerialization.isValidJSONObject(payload) else {
             throw NativeReaderCaptureError.invalidPagePayload
         }
+        if try await performNativePDFInk(action, payload:payload) { return }
         let script = """
           const host = window.__bwNativeInkHost;
           if (!host || typeof host[action] !== "function" || typeof host.persist !== "function") {

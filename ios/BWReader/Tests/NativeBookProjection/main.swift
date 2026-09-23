@@ -168,3 +168,53 @@ var forbidden = enqueue; forbidden["mutationId"] = "forbidden"; forbidden["value
 do { _ = try queue.perform(forbidden); fatalError("arbitrary replication route accepted") } catch ReaderNativeBookStore.MutationError.invalid { }
 check(try envelopes().count == 3, "invalid command changed outbox")
 print("Native replication enqueue: atomic pairing, crash rollback, ordering and stable retry identities passed")
+
+let inkStore = try ReaderNativeDataStore(path:":memory:")
+var inkTime: Int64 = 200_000
+let inkWriter = ReaderNativeBookStore(store:inkStore,bookID:book,deviceID:"pencil",now:{inkTime})
+let inkReader = ReaderNativeBookProjection(store:inkStore)
+func inkRequest(_ id:String, _ action:String, _ extra:[String:Any] = [:]) -> [String:Any] {
+    var input: [String:Any] = ["action":action,"opId":id,"page":45,
+        "segments":[["surfaceId":"page:45","points":[[0.1,0.1],[0.2,0.2]],"width":4,"color":"#123456"]]]
+    extra.forEach { input[$0.key] = $0.value }
+    return ["bookID":book,"mutationId":id,"operation":"ink-operation","value":input]
+}
+func inkCount() throws -> Int { (try inkReader.state("ink",bookID:book).payload as? [String:[[String:Any]]])?["45"]?.count ?? 0 }
+// Ink, undo and pending sync are committed together, not before persistence.
+try inkStore.execute("CREATE TRIGGER fail_ink BEFORE INSERT ON records WHEN NEW.collection = 'native-ink' BEGIN SELECT RAISE(ABORT, 'ink failed'); END")
+let pen = inkRequest("pen-1","commit")
+do { _ = try inkWriter.perform(pen); fatalError("ink disk failure swallowed") } catch ReaderNativeDataStore.StoreError.sql { }
+check(try inkStore.cursor() == 0 && inkWriter.nextInkSyncTime() == nil, "failed ink left history or pending sync")
+try inkStore.execute("DROP TRIGGER fail_ink")
+_ = try inkWriter.perform(pen)
+check(try inkCount() == 1 && inkWriter.nextInkSyncTime() == 260_000, "pen not durable or quiet time wrong")
+let inkCursor = try inkStore.cursor()
+check(try inkWriter.perform(pen)["replayed"] as? Bool == true && inkStore.cursor() == inkCursor, "Pencil retry duplicated a stroke")
+_ = try inkWriter.perform(inkRequest("undo-1","undo"))
+check(try inkCount() == 0, "native undo did not restore previous page")
+_ = try inkWriter.perform(inkRequest("redo-1","redo"))
+check(try inkCount() == 1, "native redo lost a stroke")
+_ = try inkWriter.perform(inkRequest("region-1","createRegion",["regionId":"r1","segments":[
+    ["surfaceId":"page:45","points":[[0.5,0.5],[0.8,0.5],[0.8,0.8],[0.5,0.8]]]]]))
+check(try inkCount() == 2, "region not saved")
+_ = try inkWriter.perform(inkRequest("erase-1","erase",["segments":[["surfaceId":"page:45","points":[[0.6,0.6]]]]]))
+check(try inkCount() == 1, "polygon interior was not erased")
+_ = try inkWriter.perform(["bookID":book,"mutationId":"early-flush","operation":"ink-sync","value":[:]])
+check(try inkStore.records(collection:"native-replication-outbox",idPrefix:book + ":").isEmpty, "ink synced before quiet period")
+inkTime = 270_000
+// A failed outbox write retains the pending page for later retry.
+try inkStore.execute("CREATE TRIGGER fail_send BEFORE INSERT ON records WHEN NEW.collection = 'native-replication-outbox' BEGIN SELECT RAISE(ABORT, 'send failed'); END")
+let flush: [String:Any] = ["bookID":book,"mutationId":"flush","operation":"ink-sync","value":[:]]
+do { _ = try inkWriter.perform(flush); fatalError("outbox failure swallowed") } catch ReaderNativeDataStore.StoreError.sql { }
+check(try inkWriter.nextInkSyncTime() != nil, "failed flush lost pending ink")
+try inkStore.execute("DROP TRIGGER fail_send")
+_ = try inkWriter.perform(flush)
+check(try inkWriter.nextInkSyncTime() == nil, "successful flush retained pending marker")
+let inkMessages = try inkStore.records(collection:"native-replication-outbox",idPrefix:book + ":")
+check(inkMessages.count == 2, "quiet period did not coalesce pen, undo, redo and erase into one page update plus pair")
+let currentInk = try inkReader.state("ink",bookID:book)
+_ = try inkWriter.perform(["bookID":book,"mutationId":"remote-update","operation":"ink","expectedRevision":currentInk.revision,
+    "value":["45":[["t":"pen","p":[[0.9,0.9]]]]]])
+_ = try inkWriter.perform(inkRequest("stale-undo","undo"))
+check(try inkCount() == 1, "old undo overwrote externally replaced strokes")
+print("Native Pencil: atomic save, retry, undo/redo, erasure, deferred outbox and stale history checks passed")
