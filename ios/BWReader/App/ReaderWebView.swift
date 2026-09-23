@@ -2133,6 +2133,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             (() => {
               const root = document.documentElement;
               root.classList.add('bw-native-shell');
+              window.__BW_NATIVE_CONVERSATION_DATA__ = \(legacyChrome ? "false" : "true");
               if (\(legacyChrome ? "true" : "false")) root.classList.add('bw-native-legacy-chrome');
               const style = document.createElement('style');
               style.id = 'bw-native-shell-style';

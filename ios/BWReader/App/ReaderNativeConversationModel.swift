@@ -43,6 +43,9 @@ struct ReaderNativeConversationMessage: Identifiable {
     let role: String
     let text: String
     let streaming: Bool
+    let title: String
+    let statusText: String
+    let progressSummary: String
     let parts: [ReaderNativeConversationPart]
     let reviewSelections: [ReaderNativeReviewSelection]
 
@@ -55,6 +58,15 @@ struct ReaderNativeConversationMessage: Identifiable {
         role = value["role"] as? String ?? "assistant"
         text = value["text"] as? String ?? ""
         streaming = value["streaming"] as? Bool ?? false
+        title = value["title"] as? String ?? ""
+        statusText = value["statusText"] as? String ?? ""
+        if let progress = value["progress"] as? [String: Any], let states = progress["states"] as? [Any], !states.isEmpty {
+            let total = max(states.count, (progress["total"] as? NSNumber)?.intValue ?? 0)
+            let done = states.filter { $0 as? String == "done" }.count
+            let failed = states.filter { $0 as? String == "err" }.count
+            let running = states.filter { $0 as? String == "run" }.count
+            progressSummary = "成功 \(done)，失败 \(failed)，运行中 \(running)，待处理 \(total - done - failed - running)"
+        } else { progressSummary = "" }
         reviewSelections = (value["reviewSelections"] as? [[String: Any]] ?? []).compactMap(ReaderNativeReviewSelection.init)
         var seen = Set<String>()
         parts = (value["parts"] as? [[String: Any]] ?? [])

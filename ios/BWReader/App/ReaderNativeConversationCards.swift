@@ -16,6 +16,15 @@ struct ReaderNativeConversationMessageView: View {
                 Spacer(minLength: 0)
             }
             .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
+            if !message.title.isEmpty {
+                Text(message.title).font(.subheadline.weight(.medium))
+            }
+            if !message.statusText.isEmpty {
+                Text(message.statusText).font(.caption).foregroundStyle(.secondary)
+            }
+            if !message.progressSummary.isEmpty {
+                Text(message.progressSummary).font(.caption).foregroundStyle(.secondary)
+            }
             if !message.text.isEmpty {
                 ReaderNativeConversationMarkdown(text: message.text)
             } else if message.streaming {

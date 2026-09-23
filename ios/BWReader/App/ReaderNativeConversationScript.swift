@@ -185,7 +185,7 @@ enum ReaderNativeConversationScript {
         // Structured turns include live drafts without reading a rendered web
         // bubble. Standalone legacy messages remain pending migration.
         const body = presentation
-          ? source.filter(part => part.kind === 'text').map(part => text(part.text)).join('\n\n')
+          ? source.filter(part => part.kind === 'text').map(part => typeof part.text === 'string' ? part.text : '').join('\n\n')
           : (!tid && !node.__vcCard && !flashGroup(node) ? cleanText(node) : '');
         const streaming = presentation ? presentation.streaming : (!tid && (node.matches('.mfx-streaming,.mfx-typing') || !!node.querySelector('.mfx-streaming,.mfx-typing')));
         const parts = [];
@@ -206,10 +206,14 @@ enum ReaderNativeConversationScript {
         if (!parts.length && !body && !streaming && (node.matches('.vc-card,.vc-if') || node.querySelector('.vc-card,.fc-wrap,iframe,video'))) {
           parts.push(artifact(id + '-artifact', node, node.querySelector('.vc-card-hd,.vc-if-hd')?.textContent || '生成物'));
         }
-        if (body.length >= 32000 || node.querySelector('iframe,video,img,mjx-container,a,.asst-ctx,.asst-ctx-card,.rc-asst-ctx,.asst-pagelink,.actx-page,.asst-btm,.asst-followups,.asst-clip,.asst-jump,.asst-undo')) {
+        if ((!presentation && body.length >= 32000) || node.querySelector('iframe,video,img,mjx-container,a,.asst-ctx,.asst-ctx-card,.rc-asst-ctx,.asst-pagelink,.actx-page,.asst-btm,.asst-followups,.asst-clip,.asst-jump,.asst-undo')) {
           parts.push(artifact(id + '-original', node, '完整内容与操作', cleanText(node.querySelector('.asst-ctx,.asst-ctx-card,.rc-asst-ctx'), 1200)));
         }
-        return body || parts.length || streaming ? { id, role, text: text(body), streaming, parts } : null;
+        return body || parts.length || streaming || presentation?.title ? {
+          id, role, text: presentation ? body : text(body), streaming, parts,
+          title: text(presentation?.title, 240), statusText: text(presentation?.status?.text, 1000),
+          progress: presentation?.progress || null
+        } : null;
       }
       // 找这组学习卡当前挂着的容器。
       //
@@ -751,6 +755,8 @@ enum ReaderNativeConversationScript {
       function setNativeMode(enabled) {
         nativeMode = !!enabled;
         nativeModeKnown = true;
+        rc().turnCard?.setNativePresentation?.(nativeMode);
+        messagesDirty = true;
         applyVisualMode(); schedule();
         return { ok: true };
       }

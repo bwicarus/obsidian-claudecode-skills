@@ -44,7 +44,7 @@ function el(tag) {
   return e;
 }
 
-function loadTurnCard() {
+function loadTurnCard(native = false) {
   const thread = el("div");
   const document = {
     createElement: el, createTextNode: (t) => ({ text: t }),
@@ -54,6 +54,7 @@ function loadTurnCard() {
     addEventListener() {},
   };
   const win = {
+    __BW_NATIVE_CONVERSATION_DATA__: native,
     document, RC: {
       toolChip: { flowBtn: () => el("button"), create: () => el("div"), retype() {}, setState() {}, done() {} },
       flashcard: {}, adapter: () => ({ getContext: () => ({}) }),
@@ -69,8 +70,61 @@ function loadTurnCard() {
   win.window = win;
   vm.runInContext(TURNS, vm.createContext(win), { filename: "rc-turncard.js" });
   assert.ok(win.RC.turnCard, "rc-turncard 未导出 RC.turnCard");
-  return { tc: win.RC.turnCard, thread };
+  return { tc: win.RC.turnCard, thread, win };
 }
+
+test('native streaming and replay retain complete content without running hidden renderers or layout', () => {
+  const { tc, thread, win } = loadTurnCard(true);
+  let rendered = 0, layoutReads = 0;
+  win.RC.assistant = { renderMd() { rendered++; } };
+  Object.defineProperty(thread, 'scrollHeight', { get() { layoutReads++; return 100; } });
+  const turn = tc.open('native');
+  const content = '**text** $x^2$ ![](https://example.com/hidden.png)\n'.repeat(1000);
+  tc.draftText('native', content.slice(0, 400), 'assistant', 'item', 'runner');
+  tc.draftText('native', content, 'assistant', 'item', 'runner');
+  tc.freezeDraft('native', 'item', 'runner', 'assistant');
+  tc.addPart('native', { kind: 'tool', call_id: 't1', tool: 'read', status: 'running' });
+  tc.addPart('native', { kind: 'tool', call_id: 't1', tool: 'read', status: 'completed', result: 'ok' });
+  tc.status('native', '保存中', false);
+  tc.progress('native', { total: 3, step: 1, status: 'done' });
+  tc.progress('native', { total: 3, step: 2, status: 'error' });
+  assert.equal(rendered, 0);
+  assert.equal(layoutReads, 0);
+  assert.equal(turn.bd.children.length, 0);
+  assert.equal(turn.hd, null);
+  assert.equal(turn.statusEl, undefined);
+  assert.equal(tc.openFlow('native'), false);
+  const snapshot = tc.presentationOf('native');
+  assert.equal(snapshot.parts[0].text, content);
+  assert.equal(snapshot.parts[1].result, 'ok');
+  assert.equal(snapshot.status.text, '保存中');
+  assert.deepEqual(Array.from(snapshot.progress.states), ['done', 'err', null]);
+  const replay = tc.renderTurn('history', tc.partsOf('native'), thread, { historyReplay: true });
+  assert.ok(replay);
+  assert.equal(tc.presentationOf('history').parts[0].text, content);
+  assert.equal(rendered, 0);
+});
+
+test('switching native presentation back to legacy restores text without persisting or registering cards again', () => {
+  const { tc, win } = loadTurnCard(true);
+  let rendered = 0, changed = 0;
+  win.RC.assistant = { renderMd(node, text) { rendered++; node.textContent = text; } };
+  tc.onChange = () => changed++;
+  const turn = tc.open('switch');
+  tc.draftText('switch', 'hello', 'user');
+  tc.freezeDraft('switch');
+  tc.status('switch', 'ready', true);
+  tc.setNativePresentation(false);
+  assert.equal(rendered, 1);
+  assert.equal(turn.bd.children[0].textContent, 'hello');
+  assert.equal(changed, 0);
+  tc.setNativePresentation(true);
+  assert.equal(turn.bd.children.length, 0);
+  assert.equal(tc.presentationOf('switch').parts[0].text, 'hello');
+  tc.draftText('switch', 'next', 'user');
+  assert.equal(rendered, 1);
+  assert.equal(changed, 0);
+});
 
 // 工具部件的指纹：工具名 + 信息量（r=有结果、a=有入参、bare=光有标签）
 // ⚠ Array.from 不是多余的：partsOf 返回的数组造在 vm 的 realm 里，原型与本文件的
