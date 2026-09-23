@@ -730,8 +730,8 @@
   var nativeBookWrites = false;
   // This adapter carries commands, never derived records. Swift owns the
   // transaction and builds the indexes from the authoritative note payload.
-  function nativeBookMutation(operation, value, expectedRevision) {
-    var request = { bookID: bookId, operation: operation, value: clone(value), mutationId: 'book-' + randomHex(16) };
+  function nativeBookMutation(operation, value, expectedRevision, mutationIdentity) {
+    var request = { bookID: bookId, operation: operation, value: clone(value), mutationId: mutationIdentity || 'book-' + randomHex(16) };
     if (expectedRevision != null) request.expectedRevision = expectedRevision;
     return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
       action: 'bookMutation', request: request
@@ -15528,6 +15528,24 @@
     makeNote: nativeReaderMakeNote,
     lookupWord: nativeReaderLookupWord,
     markVocabulary: nativeReaderMarkVocabulary,
+    supportsNativeNoteOperations: function () { return nativeBookWrites; },
+    nativeNoteOperation: function (input) {
+      return bootPromise.then(function () {
+        if (!nativeBookWrites) throw new RuntimeError('原生卡片存储尚未就绪', 'BW_NATIVE_BOOK_WRITE');
+        return withNativePDFWriter('native-note-operation', function (lease) {
+          assertNativePDFWriterLease(lease);
+          return nativeBookMutation('note-operation', input, null, input.opId).then(function (receipt) {
+            if (!receipt.result || receipt.result.ok !== true) throw new RuntimeError('原生卡片回执不完整','BW_NATIVE_BOOK_WRITE');
+            announceLocalNotesChanged('native-note-operation');
+            var changes = Array.isArray(receipt.bindingChanges) ? receipt.bindingChanges : [];
+            var keys = Array.from(new Set(changes.flatMap(function (c) { return [c.before,c.after]; }).filter(Boolean)));
+            dispatchWordBindingsChanged(keys,changes,'native');
+            scheduleReplicationDrain(0);
+            return receipt.result;
+          });
+        });
+      });
+    },
     savePDFHighlight: function (payload) {
       var allowed = new Set([
         'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',

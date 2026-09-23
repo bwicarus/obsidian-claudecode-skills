@@ -4,10 +4,9 @@ import SQLite3
 /// 本机数据库：阅读器全部用户数据的落地处。
 ///
 /// 设计与分阶段见 `references/reader-native-datastore-plan-20260922.md`。一句话：
-/// **这里只管持久化机制，不管判据**。记录该长什么样（revision、墓碑、causal
-/// 证明、批次规划）全在 `reader-runtime/data-store.js` 里，照抄一遍等于让
-/// 「同一次写入该得到什么记录」有两个答案 —— 而这种分歧只在两边真跑过同一条
-/// 数据时才暴露，那时已经写进库里了。
+/// 此层只管持久化机制。App 的书籍业务写入由 ReaderNativeBookStore 在事务内
+/// 生成记录、索引、日志及回执；尚未迁移的模块通过桥使用同一记录格式。浏览器
+/// 扩展保留自己的 JavaScript 业务层，兼容性由实际数据与事务测试核对。
 ///
 /// ⚠ **只依赖 Foundation + SQLite3**，不 import UIKit/WebKit：它要能被
 /// `xcrun swiftc` 单文件编译出来直接跑（`Tests/NativeDataStore/main.swift`）。
@@ -37,7 +36,7 @@ final class ReaderNativeDataStore {
         }
     }
 
-    /// 一条记录在库里的样子。`json` 是 data-store.js 那边算好的完整记录，
+    /// 一条记录在库里的样子。`json` 是业务层生成的完整记录，
     /// 这里不解释它 —— 只把 collection/id/rev/updatedAt 抽出来当索引用。
     struct Record: Equatable {
         let collection: String

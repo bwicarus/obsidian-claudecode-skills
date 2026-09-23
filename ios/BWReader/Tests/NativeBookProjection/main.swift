@@ -218,3 +218,35 @@ _ = try inkWriter.perform(["bookID":book,"mutationId":"remote-update","operation
 _ = try inkWriter.perform(inkRequest("stale-undo","undo"))
 check(try inkCount() == 1, "old undo overwrote externally replaced strokes")
 print("Native Pencil: atomic save, retry, undo/redo, erasure, deferred outbox and stale history checks passed")
+
+let noteStore = try ReaderNativeDataStore(path:":memory:")
+let noteWriter = ReaderNativeBookStore(store:noteStore,bookID:book,deviceID:"cards",now:{300_000})
+let noteRead = ReaderNativeBookProjection(store:noteStore)
+let originalNote: [String:Any] = ["id":"c_12345678","anchor":["kind":"pdf","page":45,"x":0.2,"y":0.2],"w":260,"h":180,
+    "html":["cid":"source-id","content":"原卡片正文","bind":["kind":"page-chars","page":45,"from":0,"to":3,"text":"SARS"]]]
+_ = try noteWriter.perform(["bookID":book,"mutationId":"seed","operation":"notes","expectedRevision":0,"value":[originalNote]])
+func noteAction(_ id:String,_ input:[String:Any]) -> [String:Any] {
+    var value = input; value["id"] = "c_12345678"; value["opId"] = id
+    return ["bookID":book,"mutationId":id,"operation":"note-operation","value":value]
+}
+let moved = try noteWriter.perform(noteAction("move",["action":"update","changes":["anchor":["page":44,"x":0.4,"y":0.3],"bind":NSNull(),"form":"min"]]))
+let movedNote = (moved["result"] as! [String:Any])["note"] as! [String:Any]
+let html = movedNote["html"] as! [String:Any]
+check(html["cid"] as? String == "source-id" && html["content"] as? String == "原卡片正文", "moving a card changed its content/identity")
+check((html["bind"] as! [String:Any])["page"] as? Int == 45 && html["form"] as? String == "full", "missing new geometry unbound the card or allowed a pinned min form")
+let geo = String(decoding:try JSONSerialization.data(withJSONObject:ReaderNativeNoteActions.geometry(movedNote),options:.sortedKeys),as:UTF8.self)
+let drawNote = noteAction("draw-note",["action":"ink","kind":"commit","geometry":geo,"aspectRatio":1.4,
+    "segments":[["points":[[0.1,0.1],[0.2,0.2]],"width":2]]])
+_ = try noteWriter.perform(drawNote)
+let noteCursor = try noteStore.cursor()
+check(try noteWriter.perform(drawNote)["replayed"] as? Bool == true && noteStore.cursor() == noteCursor, "card Pencil retry duplicated its sync command")
+_ = try noteWriter.perform(noteAction("resize",["action":"update","changes":["w":320,"h":200]]))
+var staleDraw = drawNote; staleDraw["mutationId"] = "draw-stale"
+do { _ = try noteWriter.perform(staleDraw); fatalError("stale card geometry accepted") } catch ReaderNativeNoteRules.NoteError.invalid { }
+// Outbox failure must roll back the card edit and all derived indexes.
+try noteStore.execute("CREATE TRIGGER fail_card_send BEFORE INSERT ON records WHEN NEW.collection = 'native-replication-outbox' BEGIN SELECT RAISE(ABORT, 'send failed'); END")
+let beforeFailedMove = try noteRead.state("document-notes-legacy",bookID:book).revision
+do { _ = try noteWriter.perform(noteAction("failed-move",["action":"update","changes":["w":600,"h":400]])); fatalError("card outbox failure hidden") }
+catch ReaderNativeDataStore.StoreError.sql { }
+check(try noteRead.state("document-notes-legacy",bookID:book).revision == beforeFailedMove, "card edit survived failed outbox commit")
+print("Native card actions: stable identity, bind preservation, geometry fencing, retry and atomic replication passed")

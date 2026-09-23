@@ -46,7 +46,7 @@ struct ReaderNativeBookStore {
                       number.doubleValue >= 0, number.doubleValue <= 9_007_199_254_740_991 else { throw MutationError.invalid("预期修订号") }
                 expected = number.int64Value
             } else {
-                guard ["reading-position", "note-api", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
+                guard ["reading-position", "note-api", "note-operation", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
                 expected = nil
             }
             let revision: Int64
@@ -65,17 +65,30 @@ struct ReaderNativeBookStore {
                 let queued = try enqueueReplication(command, mutation: mutation, at: stamp)
                 revision = queued.revision
                 result = ["ok": true, "queued": queued.queued]
-            case "note-api":
-                guard let api = value as? [String: Any], let method = api["method"] as? String,
-                      let body = api["body"] as? [String: Any] else { throw MutationError.invalid("便签请求") }
+            case "note-api", "note-operation":
+                guard let api = value as? [String: Any] else { throw MutationError.invalid("便签请求") }
                 let state = try projection.state("document-notes-legacy", bookID: bookID)
                 guard state.payload == nil || state.payload is [[String: Any]] else { throw MutationError.invalid("便签数据损坏") }
                 let notes = state.payload as? [[String: Any]] ?? []
+                let method: String, body: [String:Any]
+                if operation == "note-operation" {
+                    guard let id = api["id"] as? String, let note = notes.first(where: { $0["id"] as? String == id }) else {
+                        throw ReaderNativeNoteRules.NoteError.missing
+                    }
+                    let plan = try ReaderNativeNoteActions.request(api,note:note,file:"localbook:" + bookID,now:stamp)
+                    method = plan.method; body = plan.body
+                } else {
+                    guard let verb = api["method"] as? String, let fields = api["body"] as? [String:Any] else { throw MutationError.invalid("便签请求") }
+                    method = verb; body = fields
+                }
                 let outcome = try ReaderNativeNoteRules.apply(method: method, body: body, notes: notes,
                     file: "localbook:" + bookID, now: stamp,
                     newID: { "n" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(11) })
                 revision = try writeNotes(outcome.notes, expected: state.revision, mutation: mutation, at: stamp)
                 result = outcome.result
+                if operation == "note-operation" {
+                    _ = try enqueueReplication(["url":"/pdf/api/notes","method":method,"body":body],mutation:mutation + ":replication",at:stamp)
+                }
                 let before = Dictionary(Self.wordBindings(notes).map { ($0["cid"] as! String, $0["key"] as! String) }, uniquingKeysWith: { _, last in last })
                 let after = Dictionary(Self.wordBindings(outcome.notes).map { ($0["cid"] as! String, $0["key"] as! String) }, uniquingKeysWith: { _, last in last })
                 bindingChanges = Set(before.keys).union(after.keys).sorted().compactMap { id in

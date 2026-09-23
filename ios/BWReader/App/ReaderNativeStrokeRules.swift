@@ -6,7 +6,7 @@ import CoreFoundation
 enum ReaderNativeStrokeRules {
     enum StrokeError: LocalizedError {
         case invalid(String)
-        var errorDescription: String? { if case .invalid(let why) = self { return "笔迹参数无效：" + why } }
+        var errorDescription: String? { switch self { case .invalid(let why): return "笔迹参数无效：" + why } }
     }
     struct Outcome {
         var surfaces: [String: [[String: Any]]]
