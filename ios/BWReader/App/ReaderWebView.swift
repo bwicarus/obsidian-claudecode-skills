@@ -1742,12 +1742,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // 等于告诉词典"这个词的上下文就是这个词" —— 一词多义时给出的那条释义，
         // 跟用户正在读的这句话未必是同一个意思。整句取不到才退回选中串。
         let whole = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generation = bookUserStateContextGeneration
+        let bookID = currentLocalBook?.id
         let panel = ReaderNativeLookupModel(
             text: trimmed, mode: mode, page: max(0, page),
             context: String((whole.isEmpty ? trimmed : whole).prefix(320))
         ) { [weak self] command in
-            await self?.requestNativeConversationCommand(command)
-                ?? ["ok": false, "error": "阅读页已关闭"]
+            guard let self, generation == self.bookUserStateContextGeneration, bookID == self.currentLocalBook?.id else {
+                return ["ok": false, "error": "阅读页已切换"]
+            }
+            return await self.requestNativeConversationCommand(command)
         }
         // 标了掌握就重取一次叠加数据：否则这一页的下划线要翻页才消失。
         panel.onMarked = { [weak self] in self?.refreshNativePageOverlays(force: true) }
@@ -2098,7 +2102,56 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
+    private var nativeLookupCache: [String: [String: Any]] = [:]
+    private var nativeLookupCacheBytes = 0
+    private var nativeLookupTasks: [String: (id: UUID, task: Task<[String: Any], Error>)] = [:]
+
+    private func performNativeLookupCommand(_ command: [String: Any]) async -> [String: Any]? {
+        guard command["action"] as? String == "nativeSelectionLookup", let input = command["value"] as? [String: Any],
+              let mode = input["mode"] as? String, ["translate", "example-zh", "dict-full"].contains(mode) else { return nil }
+        do {
+            guard !isLoading, let book = currentLocalBook, let gateway = nativeServerGateway,
+                  isTrustedReaderURL(webView.url) else { throw ReaderNativeLookupRequest.Failure(message: "阅读页尚未就绪") }
+            let generation = bookUserStateContextGeneration
+            let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+            let languages = try ReaderNativeBookProjection(store: store).state("book-languages", bookID: book.id).payload as? [String] ?? []
+            let plan = try ReaderNativeLookupRequest(input, file: "localbook:" + book.id, languages: languages)
+            let key = String(generation) + ":" + plan.mode + ":" + plan.path + ":" + plan.body.base64EncodedString()
+            if let cached = nativeLookupCache[key] { return ["ok": true, "value": cached] }
+            let job: Task<[String: Any], Error>, jobID: UUID
+            if let running = nativeLookupTasks[key] { job = running.task; jobID = running.id }
+            else {
+                guard nativeLookupTasks.count < 24 else { throw ReaderNativeLookupRequest.Failure(message: "查询正在处理中，请稍候") }
+                jobID = UUID()
+                job = Task { @MainActor in
+                    let response = try await gateway.fetchData(path: plan.path, method: plan.method, body: plan.body,
+                                                              surface: book.format == .pdf ? .pdf : .epub)
+                    return try plan.decode(status: response.status, data: response.data)
+                }
+                nativeLookupTasks[key] = (jobID, job)
+            }
+            defer { if nativeLookupTasks[key]?.id == jobID { nativeLookupTasks.removeValue(forKey: key) } }
+            let value = try await job.value
+            guard generation == bookUserStateContextGeneration, currentLocalBook?.id == book.id else {
+                throw ReaderNativeLookupRequest.Failure(message: "阅读页已切换")
+            }
+            // Cache only complete read results. Empty example translations can
+            // be retried; failures never start a duplicate web request.
+            let cacheBytes = (try? JSONSerialization.data(withJSONObject: value).count) ?? Int.max
+            if cacheBytes <= 64 * 1024, nativeLookupCache[key] == nil,
+               mode != "example-zh" || !(value["zh"] as? String ?? "").isEmpty {
+                if nativeLookupCache.count >= 128 || nativeLookupCacheBytes + cacheBytes > 1024 * 1024 {
+                    nativeLookupCache.removeAll(keepingCapacity: true); nativeLookupCacheBytes = 0
+                }
+                nativeLookupCache[key] = value
+                nativeLookupCacheBytes += cacheBytes
+            }
+            return ["ok": true, "value": value]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativeLookupCommand(command) { return result }
         if let result = await performNativeCardCommand(command) { return result }
         if let result = await performNativeHTMLNoteCommand(command) { return result }
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
@@ -6722,6 +6775,10 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
         invalidateNativePDFDocument(reason: "navigation-start")
+        nativeLookupTasks.values.forEach { $0.task.cancel() }
+        nativeLookupTasks.removeAll()
+        nativeLookupCache.removeAll()
+        nativeLookupCacheBytes = 0
         isLoading = true
         loadError = nil
         nativeConversation.resetForNavigation()
