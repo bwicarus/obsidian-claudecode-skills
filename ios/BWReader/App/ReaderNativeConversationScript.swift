@@ -24,6 +24,7 @@ enum ReaderNativeConversationScript {
       let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null, selectionSubscription = null, selectionRegistry = null;
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
       let controls = null, controlsObserver = null, suspended = false;
+      let captionElement = null, captionObserver = null;
       let settingsModels = null, settingsVoice = null;
       let nativePageSelectionSequence = 0;
       let searchController = null, searchResults = new Map(), searchQuery = '', searchSequence = 0;
@@ -419,6 +420,11 @@ enum ReaderNativeConversationScript {
             return invoke('form', { value: command.value });
           });
           controls.move = registerAction(token + '-move', item.root, command => {
+            // 原生正文接管时：页码 + 页内坐标 + 原生认好的词（见 rc-stickynote 'move' 的 native 分支）。
+            const native = command.value;
+            if (native && typeof native === 'object' && Number.isInteger(native.page)) {
+              return invoke('move', { native: { page: native.page, x: native.x, y: native.y, bind: native.bind || null } });
+            }
             if (![command.x, command.y].every(v => Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
             return invoke('move', { x: command.x * innerWidth, y: command.y * innerHeight });
           });
@@ -663,7 +669,7 @@ enum ReaderNativeConversationScript {
           legacyVisible, selection: selectedContext(),
           readerSelection: (typeof window.__bwReaderEpubSelection === 'function'
             ? (window.__bwReaderEpubSelection() || { text: '' }) : { text: '' }),
-          attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          attachments, readingTools, navigation: rc().readerNavigation?.state?.() || {}, review, placements, captions: captionState(), sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -695,6 +701,20 @@ enum ReaderNativeConversationScript {
           };
           installed.add(name);
         });
+      }
+      /// 底部字幕条（#vc-cap）的内容。原生接管后网页层透明，这条字幕看不见 ——
+      /// 2026-09-23 用户："侧边栏关闭时 ai 回复的流式字幕没有正确显示"。
+      function captionState() {
+        const cap = document.getElementById('vc-cap');
+        if (!cap || !cap.classList.contains('on')) return { on: false, lines: [] };
+        const lines = Array.from(cap.children).slice(-4).map(node => {
+          const cls = node.classList;
+          const kind = cls.contains('vc-cap-st') ? (cls.contains('vc-st-err') ? 'error' : (cls.contains('vc-st-ok') ? 'ok' : 'status'))
+            : cls.contains('vc-cap-wait') ? 'wait' : 'line';
+          return { kind, user: cls.contains('vc-cap-u'), previous: cls.contains('vc-cap-prev'),
+            text: text(node.textContent, 600) };
+        }).filter(line => line.kind === 'wait' || line.text.trim());
+        return { on: true, lines };
       }
       function voiceState() {
         const computer = document.getElementById('asst-computer'), call = document.getElementById('asst-call');
@@ -756,6 +776,14 @@ enum ReaderNativeConversationScript {
           controlsObserver?.disconnect(); controls = currentControls;
           if (controls) { controlsObserver = new MutationObserver(schedule); controlsObserver.observe(controls, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'title', 'placeholder'] }); }
         }
+        const currentCaption = document.getElementById('vc-cap');
+        if (currentCaption !== captionElement) {
+          captionObserver?.disconnect(); captionElement = currentCaption;
+          if (captionElement) {
+            captionObserver = new MutationObserver(schedule);
+            captionObserver.observe(captionElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+          }
+        }
         observeDrawer();
         applyVisualMode();
         wrapNotifications(rc().turnCard, ['addPart', 'draftText', 'freezeDraft', 'reconcile', 'cliPart', 'busy', 'idle', 'status', 'progress', 'drop', 'rename', 'reset']);
@@ -775,7 +803,7 @@ enum ReaderNativeConversationScript {
              'nativeFigureAttach', 'nativeGrammar',
              'nativeHighlightEdit', 'nativePhraseFav',
              'nativeCreateNote', 'nativeOcrSelection',
-             'nativeEpubHighlight'].includes(command.action)) parameterKeys.push('value');
+             'nativeEpubHighlight', 'nativeNoteDelete'].includes(command.action)) parameterKeys.push('value');
         if (command.action === 'readingSettingsWrite') parameterKeys.push('key', 'value');
         if (command.action === 'settingsWrite') parameterKeys.push('section', 'value', 'key', 'device', 'op', 'name');
         if (command.action === 'reviewAction' || command.action === 'navigationAction' || command.action === 'liveAction' || command.action === 'clearConversation') parameterKeys.push('value');
@@ -964,6 +992,13 @@ enum ReaderNativeConversationScript {
             if (captured !== scope || getScopeKey() !== scopeKey) return { ok: false, error: '书籍已切换' };
             if (!saved || saved.ok !== true) return { ok: false, error: '页卡未保存' };
             return { ok: true, value: { id: value.id } };
+          } else if (action === 'nativeNoteDelete') {
+            // 原生自己画的词锚卡（网页没挂这张卡）上的删除。走便签自己的 deleteNote，
+            // 网页内存里的那份一起删 —— 直接打 DELETE 的话网页还拿着旧对象，之后会写回来。
+            const value = command.value;
+            if (!value || typeof value.id !== 'string' || !value.id) return { ok: false, error: '卡片参数无效' };
+            const removed = await rc().stickynote?.nativeDeleteNote?.(value.id);
+            return removed ? { ok: true } : { ok: false, error: '卡片没能删除' };
           } else if (action === 'nativeEpubHighlight') {
             // EPUB 选区条的「划线」。落库、锚点解析、就地上色、记住上次用的颜色
             // 都在底座 saveHl 那条路上，这里只转交。

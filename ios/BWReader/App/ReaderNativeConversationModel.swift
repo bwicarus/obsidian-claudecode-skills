@@ -63,6 +63,27 @@ struct ReaderNativeConversationMessage: Identifiable {
     }
 }
 
+/// 底部字幕条（网页 #vc-cap）的内容。原生接管后网页层透明，这条字幕由原生画。
+struct ReaderNativeCaptions: Equatable {
+    struct Line: Equatable, Identifiable {
+        let id: Int
+        let kind: String        // line / status / ok / error / wait
+        let user: Bool
+        let previous: Bool
+        let text: String
+    }
+    var on = false
+    var lines: [Line] = []
+
+    init(_ value: [String: Any] = [:]) {
+        on = value["on"] as? Bool ?? false
+        lines = (value["lines"] as? [[String: Any]] ?? []).enumerated().map { index, line in
+            Line(id: index, kind: line["kind"] as? String ?? "line", user: line["user"] as? Bool ?? false,
+                 previous: line["previous"] as? Bool ?? false, text: line["text"] as? String ?? "")
+        }
+    }
+}
+
 struct ReaderNativeConversationVoice {
     let mode: String?
     let active: Bool
@@ -137,6 +158,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var attachments: [ReaderNativeContextAttachment] = []
     @Published private(set) var readingTools: [ReaderNativeControl] = []
     @Published private(set) var messages: [ReaderNativeConversationMessage] = []
+    @Published private(set) var captions = ReaderNativeCaptions()
     /// 正在显示的是本机缓存（页面还没交来历史，或历史取不到）。
     @Published private(set) var showingCachedMessages = false
     private var lastCachedAt = Date.distantPast
@@ -268,6 +290,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         if let navigation = payload["navigation"] as? [String: Any] { navigationPanel?.receive(navigation) }
         capabilities = Set(payload["capabilities"] as? [String] ?? [])
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
+        let nextCaptions = ReaderNativeCaptions(payload["captions"] as? [String: Any] ?? [:])
+        if nextCaptions != captions { captions = nextCaptions }
         messages = nextMessages
         revision = nextRevision
         noteSnapshotCost(payload["payloadBytes"] as? Int ?? 0)
@@ -358,6 +382,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         messages = []
         capabilities = []
         voice = ReaderNativeConversationVoice()
+        captions = ReaderNativeCaptions()
         pendingActions = []
         error = nil
         draft = ""

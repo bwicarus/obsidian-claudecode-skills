@@ -50,10 +50,8 @@ test("③ 拖动写页内归一化锚点，不是网页视口坐标", () => {
   // 视图那侧：原生成功就 return，别再写一遍网页锚点。
   const gesture = body(CARDS, "private var moveGesture", "private var resizeGesture");
   // 原生那条先走；成了就不再写网页锚点（分支体内 return）。
-  const nativeFirst = gesture.slice(
-    gesture.indexOf("if await reader.moveNativeCard(id: item.noteID, windowPoint: point) {"),
-    gesture.indexOf("guard let action = item.controls"),
-  );
+  const nativeStart = gesture.indexOf("if await reader.moveNativeCard(id: item.noteID, windowPoint: point) {");
+  const nativeFirst = gesture.slice(nativeStart, gesture.indexOf("guard let action = item.controls", nativeStart));
   assert.ok(nativeFirst.length > 0, "原生落点分支必须排在网页路径之前");
   assert.match(nativeFirst, /return/);
 
@@ -72,4 +70,16 @@ test("④ 改大小按卡片自身单位存", () => {
   assert.match(resize, /Double\(size\.width\) \/ ratio/);
   // noteGeometry 那侧的同一算法：它变了，这里要跟着变。
   assert.match(DOCUMENT, /let ratio = base > 0 \? pageRect\.width \/ base : 1/);
+});
+
+test("⑤ 钉在词上的卡：拖动时词由原生认，连同页内坐标交给网页，不再用网页视口坐标", () => {
+  const gesture = body(CARDS, "private var moveGesture", "private var resizeGesture");
+  const start = gesture.indexOf("if item.bound {");
+  const bound = gesture.slice(start, gesture.indexOf("return\n                }", start) + 10);
+  assert.match(bound, /reader\.nativeDropTarget\(windowPoint: point\)/);
+  assert.match(bound, /"value": target/);
+  assert.match(WEBVIEW, /document\.wordBind\(at: local\)/);
+  assert.match(DOCUMENT, /func wordBind\(at local: CGPoint\) -> WordBind\?/);
+  const STICKY = readFileSync(new URL("_server_deploy/static/pdf/rc-stickynote.js", ROOT), "utf8");
+  assert.match(STICKY, /command\.key === 'move' && command\.native && typeof command\.native === 'object'/);
 });

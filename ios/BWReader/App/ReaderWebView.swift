@@ -480,21 +480,96 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// ⚠ 走的是页卡自己的 `toggleBound` 控件 id，跟侧栏里点开是同一条路。
     /// 找不到就**出声** —— "点了没反应"是这块地方已经栽过一次的坑。
     func openNativeBoundCard(noteID: String) {
-        guard !noteID.isEmpty,
-              let placement = nativeConversation.placements.first(where: { $0.noteID == noteID }) else {
-            showTransientNotice("这段绑定的卡片还没加载好，请稍后再点。")
-            return
-        }
-        guard let action = placement.controls["toggleBound"] else {
-            showTransientNotice("这张卡没有可用的展开操作。")
-            return
-        }
-        Task { [weak self] in
-            guard let self else { return }
-            if await nativeConversation.perform("liveAction", parameters: ["actionId": action]) == false {
-                showTransientNotice(nativeConversation.error ?? "卡片没能打开，请重试。")
+        guard !noteID.isEmpty else { return }
+        // 网页那侧挂着这张卡：走它的开合（状态、词典段、上下文选中都在那边）。
+        if let placement = nativeConversation.placements.first(where: { $0.noteID == noteID }),
+           let action = placement.controls["toggleBound"] {
+            nativeOpenBoundNotes.remove(noteID)
+            Task { [weak self] in
+                guard let self else { return }
+                if await nativeConversation.perform("liveAction", parameters: ["actionId": action]) == false {
+                    showTransientNotice(nativeConversation.error ?? "卡片没能打开，请重试。")
+                }
             }
+            return
         }
+        // 网页没挂这张卡（它只挂网页自己渲染到的那几页，跟原生正文显示的页不同步）：
+        // 原生直接按便签数据把卡画出来。
+        // ⚠ 原来这里一律提示"还没加载好" —— 于是翻到别页再回来，框看得见却怎么点都打不开
+        //   （2026-09-23 用户实报）。
+        guard let note = nativePDFDocument?.notes.first(where: { $0["id"] as? String == noteID }),
+              ReaderNativePagePlacement(nativeNote: note, open: true) != nil else {
+            showTransientNotice("这张卡的内容还没同步到本机，请稍后再点。")
+            return
+        }
+        if nativeOpenBoundNotes.contains(noteID) { nativeOpenBoundNotes.remove(noteID) }
+        else { nativeOpenBoundNotes = [noteID] }   // 一次只展开一张（原版 toggleBoundCard 同规则）
+    }
+
+    /// 原生自己展开的词锚卡（网页没挂这张卡时）。
+    @Published var nativeOpenBoundNotes: Set<String> = []
+
+    /// 网页没挂、但原生已展开的那几张卡，按便签数据现造一份 placement。
+    func nativeOnlyPlacements() -> [ReaderNativePagePlacement] {
+        guard let document = nativePDFDocument, !nativeOpenBoundNotes.isEmpty else { return [] }
+        let mounted = Set(nativeConversation.placements.map(\.noteID))
+        return nativeOpenBoundNotes.sorted().compactMap { id in
+            guard !mounted.contains(id), let note = document.notes.first(where: { $0["id"] as? String == id }) else {
+                return nil
+            }
+            return ReaderNativePagePlacement(nativeNote: note, open: true)
+        }
+    }
+
+    /// 原生自己画的卡上的删除（网页没挂这张卡，没有网页控件可用）。
+    func deleteNativeNote(noteID: String) async -> Bool {
+        let receipt = await requestNativeConversationCommand([
+            "action": "nativeNoteDelete", "scope": nativeConversation.scope, "value": ["id": noteID],
+        ])
+        guard receipt["ok"] as? Bool == true else {
+            showTransientNotice(receipt["error"] as? String ?? "卡片没能删除。")
+            return false
+        }
+        nativeOpenBoundNotes.remove(noteID)
+        scheduleNativePDFProjectionRefresh()
+        return true
+    }
+
+    /// 拖卡松手的落点：页码 + 页内归一化坐标 + 原生认出的词（认不出就没有 bind）。
+    func nativeDropTarget(windowPoint: CGPoint) -> [String: Any]? {
+        guard let document = nativePDFDocument else { return nil }
+        let local = document.view.convert(windowPoint, from: nil)
+        guard let placed = document.pagePoint(at: local) else { return nil }
+        var value: [String: Any] = ["page": placed.page, "x": Double(placed.point.x), "y": Double(placed.point.y)]
+        if let word = document.wordBind(at: local) { value["bind"] = word.payload }
+        return value
+    }
+
+    /// 展开的词锚卡贴着它的词摆 —— 照原版 `_placeWordCard`：词右侧留 10；右边放不下
+    /// 就放到词左侧；竖直方向与词居中。
+    /// ⚠ 原版最后夹进**屏幕**，这里夹进**页面**：夹屏幕的话位置随滚动变，文档层就又得
+    ///   每帧重排（= 残影）；夹页面则滚动时一动不动。
+    func nativeWordCardDocumentRect(id: String, size: CGSize?) -> CGRect? {
+        guard let document = nativePDFDocument, let content = document.view.documentView,
+              let note = document.notes.first(where: { $0["id"] as? String == id }),
+              let geometry = document.noteGeometry(note, presentationSize: size),
+              let word = geometry.bindingRects.last else { return nil }
+        // 词所在的页（可能跟卡片锚点不是同一页）。
+        let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any]
+        let bindPage = ((payload?["bind"] as? [String: Any])?["page"] as? NSNumber)?.intValue ?? geometry.page
+        guard let page = document.viewRect(normalized: CGRect(x: 0, y: 0, width: 1, height: 1), page: bindPage)
+        else { return nil }
+        func doc(_ rect: CGRect) -> CGRect {
+            content.convert(rect, from: document.view).offsetBy(dx: -content.bounds.minX, dy: -content.bounds.minY)
+        }
+        let base = doc(geometry.rect), w = doc(word), frame = doc(page)
+        let gap: CGFloat = 10, margin: CGFloat = 8
+        var left = w.maxX + gap
+        if left + base.width > frame.maxX - margin { left = w.minX - base.width - gap }
+        var top = w.midY - base.height / 2
+        left = min(max(frame.minX + margin, left), max(frame.minX + margin, frame.maxX - base.width - margin))
+        top = min(max(frame.minY + margin, top), max(frame.minY + margin, frame.maxY - base.height - margin))
+        return CGRect(x: left, y: top, width: base.width, height: base.height)
     }
 
     func nativePageCardRect(_ rect: CGRect, in container: CGRect) -> CGRect {
@@ -870,7 +945,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // 顶栏「阅读工具」里的那些按钮点的是网页工具栏（译页/注音/生词下划线/图描述…），
         // 它们改的正是原生正文要画的东西。不在这儿重取一次，表现就是「点了译页没反应」
         // —— 网页那侧确实开了，只是原生没去拿新数据。
-        if ok, command["action"] as? String == "liveAction" { refreshNativePageOverlays() }
+        if ok, command["action"] as? String == "liveAction" {
+            refreshNativePageOverlays()
+            // 卡片的开合 / 移动 / 形态 / 新建都会改便签 —— 立刻重取一次投影，
+            // 否则原生的锁定框和卡位要等下一次别的写入才更新（翻页回来才变的那种）。
+            scheduleNativePDFProjectionRefresh()
+        }
         return ok ? nil : (receipt["error"] as? String ?? "操作未完成，请重试")
     }
 

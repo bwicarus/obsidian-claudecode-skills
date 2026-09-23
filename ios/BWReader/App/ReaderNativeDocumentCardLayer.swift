@@ -177,7 +177,8 @@ struct ReaderNativeAnchoredCards: View {
         let _ = document.geometryRevision
         ZStack(alignment: .topLeading) {
             Color.clear
-            ForEach(model.placements) { item in
+            // 网页挂着的卡 + 网页没挂、原生自己展开的词锚卡。
+            ForEach(model.placements + reader.nativeOnlyPlacements()) { item in
                 card(item)
             }
         }
@@ -190,8 +191,7 @@ struct ReaderNativeAnchoredCards: View {
 
     @ViewBuilder
     private func card(_ item: ReaderNativePagePlacement) -> some View {
-        if item.visible, !item.floating,
-           let rect = reader.nativePageCardDocumentRect(id: item.noteID, size: item.size) {
+        if item.visible, !item.floating, let rect = documentRect(item) {
             ReaderNativePlacedCard(item: item, reader: reader, model: model, rect: rect,
                                    available: layer.viewport, space: .named(Self.space),
                                    unitScale: layer.scale, toWindow: layer.toWindow)
@@ -201,6 +201,15 @@ struct ReaderNativeAnchoredCards: View {
                 })
                 .offset(x: rect.minX, y: rect.minY)
         }
+    }
+}
+
+extension ReaderNativeAnchoredCards {
+    /// 展开的词锚卡贴着词摆（原版 _placeWordCard）；其余按便签自己的锚点。
+    fileprivate func documentRect(_ item: ReaderNativePagePlacement) -> CGRect? {
+        if item.bound, item.open,
+           let rect = reader.nativeWordCardDocumentRect(id: item.noteID, size: item.size) { return rect }
+        return reader.nativePageCardDocumentRect(id: item.noteID, size: item.size)
     }
 }
 

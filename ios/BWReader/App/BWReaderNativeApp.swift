@@ -202,6 +202,11 @@ private struct ReaderRootView: View {
             if nativeInterfaceEnabled && !reader.nativeConversation.legacyVisible {
                 ReaderNativePageCards(reader: reader, model: reader.nativeConversation)
                     .ignoresSafeArea(edges: .bottom)
+                // 侧栏关着时的通话字幕（原版 #vc-cap：底部居中，离底 76）。
+                ReaderNativeCaptionBar(model: reader.nativeConversation)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, 76)
+                    .allowsHitTesting(false)
             }
 
             NativePencilLiveOverlay(

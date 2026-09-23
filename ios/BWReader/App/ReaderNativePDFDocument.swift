@@ -872,8 +872,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     /// 认不出就给一条横线（＝插入位置）。返回 `view` 自己的坐标系。
     func dropPreview(_ local: CGPoint) -> ReaderNativeDropPreview? {
         guard let placed = canonicalPoint(local, from: view) else { return nil }
-        if let core = selectionCores[placed.page], let index = core.hit(placed.point, exactOnly: false),
-           let value = try? core.exact([index]), !value.rects.isEmpty {
+        // 光带 = 松手后会钉住的那个**词**（与 wordBind 同一套规则，预览说什么松手就是什么）。
+        if let word = wordBind(at: local), let core = selectionCores[placed.page],
+           let value = try? core.exact(word.indexes), !value.rects.isEmpty {
             let rects = value.rects.compactMap { viewRect(normalized: $0, page: placed.page) }
             if !rects.isEmpty { return ReaderNativeDropPreview(rects: rects, line: nil) }
         }
@@ -885,7 +886,59 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         return ReaderNativeDropPreview(rects: [], line: line)
     }
 
-    private func layoutChanged() {
+    struct WordBind {
+        let page: Int
+        let indexes: [Int]
+        let text: String
+        /// 与网页 wordBindFromPoint 同形：{kind:'page-chars', page, from, to, text, ois}。
+        var payload: [String: Any] {
+            ["kind": "page-chars", "page": page, "from": indexes.first ?? 0, "to": indexes.last ?? 0,
+             "text": String(text.prefix(200)), "ois": Array(indexes.prefix(512))]
+        }
+    }
+
+    /// 落点处的词 —— 逐条照网页 `noteWordRect`（27-rc-adapter.js）：
+    /// 先找**落点左侧、同一行**最近的字（行带 = ±0.75 字高，至少 14）；同行没有才退全局最近；
+    /// 离得太远（屏幕上 > 48 点）算没认到；再按同一个词 id（w）、同一区块聚成整词。
+    ///
+    /// ⚠ 原生自己认，不交给网页：网页按它自己的视口坐标 elementFromPoint 找页，而原生接管后
+    ///   网页视口跟屏幕上的页对不上（2026-09-23：拖卡后词锚跑到「インフルエンザ」「よっ」上）。
+    func wordBind(at local: CGPoint) -> WordBind? {
+        guard let placed = canonicalPoint(local, from: view),
+              let chars = characterPages[placed.page], chars.pageWidth > 0, chars.pageHeight > 0 else { return nil }
+        let px = Double(placed.point.x) * chars.pageWidth, py = Double(placed.point.y) * chars.pageHeight
+        var best: Int?, bestDistance = Double.greatestFiniteMagnitude
+        var row: Int?, rowDistance = Double.greatestFiniteMagnitude
+        for (index, char) in chars.chars.enumerated() where char.sp == 0 && char.x1 > char.x0 {
+            let cx = (char.x0 + char.x1) / 2, cy = (char.y0 + char.y1) / 2
+            let height = max(char.y1 - char.y0, 1)
+            if abs(cy - py) <= max(height, 14) * 0.75, cx <= px, px - cx < rowDistance {
+                rowDistance = px - cx; row = index
+            }
+            let d = (cx - px) * (cx - px) + (cy - py) * (cy - py)
+            if d < bestDistance { bestDistance = d; best = index }
+        }
+        guard let hit = row ?? best else { return nil }
+        let distance = row != nil ? rowDistance : bestDistance.squareRoot()
+        // 屏幕上超过 48 点就算没落在词上（网页同一阈值，单位是屏幕像素）。
+        let pointsPerUnit = Double(view.scaleFactor)
+        guard distance * pointsPerUnit <= 48 else { return nil }
+        let target = chars.chars[hit]
+        let indexes = target.w >= 0
+            ? chars.chars.indices.filter { chars.chars[$0].w == target.w && chars.chars[$0].b == target.b && chars.chars[$0].sp == 0 }
+            : [hit]
+        guard !indexes.isEmpty else { return nil }
+        let text = indexes.map { chars.chars[$0].c }.joined()
+        guard !text.isEmpty else { return nil }
+        return WordBind(page: placed.page, indexes: indexes, text: text)
+    }
+
+    /// 页码 + 页内归一化坐标（与 canonicalPoint 同源）。
+    func pagePoint(at local: CGPoint) -> (page: Int, point: CGPoint)? {
+        canonicalPoint(local, from: view)
+    }
+
+    private func layoutChanged() {    private func layoutChanged() {
         // Observe actual native scrolling; no timer polls or web scroll relay.
         func firstScroll(_ root: UIView) -> UIScrollView? {
             if let scroll = root as? UIScrollView { return scroll }

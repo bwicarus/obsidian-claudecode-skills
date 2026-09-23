@@ -3859,6 +3859,31 @@ if (window.__bwPwaProviderOnly) return;
       if (next === 'min' && wordBindOf(note)) next = 'full';
       payload.form = next;
       fields[slot] = payload; fields.collapsed = false;
+    } else if (command.key === 'move' && command.native && typeof command.native === 'object') {
+      // 原生正文接管时的落点：页码与页内归一化坐标由 PDFKit 算好，词也由原生按
+      // noteWordRect 同一套规则认好（行优先取落点左侧同行最近字 → 同词聚合）。
+      // ⚠ 不能再走下面那条 reanchorAt / wordBindFromPoint：它们按**网页视口**坐标
+      //   用 elementFromPoint 找页，而原生接管后网页视口跟屏幕上的页对不上 ——
+      //   2026-09-23 实录：拖「ジフテリア」卡，词锚被改到了「インフルエンザ」「よっ」上。
+      var nv = command.native;
+      if (!Number.isInteger(nv.page) || nv.page < 1 || ![nv.x, nv.y].every(Number.isFinite) ||
+          nv.x < 0 || nv.x > 1 || nv.y < 0 || nv.y > 1) throw new Error('落点不在页面内');
+      fields.anchor = { kind: 'pdf', page: nv.page, x: nv.x, y: nv.y };
+      if (wordBindOf(note)) {
+        payload = cloneValue(note[slot]);
+        var nb = nv.bind;
+        if (nb && nb.kind === 'page-chars' && Number.isInteger(nb.page) && Number.isInteger(nb.from) &&
+            Number.isInteger(nb.to) && nb.from >= 0 && nb.to >= nb.from && typeof nb.text === 'string' && nb.text) {
+          payload.bind = { kind: 'page-chars', page: nb.page, from: nb.from, to: nb.to, text: nb.text.slice(0, 200) };
+          if (Array.isArray(nb.ois) && nb.ois.length && nb.ois.length <= 512) {
+            payload.bind.ois = nb.ois.filter(function (v) { return Number.isInteger(v) && v >= 0; });
+            if (!payload.bind.ois.length) delete payload.bind.ois;
+          }
+        }
+        // 认不出词：保留原词锚。原生那侧拿不到字符层（页还没加载）不等于"拖到了空白处"，
+        // 据此撤锚会把好好的卡变成自由卡。
+        fields[slot] = payload;
+      }
     } else if (command.key === 'move') {
       if (![command.x, command.y].every(Number.isFinite)) throw new Error('落点无效');
       var point = { x: command.x, y: command.y };
@@ -4137,6 +4162,11 @@ if (window.__bwPwaProviderOnly) return;
     placeHtmlAt: function (x, y, card, anchor) { return Promise.resolve(createHtmlAt(x, y, card, true, anchor)); },
     nativePlacementState: nativePlacementState,
     nativePlacementAction: nativePlacementAction,
+    // 按便签 id 删除 —— 不要求这张卡在网页里挂着（原生自己画的词锚卡没有网页控件）。
+    nativeDeleteNote: function (id) {
+      var note = currentNote(String(id || ''));
+      return note ? deleteNote(note) : Promise.resolve(false);
+    },
     nativeInkAction: nativeInkAction,
     persistBoundCard: persistBoundCard,   // AI page-chars：Promise 只在 create+本地投影成功后 ok:true
     cardContextText: cardContextText,   // 收藏/上下文共用正面+背面可读投影；raw/meta 仍保留完整卡记录

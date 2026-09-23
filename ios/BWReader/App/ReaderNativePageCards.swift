@@ -31,6 +31,8 @@ struct ReaderNativePagePlacement: Identifiable {
     /// 'dot'（圆角方标记）/ 'min'（长条）/ 'full'（方块）。
     /// ⚠ 不能只看 collapsed —— 那把三态压成两态，圆点和长条就长得一样了。
     let form: String
+    /// 原生按便签数据现造的（网页没挂这张卡）。没有网页控件：开合、删除走原生。
+    let nativeOnly: Bool
     /// 钉在正文上。⚠ 钉住的卡**不进长条态**（用户 2026-08-18 拍板：概要与锚点
     /// 重复），所以它的形态循环是 标记 ⇄ 方块 两态，不是三态。
     let pinned: Bool
@@ -43,6 +45,7 @@ struct ReaderNativePagePlacement: Identifiable {
               [x, y, w, h].allSatisfy({ $0.isFinite }), w >= 0, h >= 0 else { return nil }
         self.id = id
         noteID = value["noteId"] as? String ?? ""
+        nativeOnly = value["nativeOnly"] as? Bool ?? false
         title = value["title"] as? String ?? "卡片"
         rect = CGRect(x: x, y: y, width: w, height: h)
         bound = value["bound"] as? Bool ?? false
@@ -66,6 +69,35 @@ struct ReaderNativePagePlacement: Identifiable {
         let raw = value["form"] as? String ?? (value["collapsed"] as? Bool == true ? "dot" : "full")
         form = ["dot", "min", "full"].contains(raw) ? raw : "full"
         pinned = value["pinned"] as? Bool ?? (value["bound"] as? Bool ?? false)
+    }
+
+    /// 网页没挂这张卡时，按便签数据现造一份（只支持 html 槽 —— 现有页卡全是这种）。
+    /// 色调取法与网页 wordCardPresentation 一致：词锚卡按分类，自由卡用自己的 type。
+    init?(nativeNote note: [String: Any], open: Bool) {
+        guard let id = note["id"] as? String, !id.isEmpty,
+              let html = note["html"] as? [String: Any] else { return nil }
+        let label = (html["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "卡片"
+        let bound = (html["bind"] as? [String: Any])?["kind"] as? String == "page-chars"
+        let tone = bound ? ReaderNativePagePlacement.hexString(ReaderNativeMarkerStyle.tone(html, slot: "html"))
+                         : (html["type"] as? String ?? "")
+        let zero = NSNumber(value: 0)
+        let part: [String: Any] = [
+            "id": "native-" + id + "-html", "kind": "general", "title": label, "text": "", "status": "saved",
+            "data": ["text": html["content"] as? String ?? "",
+                     "format": html["isHtml"] as? Bool == true ? "html" : "text"],
+        ]
+        self.init([
+            "id": "native-" + id, "noteId": id, "nativeOnly": true, "title": label,
+            "rect": ["x": zero, "y": zero, "width": zero, "height": zero],
+            "bound": bound, "collapsed": false, "floating": false, "visible": true, "open": open,
+            "controls": [String: String](), "parts": [part], "tone": tone, "form": "full", "pinned": bound,
+        ])
+    }
+
+    private static func hexString(_ color: UIColor) -> String {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return String(format: "#%02x%02x%02x", Int(round(r * 255)), Int(round(g * 255)), Int(round(b * 255)))
     }
 
     /// `#rrggbb` / `#rgb` → UIColor；解不出来返回 nil。
@@ -145,7 +177,7 @@ struct ReaderNativePageCards: View {
     }
 
     private var openBoundIDs: Set<String> {
-        Set(model.placements.filter { $0.bound && $0.open }.map(\.noteID))
+        Set(model.placements.filter { $0.bound && $0.open }.map(\.noteID)).union(reader.nativeOpenBoundNotes)
     }
 
     /// 打开/收起一张词锚卡。
@@ -329,7 +361,7 @@ struct ReaderNativePlacedCard: View {
     private var surfaceBorder: Color { isDot ? Color.clear : finish.border }
     private var dropShadow: Color { isDot ? Color.clear : Color.black.opacity(0.45) }
     private var toneGlow: Color { isDot ? Color.clear : finish.glow.opacity(0.6) }
-    private var pickedRing: Color { ReaderNativeCardDropZone.dock.opacity(contextSelected ? 0.85 : 0) }
+    private var pickedRing: Color { ReaderNativeCardDropZone.dock }
 
     /// 圆点态的那枚标记：40×40 圆角方（半径 13），照原版 `.vc-card-dot`：
     /// 底 = 色调 14% 混 rgba(22,26,38,.38)，图标用色调。
@@ -366,7 +398,10 @@ struct ReaderNativePlacedCard: View {
 
     /// 点卡头：词锚卡 = 收起回词上（原版点标记同一动作）；自由卡 = 形态循环。
     private func tapHeader() {
-        if item.bound { run("collapse") } else { runForm(nextForm) }
+        if item.bound {
+            if item.nativeOnly { reader.openNativeBoundCard(noteID: item.noteID) }   // 原生自己开的，原生自己收
+            else { run("collapse") }
+        } else { runForm(nextForm) }
     }
 
     private var savedSize: CGSize? {
@@ -488,9 +523,32 @@ struct ReaderNativePlacedCard: View {
         // （`--vc-cardblur:none`，注释原话"去 blur 后加实"）。圆点态照 .vc-dot 近乎透明。
         .readerCardSurface(surfaceFill, glass: !isDot, in: RoundedRectangle(cornerRadius: corner))
         .overlay(RoundedRectangle(cornerRadius: corner).stroke(surfaceBorder, lineWidth: 0.5))
-        // 选中环照原版 .vc-picked：1.5pt 的 rgba(123,108,255,.85)。
-        .overlay(RoundedRectangle(cornerRadius: corner).stroke(pickedRing, lineWidth: 1.5))
         .clipShape(RoundedRectangle(cornerRadius: corner))
+        // 「已带入对话」：原版 .vc-picked 是卡外 2px 的 rgba(123,108,255,.85) —— 紫色卡上
+        // 几乎看不见（2026-09-23 用户："选中时边框特效不够明显，特别是卡片本身为紫色时"）。
+        // 加强成：卡外 2.5pt 选中环 + 环内一道白细线（跟任何色调都拉得开对比）+ 同色外发光
+        // + 右上角对勾。⚠ 画在 clipShape 之后，否则外圈会被卡片自己裁掉一半。
+        .overlay {
+            if contextSelected {
+                ZStack(alignment: .topTrailing) {
+                    RoundedRectangle(cornerRadius: corner + 1.5)
+                        .stroke(Color.white.opacity(0.9), lineWidth: 1)
+                        .padding(-1.5)
+                    RoundedRectangle(cornerRadius: corner + 4)
+                        .stroke(pickedRing, lineWidth: 2.5)
+                        .padding(-4)
+                        .shadow(color: pickedRing.opacity(0.8), radius: 8)
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(Color.white, ReaderNativeCardDropZone.dock)
+                        .background(Circle().fill(Color.white).padding(2))
+                        .offset(x: 9, y: -9)
+                        .accessibilityLabel("已带入对话")
+                }
+                .allowsHitTesting(false)
+            }
+        }
         .animation(.easeOut(duration: 0.15), value: contextSelected)
         .overlay(alignment: .bottomTrailing) {
             if item.form == "full", item.controls["resize"] != nil {
@@ -528,7 +586,10 @@ struct ReaderNativePlacedCard: View {
         })
         .disabled(model.isPerforming("liveAction"))
         .confirmationDialog("仅移除这处书页卡片，原卡和学习记录会保留。", isPresented: $confirmRemoval, titleVisibility: .visible) {
-            Button("移除", role: .destructive) { run("remove") }
+            Button("移除", role: .destructive) {
+                if item.nativeOnly { Task { _ = await reader.deleteNativeNote(noteID: item.noteID) } }
+                else { run("remove") }
+            }
         }
         .alert("卡片操作未完成", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
             Button("好") { operationError = nil }
@@ -574,6 +635,11 @@ struct ReaderNativePlacedCard: View {
                     }
                     return
                 }
+                if ReaderNativeCardDropZone.inTrash(released), item.nativeOnly {
+                    committed = nil
+                    Task { _ = await reader.deleteNativeNote(noteID: item.noteID) }
+                    return
+                }
                 if ReaderNativeCardDropZone.inDock(released, screenHeight: reader.cardDrag.screenFrame.height),
                    let action = item.controls["favorite"] {
                     // 收藏是**复制**：原卡回原位，不改锚点（原版同一条注释）。
@@ -584,6 +650,27 @@ struct ReaderNativePlacedCard: View {
                         } else {
                             reader.showTransientNotice("已收入收藏夹")
                         }
+                    }
+                    return
+                }
+                if item.bound {
+                    // 钉在词上的卡：拖到哪个词就改绑到哪个词（原版规则），但**词由原生认**，
+                    // 连同页内坐标一起交给网页的移动动作。
+                    // ⚠ 以前交的是网页视口坐标，网页按它自己的视口找页 —— 与屏幕上的页对不上，
+                    //   词锚被改到了别的词上（2026-09-23 实录：「インフルエンザ」「よっ」）。
+                    guard let action = item.controls["move"],
+                          let target = reader.nativeDropTarget(windowPoint: point) else {
+                        committed = nil
+                        if item.nativeOnly { reader.showTransientNotice("这张卡还没载入完整，暂时只能收起或删除。") }
+                        return
+                    }
+                    committed = value.translation
+                    Task {
+                        if await model.perform("liveAction", parameters: ["actionId": action, "value": target]) == false {
+                            reader.showTransientNotice(model.error ?? "这张卡没能挪到这里。")
+                        }
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        committed = nil
                     }
                     return
                 }
