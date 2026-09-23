@@ -19,6 +19,8 @@ struct ReaderNativeBookStore {
     let bookID: String
     let deviceID: String
     var now: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+    var displayName: String? = nil
+    var contentSHA256: String? = nil
     private var projection: ReaderNativeBookProjection { .init(store: store) }
 
     func perform(_ request: [String: Any]) throws -> [String: Any] {
@@ -44,13 +46,18 @@ struct ReaderNativeBookStore {
                       number.doubleValue >= 0, number.doubleValue <= 9_007_199_254_740_991 else { throw MutationError.invalid("预期修订号") }
                 expected = number.int64Value
             } else {
-                guard ["reading-position", "note-api"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
+                guard ["reading-position", "note-api", "replication-enqueue"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
                 expected = nil
             }
             let revision: Int64
             var result: [String: Any]? = nil
             var bindingChanges: [[String: Any]] = []
             switch operation {
+            case "replication-enqueue":
+                guard let command = value as? [String: Any] else { throw MutationError.invalid("复制命令") }
+                let queued = try enqueueReplication(command, mutation: mutation, at: stamp)
+                revision = queued.revision
+                result = ["ok": true, "queued": queued.queued]
             case "note-api":
                 guard let api = value as? [String: Any], let method = api["method"] as? String,
                       let body = api["body"] as? [String: Any] else { throw MutationError.invalid("便签请求") }
@@ -94,6 +101,68 @@ struct ReaderNativeBookStore {
             return receipt
         }
     }
+
+    /// The durable outbox uses the existing wire protocol. Creating the book
+    /// link and its pair announcement is atomic with the first command, so a
+    /// crash cannot leave an unannounced identity or an unrepeatable command.
+    private func enqueueReplication(_ command: [String: Any], mutation: String, at: Int64) throws -> (revision: Int64, queued: Bool) {
+        let routes: [String: Set<String>] = [
+            "/pdf/api/notes": ["POST", "PATCH", "DELETE"],
+            "/pdf/api/highlights": ["POST", "PATCH", "DELETE"],
+            "/pdf/api/epub-highlights": ["POST", "PATCH", "DELETE"],
+            "/pdf/api/userpages": ["POST", "PATCH", "DELETE"],
+            "/pdf/api/ink": ["POST"], "/pdf/api/epub-ink": ["POST"],
+            "/pdf/api/reading-pos": ["POST"], "/replication/activity": ["POST"],
+            "/replication/diagnostic": ["POST"], "/replication/resync": ["POST"],
+            "/replication/notification": ["POST"]
+        ]
+        guard Set(command.keys) == Set(["url", "method", "body"]),
+              let url = command["url"] as? String, let method = command["method"] as? String,
+              routes[url]?.contains(method) == true, let body = command["body"] as? [String: Any] else {
+            throw MutationError.invalid("复制路由或参数")
+        }
+        if let file = body["file"], file as? String != "localbook:" + bookID { throw MutationError.invalid("复制书籍不匹配") }
+        guard bookID != "localbook-welcome" else { return (0, false) }
+        let existing = try projection.state("replication-link", bookID: bookID)
+        let replicationID: String
+        let needsPair: Bool
+        if let payload = existing.payload {
+            guard let link = payload as? [String: Any], let id = link["replicationBookId"] as? String,
+                  id.range(of: "^repbook-[a-f0-9]{32}$", options: .regularExpression) != nil else {
+                throw MutationError.invalid("复制配对记录损坏")
+            }
+            replicationID = id; needsPair = false
+        } else { replicationID = "repbook-" + Self.uuid(); needsPair = true }
+        func envelope(_ path: String, _ verb: String, _ payload: [String: Any]) -> [String: Any] {
+            ["contract": "replication-command/1", "deviceId": deviceID,
+             "replicationBookId": replicationID, "actor": "user",
+             "op": ["mutationId": "mut-v2-" + Self.uuid(), "url": path, "method": verb, "body": payload]]
+        }
+        let message = envelope(url, method, body)
+        guard try Self.bytes(message).count <= 5 * 1024 * 1024 else { throw MutationError.invalid("复制命令超过信封上限") }
+        func append(_ message: [String: Any], suffix: String) throws -> Int64 {
+            // Persistent counter is scoped to this database and never resets on
+            // reload. Native IDs cannot collide with the legacy JS counter.
+            let previous = Int64(try store.meta("nativeReplicationSequence") ?? "0") ?? 0
+            guard previous >= 0 && previous < Int64.max, at >= 0 else { throw MutationError.invalid("复制队列序号") }
+            let sequence = previous + 1
+            try store.putMeta("nativeReplicationSequence", json: String(sequence))
+            let rowID = bookID + ":ro-" + String(format: "%012llx-n%016llx", at, sequence)
+            return try write(collection: "native-replication-outbox", id: rowID,
+                payload: ["envelope": message], expected: 0, mutation: mutation + suffix, at: at)
+        }
+        if needsPair {
+            try writeState("replication-link", value: ["replicationBookId": replicationID, "pairedAt": at / 1000],
+                           expected: existing.revision, mutation: mutation + ":link", at: at)
+            var pair: [String: Any] = ["peerBookId": bookID, "replicationBookId": replicationID,
+                                      "displayName": String((displayName.flatMap { $0.isEmpty ? nil : $0 } ?? bookID).prefix(512))]
+            if let sha = contentSHA256, sha.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil { pair["contentSha256"] = sha }
+            _ = try append(envelope("/replication/pair", "POST", pair), suffix: ":pair")
+        }
+        return (try append(message, suffix: ":command"), true)
+    }
+
+    private static func uuid() -> String { UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() }
 
     private func writeNotes(_ notes: [[String: Any]], expected: Int64?, mutation: String, at: Int64) throws -> Int64 {
         let revision = try writeState("document-notes-legacy", value: notes, expected: expected, mutation: mutation + ":notes", at: at)

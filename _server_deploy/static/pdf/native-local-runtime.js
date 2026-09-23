@@ -1899,6 +1899,19 @@
 
   function enqueueReplicationCommand(url, method, body) {
     if (!replicationEligible()) return Promise.resolve(false);
+    if (nativeBookWrites) {
+      return nativeBookMutation('replication-enqueue', { url: url, method: method, body: clone(body) })
+        .then(function (receipt) {
+          if (!receipt.result || receipt.result.ok !== true) throw new RuntimeError('原生复制队列回执不完整', 'BW_REPLICATION_ENQUEUE');
+          if (receipt.result.queued) scheduleReplicationDrain(500);
+          return receipt.result.queued === true;
+        }).catch(function (error) {
+          // A failed native enqueue must never retry through the old writer;
+          // an unknown result may already have committed a durable command.
+          if (typeof root.dlog === 'function') root.dlog('原生复制命令入队失败:' + String(error && error.message || error), '#ff6b6b');
+          return false;
+        });
+    }
     return serializeLocalStateMutation('document', 'replication-outbox', function () {
       return storedStateRecord(
         stores.document, REPLICATION_LINK_KIND, 'documentId', bookId, null

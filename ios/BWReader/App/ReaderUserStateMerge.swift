@@ -25,7 +25,7 @@ final class ReaderUserStateMerge {
 
     /// Empty-domain flags have the same semantics as the browser contract.
     func domainEmpty(domain: String, value: Any) throws -> Bool {
-        _ = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])
+        guard JSONSerialization.isValidJSONObject([value]) else { throw MergeError.invalidPayload }
         return ReaderNativeBookMerge.empty(domain: domain, value: value)
     }
 

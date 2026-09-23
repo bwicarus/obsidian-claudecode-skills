@@ -5880,9 +5880,12 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 }
                 do {
                     let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
-                    let receipt = try ReaderNativeBookStore(store: store, bookID: bookID, deviceID: deviceID).perform(request)
-                    scheduleNativePDFProjectionRefresh()
-                    markCloudSyncDirty()
+                    let receipt = try ReaderNativeBookStore(store: store, bookID: bookID, deviceID: deviceID,
+                        displayName: currentLocalBook?.title, contentSHA256: currentLocalBookContentSHA256).perform(request)
+                    if request["operation"] as? String != "replication-enqueue" {
+                        scheduleNativePDFProjectionRefresh()
+                        markCloudSyncDirty()
+                    }
                     replyHandler(receipt, nil)
                 } catch ReaderNativeDataStore.StoreError.revisionConflict {
                     replyHandler(["ok": false, "code": "BW_DATA_CONFLICT"], nil)

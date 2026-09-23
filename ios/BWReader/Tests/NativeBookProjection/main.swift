@@ -135,3 +135,36 @@ let otherBusiness = ReaderNativeBookStore(store: writing, bookID: otherBook, dev
 var reused = save; reused["bookID"] = otherBook
 _ = try otherBusiness.perform(reused)
 check(try read.state("document-notes-legacy", bookID: otherBook).revision == 1, "same operation ID in another book was suppressed")
+
+let queueStore = try ReaderNativeDataStore(path: ":memory:")
+let queue = ReaderNativeBookStore(store: queueStore, bookID: book, deviceID: "device-native", now: { 123456 },
+                                displayName: "原生书籍", contentSHA256: String(repeating: "a", count: 64))
+let enqueue: [String: Any] = ["bookID": book, "mutationId": "enqueue-1", "operation": "replication-enqueue",
+    "value": ["url":"/pdf/api/notes", "method":"POST", "body":["file":"localbook:" + book, "id":"c_12345678"]]]
+// A failure at the second half must roll back link, pair, counter and command.
+try queueStore.execute("CREATE TRIGGER fail_queue BEFORE INSERT ON records WHEN NEW.collection = 'native-replication-outbox' BEGIN SELECT RAISE(ABORT, 'queue failed'); END")
+do { _ = try queue.perform(enqueue); fatalError("outbox disk failure was hidden") } catch ReaderNativeDataStore.StoreError.sql { }
+check(try ReaderNativeBookProjection(store:queueStore).state("replication-link", bookID:book).payload == nil, "unannounced replication link survived rollback")
+check(try queueStore.cursor() == 0 && queueStore.meta("nativeReplicationSequence") == nil, "partial outbox survived rollback")
+try queueStore.execute("DROP TRIGGER fail_queue")
+_ = try queue.perform(enqueue)
+func envelopes() throws -> [[String: Any]] {
+    try queueStore.records(collection:"native-replication-outbox", idPrefix:book + ":").sorted { $0.id < $1.id }.map { record in
+        let row = try JSONSerialization.jsonObject(with:Data(record.json.utf8)) as! [String:Any]
+        return ((row["value"] as! [String:Any])["payload"] as! [String:Any])["envelope"] as! [String:Any]
+    }
+}
+let messages = try envelopes()
+check(messages.count == 2, "first command must include exactly one pair announcement")
+let pairOp = messages[0]["op"] as! [String:Any], noteOp = messages[1]["op"] as! [String:Any]
+check(pairOp["url"] as? String == "/replication/pair" && noteOp["url"] as? String == "/pdf/api/notes", "pair must precede command")
+check((pairOp["body"] as! [String:Any])["contentSha256"] as? String == String(repeating:"a", count:64), "full-content identity omitted")
+check(messages[0]["replicationBookId"] as? String == messages[1]["replicationBookId"] as? String, "pair and command identities differ")
+check(try queue.perform(enqueue)["replayed"] as? Bool == true && envelopes().count == 2, "retry duplicated outbox command")
+var second = enqueue; second["mutationId"] = "enqueue-2"
+_ = try queue.perform(second)
+check(try envelopes().count == 3, "existing link was paired again")
+var forbidden = enqueue; forbidden["mutationId"] = "forbidden"; forbidden["value"] = ["url":"https://example.com", "method":"POST", "body":[:]]
+do { _ = try queue.perform(forbidden); fatalError("arbitrary replication route accepted") } catch ReaderNativeBookStore.MutationError.invalid { }
+check(try envelopes().count == 3, "invalid command changed outbox")
+print("Native replication enqueue: atomic pairing, crash rollback, ordering and stable retry identities passed")

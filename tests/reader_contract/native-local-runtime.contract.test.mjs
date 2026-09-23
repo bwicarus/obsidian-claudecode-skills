@@ -2048,6 +2048,7 @@ test("ready App note requests use Swift business commands and never retry a reje
   const { context, dataStoresState } = await harness({
     nativeBookReply(message) {
       commands.push(message);
+      if (message.request.operation === 'replication-enqueue') return { ok: true, result: { ok: true, queued: true } };
       if (rejected) return { ok: false, code: 'BW_LOCAL_NOTES', status: 404, error: '未找到便签' };
       const { body, method } = message.request.value;
       assert.equal(method, 'POST');
@@ -2060,7 +2061,8 @@ test("ready App note requests use Swift business commands and never retry a reje
   const response = await context.fetch('/pdf/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(note) });
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).note, note);
-  assert.equal(commands.length, 1);
+  assert.equal(commands.filter(c => c.request.operation === 'note-api').length, 1);
+  assert.equal(commands.filter(c => c.request.operation === 'replication-enqueue').length, 1);
   assert.equal(commands[0].action, 'bookMutation');
   assert.equal(commands[0].request.operation, 'note-api');
   assert.equal(commands[0].request.bookID, DEFAULT_LOCAL_BOOK_ID);
@@ -2070,7 +2072,8 @@ test("ready App note requests use Swift business commands and never retry a reje
   rejected = true;
   const failure = await context.fetch('/pdf/api/notes', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, id: 'c_12345678', text: '改' }) });
   assert.equal(failure.status, 404);
-  assert.equal(commands.length, 2);
+  assert.equal(commands.filter(c => c.request.operation === 'note-api').length, 2);
+  assert.equal(commands.filter(c => c.request.operation === 'replication-enqueue').length, 1, 'rejected note was not enqueued');
   assert.equal(dataStoresState.document.values.has('native-document-notes-legacy:' + DEFAULT_LOCAL_BOOK_ID + ':document-notes-legacy'), false,
     'failure must not create a second owner or recreate a missing note');
 });

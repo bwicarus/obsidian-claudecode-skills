@@ -40,7 +40,10 @@ enum ReaderNativeBookMerge {
         return value is NSNull || (value as? String == "") || emptyContainer(value)
     }
     private static func encoded(_ value: Any?) throws -> Data {
-        try JSONSerialization.data(withJSONObject: value ?? NSNull(), options: [.sortedKeys, .fragmentsAllowed, .withoutEscapingSlashes])
+        // Darwin Foundation raises an Objective-C exception for NaN rather
+        // than a catchable Swift error; validate before calling the writer.
+        guard JSONSerialization.isValidJSONObject([value ?? NSNull()]) else { throw ReaderUserStateMerge.MergeError.invalidPayload }
+        return try JSONSerialization.data(withJSONObject: value ?? NSNull(), options: [.sortedKeys, .fragmentsAllowed, .withoutEscapingSlashes])
     }
     private static func same(_ a: Any?, _ b: Any?) throws -> Bool { try encoded(a) == encoded(b) }
     private static func copied(_ value: Any?) throws -> Any { try JSONSerialization.jsonObject(with: encoded(value), options: [.fragmentsAllowed]) }
