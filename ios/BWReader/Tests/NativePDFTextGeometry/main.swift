@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 let fixtureURL = URL(fileURLWithPath: CommandLine.arguments[1])
 let fixture = try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as! [String: Any]

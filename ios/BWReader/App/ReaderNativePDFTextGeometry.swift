@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// PDF text geometry in source-index space. This is a native data model, not a
 /// second renderer. It preserves the reader's block/cell/word rules and is
