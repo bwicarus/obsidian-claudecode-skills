@@ -1862,9 +1862,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     /// 点了已有划线 → 原生编辑面板（改色 / 备注 / 删除）。
     private func openNativeHighlightEditor(_ highlight: ReaderNativePDFDocument.Highlight) {
+        let bookID = currentLocalBook?.id, digest = currentLocalBookContentSHA256
         let panel = ReaderNativeHighlightEditorModel(highlight: highlight) { [weak self] command in
-            await self?.requestNativeConversationCommand(command)
-                ?? ["ok": false, "error": "阅读页已关闭"]
+            guard let self, let bookID, let digest, let value = command["value"] as? [String:Any] else {
+                return ["ok":false,"error":"阅读页已关闭"]
+            }
+            return await self.performNativeHighlight(operation:"highlight-edit",input:value,bookID:bookID,digest:digest)
         }
         // 改完重取一次投影：颜色变了、虚框出现、整条消失，都要这一步才看得见。
         // PATCH/DELETE 经本地 runtime 时本来也会 ping 回来（withNativePDFWriter 的
@@ -1903,13 +1906,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeFigure = panel
     }
 
-    /// 原生选区菜单里点了划线。
-    ///
-    /// ⚠ **不在原生这边另写一套保存**：走的是阅读器自己的
-    /// `__bwReaderHighlightExactText` —— AI 划线用的同一条路径、同一套存储、
-    /// 同一份色板。原生这边只负责把「哪一页的哪段文字、什么颜色」递过去。
-    /// 写入成功后本地 runtime 会 ping 回来，投影把它画到原生正文上（见
-    /// scheduleNativePDFProjectionRefresh），所以这里不必自己重画。
+    /// The native selection already has exact PDF rectangles. Persist them
+    /// with undo and replication in the same SQLite transaction as AI edits.
     private func highlightFromNativeSelection(
         _ request: ReaderNativePDFDocument.HighlightRequest,
         bookID: String, contentSHA256: String
@@ -1920,18 +1918,40 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               request.pageWidth > 0, request.pageHeight > 0,
               ["yellow", "green", "blue", "pink"].contains(request.color),
               nativePDFDocument?.matches(bookID: bookID, contentSHA256: contentSHA256) == true else { return }
-        let receipt = await requestNativeConversationCommand([
-            "action": "nativeSelectionHighlight",
-            "value": [
-                "page": request.page, "text": trimmed, "color": request.color,
-                "sentence": String(request.sentence.prefix(600)),
-                "rects": request.rects,
-                "pageWidth": request.pageWidth, "pageHeight": request.pageHeight,
-            ],
-        ])
+        let id = "c_" + UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()
+        let body: [String:Any] = ["file":"localbook:" + bookID,"id":id,"page":request.page,"text":trimmed,
+            "color":ReaderNativeHighlightRules.palette[request.color]!,"sentence":String(request.sentence.prefix(600)),
+            "rects":request.rects,"page_w":request.pageWidth,"page_h":request.pageHeight]
+        let receipt = await performNativeHighlight(operation:"highlight-api",input:["method":"POST","body":body,"assistant":true],bookID:bookID,digest:contentSHA256)
         if receipt["ok"] as? Bool != true {
             nativePDFMountFailure = "划线失败：" + ((receipt["error"] as? String) ?? "未知原因")
         }
+    }
+
+    private func performNativeHighlight(operation:String,input:[String:Any],bookID:String,digest:String) async -> [String:Any] {
+        do {
+            guard let document = nativePDFDocument, let access = currentLocalBookAccess, access.record.id == bookID,
+                  nativeReadingStoreBookID == bookID, let deviceID = nativeReadingStoreDeviceID,
+                  document.matches(bookID:bookID,contentSHA256:digest), nativePDFMutationCommandDepth == 0 else {
+                throw ReaderNativeBookStore.MutationError.unavailable
+            }
+            let generation = bookUserStateContextGeneration
+            let pending = try await nativePDFMutationActor.hasUnfinishedMutation(book:access)
+            guard !pending, nativePDFMutationCommandDepth == 0, generation == bookUserStateContextGeneration,
+                  currentLocalBookAccess === access, currentLocalBookContentSHA256 == digest else { throw ReaderNativeBookStore.MutationError.unavailable }
+            let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+            let receipt = try ReaderNativeBookStore(store:store,bookID:bookID,deviceID:deviceID,displayName:access.record.title,contentSHA256:digest)
+                .perform(["bookID":bookID,"mutationId":"highlight-" + UUID().uuidString,"operation":operation,"value":input])
+            let result = receipt["result"] as? [String:Any] ?? [:]
+            let domains = try ReaderNativeBookProjection(store:store).exportReadingDomains(bookID:bookID)
+            try document.applyOverlays(domains,bookID:bookID,contentSHA256:digest)
+            markCloudSyncDirty()
+            // Transitional legacy consumers observe a committed record only.
+            // They no longer normalize, save, or render a hidden PDF page.
+            webView.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('bw:native-highlight-committed',{detail:value})); return true;",
+                arguments:["value":["bookID":bookID,"input":input,"result":result]],in:nil,in:.page,completionHandler:nil)
+            return ["ok":true,"value":result]
+        } catch { return ["ok":false,"error":error.localizedDescription] }
     }
 
     /// 本地 runtime 落了一笔用户状态 → 把高亮/墨迹/便签重新投影到原生正文。
@@ -6125,6 +6145,12 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     replyHandler(["ok": false, "code": "BW_LOCAL_NOTES", "status": 404, "error": "未找到便签"], nil)
                 } catch let error as ReaderNativeNoteRules.NoteError {
                     replyHandler(["ok": false, "code": "BW_LOCAL_NOTES", "status": 400, "error": error.localizedDescription], nil)
+                } catch ReaderNativeHighlightRules.HighlightError.missing {
+                    replyHandler(["ok":false,"code":"BW_LOCAL_HIGHLIGHTS","status":404,"error":"未找到划线"],nil)
+                } catch ReaderNativeHighlightRules.HighlightError.conflict {
+                    replyHandler(["ok":false,"code":"BW_NATIVE_PDF_ASSISTANT_CONFLICT","status":409,"error":"划线操作编号已用于不同内容"],nil)
+                } catch let error as ReaderNativeHighlightRules.HighlightError {
+                    replyHandler(["ok":false,"code":"BW_LOCAL_HIGHLIGHTS","status":400,"error":error.localizedDescription],nil)
                 } catch { replyHandler(nil, String(describing: error)) }
                 return
             }

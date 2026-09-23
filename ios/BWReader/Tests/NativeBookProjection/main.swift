@@ -250,3 +250,47 @@ do { _ = try noteWriter.perform(noteAction("failed-move",["action":"update","cha
 catch ReaderNativeDataStore.StoreError.sql { }
 check(try noteRead.state("document-notes-legacy",bookID:book).revision == beforeFailedMove, "card edit survived failed outbox commit")
 print("Native card actions: stable identity, bind preservation, geometry fencing, retry and atomic replication passed")
+
+let highlightStore = try ReaderNativeDataStore(path:":memory:")
+let highlightWriter = ReaderNativeBookStore(store:highlightStore,bookID:book,deviceID:"highlights",now:{400_000})
+let highlightRead = ReaderNativeBookProjection(store:highlightStore)
+let highlightBody: [String:Any] = ["file":"localbook:" + book,"id":"c_abcddcba","page":45,"rects":[[30.123,40.125,10.1,20.0]],
+    "text":"原文","sentence":"所在句","color":"#fff59d","page_w":600,"page_h":800]
+func highlightRequest(_ id: String, _ input: [String:Any], edit: Bool = false) -> [String:Any] {
+    ["bookID":book,"mutationId":id,"operation":edit ? "highlight-edit" : "highlight-api","value":input]
+}
+let addHighlight = highlightRequest("add-highlight",["method":"POST","body":highlightBody,"assistant":true])
+try highlightStore.execute("CREATE TRIGGER fail_highlight_send BEFORE INSERT ON records WHEN NEW.collection = 'native-replication-outbox' BEGIN SELECT RAISE(ABORT, 'send failed'); END")
+do { _ = try highlightWriter.perform(addHighlight); fatalError("highlight outbox failure swallowed") } catch ReaderNativeDataStore.StoreError.sql { }
+check(try highlightRead.highlights("document-highlights",bookID:book).items.isEmpty, "highlight survived failed commit")
+check(try highlightRead.state("pdf-assistant-undo",bookID:book).payload == nil, "undo survived rolled back highlight")
+try highlightStore.execute("DROP TRIGGER fail_highlight_send")
+let highlightResult = try highlightWriter.perform(addHighlight)["result"] as! [String:Any]
+let savedHighlight = highlightResult["highlight"] as! [String:Any]
+check(savedHighlight["rects"] as? [[Double]] == [[10.1,20,30.12,40.13]], "PDF rectangle normalization drift")
+let highlightCursor = try highlightStore.cursor()
+_ = try highlightWriter.perform(addHighlight)
+var retryHighlight = addHighlight; retryHighlight["mutationId"] = "new-transport-id"
+let retriedHighlight = try highlightWriter.perform(retryHighlight)
+check((retriedHighlight["result"] as! [String:Any])["replayed"] as? Bool == true, "assistant stable creation was not deduplicated")
+check(try highlightStore.cursor() == highlightCursor, "highlight retry re-enqueued replication")
+check((try highlightRead.state("pdf-assistant-undo",bookID:book).payload as! [[String:Any]]).count == 1, "duplicate undo entry")
+// A new transport request with the same creation ID may not overwrite content.
+var changedHighlight = highlightBody; changedHighlight["text"] = "changed"
+do { _ = try highlightWriter.perform(highlightRequest("conflict",["method":"POST","body":changedHighlight,"assistant":true])); fatalError("conflicting creation overwrote highlight") }
+catch ReaderNativeHighlightRules.HighlightError.conflict { }
+let cleared = try highlightWriter.perform(highlightRequest("clear-color",["id":"c_abcddcba","op":"color","value":""],edit:true))
+check((cleared["result"] as! [String:Any])["deleted"] as? Bool != true, "color removal erased sentence context")
+let recolored = try highlightWriter.perform(highlightRequest("blue",["id":"c_abcddcba","op":"color","value":"blue"],edit:true))
+let recoloredBody = (recolored["result"] as! [String:Any])["highlight"] as! [String:Any]
+check(recoloredBody["color"] as? String == "#a3d4ff", "editor persisted an invalid named color")
+check(recoloredBody["rects"] as? [[Double]] == savedHighlight["rects"] as? [[Double]], "editing changed highlight geometry")
+_ = try highlightWriter.perform(highlightRequest("delete-highlight",["id":"c_abcddcba","op":"delete"],edit:true))
+check(try highlightRead.highlights("document-highlights",bookID:book).items.isEmpty, "deleted native highlight still visible")
+do { _ = try highlightWriter.perform(highlightRequest("deleted-replay",["method":"POST","body":highlightBody,"assistant":true])); fatalError("deleted creation silently resurrected") }
+catch ReaderNativeHighlightRules.HighlightError.conflict { }
+let pendingReceipts: [[String:Any]] = [["id":"pending","contract":"reader-native-page-card-action/1","state":"preparing"]]
+    + (0..<200).map { ["id":"r\($0)","ts":$0] }
+let boundedReceipts = try ReaderNativeHighlightRules.boundedReceipts(pendingReceipts)
+check(boundedReceipts.count == 160 && boundedReceipts.first?["id"] as? String == "pending", "receipt pruning lost interrupted recovery authority")
+print("Native highlights: atomic undo/outbox, stable retry, field-preserving edits, color removal and tombstones passed")

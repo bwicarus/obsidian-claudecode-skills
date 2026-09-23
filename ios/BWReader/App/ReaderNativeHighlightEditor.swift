@@ -5,9 +5,8 @@ import SwiftUI
 /// 接管后 `.hl-layer` 不存在，网页那条「点划线弹浮层」的路整条断掉 —— 划得上去、
 /// 改不了也删不掉。这里是原生唯一能改到划线的地方。
 ///
-/// ⚠ **落库全走底座** `_hlUpdate` / `_hlDelete`（同一条 PATCH/DELETE、同一套
-/// 「点当前色＝取消颜色」语义）。原生不另写保存：颜色键是用户自己的墨水，
-/// 存在他的笔记里，另写一套等于两份规则各自漂移。
+/// Writes use the native book transaction and retain the existing wire record,
+/// color removal semantics and replication command.
 @MainActor
 final class ReaderNativeHighlightEditorModel: ObservableObject, Identifiable {
     let id: String
@@ -35,7 +34,7 @@ final class ReaderNativeHighlightEditorModel: ObservableObject, Identifiable {
         self.page = highlight.page
         self.text = highlight.text
         self.note = highlight.note
-        self.colorKey = highlight.colorKey
+        self.colorKey = ReaderNativeHighlightRules.palette.first { $0.value.lowercased() == highlight.colorKey.lowercased() }?.key ?? highlight.colorKey
         self.request = request
     }
 
@@ -43,7 +42,7 @@ final class ReaderNativeHighlightEditorModel: ObservableObject, Identifiable {
     var onChanged: (() -> Void)?
 
     /// 点色板。点的是**当前色**时是「取消颜色」：有备注留虚框，没备注整条删掉 ——
-    /// 这条语义在网页那侧，这里只是把空字符串递过去让它决定。
+    /// 由原生事务根据最新保存内容决定是否删除。
     func pick(_ key: String) async {
         await send(op: "color", value: key == colorKey ? "" : key)
     }

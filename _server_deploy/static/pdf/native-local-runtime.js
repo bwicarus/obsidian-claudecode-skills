@@ -2089,6 +2089,12 @@
     dispatchWordBindingsChanged(keys,changes,'swift');
     scheduleReplicationDrain(0);
   });
+  root.addEventListener('bw:native-highlight-committed', function (event) {
+    var value = event && event.detail;
+    if (!nativeBookWrites || !value || value.bookID !== bookId) return;
+    if (value.input && value.input.assistant === true) announceAssistantHighlight(value.input.body || {},value.result);
+    scheduleReplicationDrain(0);
+  });
   function scheduleReplicationDrain(delayMs) {
     if (replicationDrainTimer != null) return;
     var timer = root.setTimeout(function () {
@@ -6472,6 +6478,29 @@
 
   function localPDFHighlights(input, init, url, method) {
     var code = 'BW_LOCAL_HIGHLIGHTS';
+    if (nativeBookWrites && method !== 'GET') {
+      return localJSONRoute(function () {
+        var bodyPromise;
+        if (method === 'DELETE') bodyPromise = deleteRecordRequest(input,init,url,code).then(function (request) {
+          return {file:localFileRef(),id:request.id};
+        });
+        else {
+          strictQuery(url,[],[],code);
+          bodyPromise = requestObject(input,init,method === 'POST'
+            ? ['file','id','page','rects','color','text','note','kind','sentence','body','page_w','page_h']
+            : ['file','id','color','text','note','kind','sentence','body'],
+            method === 'POST' ? ['file','page','rects'] : ['file','id'],code);
+        }
+        return bodyPromise.then(function (body) {
+          requireLocalFile(body.file,code);
+          return nativeBookMutation('highlight-api',{method:method,body:body}).then(function (receipt) {
+            if (!receipt.result || receipt.result.ok !== true) throw outgoingRequestError('原生划线回执不完整',code,500);
+            scheduleReplicationDrain(0);
+            return receipt.result;
+          });
+        });
+      },code);
+    }
     if (method === 'GET') {
       return localJSONRoute(function () {
         localFileQuery(url, ['file'], ['file'], code);
@@ -15573,9 +15602,13 @@
           // 精确工具携带稳定 mutation id，CAS 冲突可安全重试。不要排在普通
           // 高亮的共享 Promise 队列之后：旧 WebKit 写入若失联，队列会永久
           // 悬住并让每次语音高亮都只得到 20 秒回执超时。
-          return persistAssistantPDFHighlight(
-            body, 'BW_LOCAL_HIGHLIGHT_DIRECT'
-          ).then(function (saved) {
+          var save = nativeBookWrites
+            ? nativeBookMutation('highlight-api',{method:'POST',body:body,assistant:true}).then(function (receipt) {
+              if (!receipt.result || receipt.result.ok !== true) throw new RuntimeError('原生划线回执不完整','BW_NATIVE_BOOK_WRITE');
+              scheduleReplicationDrain(0);
+              return receipt.result;
+            }) : persistAssistantPDFHighlight(body, 'BW_LOCAL_HIGHLIGHT_DIRECT');
+          return save.then(function (saved) {
             // 失败与未知走不到这里：它只挂在成功分支上。
             announceAssistantHighlight(body, saved);
             return saved;

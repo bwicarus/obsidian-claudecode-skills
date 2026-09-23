@@ -46,13 +46,17 @@ struct ReaderNativeBookStore {
                       number.doubleValue >= 0, number.doubleValue <= 9_007_199_254_740_991 else { throw MutationError.invalid("预期修订号") }
                 expected = number.int64Value
             } else {
-                guard ["reading-position", "note-api", "note-operation", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
+                guard ["reading-position", "note-api", "note-operation", "highlight-api", "highlight-edit", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
                 expected = nil
             }
             let revision: Int64
             var result: [String: Any]? = nil
             var bindingChanges: [[String: Any]] = []
             switch operation {
+            case "highlight-api", "highlight-edit":
+                guard let input = value as? [String:Any] else { throw MutationError.invalid("划线操作") }
+                let outcome = try mutateHighlight(input, edit:operation == "highlight-edit", mutation:mutation, at:stamp)
+                revision = outcome.revision; result = outcome.result
             case "ink-operation":
                 guard let input = value as? [String: Any] else { throw MutationError.invalid("手写操作") }
                 let outcome = try mutateInk(input, mutation: mutation, at: stamp)
@@ -120,6 +124,79 @@ struct ReaderNativeBookStore {
             try store.rememberMutationWithinTransaction(key, json: Self.string(["fingerprint": fingerprint, "receipt": receipt]), now: stamp)
             return receipt
         }
+    }
+
+    private func mutateHighlight(_ input: [String:Any], edit: Bool, mutation: String, at: Int64) throws -> (revision:Int64,result:[String:Any]) {
+        typealias Rules = ReaderNativeHighlightRules
+        let state = try projection.highlights("document-highlights",bookID:bookID)
+        var items = state.items
+        var method = input["method"] as? String ?? "", body = input["body"] as? [String:Any] ?? [:]
+        var result: [String:Any] = ["ok":true]
+        if edit {
+            guard let id = input["id"] as? String, let old = items.first(where: { $0["id"] as? String == id }),
+                  let action = input["op"] as? String else { throw Rules.HighlightError.missing }
+            body = ["file":"localbook:" + bookID,"id":id]
+            switch action {
+            case "delete": method = "DELETE"
+            case "color":
+                let key = try Rules.string(input["value"],limit:64)
+                guard key.isEmpty || Rules.palette[key] != nil else { throw Rules.HighlightError.invalid("画笔颜色") }
+                // Translation/explanation body is also a note. Removing its
+                // color must not silently delete the written explanation.
+                let hasNote = ["note","body","sentence"].contains { !(old[$0] as? String ?? "").trimmingCharacters(in:.whitespacesAndNewlines).isEmpty }
+                method = key.isEmpty && !hasNote ? "DELETE" : "PATCH"
+                if method == "PATCH" { body["color"] = Rules.palette[key] ?? "" }
+            case "note": method = "PATCH"; body["note"] = try Rules.string(input["value"],limit:2000)
+            default: throw Rules.HighlightError.invalid("编辑动作")
+            }
+        }
+        let allowed: Set<String> = method == "POST"
+            ? ["file","id","page","rects","color","text","note","kind","sentence","body","page_w","page_h"]
+            : (method == "DELETE" ? ["file","id"] : ["file","id","color","text","note","kind","sentence","body"])
+        guard ["POST","PATCH","DELETE"].contains(method), Set(body.keys).isSubset(of:allowed),
+              body["file"] as? String == "localbook:" + bookID else { throw Rules.HighlightError.invalid("书籍或请求字段") }
+        let assistant = input["assistant"] as? Bool == true
+        if method == "POST" {
+            let highlight = try Rules.create(body,now:at), id = highlight["id"] as! String
+            if assistant {
+                guard id == body["id"] as? String, id.hasPrefix("c_") else { throw Rules.HighlightError.invalid("助手操作编号") }
+                let undoState = try projection.state("pdf-assistant-undo",bookID:bookID)
+                let receiptState = try projection.state("pdf-assistant-ops",bookID:bookID)
+                guard undoState.payload == nil || undoState.payload is [[String:Any]], receiptState.payload == nil || receiptState.payload is [[String:Any]] else {
+                    throw MutationError.invalid("划线撤销或回执记录损坏")
+                }
+                var undo = undoState.payload as? [[String:Any]] ?? [], receipts = receiptState.payload as? [[String:Any]] ?? []
+                let creationID = "direct-highlight:" + id, fingerprint = try Rules.fingerprint(highlight)
+                let existing = items.first { $0["id"] as? String == id }
+                if let prior = receipts.first(where: { $0["id"] as? String == creationID }) {
+                    guard let existing, let priorFingerprint = prior["fingerprint"] as? String,
+                          Rules.sameFingerprint(priorFingerprint,fingerprint),
+                          try Rules.sameFingerprint(Rules.fingerprint(existing),fingerprint) else { throw Rules.HighlightError.conflict }
+                    return (state.revision,["ok":true,"id":id,"highlight":existing,"replayed":true])
+                }
+                guard existing == nil else { throw Rules.HighlightError.conflict }
+                undo.append(["id":creationID,"kind":"highlight-create","targetKind":"document-highlights",
+                    "expectedRevision":state.revision + 1,"ids":[id],"ts":Double(at)/1000])
+                receipts.append(["id":creationID,"kind":"highlight","fingerprint":fingerprint,"ts":Double(at)/1000])
+                try writeState("pdf-assistant-undo",value:Array(undo.suffix(80)),expected:undoState.revision,mutation:mutation + ":undo",at:at)
+                try writeState("pdf-assistant-ops",value:Rules.boundedReceipts(receipts),expected:receiptState.revision,mutation:mutation + ":ops",at:at)
+            }
+            items.removeAll { $0["id"] as? String == id }; items.append(highlight)
+            result["id"] = id; result["highlight"] = highlight; result["replayed"] = false
+            body = highlight; body.removeValue(forKey:"time"); body["file"] = "localbook:" + bookID
+        } else {
+            guard let id = body["id"] as? String, let index = items.firstIndex(where: { $0["id"] as? String == id }) else { throw Rules.HighlightError.missing }
+            if method == "DELETE" { items.remove(at:index); result["deleted"] = true }
+            else { items[index] = try Rules.patch(body,old:items[index]); result["highlight"] = items[index] }
+        }
+        let revision = try writeHighlights("document-highlights",items:items,expected:state.revision,mutation:mutation,at:at)
+        _ = try enqueueReplication(["url":"/pdf/api/highlights","method":method,"body":body],mutation:mutation + ":replication",at:at)
+        if edit, let highlight = result["highlight"] as? [String:Any] {
+            let color = highlight["color"] as? String ?? ""
+            result["color"] = Rules.palette.first { $0.value.lowercased() == color.lowercased() }?.key ?? color
+            result["note"] = highlight["note"] ?? ""
+        }
+        return (revision,result)
     }
 
     /// Reading the latest strokes and saving undo, ink and the deferred sync

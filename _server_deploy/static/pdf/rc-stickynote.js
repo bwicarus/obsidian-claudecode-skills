@@ -4207,11 +4207,12 @@
     // 原生页卡的**数据**：只读便签本身，不挂任何 DOM（原生正文接管时网页一张卡都不挂）。
     // 只交 PDF 锚点的卡片式便签；pages 给了就只交锚点页或词锚页落在其中的那些。
     // 形态、色调、墨迹几何的取法与 nativePlacementState 逐字一致 —— 原生不另猜一份。
-    nativeNoteCards: function (pages) {
+    nativeNoteCards: function (pages, options) {
       var want = Array.isArray(pages) && pages.length ? pages : null;
       return notes.map(function (note) {
         var slot = cardPayloadSlot(note), anchor = note && note.anchor;
         if (!slot || !anchor || anchor.kind !== 'pdf') return null;
+        if (slot === 'html' && options && options.excludeHTML === true) return null;
         var bind = wordBindOf(note), data = note[slot];
         if (want && want.indexOf(anchor.page) < 0 && !(bind && want.indexOf(bind.page) >= 0)) return null;
         var id = noteIdOf(note);

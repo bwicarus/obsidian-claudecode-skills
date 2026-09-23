@@ -519,7 +519,7 @@ enum ReaderNativeConversationScript {
         const pages = Number.isInteger(page) && page > 0
           ? Array.from({ length: 9 }, (_, i) => page - 4 + i).filter(n => n > 0) : null;
         const generation = sticky.nativeGeneration?.();
-        return sticky.nativeNoteCards(pages).flatMap(item => {
+        return sticky.nativeNoteCards(pages, {excludeHTML:window.__BW_NATIVE_HTML_NOTES__ === true}).flatMap(item => {
           if (window.__BW_NATIVE_HTML_NOTES__ === true && item.html && !item.card) return [];
           const owner = { get isConnected() { return sticky.nativeGeneration?.() === generation && !!sticky.nativeHasNote?.(item.id); } };
           const id = 'note-' + hash(item.id);

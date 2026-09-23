@@ -45,6 +45,19 @@ function _hlGesture() {
 }
 let _allHighlights = [];
 let _hlByPage = {};
+// Native writes publish a committed record. Update the transitional lookup
+// index directly; no page mount, fetch, raster or web overlay is needed.
+window.addEventListener('bw:native-highlight-committed', function (event) {
+  const value = event && event.detail;
+  if (!value || 'localbook:' + value.bookID !== FILE_REL || !value.result?.ok) return;
+  const highlight = value.result.highlight;
+  const id = highlight?.id || value.input?.id || value.input?.body?.id;
+  if (!id) return;
+  _allHighlights = _allHighlights.filter(h => h && h.id !== id);
+  if (highlight && !value.result.deleted) _allHighlights.push(highlight);
+  _hlByPage = {};
+  for (const h of _allHighlights) (_hlByPage[h.page] ||= []).push(h);
+});
 let _resultContext = null;   // {charSel, text, sentence, kind} 由 onTranslate/onExplain 入口存
 let _resultReqId = 0;        // 结果框请求序号：每开一次新框 +1，异步回调写入前比对，过期(被新任务覆盖)就丢弃
 
