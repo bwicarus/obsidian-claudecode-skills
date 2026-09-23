@@ -180,3 +180,20 @@ test("查词：phrase/isJa 在第一个用到它们的分支之前声明；面�
   assert.match(VIEW, /model\.inflection/);
   assert.match(VIEW, /model\.partOfSpeech/);
 });
+
+test("侧栏卡能长按拖起：会话列表的滚动检测不在手指落下时就认领触摸", () => {
+  // 2026-09-23 用户："拖卡甚至无法在侧边栏中长按进入拖动模式"。
+  const VIEW = read("ios/BWReader/App/ReaderNativeConversationView.swift");
+  assert.doesNotMatch(VIEW, /simultaneousGesture\(\s*DragGesture\(minimumDistance: 0\)/);
+  const CARDS = read("ios/BWReader/App/ReaderNativeConversationCards.swift");
+  assert.match(CARDS, /\.contentShape\(Rectangle\(\)\)\s*\n\s*\/\/ 拖出去时给一个像"卡片副本"的影子/);
+});
+
+test("点词查词贴着词弹小框（原版 #word-pop），不走底部面板", () => {
+  const APP = read("ios/BWReader/App/BWReaderNativeApp.swift");
+  assert.match(APP, /ReaderNativeWordPopLayer\(reader: reader\)/);
+  assert.match(WEBVIEW, /if \["dict", "phrase"\]\.contains\(mode\), let anchor = nativePDFDocument\?\.lastLookupAnchor \{/);
+  const POP = read("ios/BWReader/App/ReaderNativeWordPop.swift");
+  assert.match(POP, /ReaderNativeLookupContent\(model: model\)/);
+  assert.match(POP, /\.task \{ await model\.load\(\) \}/);
+});

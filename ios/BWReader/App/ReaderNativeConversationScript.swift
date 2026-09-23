@@ -267,6 +267,22 @@ enum ReaderNativeConversationScript {
         }
         return inlineImages;
       }
+      // 学习卡组找不到挂载的容器时：把卡位里实际写着什么带出来（草稿保存失败时渲染层把原因
+      // 写进了卡位），记一次日志，并在稍后重拍几次快照 —— 容器可能只是晚一点才登记。
+      // ⚠ 2026-09-23 用户截图：侧栏里只剩「学习卡暂时读不到（no-card-group）」，看不出为什么。
+      const cardGroupRetries = new Map();
+      function missingCardGroup(part, node) {
+        const gid = String(part.data?.gid || part.id);
+        const hint = String(node?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        if (hint) part.data.liveReason = 'no-card-group：' + hint;
+        const tries = cardGroupRetries.get(gid) || 0;
+        if (tries >= 3) return;
+        cardGroupRetries.set(gid, tries + 1);
+        if (tries === 0) {
+          try { window.__bwClientLog?.('log', '[card-group] missing gid=' + gid.slice(0, 40) + ' hint=' + hint); } catch (_) {}
+        }
+        setTimeout(schedule, 1200 * (tries + 1));
+      }
       function liveArtifacts(messages) {
         for (const message of messages) {
         for (const part of message.parts) {
@@ -293,6 +309,7 @@ enum ReaderNativeConversationScript {
           if (!interaction && part.kind === 'anki') {
             part.data.liveReason = !group ? 'no-card-group'
               : !rc().flashcard ? 'no-flashcard-module' : 'no-state:' + cardIndex;
+            if (!group) missingCardGroup(part, node);
           }
           if (interaction && (part.kind === 'anki' || part.kind === 'artifact')) {
             part.kind = 'anki';

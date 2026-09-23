@@ -34,8 +34,9 @@ struct ReaderNativePDFSelectionPanelLayer: View {
 }
 
 /// 贴着选区摆：优先放在选区下方，放不下就放上方；左右夹进屏幕。
-private struct ReaderNativeSelectionPanelPlacement: Layout {
+struct ReaderNativeSelectionPanelPlacement: Layout {
     let anchor: CGRect
+    var maxWidth: CGFloat = 480
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         proposal.replacingUnspecifiedDimensions()
@@ -44,7 +45,7 @@ private struct ReaderNativeSelectionPanelPlacement: Layout {
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         guard let view = subviews.first else { return }
         let margin: CGFloat = 8
-        let size = view.sizeThatFits(ProposedViewSize(width: min(480, max(160, bounds.width - margin * 2)), height: nil))
+        let size = view.sizeThatFits(ProposedViewSize(width: min(maxWidth, max(160, bounds.width - margin * 2)), height: nil))
         var y = anchor.maxY + margin
         if y + size.height > bounds.height - margin { y = anchor.minY - size.height - margin }
         let x = min(max(margin, anchor.minX), max(margin, bounds.width - size.width - margin))

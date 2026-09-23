@@ -197,170 +197,7 @@ struct ReaderNativeLookupView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if model.loading {
-                        ProgressView().frame(maxWidth: .infinity, alignment: .center).padding(.top, 24)
-                    } else if let error = model.error {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
-                    } else if model.isPhrase {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text(model.headword).font(.title3.weight(.semibold))
-                            if !model.reading.isEmpty {
-                                Text(model.reading).font(.callout)
-                                    .foregroundStyle(ReaderNativeTheme.muted)
-                            }
-                            Button { model.speak() } label: { Image(systemName: "speaker.wave.2") }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("发音")
-                        }
-                        Text(model.chinese.isEmpty ? "（无翻译）" : model.chinese)
-                            .font(.body).textSelection(.enabled)
-                        if !model.kanji.isEmpty {
-                            Text(model.kanji.joined(separator: "　")).font(.callout)
-                                .foregroundStyle(ReaderNativeTheme.muted)
-                        }
-                        Divider()
-                        Button {
-                            Task { await model.toggleFavorite() }
-                        } label: {
-                            Label(model.favorited ? "已收藏（点此取消）" : "收藏为词组",
-                                  systemImage: model.favorited ? "star.fill" : "star")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(model.favoriting)
-                        .accessibilityHint("收藏后这几个字之后会当作一个词来分词")
-                        Button {
-                            Task { await model.markMastered() }
-                        } label: {
-                            Label(model.mastered ? "已掌握（点此取消）" : "标记掌握",
-                                  systemImage: model.mastered ? "checkmark.circle.fill" : "star")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(model.marking)
-                    } else if model.mode == "explain" {
-                        Text(model.text).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
-                        Divider()
-                        if model.explanation.isEmpty {
-                            Text("没有返回解释。").foregroundStyle(ReaderNativeTheme.muted)
-                        } else {
-                            ForEach(Array(model.explanation.enumerated()), id: \.offset) { _, line in
-                                Text(line).font(.callout).textSelection(.enabled)
-                            }
-                        }
-                    } else if model.mode == "translate" {
-                        Text(model.text).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
-                        Divider()
-                        Text(model.chinese.isEmpty ? "没有返回译文。" : model.chinese)
-                            .font(.body).textSelection(.enabled)
-                    } else {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text(model.headword).font(.title2.weight(.semibold))
-                            Button {
-                                model.speak()
-                            } label: {
-                                Image(systemName: "speaker.wave.2")
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("发音")
-                            if !model.reading.isEmpty {
-                                Text(model.reading).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
-                            }
-                            if !model.phonetic.isEmpty {
-                                Text(model.phonetic).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
-                            }
-                            if model.frequency > 0 {
-                                Text("BNC#\(model.frequency)").font(.caption2.monospacedDigit())
-                                    .foregroundStyle(ReaderNativeTheme.muted)
-                            }
-                        }
-                        if !model.inflection.isEmpty {
-                            // 变形：日语=原形 + 语法标签（过去た/否定ない/て形…）；英语=各种屈折变形。
-                            Text(model.inflection).font(.footnote).foregroundStyle(ReaderNativeTheme.muted)
-                        }
-                        if !model.lemma.isEmpty, model.lemma != model.headword {
-                            Text("原形 " + model.lemma).font(.footnote)
-                                .foregroundStyle(ReaderNativeTheme.muted)
-                        }
-                        if !model.chinese.isEmpty {
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                if !model.partOfSpeech.isEmpty {
-                                    // 词性单独做暗色小标签（原版 .wp-pos-tag）。
-                                    Text(model.partOfSpeech).font(.caption2)
-                                        .padding(.horizontal, 5).padding(.vertical, 1)
-                                        .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 4))
-                                        .foregroundStyle(ReaderNativeTheme.muted)
-                                }
-                                Text(model.chinese).font(.body).textSelection(.enabled)
-                            }
-                        }
-                        if !model.kanji.isEmpty {
-                            // 日语汉字拆解：网页那侧也是这么列的。
-                            Text(model.kanji.joined(separator: "　")).font(.callout)
-                                .foregroundStyle(ReaderNativeTheme.muted)
-                        }
-                        if !model.definition.isEmpty {
-                            Divider()
-                            Text(model.definition).font(.callout).textSelection(.enabled)
-                        }
-                        if model.chinese.isEmpty && model.definition.isEmpty {
-                            Text("词典里没有这个词。").foregroundStyle(ReaderNativeTheme.muted)
-                        }
-                        if !model.examples.isEmpty {
-                            Divider()
-                            VStack(alignment: .leading, spacing: 8) {
-                                ForEach(Array(model.examples.enumerated()), id: \.offset) { _, pair in
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(pair.0).font(.callout)
-                                        if !pair.1.isEmpty {
-                                            Text(pair.1).font(.footnote)
-                                                .foregroundStyle(ReaderNativeTheme.muted)
-                                        }
-                                    }
-                                }
-                            }
-                            .textSelection(.enabled)
-                        }
-                        if !model.synonyms.isEmpty || !model.antonyms.isEmpty {
-                            let parts = [model.synonyms.isEmpty ? "" : "同 " + model.synonyms.prefix(5).joined(separator: ", "),
-                                         model.antonyms.isEmpty ? "" : "反 " + model.antonyms.prefix(5).joined(separator: ", ")]
-                            Text(parts.filter { !$0.isEmpty }.joined(separator: " · "))
-                                .font(.footnote).foregroundStyle(ReaderNativeTheme.muted)
-                        }
-                        // 日语不出这个按钮：日语的「展开」在网页上是另一条路（离线富内容
-                        // 小框已经给了 + 按需的 AI 深入讲解），不是同一个端点。
-                        if !model.expanded, !model.isJapanese {
-                            Button {
-                                Task { await model.expand() }
-                            } label: {
-                                Label(model.expanding ? "展开中…" : "展开完整词典",
-                                      systemImage: "chevron.down.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(model.expanding)
-                        }
-                        Divider()
-                        // 原版小框底部那一排：标记掌握 + 语法。
-                        HStack(spacing: 10) {
-                            Button {
-                                Task { await model.markMastered() }
-                            } label: {
-                                Label(model.mastered ? "已掌握 100" : "标记掌握",
-                                      systemImage: model.mastered ? "checkmark.circle.fill" : "star")
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(model.mastered ? .green : nil)
-                            .disabled(model.marking)
-                            .accessibilityHint("标记掌握后这个词不再画生词下划线；再点取消")
-                            Button { model.grammar() } label: {
-                                Label("语法", systemImage: "chart.bar.doc.horizontal")
-                            }
-                            .buttonStyle(.bordered)
-                            .accessibilityHint("对这个词所在的整句做语法分析")
-                        }
-                        .font(.footnote)
-                    }
-                }
+                ReaderNativeLookupContent(model: model)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
             }
@@ -375,6 +212,178 @@ struct ReaderNativeLookupView: View {
         }
         .tint(ReaderNativeTheme.accent)
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// 查词结果的正文（词头、释义、例句、按钮）。底部面板与贴词小框共用这一份。
+struct ReaderNativeLookupContent: View {
+    @ObservedObject var model: ReaderNativeLookupModel
+
+    var body: some View {
+    VStack(alignment: .leading, spacing: 14) {
+        if model.loading {
+            ProgressView().frame(maxWidth: .infinity, alignment: .center).padding(.top, 24)
+        } else if let error = model.error {
+            Label(error, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+        } else if model.isPhrase {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(model.headword).font(.title3.weight(.semibold))
+                if !model.reading.isEmpty {
+                    Text(model.reading).font(.callout)
+                        .foregroundStyle(ReaderNativeTheme.muted)
+                }
+                Button { model.speak() } label: { Image(systemName: "speaker.wave.2") }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("发音")
+            }
+            Text(model.chinese.isEmpty ? "（无翻译）" : model.chinese)
+                .font(.body).textSelection(.enabled)
+            if !model.kanji.isEmpty {
+                Text(model.kanji.joined(separator: "　")).font(.callout)
+                    .foregroundStyle(ReaderNativeTheme.muted)
+            }
+            Divider()
+            Button {
+                Task { await model.toggleFavorite() }
+            } label: {
+                Label(model.favorited ? "已收藏（点此取消）" : "收藏为词组",
+                      systemImage: model.favorited ? "star.fill" : "star")
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.favoriting)
+            .accessibilityHint("收藏后这几个字之后会当作一个词来分词")
+            Button {
+                Task { await model.markMastered() }
+            } label: {
+                Label(model.mastered ? "已掌握（点此取消）" : "标记掌握",
+                      systemImage: model.mastered ? "checkmark.circle.fill" : "star")
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.marking)
+        } else if model.mode == "explain" {
+            Text(model.text).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
+            Divider()
+            if model.explanation.isEmpty {
+                Text("没有返回解释。").foregroundStyle(ReaderNativeTheme.muted)
+            } else {
+                ForEach(Array(model.explanation.enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.callout).textSelection(.enabled)
+                }
+            }
+        } else if model.mode == "translate" {
+            Text(model.text).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
+            Divider()
+            Text(model.chinese.isEmpty ? "没有返回译文。" : model.chinese)
+                .font(.body).textSelection(.enabled)
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(model.headword).font(.title2.weight(.semibold))
+                Button {
+                    model.speak()
+                } label: {
+                    Image(systemName: "speaker.wave.2")
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("发音")
+                if !model.reading.isEmpty {
+                    Text(model.reading).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
+                }
+                if !model.phonetic.isEmpty {
+                    Text(model.phonetic).font(.callout).foregroundStyle(ReaderNativeTheme.muted)
+                }
+                if model.frequency > 0 {
+                    Text("BNC#\(model.frequency)").font(.caption2.monospacedDigit())
+                        .foregroundStyle(ReaderNativeTheme.muted)
+                }
+            }
+            if !model.inflection.isEmpty {
+                // 变形：日语=原形 + 语法标签（过去た/否定ない/て形…）；英语=各种屈折变形。
+                Text(model.inflection).font(.footnote).foregroundStyle(ReaderNativeTheme.muted)
+            }
+            if !model.lemma.isEmpty, model.lemma != model.headword {
+                Text("原形 " + model.lemma).font(.footnote)
+                    .foregroundStyle(ReaderNativeTheme.muted)
+            }
+            if !model.chinese.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if !model.partOfSpeech.isEmpty {
+                        // 词性单独做暗色小标签（原版 .wp-pos-tag）。
+                        Text(model.partOfSpeech).font(.caption2)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 4))
+                            .foregroundStyle(ReaderNativeTheme.muted)
+                    }
+                    Text(model.chinese).font(.body).textSelection(.enabled)
+                }
+            }
+            if !model.kanji.isEmpty {
+                // 日语汉字拆解：网页那侧也是这么列的。
+                Text(model.kanji.joined(separator: "　")).font(.callout)
+                    .foregroundStyle(ReaderNativeTheme.muted)
+            }
+            if !model.definition.isEmpty {
+                Divider()
+                Text(model.definition).font(.callout).textSelection(.enabled)
+            }
+            if model.chinese.isEmpty && model.definition.isEmpty {
+                Text("词典里没有这个词。").foregroundStyle(ReaderNativeTheme.muted)
+            }
+            if !model.examples.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(model.examples.enumerated()), id: \.offset) { _, pair in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(pair.0).font(.callout)
+                            if !pair.1.isEmpty {
+                                Text(pair.1).font(.footnote)
+                                    .foregroundStyle(ReaderNativeTheme.muted)
+                            }
+                        }
+                    }
+                }
+                .textSelection(.enabled)
+            }
+            if !model.synonyms.isEmpty || !model.antonyms.isEmpty {
+                let parts = [model.synonyms.isEmpty ? "" : "同 " + model.synonyms.prefix(5).joined(separator: ", "),
+                             model.antonyms.isEmpty ? "" : "反 " + model.antonyms.prefix(5).joined(separator: ", ")]
+                Text(parts.filter { !$0.isEmpty }.joined(separator: " · "))
+                    .font(.footnote).foregroundStyle(ReaderNativeTheme.muted)
+            }
+            // 日语不出这个按钮：日语的「展开」在网页上是另一条路（离线富内容
+            // 小框已经给了 + 按需的 AI 深入讲解），不是同一个端点。
+            if !model.expanded, !model.isJapanese {
+                Button {
+                    Task { await model.expand() }
+                } label: {
+                    Label(model.expanding ? "展开中…" : "展开完整词典",
+                          systemImage: "chevron.down.circle")
+                }
+                .buttonStyle(.borderless)
+                .disabled(model.expanding)
+            }
+            Divider()
+            // 原版小框底部那一排：标记掌握 + 语法。
+            HStack(spacing: 10) {
+                Button {
+                    Task { await model.markMastered() }
+                } label: {
+                    Label(model.mastered ? "已掌握 100" : "标记掌握",
+                          systemImage: model.mastered ? "checkmark.circle.fill" : "star")
+                }
+                .buttonStyle(.bordered)
+                .tint(model.mastered ? .green : nil)
+                .disabled(model.marking)
+                .accessibilityHint("标记掌握后这个词不再画生词下划线；再点取消")
+                Button { model.grammar() } label: {
+                    Label("语法", systemImage: "chart.bar.doc.horizontal")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityHint("对这个词所在的整句做语法分析")
+            }
+            .font(.footnote)
+        }
+    }
     }
 }
 

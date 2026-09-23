@@ -281,8 +281,11 @@ struct ReaderNativeConversationView: View {
                     }
                     if model.followsLatest { proxy.scrollTo("nativeConversationBottom", anchor: .bottom) }
                 }
+                // ⚠ minimumDistance 不能是 0：那样手指一落下就被它认领，卡片标题上的系统长按
+                //   拖动（.draggable，UIKit 的拖放交互）起不来 —— 2026-09-23 用户："拖卡甚至
+                //   无法在侧边栏中长按进入拖动模式"。它只需要知道"用户在滚"，手指真的动了再算。
                 .simultaneousGesture(
-                    DragGesture(minimumDistance: 0)
+                    DragGesture(minimumDistance: 8)
                         .updating($interacting) { _, active, _ in active = true }
                         .onChanged { _ in
                             model.followsLatest = false

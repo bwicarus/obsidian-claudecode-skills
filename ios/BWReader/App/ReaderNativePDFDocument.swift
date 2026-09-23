@@ -343,6 +343,11 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         selectionPanelAnchor = overlay.selectionWindowRect()
     }
 
+    /// 最近一次查词时那个词在窗口里的框（贴词小框按它摆）。
+    private(set) var lastLookupAnchor: CGRect?
+    /// 贴在正文上的临时东西（查词小框）该收起了：开始滚动 / 点了空白处。
+    var onDismissTransient: (() -> Void)?
+
     /// 只收起窗口，选区留着（查词/翻译等打开面板后）。
     func dismissSelectionPanel() {
         selectionPanel = nil; selectionPanelAnchor = nil
@@ -1067,10 +1072,12 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let layoutKey: [CGFloat] = [view.scaleFactor, content.width, content.height, view.bounds.width, view.bounds.height]
         if layoutKey != lastLayoutKey { lastLayoutKey = layoutKey; layoutRevision &+= 1 }
         if selectionPanelAnchor != nil { selectionPanelAnchor = nil }
+        if settleTask == nil { onDismissTransient?() }   // 一次滚动只报一次（开始时）
         settleTask?.cancel()
         settleTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard let self, !Task.isCancelled else { return }
+            self.settleTask = nil
             self.settledRevision &+= 1
             if self.selectionPanel != nil {
                 self.selectionPanelAnchor = self.selectionPanelOverlay?.selectionWindowRect()
@@ -1155,6 +1162,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     }
 
     func clearSelection() {
+        onDismissTransient?()
         selectionTask?.cancel(); customSelection = false
         textOverlays.values.forEach { $0.clearSelection() }
         view.clearSelection(); onSelection?([])
@@ -1234,7 +1242,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         overlay.onGrammar = { [weak self] value in
             self?.onGrammar?(number, value.sentence, value.text)
         }
-        overlay.onLookup = { [weak self] value, mode in
+        overlay.onLookup = { [weak self, weak overlay] value, mode in
+            // 记下这个词在屏幕上的位置：查词结果按原版那样贴着词弹小框。
+            self?.lastLookupAnchor = overlay?.selectionWindowRect()
             self?.onLookup?(number, value.text, value.sentence, mode)
         }
         // 有字符数据的页一律由原生文字层接选区（我们自己的选区菜单）；PDFKit 自带的选择

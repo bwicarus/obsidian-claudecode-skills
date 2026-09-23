@@ -478,6 +478,39 @@ test("草稿 gid 只允许 cards/source 精确幂等重放，已有记录必须�
   );
 });
 
+test("原生存储重排 JSON 字段后，同一草稿可重放，真实内容或来源分叉仍拒绝", async () => {
+  const store = makeStore("native-key-order");
+  const { repo } = repository(store);
+  const input = {
+    id: CARD_A,
+    cards: [basic("ウイルス性肝炎"), cloze()],
+    source: source({ draftId: "draft-native-replay" }),
+  };
+  const options = { mutationId: "native-create", requireDraftIdForReplay: true };
+  const created = await repo.registerDraft(input, options);
+  const get = store.get.bind(store);
+  // ReaderNativeDataStoreBridge persists JSON with .sortedKeys.
+  const sorted = (value) => Array.isArray(value) ? value.map(sorted)
+    : value && typeof value === "object"
+      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sorted(value[key])]))
+      : value;
+  store.get = async (...args) => sorted(await get(...args));
+  const replay = () => repo.registerDraft(input, {
+    ...options, mutationId: "native-replay",
+  });
+  assert.deepEqual(await replay(), created);
+  assert.deepEqual(await replay(), created, "重复展示不改变内容或学习状态版本");
+  await assert.rejects(repo.registerDraft({ ...input,
+    cards: [basic("different meaning"), cloze()],
+  }, options), (error) => error.code === "BW_CARD_REPOSITORY_CONTENT_CONFLICT");
+  await assert.rejects(repo.registerDraft({ ...input,
+    cards: [...input.cards].reverse(),
+  }, options), (error) => error.code === "BW_CARD_REPOSITORY_CONTENT_CONFLICT");
+  await assert.rejects(repo.registerDraft({ ...input,
+    source: { ...input.source, quote: "different quote" },
+  }, options), (error) => error.code === "BW_CARD_REPOSITORY_SOURCE_CONFLICT");
+});
+
 test("草稿正文按稳定 batch index 写入 exactState，重载不改原始呈现基线", async () => {
   const { repo } = repository();
   const originalCards = [basic("draft 0"), basic("draft 1")];

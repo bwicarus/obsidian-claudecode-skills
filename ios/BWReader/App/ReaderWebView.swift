@@ -374,6 +374,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     @Published private(set) var nativePDFMountFailure: String?
     /// 原生查词/翻译面板。非 nil 即弹出（在 ReaderNativeWorkspace 里呈现）。
     @Published var nativeLookup: ReaderNativeLookupModel?
+    /// 贴词小框（原版 #word-pop）：点词查词 / 词组的结果贴着那个词弹出，不走底部面板。
+    @Published var nativeWordPop: ReaderNativeLookupModel?
+    @Published var nativeWordPopAnchor: CGRect?
     @Published var nativeFigure: ReaderNativeFigureModel?
     @Published var nativeGrammar: ReaderNativeGrammarModel?
     @Published var nativeHighlightEditor: ReaderNativeHighlightEditorModel?
@@ -1302,6 +1305,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 && self.currentLocalBook?.id == bookID && self.currentLocalBookContentSHA256 == digest
         }
         activeNativePDFDocument = document
+        document.onDismissTransient = { [weak self] in
+            Task { @MainActor [weak self] in
+                if self?.nativeWordPop != nil { self?.nativeWordPop = nil }
+            }
+        }
+        nativePlacementsCancellable = nativeConversation.$placements.sink { [weak self] items in
+            Task { @MainActor [weak self] in self?.reconcileNativeNotePlacements(items) }
+        }
         document.onDiagnostic = { [weak self] line in
             Task { @MainActor [weak self] in self?.postClientLog(line) }
         }
@@ -1481,13 +1492,21 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         panel.onGrammar = { [weak self] sentence, focus in
             guard let self else { return }
             self.nativeLookup = nil
+            self.nativeWordPop = nil
             // 等词典面板收起再开语法面板（两个 sheet 不能同时出）。
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 450_000_000)
                 self?.openNativeGrammar(sentence: sentence, focus: focus)
             }
         }
-        nativeLookup = panel
+        // 点词 / 词组：贴着那个词弹小框（原版 #word-pop）；翻译、解释这类长结果仍走面板。
+        if ["dict", "phrase"].contains(mode), let anchor = nativePDFDocument?.lastLookupAnchor {
+            nativeWordPopAnchor = anchor
+            nativeWordPop = panel
+        } else {
+            nativeWordPop = nil
+            nativeLookup = panel
+        }
     }
 
     /// 顶栏 🗒 新建便签。
@@ -1622,6 +1641,32 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ///
     /// 合并成一次：一次划线会连着落好几笔（高亮本体 + 关联记录），逐笔重投
     /// 等于把整包 user-state 导出好几遍。180ms 与导航桥的节流同口径。
+    /// 网页那侧已经交出、原生这边还不知道的便签卡（刚放下的卡）。
+    ///
+    /// ⚠ 2026-09-23 实录：侧栏卡拖到书页，放置回执 ok=true、卡却不出现。便签先进网页内存、
+    ///   异步落库；原生那次重读投影发生在落库之前，拿不到这张卡的位置就不画，之后也没有
+    ///   任何事件再触发重读。这里对"交出来了但原生不认识"的卡退避重读，读到为止（至多 5 次）。
+    private var nativePlacementsCancellable: AnyCancellable?
+    private var nativeNotesReconciling = false
+
+    private func reconcileNativeNotePlacements(_ items: [ReaderNativePagePlacement]) {
+        guard !nativeNotesReconciling, let document = nativePDFDocument else { return }
+        let known = Set(document.notes.compactMap { $0["id"] as? String })
+        let missing = Set(items.filter { $0.fromNote && !known.contains($0.noteID) }.map(\.noteID))
+        guard !missing.isEmpty else { return }
+        nativeNotesReconciling = true
+        Task { @MainActor [weak self, weak document] in
+            defer { self?.nativeNotesReconciling = false }
+            for attempt in 1...5 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 400_000_000)
+                guard let self, let document, self.nativePDFDocument === document else { return }
+                await self.refreshNativePDFProjection()
+                let now = Set(document.notes.compactMap { $0["id"] as? String })
+                if missing.isSubset(of: now) { return }
+            }
+        }
+    }
+
     private func scheduleNativePDFProjectionRefresh() {
         guard nativePDFDocument != nil else { return }
         guard nativeProjectionRefreshTask == nil else { return }

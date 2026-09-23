@@ -208,6 +208,8 @@ private struct ReaderNativeConversationArtifactCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if isDraft { Text("待确认").font(.caption2).foregroundStyle(ReaderNativeTheme.muted) }
             }
+            // 整条标题都能按住拖（不只是图标和字本身）。
+            .contentShape(Rectangle())
             // 拖出去时给一个像"卡片副本"的影子 —— 网页那版拖的就是卡的克隆
             // （rc-voicecall `_dragToDock` 的 ghost）。默认快照拖的是这一行标题，
             // 看着不像在搬一张卡。

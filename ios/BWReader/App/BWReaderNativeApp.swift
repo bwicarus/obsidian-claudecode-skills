@@ -231,6 +231,9 @@ private struct ReaderRootView: View {
                 // 选区窗口（原版 #sel-toolbar）：贴着选区浮在正文上。
                 ReaderNativePDFSelectionPanelLayer(document: document)
                     .ignoresSafeArea(edges: .bottom)
+                // 贴词小框（原版 #word-pop）：点词查词的结果贴着词弹出。
+                ReaderNativeWordPopLayer(reader: reader)
+                    .ignoresSafeArea(edges: .bottom)
             }
 
             if nativeInterfaceEnabled && !reader.nativeConversation.legacyVisible {
