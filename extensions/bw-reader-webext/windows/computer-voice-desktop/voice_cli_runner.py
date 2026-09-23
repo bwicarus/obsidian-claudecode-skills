@@ -1233,7 +1233,7 @@ class Runner:
                         #   没有后台轮（纯聊天）才用自己的 v- 轮次。
                         #   归属依据是后台的实际调用，与措辞无关 —— 同「收拢」那套一个口径。
                         _own, _clear = stream_owner(
-                            self._turn["id"] if self._turn is not None else None,
+                            self._backend_display_id(),
                             self._voice_turn_id, self._voice_stream_owner)
                         if _clear:
                             # v- → 后台轮：先把旧容器草稿清空，否则同一段文字会顶在上面
@@ -1280,7 +1280,8 @@ class Runner:
                     streams = self._turn.setdefault("item_streams", {})
                     if item_id not in self._turn.setdefault("completed_items", set()):
                         streams[item_id] = (streams.get(item_id, "") + str(p["delta"]))[:32000]
-                        self._stream_post(self._turn["id"], streams[item_id], item_id=item_id)
+                        self._stream_post(self._part_segment(self._turn, item_id), streams[item_id],
+                                          item_id=item_id)
             elif m in ("item/started", "item/completed"):
                 if not self._matches_backend_turn(p):
                     return
@@ -3459,6 +3460,7 @@ class Runner:
                 tid = str(self._turn.get("id"))
                 self._history_post({"user": text, "via": "codex-voice",
                                     "turn_id": tid + ".t" + str(int(time.time() * 1000))[-6:]})
+                self._segment_backend_turn("typed")
                 self.log("typed", via="steer", text=text[:200])
                 return {"ok": True, "via": "backend"}
             # 那一轮恰好刚结束：退回起新的一轮
@@ -3628,7 +3630,7 @@ class Runner:
         if first:
             self._pre_turn_voice = None
         if pre and (time.time() - pre[2]) < 30 and pre[2] >= self._last_user_at():
-            self._voice_post(rec["id"], pre[1], absorb=pre[0], item_id=pre[0], final=True)
+            self._voice_post(rec.get("seg") or rec["id"], pre[1], absorb=pre[0], item_id=pre[0], final=True)
             self.log("pre_turn_voice_absorbed", turnId=rec.get("id"), frm=pre[0])
         part = {"kind": "tool", "tool": label[:160], "label": label[:320],
                 "origin": "runner", "id": call_id, "call_id": call_id, "status": "running"}
@@ -3651,14 +3653,69 @@ class Runner:
 
     def _publish_runner_parts(self, *, item_id=None, final=False, changed_parts=None):
         rec = self._turn
-        body = {"parts": changed_parts if changed_parts is not None else rec.get("parts", []),
-                "via": "codex-voice", "origin": "runner",
-                "turn_id": rec["id"], "item_id": item_id or ("parts:" + rec["id"]),
-                "role": "assistant", "upsert_only": 1, "create_if_missing": 1,
-                "notify_sidebar": 1}
-        if final:
-            body["stream_final"] = 1
-        self._history_post(body)
+        parts = changed_parts if changed_parts is not None else rec.get("parts", [])
+        # 每个部件回它第一次落库的那一段（见 _segment_backend_turn）。
+        groups = {}
+        for part in parts:
+            groups.setdefault(self._part_segment(rec, part.get("id")), []).append(part)
+        if not groups:
+            groups[rec.get("seg") or rec["id"]] = []
+        for seg, seg_parts in groups.items():
+            body = {"parts": seg_parts,
+                    "via": "codex-voice", "origin": "runner",
+                    "turn_id": seg, "item_id": item_id or ("parts:" + seg),
+                    "role": "assistant", "upsert_only": 1, "create_if_missing": 1,
+                    "notify_sidebar": 1}
+            if final:
+                body["stream_final"] = 1
+            self._history_post(body)
+
+    # ── 后台轮的「显示分段」 ──────────────────────────────────────────────
+    # 用户 2026-09-23：「侧边栏的对话显示顺序有问题，ai 的对话全都积累到了同一个地方」。
+    # 后台一轮可以跑很久。这期间用户又说了几句、语音模型也答了几句 —— 旧规则把这些语音
+    # 回复**一律**并进那条后台轮容器，而容器是轮次开始时建的，于是它们全堆在那一格里、
+    # 排在用户后来那几句**上面**（实录：「我当然知道啦」「嗯，我看一下」都跑进了更早的
+    # 「好，我会把介绍卡…」那一格）。
+    # 现在：后台轮在跑时用户每说/打一句（落库之后），这一轮就切一个新段 `<轮id>:sN`；
+    # 之后的语音回复与后台输出都写进新段。新段在用户那句**之后**才落库，排序自然对。
+    # 一个部件第一次落在哪段，以后的更新就一直回那段 —— 工具卡跑到一半切段，不会分身两处。
+    # 「一个任务一个框」仍然成立，只是按用户的话切成了几格。
+    def _backend_display_id(self):
+        rec = self._turn
+        if rec is None:
+            return None
+        return rec.get("seg") or rec["id"]
+
+    def _part_segment(self, rec, part_id):
+        return rec.setdefault("part_seg", {}).setdefault(str(part_id), rec.get("seg") or rec["id"])
+
+    def _segment_backend_turn(self, reason):
+        rec = self._turn
+        if rec is None:
+            return None
+        old = rec.get("seg") or rec["id"]
+        n = int(rec.get("seg_n") or 1) + 1
+        rec["seg_n"] = n
+        new = str(rec["id"])[:100] + ":s" + str(n)
+        rec["seg"] = new
+        # 侧栏据此把「当前容器」换到新段：App 之后画的部件也落进新段。
+        self._stream_start_post(new)
+        # 正在流的那句语音回复往往比用户那句落库早几毫秒开始（实录 seq8366 早于 8367），
+        # 归属在那一刻已经定在旧段 —— 它回答的正是用户刚说完这句，搬进新段。
+        state = getattr(self, "_transcript_streams", None)
+        for entry in (list(state.entries.values()) if state else []):
+            if entry["role"] == "assistant" and not entry["final"] and entry.get("owner") == old:
+                self._stream_post(old, "", item_id=entry["id"])
+                entry["owner"] = new
+                if entry.get("text"):
+                    self._stream_post(new, entry["text"], role="assistant", item_id=entry["id"])
+        if getattr(self, "_voice_stream_owner", None) == old:
+            # 旧 stdio 路径：容器级草稿里还挂着这句的半截，重发旧段草稿时把它去掉。
+            parts = (getattr(self, "_voice_parts", None) or {}).get(old) or []
+            self._stream_post(old, (chr(10) + chr(10)).join(parts))
+            self._voice_stream_owner = new
+        self.log("backend_segment", turnId=str(rec["id"])[-12:], seg=n, reason=reason)
+        return new
 
     def _last_user_at(self) -> float:
         """用户最后一次说话的时刻。
@@ -3691,7 +3748,7 @@ class Runner:
                 rec["assistant"] = txt
                 self._backend_recent = (time.time(), txt)
             if txt and not self._voice_owns_text():
-                self._stream_post(rec["id"], txt, item_id=item_id)
+                self._stream_post(self._part_segment(rec, item_id), txt, item_id=item_id)
                 part = {"kind": "text", "text": txt[:32000], "origin": "runner",
                         "id": item_id, "item_id": item_id}
                 self._put_runner_part(part)
@@ -3767,7 +3824,7 @@ class Runner:
         self._delegation_open_at = 0.0
         if rec:
             # 收尾那句语音几乎总是落在轮外，要能认领回去（见 _subtitle_done 的 owner 判定）
-            self._last_backend_turn_id = rec["id"]
+            self._last_backend_turn_id = rec.get("seg") or rec["id"]
         if not rec:
             return
         user = None if rec.get("user_posted") else rec.get("user")
@@ -3779,7 +3836,8 @@ class Runner:
             user, assistant = None, None
             if not rec["parts"] and not rec.get("absorb"):
                 self.log("history_skip_backend_text", turnId=rec["id"][:40])
-        body = {"user": user or "", "assistant": assistant or "", "via": "codex-voice", "turn_id": rec["id"][:40]}
+        seg = rec.get("seg") or rec["id"][:40]
+        body = {"user": user or "", "assistant": assistant or "", "via": "codex-voice", "turn_id": seg}
         # Every identified part was persisted as it changed. Re-sending the whole
         # task here grows quadratically and can exceed the endpoint's payload limit.
         # 这一轮期间那几条零散的语音记录：正文已并进上面的 parts，这里告诉服务端把它们删掉，
@@ -3791,7 +3849,7 @@ class Runner:
         #  App 任何一次画部件都会被错并到已经结束的轮次里）。
         body["turn_end"] = 1
         body["stream_final"] = 1
-        body["item_id"] = "turn:" + rec["id"]
+        body["item_id"] = "turn:" + seg
         # 这一轮**一个工具都没调过** → 侧栏那边没有任何 App 自己画出来的东西，
         # 只有正文；而正文的写入走 upsert，服务端按规矩不发事件（发了会在工具执行
         # 途中打断投递，见 assistant.py）。于是这一轮的内容要等下一次非 upsert 的
@@ -3835,7 +3893,7 @@ class Runner:
             self._voice_user_stream = entry["text"]
             owner = entry["id"]
         else:
-            owner, clear = stream_owner(self._turn["id"] if self._turn else None,
+            owner, clear = stream_owner(self._backend_display_id(),
                                         entry["id"], entry["owner"])
             if clear:
                 self._stream_post(clear, "", item_id=entry["id"])
@@ -3883,6 +3941,9 @@ class Runner:
                 pass
             self._history_post({"user": text, "via": "voice", "turn_id": tid,
                                 "item_id": tid, "role": "user", "stream_final": 1})
+            # 后台轮还在跑：之后的回答排到这句下面去（见 _segment_backend_turn）。
+            if self._turn is not None:
+                self._segment_backend_turn("user-voice")
         elif role == "assistant":
             tid = item_id or self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
             fixed_owner = owner or self._voice_stream_owner
@@ -3897,8 +3958,7 @@ class Runner:
             #   上一版是"先建再收拢"，结果半截草稿、完整句、零散记录三份并存（实录里三样都在）。
             #   不建就没得收，这比事后删干净。
             #   已开始流式的句子固定在原 owner；没有绑定时仅认当前后台轮，不按20秒猜。
-            rec = self._turn
-            owner = fixed_owner or (rec["id"] if rec is not None else None)
+            owner = fixed_owner or self._backend_display_id()
             if owner and not str(owner).startswith("v-"):
                 self._voice_post(owner, text, item_id=tid, final=True)
                 # ⚠ 不再往 rec["parts"] 里也塞一份：上面那次投递已经落库了，

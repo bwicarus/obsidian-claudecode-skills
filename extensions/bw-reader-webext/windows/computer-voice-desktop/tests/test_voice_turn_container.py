@@ -165,6 +165,112 @@ class StreamOwnerTest(unittest.TestCase):
                          (BACKEND, None))
 
 
+class BackendSegmentTest(unittest.TestCase):
+    """后台轮在跑时，用户每说/打一句，之后的回答就排到那句下面（2026-09-23 实录）。
+
+    用户：「侧边栏的对话显示顺序有问题，ai 的对话全都积累到了同一个地方」——
+    「我当然知道啦」「嗯，我看一下」都并进了更早那一格，排在用户后来的话上面。
+    """
+
+    SEG2 = BACKEND + ":s2"
+
+    def _runner(self, turn=True):
+        from collections import deque
+        r = object.__new__(vcr.Runner)
+        r.settings = {"historyMode": "subtitle"}
+        r.session_state = "connected"
+        r.transcripts = deque()
+        r._voice_user_stream = ""
+        r._voice_user_turn_id = None
+        r._voice_turn_id = None
+        r._voice_stream = ""
+        r._voice_stream_owner = None
+        r._voice_parts = {}
+        r._pre_turn_voice = None
+        r._turn = {"id": BACKEND, "parts": []} if turn else None
+        r._last_backend_turn_id = None
+        r._backend_done_at = 0
+        r.posted, r.streamed, r.logs = [], [], []
+        r._history_post = lambda body: r.posted.append(body)
+        r._stream_post = lambda tid, text, role="assistant", **kw: r.streamed.append(
+            (tid, text, role, kw.get("item_id")))
+        r._stream_start_post = lambda tid: r.streamed.append(("start", tid, None, None))
+        r.log = lambda kind, **kv: r.logs.append((kind, kv))
+        r._promise_watch = lambda *args: None
+        return r
+
+    def _index(self, r, pred):
+        return next(i for i, body in enumerate(r.posted) if pred(body))
+
+    def test_用户新说一句_之后的语音回答排到它下面(self):
+        r = self._runner()
+        r._subtitle_done("assistant", "好,我会把介绍卡写清楚。", item_id="v-a1")
+        self.assertEqual(r.posted[-1]["turn_id"], BACKEND)
+        r._subtitle_done("user", "你知道如何", item_id="vu-u1.u")
+        self.assertIn(("start", self.SEG2, None, None), r.streamed)
+        r._subtitle_done("assistant", "我当然知道啦,怎么了?", item_id="v-a2")
+        reply = self._index(r, lambda b: b.get("turn_id") == self.SEG2)
+        user = self._index(r, lambda b: b.get("user") == "你知道如何")
+        self.assertLess(user, reply, "新段必须在用户那句落库之后才建")
+        self.assertEqual(r.posted[reply]["parts"][0]["text"], "我当然知道啦,怎么了?")
+
+    def test_正在流的回答比用户落库早开始_也搬进新段(self):
+        r = self._runner()
+        state = r._transcript_state()
+        state.start("assistant", "rtA")
+        r._transcript_publish(state.delta("assistant", "嗯,", "rtA"))
+        self.assertEqual(r.streamed[-1][0], BACKEND)
+        r._subtitle_done("user", "我是说刚才我提出的这个,你觉得如何", item_id="vu-u2.u")
+        entry = next(e for e in state.entries.values() if e["role"] == "assistant")
+        self.assertIn((BACKEND, "", "assistant", entry["id"]), r.streamed, "旧段的半截草稿要清掉")
+        self.assertIn((self.SEG2, "嗯,", "assistant", entry["id"]), r.streamed)
+        r._transcript_final("assistant", "嗯,我看一下。", "rtA")
+        self.assertEqual(r.posted[-1]["turn_id"], self.SEG2)
+
+    def test_跑到一半切段的工具卡不分身(self):
+        r = self._runner()
+        r._tool_opened({"id": "call-1", "type": "mcpToolCall", "tool": "a"})
+        r._subtitle_done("user", "顺便问一句", item_id="vu-u3.u")
+        r._turn_item({"id": "call-1", "type": "mcpToolCall", "tool": "a", "status": "completed"})
+        r._tool_opened({"id": "call-2", "type": "mcpToolCall", "tool": "b"})
+        by_call = {}
+        for body in r.posted:
+            for part in body.get("parts") or []:
+                if part.get("call_id"):
+                    by_call.setdefault(part["call_id"], set()).add(body["turn_id"])
+        self.assertEqual(by_call["call-1"], {BACKEND}, "第一次落在哪段，完成时也回那段")
+        self.assertEqual(by_call["call-2"], {self.SEG2})
+
+    def test_收尾落在当前段(self):
+        r = self._runner()
+        r._subtitle_done("user", "再加一条", item_id="vu-u4.u")
+        r._finish_turn({"id": BACKEND, "status": "completed"})
+        body = r.posted[-1]
+        self.assertEqual(body["turn_id"], self.SEG2)
+        self.assertEqual(body["item_id"], "turn:" + self.SEG2)
+        self.assertEqual(body["turn_end"], 1)
+
+    def test_打字插进在跑的轮_同样切段(self):
+        r = self._runner()
+        r.backend_busy = True
+        r.mark_activity = lambda what: None
+
+        async def steer(text, tag):
+            return {"ok": True}
+        r.steer_running_turn = steer
+        r.session_state = "idle"
+        asyncio.run(r.typed("帮我再看一下这页"))
+        user = self._index(r, lambda b: b.get("user") == "帮我再看一下这页")
+        self.assertTrue(r.posted[user]["turn_id"].startswith(BACKEND + ".t"))
+        self.assertEqual(r._turn.get("seg"), self.SEG2)
+
+    def test_没有后台轮时不切段(self):
+        r = self._runner(turn=False)
+        r._subtitle_done("user", "你好", item_id="vu-u5.u")
+        self.assertFalse([k for k, _ in r.logs if k == "backend_segment"])
+        self.assertFalse([x for x in r.streamed if x[0] == "start"])
+
+
 class ToolOpensContainerTest(unittest.TestCase):
     """第一个工具调用就把本轮容器建出来 —— 为的是**次序**，不只是早点显示。"""
 
