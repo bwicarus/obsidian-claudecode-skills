@@ -43,10 +43,12 @@ test("③ 字号与位置沿用网页那套算法", () => {
   // 网页：fs = max(7, min(h*0.36, w/rt.length))，top = max(0, y0 - fs*0.34)
   assert.match(RUBY, /Math\.max\(7, Math\.min\(h \* 0\.36, w \/ Math\.max\(1, rt\.length\) \* 1\.0\)\)/);
   assert.match(RUBY, /Math\.max\(0, y0 - fs \* 0\.34\)/);
-  const draw = body(DOCUMENT, "for item in document.furigana(page: number)",
-                    "for stroke in document.ink[number]");
+  // 振假名现在画在每页自己的 overlay 里（ReaderNativePDFDocument.drawDecorations），
+  // 不再是视口上那张 Canvas —— 那张 Canvas 滚动时慢一帧，留残影。
+  const draw = body(DOCUMENT, "for item in furigana(page: number)",
+                    "for stroke in ink[number]");
   assert.match(draw, /max\(7, min\(h \* 0\.36, w \/ CGFloat\(max\(1, rt\.count\)\)\)\)/,
     "字号算法要与网页一致");
-  assert.match(draw, /max\(0, box\.minY - fontSize \* 0\.34\)/,
+  assert.match(draw, /max\(frame\.minY, box\.minY - fontSize \* 0\.34\)/,
     "位置算法要与网页一致");
 });

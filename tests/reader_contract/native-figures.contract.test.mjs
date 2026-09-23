@@ -49,16 +49,13 @@ test("② 带入与否的权威在网页，原生只发起", () => {
 });
 
 test("③ 徽标是真控件，锚点缺失时退图框角落", () => {
-  // ⚠ Canvas 接不到点击 —— 画在 Canvas 里的徽标点不动。
-  const badge = DOC.slice(DOC.indexOf("struct ReaderNativeFigureBadge"));
-  assert.match(badge, /Button \{/);
-  assert.match(badge, /onOpen\?\(figure\)/);
-  assert.match(badge, /guard let badge = figure\.badge/, "服务端算好的锚点优先");
-  assert.match(badge, /box\.maxX - side \* 0\.7/, "没有锚点时退图框右上角");
-  // ⚠ 位置算法必须拆成具名步骤：一串 min/max 嵌在 .position 里会让 Swift 编译器
-  // 直接放弃类型检查（"unable to type-check this expression in reasonable time"）。
-  assert.match(badge, /private func anchor\(box: CGRect, frame: CGRect\) -> CGPoint/);
-  assert.match(badge, /private func clamped\(_ point: CGPoint, in frame: CGRect\)/);
+  // ⚠ 徽标是 UIKit 真控件，长在页面自己的 overlay 里（跟页面同一帧滚，不留残影）。
+  const badge = DOC.slice(DOC.indexOf("private final class ReaderNativePageButtonView: UIButton"));
+  assert.match(badge, /addAction\(UIAction \{ \[weak self\] _ in self\?\.spec\.action\(\) \}/);
+  assert.match(DOC, /self\?\.onOpenFigure\?\(figure\)/);
+  assert.match(badge, /badge\.map \{ CGPoint\(x: page\.minX \+ \$0\.x \* page\.width/, "服务端算好的锚点优先");
+  assert.match(badge, /anchor\.maxX - side \* 0\.7/, "没有锚点时退图框右上角");
+  assert.match(badge, /min\(max\(page\.minX \+ half, center\.x\), page\.maxX - half\)/, "夹进页面内");
   // DOM 那侧的回退要 hitsText 避开正文（需要文字层），接管后没有。
   const entry = body(SRC, "window.__bwReaderPageFigures = async function",
                      "window.__bwReaderFigureAttach");
@@ -66,10 +63,10 @@ test("③ 徽标是真控件，锚点缺失时退图框角落", () => {
 });
 
 test("④ 已带入的图画持久绿框（对应 .fig-hl-sel）", () => {
-  const draw = body(DOC, "for figure in document.figures[number] ?? [] where figure.attached",
-                    "for stroke in document.ink");
+  const draw = body(DOC, "for figure in figures[number] ?? [] where figure.attached",
+                    "for stroke in ink[number]");
   assert.match(draw, /cornerRadius: 7/, "与 .fig-hl-sel 同一个圆角");
-  assert.match(draw, /lineWidth: 2\.5/);
+  assert.match(draw, /setLineWidth\(2\.5\)/);
   assert.match(SRC, /\.fig-hl-sel\{[^']*border:2\.5px solid rgba\(48,209,88/,
     "网页那侧的绿框规格没变");
   // 带入状态变了，正文上的框和徽标颜色要跟着变。

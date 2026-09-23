@@ -42,6 +42,18 @@ extension View {
     ///
     /// ⚠ 部署目标是 iOS 17，所以必须带 `#available`；低版本**原样退回**调用方
     /// 给的底色，不做"像玻璃的假玻璃"（半透明 + blur 在旧系统上既不省电也不好看）。
+    /// 页卡卡面：**保持原版配色**（色调 15% 混深灰），在 iOS 26 上把这层平涂换成
+    /// 染了同一色调的 Liquid Glass —— 卡片本身就是玻璃，不是在卡外面再套一层
+    /// （2026-09-23 用户："在保持现有设计的情况下使用 liquid glass 来强化卡片的表现"）。
+    @ViewBuilder
+    func readerCardSurface<S: Shape>(_ fill: Color, glass: Bool, in shape: S) -> some View {
+        if #available(iOS 26.0, *), glass {
+            self.glassEffect(.regular.tint(fill), in: shape)
+        } else {
+            self.background(fill, in: shape)
+        }
+    }
+
     @ViewBuilder
     func readerGlass<S: Shape, F: ShapeStyle>(in shape: S, fallback: F) -> some View {
         if #available(iOS 26.0, *) {

@@ -63,10 +63,10 @@ test("④ 划线带着身份进来，否则点上去不知道点的是哪一条"
   assert.match(model, /let note: String/);
   // 空 color 是「无色」划线；拿黄色兜底等于把用户取消掉的颜色涂回去。
   assert.match(DOC, /let hex = value\["color"\] as\? String \?\? ""/);
-  const draw = body(DOC, "for highlight in document.highlights[number] ?? [] {",
+  const draw = body(DOC, "for highlight in highlights[number] ?? [] {",
                     "// 生词句子：135° 排线");
   assert.match(draw, /highlight\.colorKey\.isEmpty/);
-  assert.match(draw, /dash: \[3, 2\]/, "无色画虚框");
+  assert.match(draw, /lengths: \[3, 2\]/, "无色画虚框");
 });
 
 test("⑤ 点划线优先于选字，且顺序不能反", () => {

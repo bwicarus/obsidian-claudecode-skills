@@ -70,12 +70,12 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     @Published private(set) var error: String?
     @Published private(set) var ready = false
     @Published private(set) var geometryRevision = 0
-    @Published private(set) var ink: [Int: [ReaderNativeCardStroke]] = [:]
-    @Published private(set) var highlights: [Int: [Highlight]] = [:]
+    @Published private(set) var ink: [Int: [ReaderNativeCardStroke]] = [:] { didSet { refreshDecorations() } }
+    @Published private(set) var highlights: [Int: [Highlight]] = [:] { didSet { refreshDecorations() } }
     /// 生词下划线。rects 是点坐标（与高亮同一空间），由网页那侧算好该画哪些 ——
     /// 「已掌握的不画」牵涉共享仓库、本地覆盖和服务端 label 的收敛顺序，
     /// 判据留在 `_vocabMarksForDisplay` 一处，这里只负责画。
-    @Published private(set) var vocabMarks: [Int: [VocabMark]] = [:]
+    @Published private(set) var vocabMarks: [Int: [VocabMark]] = [:] { didSet { refreshDecorations() } }
 
     struct VocabMark {
         let slug: String
@@ -93,8 +93,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     /// 振假名：已掌握的词不注音（与网页那侧 `__masteredFuri` 同一份数据）。
     /// `enabled == false` 表示振假名整体关着 —— 那时一个都不画，跟"这一页没有
     /// 已掌握的词"不是一回事。
-    @Published private(set) var furiganaEnabled: [Int: Bool] = [:]
-    @Published private(set) var furiganaMastered: [Int: Set<String>] = [:]
+    @Published private(set) var furiganaEnabled: [Int: Bool] = [:] { didSet { refreshDecorations() } }
+    @Published private(set) var furiganaMastered: [Int: Set<String>] = [:] { didSet { refreshDecorations() } }
 
     func setFuriganaMastered(_ words: [String]?, enabled: Bool, page: Int) {
         furiganaEnabled[page] = enabled
@@ -121,7 +121,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let text: String
         let rects: [CGRect]
     }
-    @Published private(set) var vocabSentences: [Int: [VocabSentence]] = [:]
+    @Published private(set) var vocabSentences: [Int: [VocabSentence]] = [:] { didSet { refreshDecorations() } }
 
     /// 整页正文（按阅读顺序）。
     ///
@@ -157,7 +157,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let fontScale: Double      // 归一化字号（× 页面屏幕高度 = 实际字号）
         let text: String
     }
-    @Published private(set) var translationSlices: [Int: [TranslationSlice]] = [:]
+    @Published private(set) var translationSlices: [Int: [TranslationSlice]] = [:] { didSet { refreshDecorations() } }
 
     func setTranslationSlices(_ slices: [TranslationSlice], page: Int) {
         translationSlices[page] = slices
@@ -177,7 +177,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let group: Bool
         var attached: Bool
     }
-    @Published private(set) var figures: [Int: [Figure]] = [:]
+    @Published private(set) var figures: [Int: [Figure]] = [:] { didSet { refreshDecorations() } }
 
     func setFigures(_ items: [Figure], page: Int) {
         figures[page] = items
@@ -209,7 +209,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     /// ⚠ 网页那条路（`_highlightSearchResultsOnPage`）要 `__charBoxes`，原生接管时
     /// 那一页根本没渲 —— 它会轮询 4.8 秒然后把待办标记清掉，命中永远不亮。
     /// 原生这侧有自己的字符层，自己找自己画。
-    @Published private(set) var searchHits: [Int: [CGRect]] = [:]
+    @Published private(set) var searchHits: [Int: [CGRect]] = [:] { didSet { refreshDecorations() } }
     private var searchHitExpiry: Task<Void, Never>?
 
     func highlightSearchHits(query: String, page: Int) {
@@ -530,6 +530,23 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         publishPosition()
     }
 
+    /// 行首「译」与图徽标的回调（原来是视口 SwiftUI 层的参数，现在按钮长在页面里）。
+    var onTranslateSentence: ((VocabSentence) -> Void)?
+    var onOpenFigure: ((Figure) -> Void)?
+
+    /// 页面装饰（划线 / 生词句排线 / 搜索命中 / 生词下划线 / 振假名 / 译文 / 已带入的图 / 墨迹）
+    /// 与行首按钮，全部画在**每一页自己的 overlay** 里。
+    ///
+    /// ⚠ 原来它们画在 PDFView 之上的一张 SwiftUI Canvas 里，靠 `geometryRevision`
+    ///   在滚动后重画 —— 必然慢一帧，滚动时就是残影（2026-09-23 用户："无论是卡片
+    ///   还是那个线框都还是会随着滚动留下残影"）。overlay 是页面的子视图，跟页面同一帧走。
+    private func refreshDecorations() {
+        for (number, overlay) in textOverlays {
+            overlay.decorationButtons = decorationButtons(page: number)
+            overlay.setNeedsDisplay()
+        }
+    }
+
     /// 把最新的锁定框推给每一页的 overlay。
     /// ⚠ 便签变了、字符层刚加载完，都要重推 —— 否则框要等到那一页重新挂 overlay
     /// 才出现（翻回来才看得见，等于"有时有有时没有"）。
@@ -626,6 +643,134 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     /// 正展开着的词锚卡。由页卡层按 placement.open 推进来；变了就重画锁定框。
     var openCardIDs: Set<String> = [] {
         didSet { if openCardIDs != oldValue { refreshCardMarkers() } }
+    }
+
+    fileprivate func drawDecorations(page number: Int, context: CGContext, project: (CGRect) -> CGRect?) {
+        guard let frame = project(CGRect(x: 0, y: 0, width: 1, height: 1)) else { return }
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.clip(to: frame)
+        for highlight in highlights[number] ?? [] {
+            for normalized in highlight.rects {
+                guard let rect = project(normalized) else { continue }
+                if highlight.colorKey.isEmpty {
+                    // 「无色」划线：网页画虚框（只有备注、不涂色）。
+                    context.setStrokeColor(UIColor(ReaderNativeTheme.accent).withAlphaComponent(0.7).cgColor)
+                    context.setLineWidth(1)
+                    context.setLineDash(phase: 0, lengths: [3, 2])
+                    context.stroke(rect)
+                    context.setLineDash(phase: 0, lengths: [])
+                } else {
+                    context.setFillColor(UIColor(highlight.color).withAlphaComponent(0.3).cgColor)
+                    context.fill(rect)
+                }
+            }
+        }
+        // 生词句子：135° 排线 + 细边框（网页 repeating-linear-gradient 的同一观感）。
+        for sentence in vocabSentences[number] ?? [] {
+            let stroke = UIColor(ReaderNativePDFDocument.sentenceStroke(sentence.index))
+            for normalized in sentence.rects {
+                guard let rect = project(normalized), rect.width > 1, rect.height > 1 else { continue }
+                context.saveGState()
+                context.clip(to: rect)
+                context.setStrokeColor(stroke.withAlphaComponent(0.33).cgColor)
+                context.setLineWidth(1)
+                var x = rect.minX - rect.height
+                while x < rect.maxX {
+                    context.move(to: CGPoint(x: x, y: rect.maxY))
+                    context.addLine(to: CGPoint(x: x + rect.height, y: rect.minY))
+                    x += 4
+                }
+                context.strokePath()
+                context.restoreGState()
+                context.setStrokeColor(stroke.withAlphaComponent(0.45).cgColor)
+                context.setLineWidth(0.8)
+                context.stroke(rect)
+            }
+        }
+        // 搜索命中：黄底。
+        context.setFillColor(UIColor.yellow.withAlphaComponent(0.38).cgColor)
+        for normalized in searchHits[number] ?? [] {
+            if let rect = project(normalized) { context.fill(rect) }
+        }
+        // 生词下划线画在字底（与网页一致：y1 再下移 1pt）。
+        for mark in vocabMarks[number] ?? [] {
+            let thickness = ReaderNativeVocabPalette.thickness(mark.slug)
+            guard thickness > 0 else { continue }
+            context.setFillColor(UIColor(ReaderNativeVocabPalette.color(mark.slug)).cgColor)
+            for normalized in mark.rects {
+                guard let rect = project(normalized) else { continue }
+                context.fill(CGRect(x: rect.minX, y: rect.maxY, width: rect.width, height: thickness))
+            }
+        }
+        // 振假名：字号与位置沿用网页 _makeRubySpan（fs = max(7, min(词高*0.36, 词宽/读音字数))，
+        // top = y0 - fs*0.34）。
+        if let size = characterPageSize(number) {
+            let centered = NSMutableParagraphStyle()
+            centered.alignment = .center
+            for item in furigana(page: number) {
+                guard let rt = item.rt, let x0 = item.x0, let y0 = item.y0, let x1 = item.x1, let y1 = item.y1,
+                      let box = project(CGRect(x: x0 / size.width, y: y0 / size.height,
+                                               width: (x1 - x0) / size.width, height: (y1 - y0) / size.height))
+                else { continue }
+                let w = max(6, box.width), h = max(6, box.height)
+                let fontSize = max(7, min(h * 0.36, w / CGFloat(max(1, rt.count))))
+                (rt as NSString).draw(
+                    in: CGRect(x: box.minX, y: max(frame.minY, box.minY - fontSize * 0.34), width: w,
+                               height: fontSize * 1.2),
+                    withAttributes: [.font: UIFont.systemFont(ofSize: fontSize),
+                                     .foregroundColor: UIColor(ReaderNativeTheme.ink),
+                                     .paragraphStyle: centered])
+            }
+        }
+        // 整页翻译：行间小字，白底半透明 + 深蓝 600 字重 + 左对齐（照 .page-tr-rt）。
+        let translationInk = UIColor(red: 0.043, green: 0.239, blue: 0.569, alpha: 1)
+        for slice in translationSlices[number] ?? [] {
+            let fontSize = slice.fontScale * frame.height
+            guard fontSize >= 4 else { continue }
+            let box = CGRect(x: frame.minX + slice.origin.x * frame.width, y: frame.minY + slice.origin.y * frame.height,
+                             width: slice.width * frame.width, height: fontSize * 1.2)
+            context.setFillColor(UIColor.white.withAlphaComponent(0.86).cgColor)
+            context.addPath(UIBezierPath(roundedRect: box.insetBy(dx: -1, dy: 0), cornerRadius: 2).cgPath)
+            context.fillPath()
+            let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+            (slice.text as NSString).draw(at: CGPoint(x: box.minX, y: box.midY - font.lineHeight / 2),
+                                          withAttributes: [.font: font, .foregroundColor: translationInk])
+        }
+        // 已带入助手的图：持久绿框（.fig-hl-sel）。
+        let green = UIColor(red: 0.188, green: 0.820, blue: 0.345, alpha: 1)
+        for figure in figures[number] ?? [] where figure.attached {
+            guard let rect = project(figure.box) else { continue }
+            let path = UIBezierPath(roundedRect: rect, cornerRadius: 7)
+            context.setFillColor(green.withAlphaComponent(0.12).cgColor)
+            context.addPath(path.cgPath); context.fillPath()
+            context.setStrokeColor(green.withAlphaComponent(0.95).cgColor)
+            context.setLineWidth(2.5)
+            context.addPath(path.cgPath); context.strokePath()
+        }
+        for stroke in ink[number] ?? [] {
+            ReaderNativeInkDrawing.draw(stroke, in: frame, cgContext: context)
+        }
+    }
+
+    /// 行首「译」与图徽标 —— 真控件，长在页面 overlay 里。
+    fileprivate func decorationButtons(page number: Int) -> [ReaderNativePageButton] {
+        var buttons: [ReaderNativePageButton] = []
+        for sentence in vocabSentences[number] ?? [] {
+            guard let first = sentence.rects.first else { continue }
+            buttons.append(ReaderNativePageButton(
+                id: "tr-" + sentence.id, kind: .translate, anchor: first, badge: nil,
+                tint: UIColor(ReaderNativePDFDocument.sentenceStroke(sentence.index)),
+                label: "翻译整句") { [weak self] in self?.onTranslateSentence?(sentence) })
+        }
+        for figure in figures[number] ?? [] {
+            buttons.append(ReaderNativePageButton(
+                id: "fig-" + figure.id, kind: .figure, anchor: figure.box, badge: figure.badge,
+                tint: figure.attached ? UIColor(red: 0.188, green: 0.820, blue: 0.345, alpha: 1)
+                                      : UIColor(ReaderNativeTheme.accent),
+                label: figure.caption.isEmpty ? "图说明" : figure.caption) { [weak self] in self?.onOpenFigure?(figure) })
+        }
+        return buttons
     }
 
     func setSpread(_ enabled: Bool, firstPageAlone: Bool) {
@@ -907,6 +1052,10 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
         overlay.cardMarkers = cardMarkers(page: number)
         overlay.onOpenCard = { [weak self] id in self?.onOpenCard?(id) }
+        overlay.decorate = { [weak self] context, project in
+            self?.drawDecorations(page: number, context: context, project: project)
+        }
+        overlay.decorationButtons = decorationButtons(page: number)
         overlay.onSelect = { [weak self] value in self?.acceptOCRSelection(value, page: number) }
         overlay.onError = { [weak self] in self?.error = "当前文字层无法确认这段选区的位置。" }
         overlay.onHighlight = { [weak self] value, color in
@@ -1036,6 +1185,22 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     var cardMarkers: [ReaderNativePDFDocument.CardMarker] = [] { didSet { setNeedsDisplay() } }
     /// 点锁定框 → 展开那张卡。
     var onOpenCard: ((String) -> Void)?
+    /// 页面装饰的绘制（由文档提供，见 ReaderNativePDFDocument.drawDecorations）。
+    var decorate: ((CGContext, (CGRect) -> CGRect?) -> Void)?
+    /// 行首「译」/ 图徽标。变了就重建子视图，位置在 layoutSubviews 里按当前缩放算。
+    var decorationButtons: [ReaderNativePageButton] = [] {
+        didSet {
+            guard decorationButtons.map(\.signature) != oldValue.map(\.signature) else { return }
+            buttonViews.forEach { $0.removeFromSuperview() }
+            buttonViews = decorationButtons.map { spec in
+                let button = ReaderNativePageButtonView(spec: spec)
+                insertSubview(button, belowSubview: leadingHandle)
+                return button
+            }
+            setNeedsLayout()
+        }
+    }
+    private var buttonViews: [ReaderNativePageButtonView] = []
     private var start: Int?
     private var selected: ReaderNativePDFSelection.Value?
     private let leadingHandle = ReaderNativePDFSelectionHandle()
@@ -1046,6 +1211,8 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = false; backgroundColor = .clear
+        // 缩放时 PDFKit 改的是 overlay 的尺寸：必须整页重画，不能拉伸旧位图。
+        contentMode = .redraw
         let gesture = UILongPressGestureRecognizer(target: self, action: #selector(selectText(_:)))
         gesture.minimumPressDuration = 0.3
         gesture.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
@@ -1067,6 +1234,7 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     required init?(coder: NSCoder) { return nil }
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         guard let touched = touch.view else { return true }
+        if touched is UIControl { return false }   // 「译」/ 图徽标自己处理点击
         return !touched.isDescendant(of: leadingHandle) && !touched.isDescendant(of: trailingHandle)
     }
     override func didMoveToWindow() {
@@ -1082,8 +1250,22 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
             parent = current.superview
         }
     }
-    override func layoutSubviews() { super.layoutSubviews(); updateHandles(); setNeedsDisplay() }
+    override func layoutSubviews() {
+        super.layoutSubviews(); updateHandles(); layoutButtons(); setNeedsDisplay()
+    }
+    private func layoutButtons() {
+        guard let page = project?(CGRect(x: 0, y: 0, width: 1, height: 1)) else { return }
+        for view in buttonViews {
+            guard let anchor = project?(view.spec.anchor) else { view.isHidden = true; continue }
+            view.place(anchor: anchor, page: page, badge: view.spec.badge)
+        }
+    }
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        // 锁定框与页内按钮在**任何**页上都要接得住点击 —— 包括有文字层的 PDF 页。
+        // ⚠ 原来这里第一句就是"没有自建选区就放行"，于是文字层 PDF 上的锁定框
+        //   一律点不到（点击直接落到 PDFKit）。
+        if buttonViews.contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return true }
+        if cardMarkerAt(point) != nil { return true }
         guard let characters, !embeddedText || characters.textAuthority == .localOverride else { return false }
         if [leadingHandle, trailingHandle].contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return true }
         return hit(point) != nil
@@ -1237,6 +1419,8 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     }
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
+        // 装饰最底下（划线 / 排线 / 下划线 / 振假名 / 译文 / 墨迹），锁定框压在它们上面。
+        if let project { decorate?(context, project) }
         // 锁定框先画：选区高亮压在它上面才看得出"这一段既绑着卡、又正被选中"。
         // ⚠ 观感逐项照原版 .pgmark / .pgmark-n（pdf-styles.css + 34-bindcard 的 _bindTone）：
         //   透明底、2pt 分类色描边、框外放 2pt；展开时描边加深 + 2.5pt 外晕；
@@ -1332,173 +1516,20 @@ private struct ReaderNativePDFSurface: UIViewRepresentable {
 struct ReaderNativePDFViewport: View {
     @ObservedObject var document: ReaderNativePDFDocument
     /// 点行首的「译」：把整句交给原生翻译面板。
-    /// ⚠ 按钮必须是**真控件**，不能画在 Canvas 里 —— Canvas 接不到点击。
     var onTranslateSentence: ((ReaderNativePDFDocument.VocabSentence) -> Void)?
     /// 点图徽标 → 打开原生描述面板（描述文本是服务端早就生成好的，不在这里烧额度）。
     var onOpenFigure: ((ReaderNativePDFDocument.Figure) -> Void)?
     var body: some View {
-        ZStack {
-            ReaderNativePDFSurface(document: document)
-            Canvas { context, _ in
-                let _ = document.geometryRevision
-                for page in document.view.visiblePages {
-                    guard let owner = document.view.document else { continue }
-                    let number = owner.index(for: page) + 1
-                    guard let frame = document.viewRect(normalized: CGRect(x: 0,y: 0,width: 1,height: 1), page: number) else { continue }
-                    var pageContext = context
-                    let visible = document.view.convert(page.bounds(for: document.view.displayBox), from: page).standardized
-                    pageContext.clip(to: Path(visible))
-                    for highlight in document.highlights[number] ?? [] {
-                        for normalized in highlight.rects {
-                            guard let rect = document.viewRect(normalized: normalized, page: number) else { continue }
-                            if highlight.colorKey.isEmpty {
-                                // 「无色」划线：网页画虚框（只有备注、不涂色）。涂成黄色
-                                // 等于把用户刻意取消掉的颜色又加回去。
-                                pageContext.stroke(Path(rect), with: .color(ReaderNativeTheme.accent.opacity(0.7)),
-                                                   style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
-                            } else {
-                                pageContext.fill(Path(rect), with: .color(highlight.color.opacity(0.3)))
-                            }
-                        }
-                    }
-                    // 生词句子：135° 排线 + 细边框，与网页那套排线同一个观感
-                    // （网页用 repeating-linear-gradient，这里直接画线）。
-                    for sentence in document.vocabSentences[number] ?? [] {
-                        let stroke = ReaderNativePDFDocument.sentenceStroke(sentence.index)
-                        for normalized in sentence.rects {
-                            guard let rect = document.viewRect(normalized: normalized, page: number),
-                                  rect.width > 1, rect.height > 1 else { continue }
-                            var hatch = pageContext
-                            hatch.clip(to: Path(rect))
-                            var line = Path()
-                            var x = rect.minX - rect.height
-                            while x < rect.maxX {
-                                line.move(to: CGPoint(x: x, y: rect.maxY))
-                                line.addLine(to: CGPoint(x: x + rect.height, y: rect.minY))
-                                x += 4
-                            }
-                            hatch.stroke(line, with: .color(stroke.opacity(0.33)), lineWidth: 1)
-                            pageContext.stroke(Path(rect), with: .color(stroke.opacity(0.45)), lineWidth: 0.8)
-                        }
-                    }
-                    // 搜索命中：黄底，与网页那侧同一个意思（几秒后自动淡掉）。
-                    for normalized in document.searchHits[number] ?? [] {
-                        if let rect = document.viewRect(normalized: normalized, page: number) {
-                            pageContext.fill(Path(rect), with: .color(.yellow.opacity(0.38)))
-                        }
-                    }
-                    // 生词下划线画在字底（与网页那侧一致：y1 再下移 1pt）。
-                    for mark in document.vocabMarks[number] ?? [] {
-                        for normalized in mark.rects {
-                            guard let rect = document.viewRect(normalized: normalized, page: number) else { continue }
-                            let thickness = ReaderNativeVocabPalette.thickness(mark.slug)
-                            guard thickness > 0 else { continue }
-                            let line = CGRect(x: rect.minX, y: rect.maxY, width: rect.width, height: thickness)
-                            pageContext.fill(Path(line), with: .color(ReaderNativeVocabPalette.color(mark.slug)))
-                        }
-                    }
-                    // 振假名：字号与位置沿用网页那侧 _makeRubySpan 的同一套算法
-                    // （fs = max(7, min(词高*0.36, 词宽/读音字数))，top = y0 - fs*0.34），
-                    // 否则同一本书在两个表面上注音大小不一样。
-                    let pagePoints = document.characterPageSize(number)
-                    for item in document.furigana(page: number) {
-                        guard let size = pagePoints, let rt = item.rt,
-                              let x0 = item.x0, let y0 = item.y0,
-                              let x1 = item.x1, let y1 = item.y1,
-                              let box = document.viewRect(
-                                normalized: CGRect(x: x0 / size.width, y: y0 / size.height,
-                                                   width: (x1 - x0) / size.width,
-                                                   height: (y1 - y0) / size.height),
-                                page: number) else { continue }
-                        let w = max(6, box.width), h = max(6, box.height)
-                        let fontSize = max(7, min(h * 0.36, w / CGFloat(max(1, rt.count))))
-                        pageContext.draw(
-                            Text(rt).font(.system(size: fontSize)).foregroundStyle(ReaderNativeTheme.ink),
-                            in: CGRect(x: box.minX, y: max(0, box.minY - fontSize * 0.34),
-                                       width: w, height: fontSize * 1.2))
-                    }
-                    // 整页翻译：行间小字。位置/字号是网页那侧按点坐标算好的，
-                    // 这里只乘回该页在屏幕上的尺寸。译页与振假名互斥（网页那侧
-                    // 开一个就关另一个），所以两者不会同时挤在同一条留白里。
-                    for slice in document.translationSlices[number] ?? [] {
-                        let fontSize = slice.fontScale * frame.height
-                        guard fontSize >= 4 else { continue }
-                        let box = CGRect(x: frame.minX + slice.origin.x * frame.width,
-                                         y: frame.minY + slice.origin.y * frame.height,
-                                         width: slice.width * frame.width,
-                                         height: fontSize * 1.2)
-                        // 观感照 .page-tr-rt：白底半透明 + 深蓝 600 字重 + **左对齐**。
-                        // ⚠ Canvas 的 draw(_:in:) 是**居中**的，用它会让译文在行上飘到
-                        // 中间，跟原文对不上 —— 所以按 leading 锚点画。
-                        pageContext.fill(
-                            Path(roundedRect: box.insetBy(dx: -1, dy: 0), cornerRadius: 2),
-                            with: .color(.white.opacity(0.86)))
-                        pageContext.draw(
-                            Text(slice.text)
-                                .font(.system(size: fontSize, weight: .semibold))
-                                .foregroundStyle(Color(red: 0.043, green: 0.239, blue: 0.569)),
-                            at: CGPoint(x: box.minX, y: box.midY), anchor: .leading)
-                    }
-                    // 已带入助手的图：持久绿框（对应网页 .fig-hl-sel）。临时高亮不画 ——
-                    // 那是点图瞬间的反馈，原生这边点完就开面板了，不需要闪一下。
-                    for figure in document.figures[number] ?? [] where figure.attached {
-                        guard let rect = document.viewRect(normalized: figure.box, page: number) else { continue }
-                        let green = Color(red: 0.188, green: 0.820, blue: 0.345)
-                        pageContext.fill(Path(roundedRect: rect, cornerRadius: 7),
-                                         with: .color(green.opacity(0.12)))
-                        pageContext.stroke(Path(roundedRect: rect, cornerRadius: 7),
-                                           with: .color(green.opacity(0.95)), lineWidth: 2.5)
-                    }
-                    for stroke in document.ink[number] ?? [] {
-                        ReaderNativeInkDrawing.draw(stroke, in: frame, context: &pageContext)
-                    }
-                }
-            }.allowsHitTesting(false)
-
-            // 「译」按钮：贴在每个生词句子首行的左侧外沿。画在 Canvas 里点不到，
-            // 所以单独一层真控件；位置随 geometryRevision 重算。
-            ForEach(document.position.visiblePages, id: \.self) { number in
-                // 读一次 geometryRevision：滚动/缩放后按钮要跟着走。
-                // 与上面 Canvas 里的同一招（那里也是 `let _ = document.geometryRevision`）。
-                let _ = document.geometryRevision
-                ForEach(document.vocabSentences[number] ?? []) { sentence in
-                    if let first = sentence.rects.first,
-                       let rect = document.viewRect(normalized: first, page: number),
-                       rect.height > 8 {
-                        let side = min(26, max(14, rect.height))
-                        Button {
-                            onTranslateSentence?(sentence)
-                        } label: {
-                            Text("译")
-                                .font(.system(size: side * 0.6, weight: .semibold))
-                                .foregroundStyle(ReaderNativePDFDocument.sentenceStroke(sentence.index))
-                                .frame(width: side, height: side)
-                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("翻译整句")
-                        .position(x: rect.minX - side * 0.6, y: rect.midY)
-                    }
-                }
+        // ⚠ 这一层**不再画任何东西**。划线、排线、下划线、振假名、译文、墨迹、锁定框、
+        //   行首「译」与图徽标，全都在每一页自己的 overlay 里（ReaderNativePDFTextOverlay）。
+        //   原来它们是 PDFView 之上的一张 SwiftUI Canvas + 两层按钮，按 geometryRevision
+        //   在滚动后重画/重排 —— 慢一帧，就是残影（2026-09-22、09-23 用户连报）。
+        ReaderNativePDFSurface(document: document)
+            .onAppear {
+                document.onTranslateSentence = onTranslateSentence
+                document.onOpenFigure = onOpenFigure
             }
-
-            // 图徽标：同样必须是真控件（Canvas 接不到点击）。轻点 → 描述面板。
-            // ⚠ 位置算法拆成 ReaderNativeFigureBadge 里的具名步骤 —— 写成一串
-            // min/max 嵌套在 .position 里，Swift 编译器会直接放弃类型检查
-            // （"unable to type-check this expression in reasonable time"）。
-            ForEach(document.position.visiblePages, id: \.self) { number in
-                let _ = document.geometryRevision
-                ForEach(document.figures[number] ?? []) { figure in
-                    ReaderNativeFigureBadge(document: document, figure: figure, page: number,
-                                            onOpen: onOpenFigure)
-                }
-            }
-
-            // ⚠ 锁定框**不在这里画、也不在这里接点击**。它画在每一页自己的
-            //   overlay view 里（ReaderNativePDFTextOverlay）—— 那是页面的子视图，
-            //   跟着页面一起滚，一帧都不用重算。放在这一层就得按 geometryRevision
-            //   反复重画，滚动时必然留残影。
-        }.clipped()
+            .clipped()
     }
 }
 
@@ -1532,56 +1563,6 @@ enum ReaderNativeVocabPalette {
     }
 }
 
-/// 一个图徽标。位置计算分成具名的几步：服务端锚点 → 图框角落回退 → 夹进页面内。
-struct ReaderNativeFigureBadge: View {
-    @ObservedObject var document: ReaderNativePDFDocument
-    let figure: ReaderNativePDFDocument.Figure
-    let page: Int
-    let onOpen: ((ReaderNativePDFDocument.Figure) -> Void)?
-
-    private let side: CGFloat = 26
-
-    var body: some View {
-        if let box = document.viewRect(normalized: figure.box, page: page),
-           let frame = document.viewRect(normalized: CGRect(x: 0, y: 0, width: 1, height: 1),
-                                        page: page) {
-            let center = clamped(anchor(box: box, frame: frame), in: frame)
-            Button {
-                onOpen?(figure)
-            } label: {
-                Image(systemName: "photo")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: side, height: side)
-                    .background(Circle().fill(fill))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(figure.caption.isEmpty ? "图说明" : figure.caption)
-            .position(x: center.x, y: center.y)
-        }
-    }
-
-    private var fill: Color {
-        figure.attached ? Color(red: 0.188, green: 0.820, blue: 0.345) : ReaderNativeTheme.accent
-    }
-
-    /// 服务端预算好的锚点优先（贴着图的空白角，跨加载位置一致）；
-    /// 缺它时退图框右上角内缩 —— DOM 那侧的四角回退要文字层，接管后没有。
-    private func anchor(box: CGRect, frame: CGRect) -> CGPoint {
-        guard let badge = figure.badge else {
-            return CGPoint(x: box.maxX - side * 0.7, y: box.minY + side * 0.7)
-        }
-        return CGPoint(x: frame.minX + badge.x * frame.width,
-                       y: frame.minY + badge.y * frame.height)
-    }
-
-    private func clamped(_ point: CGPoint, in frame: CGRect) -> CGPoint {
-        let half = side / 2
-        let x = min(max(frame.minX + half, point.x), frame.maxX - half)
-        let y = min(max(frame.minY + half, point.y), frame.maxY - half)
-        return CGPoint(x: x, y: y)
-    }
-}
 
 /// 拖卡落点预览的几何。坐标系由产出方说明（文档内是 `view`，模型层转成窗口坐标）。
 struct ReaderNativeDropPreview: Equatable {
@@ -1656,5 +1637,63 @@ struct ReaderNativeMarkerStyle {
         b.getRed(&br, green: &bg, blue: &bb, alpha: &ba)
         return UIColor(red: ar * p + br * (1 - p), green: ag * p + bg * (1 - p),
                        blue: ab * p + bb * (1 - p), alpha: 1)
+    }
+}
+
+/// 页内按钮的规格（行首「译」/ 图徽标）。位置用归一化锚点，由 overlay 按当前缩放摆。
+struct ReaderNativePageButton {
+    enum Kind { case translate, figure }
+    let id: String
+    let kind: Kind
+    let anchor: CGRect          // 归一化：译 = 句子首行框；图 = 图框
+    let badge: CGPoint?         // 归一化：服务端预算好的徽标中心（图）
+    let tint: UIColor
+    let label: String
+    let action: () -> Void
+    var signature: String { id + "|" + label + "|" + tint.description }
+}
+
+private final class ReaderNativePageButtonView: UIButton {
+    let spec: ReaderNativePageButton
+
+    init(spec: ReaderNativePageButton) {
+        self.spec = spec
+        super.init(frame: .zero)
+        accessibilityLabel = spec.label
+        switch spec.kind {
+        case .translate:
+            setTitle("译", for: .normal)
+            setTitleColor(spec.tint, for: .normal)
+            backgroundColor = UIColor.systemBackground.withAlphaComponent(0.72)
+            layer.cornerRadius = 4
+        case .figure:
+            setImage(UIImage(systemName: "photo",
+                             withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)),
+                     for: .normal)
+            tintColor = .white
+            backgroundColor = spec.tint
+        }
+        addAction(UIAction { [weak self] _ in self?.spec.action() }, for: .touchUpInside)
+    }
+    required init?(coder: NSCoder) { return nil }
+
+    /// 译：贴在句子首行左侧外沿，边长随行高（14~26）；图：服务端锚点优先，缺了退图框右上角内缩，夹进页面内。
+    func place(anchor: CGRect, page: CGRect, badge: CGPoint?) {
+        switch spec.kind {
+        case .translate:
+            guard anchor.height > 8 else { isHidden = true; return }
+            let side = min(26, max(14, anchor.height))
+            titleLabel?.font = .systemFont(ofSize: side * 0.6, weight: .semibold)
+            frame = CGRect(x: anchor.minX - side * 1.1, y: anchor.midY - side / 2, width: side, height: side)
+        case .figure:
+            let side: CGFloat = 26, half = side / 2
+            let center = badge.map { CGPoint(x: page.minX + $0.x * page.width, y: page.minY + $0.y * page.height) }
+                ?? CGPoint(x: anchor.maxX - side * 0.7, y: anchor.minY + side * 0.7)
+            let x = min(max(page.minX + half, center.x), page.maxX - half)
+            let y = min(max(page.minY + half, center.y), page.maxY - half)
+            frame = CGRect(x: x - half, y: y - half, width: side, height: side)
+            layer.cornerRadius = half
+        }
+        isHidden = false
     }
 }

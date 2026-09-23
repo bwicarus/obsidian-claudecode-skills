@@ -53,17 +53,17 @@ test("③ 原生按页高归一化字号，不存 pt", () => {
   const slice = body(DOC, "struct TranslationSlice", "@Published private(set) var translationSlices");
   assert.match(slice, /let fontScale: Double/);
   // 存 pt 的话放大页面译文还是小的 —— 归一化 × 屏幕页高才跟着缩放。
-  const draw = body(DOC, "for slice in document.translationSlices", "for stroke in document.ink");
+  const draw = body(DOC, "for slice in translationSlices[number] ?? []", "for stroke in ink[number]");
   assert.match(draw, /slice\.fontScale \* frame\.height/);
 });
 
 test("④ 观感跟 .page-tr-rt 一致：白底 + 深蓝 + 左对齐", () => {
   assert.match(CSS, /\.page-tr-rt\{[^}]*text-align:left/, "网页是左对齐");
-  const draw = body(DOC, "for slice in document.translationSlices", "for stroke in document.ink");
+  const draw = body(DOC, "for slice in translationSlices[number] ?? []", "for stroke in ink[number]");
   // ⚠ Canvas 的 draw(_:in:) 居中；用它译文会在行上飘到中间跟原文对不上。
-  assert.match(draw, /anchor: \.leading/);
-  assert.doesNotMatch(code(draw), /in: CGRect\(x: frame\.minX \+ slice\.origin\.x/);
-  assert.match(draw, /\.white\.opacity\(0\.86\)/, "白底与 CSS 的 .86 同一档");
+  // 左对齐：从框左沿按点绘制（draw(at:)），不是居中的 draw(in:)。
+  assert.match(draw, /draw\(at: CGPoint\(x: box\.minX,/);
+  assert.match(draw, /UIColor\.white\.withAlphaComponent\(0\.86\)/, "白底与 CSS 的 .86 同一档");
   assert.match(draw, /weight: \.semibold/);
 });
 

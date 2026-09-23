@@ -191,6 +191,12 @@ private struct ReaderRootView: View {
                     //   命中的就是屏幕上看到的那个框）。视口这一层不参与。
                     .onAppear { document.onOpenCard = { reader.openNativeBoundCard(noteID: $0) } }
                     .ignoresSafeArea(edges: .bottom)
+                // 钉在页上的卡片：跟 PDF 同一帧滚（见 ReaderNativeDocumentCardLayer）。
+                if nativeInterfaceEnabled && !reader.nativeConversation.legacyVisible {
+                    ReaderNativeDocumentCardLayer(document: document, reader: reader,
+                                                  model: reader.nativeConversation)
+                        .ignoresSafeArea(edges: .bottom)
+                }
             }
 
             if nativeInterfaceEnabled && !reader.nativeConversation.legacyVisible {

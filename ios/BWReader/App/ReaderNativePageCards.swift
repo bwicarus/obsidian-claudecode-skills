@@ -125,8 +125,6 @@ struct ReaderNativePageMarker: Identifiable {
 struct ReaderNativePageCards: View {
     @ObservedObject var reader: ReaderWebViewModel
     @ObservedObject var model: ReaderNativeConversationModel
-    /// 正在拖的那根手指（本层局部坐标）。nil = 没在拖。
-    @State private var dragFinger: CGPoint?
 
     var body: some View {
         GeometryReader { geometry in
@@ -177,11 +175,14 @@ struct ReaderNativePageCards: View {
             // ⚠ 自成一层：它每秒更新十来次，混在这一层里就会把每张卡一起重算。
             ReaderNativeDropPreviewLayer(model: reader.cardDropPreviews, origin: frame.origin)
             // 边缘投放区（删除 / 收藏）。⚠ 判据用**手指**位置，不是卡左上角。
-            ReaderNativeCardDropZones(finger: dragFinger, size: geometry.size)
+            ReaderNativeCardDropZones(drag: reader.cardDrag, origin: frame.origin, size: geometry.size)
             ForEach(model.placements) { item in
                 placement(item, frame: frame, size: geometry.size)
             }
         }
+        // 投放区判据要知道这一层在窗口里的位置（手指是按窗口坐标记的）。
+        .onAppear { reader.cardDrag.screenFrame = frame }
+        .onChange(of: frame) { _, value in reader.cardDrag.screenFrame = value }
     }
 
     @ViewBuilder
@@ -194,15 +195,17 @@ struct ReaderNativePageCards: View {
         if reader.nativePDFDocument == nil {
             webMarkers(item, frame: frame)
         }
-        // 卡身：原生接管时用 PDFKit 解出来的位置和尺寸
-        // （noteGeometry 会按页宽/base_w 的比例缩放，并处理折叠态）。
-        let rect = cardRect(item, frame: frame)
-        if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < size.width && rect.minY < size.height {
-            ReaderNativePlacedCard(item: item, reader: reader, model: model,
-                                   origin: frame.origin, rect: rect, available: size,
-                                   finger: $dragFinger)
-                .offset(x: rect.minX, y: rect.minY)
-                .zIndex(10)
+        // 钉在正文上的卡由文档层画（ReaderNativeDocumentCardLayer，跟着 PDF 同一帧滚）。
+        // 这一层只剩浮动卡，以及原生几何解不出来时的网页坐标退路。
+        if !reader.drawsInDocumentLayer(item) {
+            let rect = cardRect(item, frame: frame)
+            if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < size.width && rect.minY < size.height {
+                ReaderNativePlacedCard(item: item, reader: reader, model: model, rect: rect, available: size,
+                                       space: .global, unitScale: 1,
+                                       toWindow: { point in point })
+                    .offset(x: rect.minX, y: rect.minY)
+                    .zIndex(10)
+            }
         }
     }
 
@@ -256,15 +259,18 @@ private struct ReaderNativeGeometryTracker<Content: View>: View {
 }
 
 @MainActor
-private struct ReaderNativePlacedCard: View {
+struct ReaderNativePlacedCard: View {
     let item: ReaderNativePagePlacement
     @ObservedObject var reader: ReaderWebViewModel
     @ObservedObject var model: ReaderNativeConversationModel
-    let origin: CGPoint
     let rect: CGRect
     let available: CGSize
-    /// 拖动中的手指位置（本层局部坐标），交给投放区判据用。
-    @Binding var finger: CGPoint?
+    /// 手势用的坐标系：屏幕层是 .global，文档层是它自己的命名坐标系。
+    let space: CoordinateSpace
+    /// 卡片本地单位 → 屏幕点（文档层 = 当前缩放；屏幕层 = 1）。改尺寸落库要用屏幕点。
+    let unitScale: CGFloat
+    /// 本地坐标 → 窗口坐标。落点、投放区判据都按窗口坐标算。
+    let toWindow: (CGPoint) -> CGPoint
     @GestureState private var translation: CGSize = .zero
     /// 松手到新位置回来之间的**暂态位移**。
     ///
@@ -364,7 +370,10 @@ private struct ReaderNativePlacedCard: View {
     }
 
     private var savedSize: CGSize? {
-        item.size.map { reader.nativePageCardRect(CGRect(origin: .zero, size: $0), in: .zero).size }
+        // 文档层：rect 由 noteGeometry 算出，**已经含了**保存过的尺寸，而且单位就是
+        // 这一层的单位；再按屏幕尺寸换一遍会差一个缩放倍数。
+        if unitScale != 1 || space != .global { return item.size == nil ? nil : rect.size }
+        return item.size.map { reader.nativePageCardRect(CGRect(origin: .zero, size: $0), in: .zero).size }
     }
     /// 壳宽照原版 `_formW`：圆点 40 / 长条 300 / 方块按卡片自己的宽。
     private var width: CGFloat {
@@ -380,37 +389,21 @@ private struct ReaderNativePlacedCard: View {
         (resizing ?? savedSize).map { max(64, min($0.height, available.height) - 41) }
     }
 
-    /// 正在拖。⚠ 这一刻**不要搬活卡片**：它里面有富文本（UITextView + SwiftSoup）
-    /// 和墨迹层，每帧搬一次就是每帧重算这些 —— 2026-09-22 用户："手指拖动移动
-    /// 距离 10，他实际移动 3"。系统自己的拖动搬的是事先截好的快照；这里做同一件事：
-    /// 拖动期间换成一张影子 —— 跟网页那版 `vc-drag-ghost`（克隆 + 源卡淡到 .22）同一个设计。
+    /// 正在拖。整张卡本身跟着手指走 —— 不再留一张淡掉的原卡在原位。
+    /// ⚠ 上一版是"原卡淡到 .22 + 只拖一条标题影子"，用户看到的就是一块残影
+    ///   （2026-09-23："长按移动时留下一个残影"）。拖动慢的真凶是每帧跑 JS 的落点
+    ///   预览和挂在主模型上的发布（都已拆掉/限流），不是卡本身。
     private var dragging: Bool { translation != .zero }
 
-    @ViewBuilder private var ghost: some View {
-        Text(item.title)
-            .font(.system(size: 12)).lineLimit(1)
-            .foregroundStyle(finish.tone)
-            .padding(.horizontal, 13)
-            .frame(width: width, height: 40, alignment: .leading)
-            .background(finish.fill, in: RoundedRectangle(cornerRadius: corner))
-            .overlay(RoundedRectangle(cornerRadius: corner).stroke(finish.border, lineWidth: 0.5))
-            // 浮起特效照原版 .rc-note-lift：微放大 + 轻微透明 + 更深的影。
-            .scaleEffect(1.03, anchor: .topLeading)
-            .opacity(0.92)
-    }
-
     var body: some View {
-        // ⚠ 用 ZStack 而不是两条并列语句：后者在 ViewBuilder 里会成为 TupleView，
-        //   而 TupleView 自己不负责布局。
-        //   `.offset` 不参与布局，所以影子拖多远都不会把这个 ZStack 撑大。
-        ZStack(alignment: .topLeading) {
-            card.opacity(dragging ? 0.22 : 1)
-            if dragging {
-                ghost.offset(translation)
-                    .shadow(color: .black.opacity(0.18), radius: 16, y: 4)
-                    .allowsHitTesting(false)
-            }
-        }
+        card
+            // 浮起特效照原版 .rc-note-lift：微放大 + 更深的影。
+            .scaleEffect(dragging ? 1.03 : 1, anchor: .topLeading)
+            .shadow(color: .black.opacity(dragging ? 0.28 : 0), radius: 18, y: 8)
+            // 动画只管浮起（缩放/阴影），不管跟手位移 —— 否则松手那一下会回弹。
+            .animation(.easeOut(duration: 0.12), value: dragging)
+            .offset(translation)
+            .zIndex(dragging ? 100 : 0)
     }
 
     /// 卡头 `.vc-card-hd`：12px、色调字、左距 13，最小高 40。
@@ -473,11 +466,18 @@ private struct ReaderNativePlacedCard: View {
                     ReaderNativePageCardBody(parts: item.parts, model: model)
                         .padding(.horizontal, 13).padding(.top, 9).padding(.bottom, 12)
                 }
+                // 长按＝带入/移出对话，**只在卡身**（原版 pinBind 的长按目标是 .vc-card-bd，
+                // 上面那条标题栏是拖动把手）。阈值取原版 LP_MS = 600ms；
+                // simultaneousGesture 才不会吃掉卡内按钮的点击和正文滚动。
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.6).onEnded { _ in toggleContext() }
+                )
                 .frame(height: bodyHeight)
                 .frame(maxHeight: bodyHeight ?? max(120, min(460, min(rect.height, available.height - 40))))
                 .overlay {
                     if let inkID = item.controls["ink"] {
-                        ReaderNativeCardInkLayer(item: item, reader: reader, actionID: inkID)
+                        ReaderNativeCardInkLayer(item: item, reader: reader, actionID: inkID,
+                                                 space: space, toWindow: toWindow)
                     }
                 }
             }
@@ -486,16 +486,11 @@ private struct ReaderNativePlacedCard: View {
         .foregroundStyle(Color(uiColor: ReaderNativeCardInk.text))
         // 卡面：原版 .vc-card.vc-typed —— 色调 15% 混深灰、**不磨砂**
         // （`--vc-cardblur:none`，注释原话"去 blur 后加实"）。圆点态照 .vc-dot 近乎透明。
-        .background(surfaceFill, in: RoundedRectangle(cornerRadius: corner))
+        .readerCardSurface(surfaceFill, glass: !isDot, in: RoundedRectangle(cornerRadius: corner))
         .overlay(RoundedRectangle(cornerRadius: corner).stroke(surfaceBorder, lineWidth: 0.5))
         // 选中环照原版 .vc-picked：1.5pt 的 rgba(123,108,255,.85)。
         .overlay(RoundedRectangle(cornerRadius: corner).stroke(pickedRing, lineWidth: 1.5))
         .clipShape(RoundedRectangle(cornerRadius: corner))
-        // 长按＝带入/移出对话。⚠ 阈值取原版的 LP_MS = 600ms；
-        //   用 simultaneousGesture 才不会把卡内按钮的点击吃掉。
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.6).onEnded { _ in toggleContext() }
-        )
         .animation(.easeOut(duration: 0.15), value: contextSelected)
         .overlay(alignment: .bottomTrailing) {
             if item.form == "full", item.controls["resize"] != nil {
@@ -520,7 +515,7 @@ private struct ReaderNativePlacedCard: View {
         // 手势被打断时 GestureState 自己归零而 onEnded 不一定来 —— 预览和投放区
         // 都得在这里擦掉，不然会留在屏幕上（红区一直亮着尤其吓人）。
         .onChange(of: translation) { _, value in
-            if value == .zero { reader.clearCardDropPreview(); finger = nil }
+            if value == .zero { reader.clearCardDropPreview(); reader.cardDrag.finger = nil }
         }
         .onChange(of: rect) { _, _ in committed = nil }
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
@@ -541,27 +536,32 @@ private struct ReaderNativePlacedCard: View {
     }
 
     private func dropPoint(_ translation: CGSize) -> CGPoint {
-        CGPoint(x: origin.x + rect.minX + translation.width + 1,
-                y: origin.y + rect.minY + translation.height + 1)
+        toWindow(CGPoint(x: rect.minX + translation.width + 1, y: rect.minY + translation.height + 1))
+    }
+
+    /// 窗口坐标 → 屏幕卡片层的本地坐标（投放区是按那一层画的）。
+    private func screenLocal(_ window: CGPoint) -> CGPoint {
+        let frame = reader.cardDrag.screenFrame
+        return CGPoint(x: window.x - frame.minX, y: window.y - frame.minY)
     }
 
     private var moveGesture: some Gesture {
         // ⚠ coordinateSpace: .global —— 投放区判据要的是**手指在屏幕上哪儿**。
         //   默认坐标系是手势所在那个小视图，拿来跟屏幕边缘比毫无意义。
-        DragGesture(minimumDistance: 6, coordinateSpace: .global)
+        DragGesture(minimumDistance: 6, coordinateSpace: space)
             .updating($translation) { value, state, _ in state = value.translation }
             .onChanged { value in
                 // 两个探测点，故意不同（原版就是这么分的）：
                 // · 投放区（删除/收藏）看**手指**；
                 // · 落点预览看**卡左上角**（+1 避开自身边框）—— 那才是钉入点。
                 //   写成同一个会出现"看着在删除区、松手却钉在正文上"。
-                finger = CGPoint(x: value.location.x - origin.x, y: value.location.y - origin.y)
+                reader.cardDrag.finger = toWindow(value.location)
                 reader.previewCardDrop(windowPoint: dropPoint(value.translation))
             }
             .onEnded { value in
                 reader.clearCardDropPreview()
-                let released = CGPoint(x: value.location.x - origin.x, y: value.location.y - origin.y)
-                finger = nil
+                let released = screenLocal(toWindow(value.location))
+                reader.cardDrag.finger = nil
                 let scope = model.scope
                 let point = dropPoint(value.translation)
                 // 删除区 / 收藏区优先于"钉到正文"（原版 onHandleUp 的顺序）。
@@ -574,7 +574,7 @@ private struct ReaderNativePlacedCard: View {
                     }
                     return
                 }
-                if ReaderNativeCardDropZone.inDock(released, screenHeight: available.height),
+                if ReaderNativeCardDropZone.inDock(released, screenHeight: reader.cardDrag.screenFrame.height),
                    let action = item.controls["favorite"] {
                     // 收藏是**复制**：原卡回原位，不改锚点（原版同一条注释）。
                     committed = nil
@@ -642,7 +642,9 @@ private struct ReaderNativePlacedCard: View {
         Task {
             // 原生接管时按卡片自身单位存（屏幕尺寸 ÷ 页宽/base_w 的比例）；
             // 否则每缩放一次书，卡片尺寸就被记错一次。
-            if await reader.resizeNativeCard(id: item.noteID, size: value) {
+            if await reader.resizeNativeCard(id: item.noteID,
+                                             size: CGSize(width: value.width * unitScale,
+                                                          height: value.height * unitScale)) {
                 if scope == model.scope { resizing = nil }
                 return
             }
@@ -724,9 +726,13 @@ enum ReaderNativeCardDropZone {
 
 @MainActor
 struct ReaderNativeCardDropZones: View {
-    /// 手指当前位置（窗口坐标）。nil = 没在拖，什么都不画。
-    var finger: CGPoint?
+    @ObservedObject var drag: ReaderNativeCardDragState
+    let origin: CGPoint
     let size: CGSize
+    /// 手指（窗口坐标）换到这一层的本地坐标。
+    private var finger: CGPoint? {
+        drag.finger.map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) }
+    }
 
     var body: some View {
         if let finger {
@@ -783,4 +789,14 @@ struct ReaderNativeCardDropZones: View {
             .animation(.easeOut(duration: 0.2), value: inDock)
         }
     }
+}
+
+/// 卡片拖动的共享状态：手指位置（窗口坐标）与屏幕卡片层在窗口里的位置。
+///
+/// ⚠ 单独一个小模型：拖动时每帧都在写，挂在阅读器主模型上等于每帧把所有卡重算一遍。
+///   文档层（跟 PDF 滚）和屏幕层（投放区）各在一个宿主里，只能靠它共享。
+@MainActor
+final class ReaderNativeCardDragState: ObservableObject {
+    @Published var finger: CGPoint?
+    var screenFrame: CGRect = .zero
 }

@@ -326,6 +326,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 发布一次就让**每一张卡**重算一遍 body —— 而拖动期间它每秒要发十来次。
     /// 单独一个小对象，只有画预览的那一层观察它。
     let cardDropPreviews = ReaderNativeDropPreviewModel()
+    let cardDrag = ReaderNativeCardDragState()
+    /// 文档卡片层（跟 PDF 同一帧滚的那层）此刻挂着没有。没挂的时候钉在页上的卡
+    /// 必须仍由屏幕层画 —— 否则两边都不画，卡直接消失。
+    @Published var documentCardLayerMounted = false
     private var dropPreviewStamp = Date.distantPast
     private var dropPreviewPoint = CGPoint(x: -10_000, y: -10_000)
     private var dropPreviewBusy = false
@@ -453,6 +457,22 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               let geometry = document.noteGeometry(note, presentationSize: size) else { return nil }
         return document.view.convert(geometry.rect, to: nil)
             .offsetBy(dx: -container.minX, dy: -container.minY)
+    }
+
+    /// 卡片在文档层里的位置（PDFView 文档视图的坐标）。它不随滚动变化，
+    /// 所以文档层滚动时 SwiftUI 不用重算任何东西 —— 跟随全靠宿主的同帧变换。
+    func nativePageCardDocumentRect(id: String, size: CGSize?) -> CGRect? {
+        guard let document = nativePDFDocument, let content = document.view.documentView,
+              let note = document.notes.first(where: { $0["id"] as? String == id }),
+              let geometry = document.noteGeometry(note, presentationSize: size) else { return nil }
+        let rect = content.convert(geometry.rect, from: document.view)
+        return rect.offsetBy(dx: -content.bounds.minX, dy: -content.bounds.minY)
+    }
+
+    /// 这张卡归文档层画（钉在 PDF 页上），还是留在屏幕层（浮动卡 / 解不出原生几何）。
+    func drawsInDocumentLayer(_ item: ReaderNativePagePlacement) -> Bool {
+        guard documentCardLayerMounted, !item.floating, !item.noteID.isEmpty else { return false }
+        return nativePageCardDocumentRect(id: item.noteID, size: item.size) != nil
     }
 
     /// 点正文里的锁定框 → 展开那张卡。
