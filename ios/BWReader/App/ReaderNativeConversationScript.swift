@@ -1024,14 +1024,22 @@ enum ReaderNativeConversationScript {
             const selection = value.pages.map(page => page.text).join('\n').trim();
             if (selection.length > 16000) return { ok: false, error: '选区过长，请缩小范围' };
             nativePageSelectionSequence = value.sequence;
+            // AI 读的阅读快照（通话里的语音 AI、后台 AI 都读它）—— 选中与清空都要报，
+            // 与侧栏开没开无关。⚠ 以前只写了下面几个全局量，快照里从来没有原生选区。
+            try {
+              window.__bwReportNativeSelection?.(selection,
+                value.pages.length === 1 ? (value.pages[0].sentence || '') : '');
+            } catch (_) {}
             if (!selection) {
               if (window.__bwNativeSelection?.owner === 'native-pdf') window.__bwNativeSelection.active = false;
             } else {
               window.__bwNativeSelection = { text: selection, active: true, owner: 'native-pdf', scope, pages: value.pages };
               window.__lastSelMeta = { page: value.pages[0].page, t: Date.now() };
               window.__lastSelSentence = value.pages.length === 1 ? (value.pages[0].sentence || '') : '';
+              // 钉进侧栏对话（输入框上方那条）：原版规定侧栏没开时不钉，那不是失败。
               window.__setFocusSel(selection, 'text');
-              if (window.__focusSel?.text !== selection) return { ok: false, error: '选区暂未进入对话，请重试' };
+              const pinned = typeof window.__asstOpen === 'function' ? window.__asstOpen() : true;
+              if (pinned && window.__focusSel?.text !== selection) return { ok: false, error: '选区暂未进入对话，请重试' };
             }
           } else if (action === 'nativeSelectionHighlight') {
             // 原生阅读区的划线。

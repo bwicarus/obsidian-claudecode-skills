@@ -97,3 +97,18 @@ test("有字符数据的页一律走我们的选区菜单；读不到字符会�
   assert.match(load, /guard attempts < 6 else/);
   assert.match(load, /self\.loadVisibleCharacterPages\(\)/, "页面停着不动也要重试");
 });
+
+test("原生选区报进 AI 读的阅读快照（与侧栏开没开无关）", () => {
+  // 2026-09-23 用户："他无法看到我的选中"。原生选区以前只写几个全局量，RC.ctxSync 里从来没有。
+  const CARET = read("_server_deploy/static/pdf/reader.src/16-caret-select.js");
+  const report = CARET.slice(CARET.indexOf("window.__bwReportNativeSelection = function"), CARET.indexOf("function checkSelection()"));
+  assert.match(report, /RC\?\.ctxSync\?\.report\(/);
+  assert.match(report, /selection: txt, sel_page: currentPage/);
+  assert.match(report, /\{ immediate: true \}/);
+  const SCRIPT = read("ios/BWReader/App/ReaderNativeConversationScript.swift");
+  const handler = SCRIPT.slice(SCRIPT.indexOf("} else if (action === 'nativePageSelection') {"), SCRIPT.indexOf("} else if (action === 'nativeSelectionHighlight') {"));
+  const reportAt = handler.indexOf("window.__bwReportNativeSelection?.(");
+  assert.ok(reportAt > 0 && reportAt < handler.indexOf("if (!selection) {"), "清空也要报，所以要在分支之前");
+  // 侧栏关着不钉进对话是原版规定，不算失败。
+  assert.match(handler, /if \(pinned && window\.__focusSel\?\.text !== selection\)/);
+});

@@ -303,6 +303,17 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     var onEditHighlight: ((Highlight) -> Void)?
     /// 页码 + 要重新识别的点坐标矩形。
     var onRecognize: ((Int, CGRect) -> Void)?
+    /// 诊断出口：写进回传服务器的客户端日志（由阅读器接上）。
+    /// ⚠ 这台 iPad 摸不到，"选中弹的是系统菜单""点卡没反应"这类问题只能靠现场自己说出来。
+    var onDiagnostic: ((String) -> Void)?
+    private var diagnosticAt: [String: Date] = [:]
+    /// 同一类诊断 2 秒内只记一条，别让拖选区刷屏。
+    private func diagnose(_ key: String, _ line: @autoclosure () -> String) {
+        let now = Date()
+        if let last = diagnosticAt[key], now.timeIntervalSince(last) < 2 { return }
+        diagnosticAt[key] = now
+        onDiagnostic?(line())
+    }
     private var access: ReaderLocalBookAccess?
     private var digest = ""
     private var generation = UUID()
@@ -1022,6 +1033,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             (document.index(for: page) + 1, page,
              selection.selectionsByLine().filter { $0.pages.contains(page) }.map { $0.bounds(for: page) })
         }
+        diagnose("sel-pdfkit", "[native-sel] pdfkit pages=" + pages.map { String($0.0) }.joined(separator: ",")
+                 + " chars=" + pages.map { characterPages[$0.0] != nil ? "y" : "n" }.joined(separator: ","))
         selectionTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -1197,9 +1210,15 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                     let value = try await NativeBookOCRManager.shared.readerPageCharacters(book: access, expectedContentSHA256: digest, page: number)
                     guard generation == ticket, self.access === access, characterReadTickets[number] == readTicket, !Task.isCancelled else { return }
                     guard let value, value.contentSHA256.lowercased() == digest, value.status == .ready else {
-                        characterReadFailed(number); return
+                        let why = value.map { "status=\($0.status)" } ?? "nil"
+                        if characterReadFailed(number) { onDiagnostic?("[native-chars] p=\(number) gave up: " + why) }
+                        else { diagnose("chars-miss-\(number)", "[native-chars] p=\(number) miss: " + why) }
+                        return
                     }
                     let core = try ReaderNativePDFSelection(value)
+                    if characterRetry[number] != nil {
+                        onDiagnostic?("[native-chars] p=\(number) ok after retry n=\(value.chars.count)")
+                    }
                     characterRetry[number] = nil
                     characterPages[number] = value; selectionCores[number] = core
                     textOverlays[number]?.characters = value
@@ -1247,6 +1266,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     private func acceptOCRSelection(_ selected: ReaderNativePDFSelection.Value, page: Int) {
         guard let access, let chars = characterPages[page], !selected.indexes.isEmpty,
               selected.indexes.allSatisfy({ chars.chars.indices.contains($0) }), chars.contentSHA256.lowercased() == digest else { return }
+        diagnose("sel-overlay", "[native-sel] overlay page=\(page) chars=\(selected.indexes.count)")
         customSelection = true; selectionTask?.cancel(); view.clearSelection()
         for (number, overlay) in textOverlays where number != page { overlay.clearSelection() }
         onSelection?([CharacterSelection(bookID: access.record.id, contentSHA256: digest, page: page,

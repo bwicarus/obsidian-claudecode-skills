@@ -7830,6 +7830,24 @@ function _ctxSelReport(txt) {
     else window.RC?.outgoing?.cancel();
   } catch (_) {}
 }
+// 原生正文的选区走同一条上报（字段、清空纪律、焦点通道都与 _ctxSelReport 一致）。
+// ⚠ 2026-09-23 用户："他无法看到我的选中"。原生接管后网页里既没有 window.getSelection
+//   也没有 _charSel，上面那条路永远报空 —— 原生选区只写进了几个全局量，AI 读的阅读快照
+//   （RC.ctxSync）里从来没有它。句子由原生字符层算好传进来（网页这时没有 __charBoxes）。
+window.__bwReportNativeSelection = function (txt, sentence) {
+  try {
+    txt = String(txt || '').trim();
+    let selCtx = txt ? String(sentence || '').slice(0, 600) : '';
+    if (selCtx.trim() === txt) selCtx = '';
+    window.RC?.ctxSync?.report(
+      { kind: 'pdf', file: FILE_REL, selection: txt, sel_page: currentPage,
+        sel_context: selCtx, sel_context_source: selCtx ? 'pdf-sentence' : '' },
+      { immediate: true });
+    if (txt) window.RC?.outgoing?.focus('text', { file: FILE_REL, page: currentPage, text: txt.slice(0, 200) });
+    else window.RC?.outgoing?.cancel();
+    return true;
+  } catch (_) { return false; }
+};
 function checkSelection() {
   const sel = window.getSelection();
   const txt = (sel.toString() || '').trim();

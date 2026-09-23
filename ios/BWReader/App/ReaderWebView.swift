@@ -522,6 +522,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // 内容还没到（快照只带当前页前后几页）就说出来，不静默。
         guard placement != nil || nativeOpenBoundNotes.contains(noteID) else {
             showTransientNotice("这张卡的内容还没同步到本机，请稍后再点。")
+            probeNoteCards(noteID: noteID)
             return
         }
         if nativeOpenBoundNotes.contains(noteID) { nativeOpenBoundNotes.remove(noteID) }
@@ -568,6 +569,25 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         parts.append("placements=\(nativeConversation.placements.count)")
         postClientLog(parts.joined(separator: " "))
+    }
+
+    /// 点卡打不开时，问网页那侧：便签模块一共交得出几张卡、这张在不在里面、它以为当前是第几页。
+    private func probeNoteCards(noteID: String) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let value = try? await webView.callAsyncJavaScript(
+                """
+                try {
+                  const s = window.RC?.stickynote;
+                  const all = typeof s?.nativeNoteCards === 'function' ? s.nativeNoteCards(null) : null;
+                  const nav = window.RC?.readerNavigation?.state?.() || {};
+                  return JSON.stringify({ api: typeof s?.nativeNoteCards, all: all ? all.length : -1,
+                    has: !!(all && all.some(c => c.id === id)), pos: nav.position ?? null,
+                    viewport: !!window.RC?.readerNavigation?.nativeViewport });
+                } catch (e) { return 'err:' + String(e && e.message || e).slice(0, 120); }
+                """, arguments: ["id": noteID], in: nil, contentWorld: .page)
+            postClientLog("[card-probe] id=" + String(noteID.prefix(12)) + " " + String(describing: value ?? "nil"))
+        }
     }
 
     /// 写一行到网页那条已经在回传服务器的客户端日志（__bwClientLog）。
@@ -1005,6 +1025,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         let receipt = await requestNativeConversationCommand(["action": "nativePageSelection", "scope": scope,
             "value": ["sequence": nativePDFSelectionSequence, "pages": pages]])
+        if receipt["ok"] as? Bool != true, !values.isEmpty {
+            postClientLog("[native-sel] report failed: " + String(describing: receipt["error"] ?? "unknown"))
+        }
         return receipt["ok"] as? Bool == true
     }
 
@@ -1154,6 +1177,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 && self.currentLocalBook?.id == bookID && self.currentLocalBookContentSHA256 == digest
         }
         activeNativePDFDocument = document
+        document.onDiagnostic = { [weak self] line in
+            Task { @MainActor [weak self] in self?.postClientLog(line) }
+        }
         document.onHighlight = { [weak self] request in
             Task { @MainActor [weak self] in
                 await self?.highlightFromNativeSelection(
@@ -1282,7 +1308,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             ReaderNativeStartupProfile.shared.mark("原生阅读区挂载")
             let history = self.nativePDFLifecycleNotes.joined(separator: ",")
             self.nativePDFLifecycleNotes = []
-            self.postClientLog("[native-pdf] mounted" + (history.isEmpty ? "" : " after " + history))
+            let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+            self.postClientLog("[native-pdf] mounted build=" + build + (history.isEmpty ? "" : " after " + history))
         }
     }
 
