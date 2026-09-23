@@ -360,8 +360,8 @@ struct ReaderNativePlacedCard: View {
     private var isDot: Bool { form == "dot" }
     private var surfaceFill: Color { isDot ? Color.clear : finish.fill }
     private var surfaceBorder: Color { isDot ? Color.clear : finish.border }
-    private var dropShadow: Color { isDot ? Color.clear : Color.black.opacity(0.45) }
-    private var toneGlow: Color { isDot ? Color.clear : finish.glow.opacity(0.6) }
+    private var dropShadow: Color { isDot ? Color.black.opacity(0.18) : Color.black.opacity(0.3) }
+    private var toneGlow: Color { isDot ? Color.clear : finish.glow.opacity(0.45) }
     private var pickedRing: Color { ReaderNativeCardDropZone.dock }
 
     /// 圆点态的那枚标记：40×40 圆角方（半径 13），照原版 `.vc-card-dot`：
@@ -373,10 +373,7 @@ struct ReaderNativePlacedCard: View {
             .font(.system(size: 17, weight: .medium))
             .foregroundStyle(finish.tone)
             .frame(width: 40, height: 40)
-            .background(finish.tone.opacity(0.14), in: RoundedRectangle(cornerRadius: 13))
-            .background(Color(red: 22 / 255, green: 26 / 255, blue: 38 / 255).opacity(0.38),
-                        in: RoundedRectangle(cornerRadius: 13))
-            .overlay(RoundedRectangle(cornerRadius: 13).stroke(finish.border, lineWidth: 0.5))
+            .readerCardDot(tone: finish.tone, border: finish.border)
             .contentShape(RoundedRectangle(cornerRadius: 13))
             // 点按 = 切形态；按住 420ms = 拖（原版圆点同一条蓄力链）。
             .gesture(pressGesture(onTap: { runForm(nextForm) }))
@@ -465,7 +462,8 @@ struct ReaderNativePlacedCard: View {
                     Image(systemName: "trash.fill").font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color(red: 1, green: 0xd8 / 255, blue: 0xde / 255))
                         .frame(width: 26, height: 26)
-                        .background(Color(red: 64 / 255, green: 35 / 255, blue: 42 / 255).opacity(0.82), in: Circle())
+                        .readerGlassCircle(tint: Color(red: 1, green: 0.27, blue: 0.23).opacity(0.45),
+                                           fallback: Color(red: 64 / 255, green: 35 / 255, blue: 42 / 255).opacity(0.82))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("删除这张卡片")
@@ -481,7 +479,7 @@ struct ReaderNativePlacedCard: View {
                     Image(systemName: "ellipsis").font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color(red: 0xe8 / 255, green: 0xe8 / 255, blue: 0xee / 255))
                         .frame(width: 26, height: 26)
-                        .background(Color.white.opacity(0.14), in: Circle())
+                        .readerGlassCircle(tint: nil, fallback: Color.white.opacity(0.14))
                 }
                 .accessibilityLabel("卡片操作")
             }
@@ -505,8 +503,11 @@ struct ReaderNativePlacedCard: View {
                 header
             }
             if form == "full" {
-                // 原版卡头下那条分隔线（截图里贯穿卡宽的细线）。
-                Rectangle().fill(Color.white.opacity(0.12)).frame(height: 0.5)
+                // 卡头下的分隔线：两头淡出，玻璃上一条硬线太生。
+                LinearGradient(colors: [Color.white.opacity(0), Color.white.opacity(0.22), Color.white.opacity(0)],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(height: 0.5)
+                    .padding(.horizontal, 10)
                 ScrollView {
                     ReaderNativePageCardBody(parts: item.parts, model: model)
                         .padding(.horizontal, 13).padding(.top, 9).padding(.bottom, 12)
@@ -529,11 +530,13 @@ struct ReaderNativePlacedCard: View {
         }
         .frame(width: width)
         .foregroundStyle(Color(uiColor: ReaderNativeCardInk.text))
-        // 卡面：原版 .vc-card.vc-typed —— 色调 15% 混深灰、**不磨砂**
-        // （`--vc-cardblur:none`，注释原话"去 blur 后加实"）。圆点态照 .vc-dot 近乎透明。
-        .readerCardSurface(surfaceFill, glass: !isDot, in: RoundedRectangle(cornerRadius: corner))
-        .overlay(RoundedRectangle(cornerRadius: corner).stroke(surfaceBorder, lineWidth: 0.5))
-        .clipShape(RoundedRectangle(cornerRadius: corner))
+        // 卡面：iOS 26 上是染了色调的 Liquid Glass（见 readerCardGlass）；圆点态整张卡就是
+        // 那枚小玻璃标记，这里不再垫。
+        .readerCardGlass(tone: finish.tone, fallbackFill: surfaceFill, fallbackBorder: surfaceBorder,
+                         enabled: !isDot, in: RoundedRectangle(cornerRadius: corner))
+        // 卡片固定走深色：玻璃取深色变体、字是浅色 —— 跟着系统浅色模式的话，白纸页上
+        // 会是一块浅玻璃配浅字，读不清。
+        .environment(\.colorScheme, .dark)
         // 「已带入对话」：原版 .vc-picked 是卡外 2px 的 rgba(123,108,255,.85) —— 紫色卡上
         // 几乎看不见（2026-09-23 用户："选中时边框特效不够明显，特别是卡片本身为紫色时"）。
         // 加强成：卡外 2.5pt 选中环 + 环内一道白细线（跟任何色调都拉得开对比）+ 同色外发光
@@ -576,8 +579,9 @@ struct ReaderNativePlacedCard: View {
             }
         }
         // 阴影 + 色调辉光（.vc-card.vc-typed 的两层 box-shadow）。
-        .shadow(color: dropShadow, radius: 18, y: 12)
-        .shadow(color: toneGlow, radius: 7)
+        // 浮在书页上的玻璃：一层软而远的影 + 一圈色调辉光。
+        .shadow(color: dropShadow, radius: 22, y: 12)
+        .shadow(color: toneGlow, radius: 14)
         // 拖动中位移加在**影子**上（见 body），这里只保留松手到新几何之间的暂态位移。
         .offset(committed ?? .zero)
         // 手势被打断时 GestureState 自己归零而 onEnded 不一定来 —— 预览和投放区
