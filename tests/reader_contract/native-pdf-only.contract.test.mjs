@@ -112,3 +112,23 @@ test("原生选区报进 AI 读的阅读快照（与侧栏开没开无关）", (
   // 侧栏关着不钉进对话是原版规定，不算失败。
   assert.match(handler, /if \(pinned && window\.__focusSel\?\.text !== selection\)/);
 });
+
+test("选区照原版：单击查词；拖选/长按出 #sel-toolbar 那种窗口，不弹系统编辑菜单", () => {
+  // 2026-09-23 用户："这和我们之前设计的不一样"。
+  const DOC = read("ios/BWReader/App/ReaderNativePDFDocument.swift");
+  const show = DOC.slice(DOC.indexOf("private func showMenu() {"), DOC.indexOf("func selectionWindowRect()"));
+  assert.doesNotMatch(show, /presentEditMenu/);
+  assert.match(show, /onPanel\?\(selected\)/);
+  const tap = DOC.slice(DOC.indexOf("@objc private func tapText("), DOC.indexOf("@objc private func selectText("));
+  assert.match(tap, /onLookup\?\(value, "dict"\)/, "单击一个词 = 直接查词");
+  const PANEL = read("ios/BWReader/App/ReaderNativePDFSelectionPanel.swift");
+  // 原版两组按钮与判据。
+  assert.match(PANEL, /private var isWord: Bool/);
+  for (const key of ["copy", "dict", "ocr", "search", "phrase", "translate", "explain", "chat", "grammar"]) {
+    assert.match(PANEL, new RegExp(`"${key}"`), key);
+  }
+  assert.match(PANEL, /if active \{ activeColor = ""; return \}/, "再点当前色 = 只取消激活");
+  assert.match(PANEL, /已选：/);
+  const APP = read("ios/BWReader/App/BWReaderNativeApp.swift");
+  assert.match(APP, /ReaderNativePDFSelectionPanelLayer\(document: document\)/);
+});

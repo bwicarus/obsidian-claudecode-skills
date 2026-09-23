@@ -1062,6 +1062,25 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return receipt["ok"] as? Bool == true
     }
 
+    /// 最近一次原生选区（选区窗口「对话」时要重新送一遍）。
+    private var lastNativePDFSelection: [ReaderNativePDFDocument.CharacterSelection] = []
+
+    /// 选区窗口的「对话」（原版 onChat）：打开侧栏，把这段选区钉进对话。
+    /// ⚠ 侧栏关着时选区按原版规定不钉进对话（__setFocusSel 第一句），所以先开侧栏、
+    ///   等网页那侧知道侧栏开了，再把同一段选区重送一遍。
+    func chatWithNativeSelection() async {
+        guard let book = currentLocalBook, let digest = currentLocalBookContentSHA256,
+              !lastNativePDFSelection.isEmpty else { return }
+        if !nativeConversation.sidebarOpen {
+            _ = await nativeConversation.perform("toggleAssistant")
+            try? await Task.sleep(nanoseconds: 350_000_000)
+        }
+        if await updateNativePDFSelection(lastNativePDFSelection, bookID: book.id, contentSHA256: digest,
+                                          scope: nativeConversation.scope) == false {
+            showTransientNotice("选中的内容没能带进对话，请在侧栏打开后重新选一次。")
+        }
+    }
+
     func setNativeDocumentCaptureViewport(_ view: UIView?) {
         localRuntimeServer?.visualCaptureBroker.setNativeDocumentViewport(view)
     }
@@ -1240,10 +1259,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         publishNativeInkSurfaces()
         refreshNativePageOverlays()
+        document.onSelectionSearch = { query in
+            // 原版 onSearchSel：用 Bing 搜选中内容。
+            var parts = URLComponents(string: "https://www.bing.com/search")
+            parts?.queryItems = [URLQueryItem(name: "q", value: String(query.prefix(400)))]
+            if let target = parts?.url { UIApplication.shared.open(target) }
+        }
+        document.onSelectionChat = { [weak self] _, _, _ in
+            Task { @MainActor [weak self] in await self?.chatWithNativeSelection() }
+        }
         document.onSelection = { [weak self] values in
             Task { @MainActor [weak self] in
                 // 用**当下**的会话 scope：接管那一刻的 scope 一旦过期，每次选中都会被悄悄丢掉。
                 guard let self else { return }
+                self.lastNativePDFSelection = values
                 _ = await self.updateNativePDFSelection(values, bookID: bookID, contentSHA256: digest,
                                                         scope: self.nativeConversation.scope)
             }

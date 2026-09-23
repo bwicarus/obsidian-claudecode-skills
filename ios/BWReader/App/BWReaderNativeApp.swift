@@ -228,6 +228,9 @@ private struct ReaderRootView: View {
                                                   model: reader.nativeConversation)
                         .ignoresSafeArea(edges: .bottom)
                 }
+                // 选区窗口（原版 #sel-toolbar）：贴着选区浮在正文上。
+                ReaderNativePDFSelectionPanelLayer(document: document)
+                    .ignoresSafeArea(edges: .bottom)
             }
 
             if nativeInterfaceEnabled && !reader.nativeConversation.legacyVisible {

@@ -314,6 +314,45 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     var onEditHighlight: ((Highlight) -> Void)?
     /// 页码 + 要重新识别的点坐标矩形。
     var onRecognize: ((Int, CGRect) -> Void)?
+    /// 选区窗口（原版 `#sel-toolbar`）此刻显示的选区。nil = 不显示。
+    struct SelectionPanel: Equatable {
+        let id: UUID
+        let page: Int
+        let text: String
+        let sentence: String
+    }
+    @Published private(set) var selectionPanel: SelectionPanel?
+    /// 窗口该贴的选区框（窗口坐标）。滚动途中为 nil —— 先藏起来，停下后再按新位置摆。
+    @Published private(set) var selectionPanelAnchor: CGRect?
+    private weak var selectionPanelOverlay: ReaderNativePDFTextOverlay?
+    /// 「搜索」「对话」：要出阅读区的两件事交给阅读器。
+    var onSelectionSearch: ((String) -> Void)?
+    var onSelectionChat: ((Int, String, String) -> Void)?
+
+    fileprivate func selectionPanelChanged(overlay: ReaderNativePDFTextOverlay?, page: Int,
+                                           value: ReaderNativePDFSelection.Value?) {
+        guard let overlay, let value else {
+            // 别的页清自己的选区时也会报 nil —— 只有当前窗口所属那一页清了才收起。
+            if overlay == nil || selectionPanelOverlay === overlay {
+                selectionPanel = nil; selectionPanelAnchor = nil; selectionPanelOverlay = nil
+            }
+            return
+        }
+        selectionPanelOverlay = overlay
+        selectionPanel = SelectionPanel(id: UUID(), page: page, text: value.text, sentence: value.sentence)
+        selectionPanelAnchor = overlay.selectionWindowRect()
+    }
+
+    /// 只收起窗口，选区留着（查词/翻译等打开面板后）。
+    func dismissSelectionPanel() {
+        selectionPanel = nil; selectionPanelAnchor = nil
+    }
+
+    /// 选区窗口上的按钮。动作实现全在文字层里（与原来菜单同一套），这里只转交。
+    func performSelectionAction(_ key: String) {
+        selectionPanelOverlay?.perform(key)
+    }
+
     /// 诊断出口：写进回传服务器的客户端日志（由阅读器接上）。
     /// ⚠ 这台 iPad 摸不到，"选中弹的是系统菜单""点卡没反应"这类问题只能靠现场自己说出来。
     var onDiagnostic: ((String) -> Void)?
@@ -1027,11 +1066,15 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let content = view.documentView?.bounds.size ?? .zero
         let layoutKey: [CGFloat] = [view.scaleFactor, content.width, content.height, view.bounds.width, view.bounds.height]
         if layoutKey != lastLayoutKey { lastLayoutKey = layoutKey; layoutRevision &+= 1 }
+        if selectionPanelAnchor != nil { selectionPanelAnchor = nil }
         settleTask?.cancel()
         settleTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard let self, !Task.isCancelled else { return }
             self.settledRevision &+= 1
+            if self.selectionPanel != nil {
+                self.selectionPanelAnchor = self.selectionPanelOverlay?.selectionWindowRect()
+            }
         }
         loadVisibleCharacterPages()
         // Content offset can change within the same PDF page without a page
@@ -1154,6 +1197,11 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
         overlay.decorationButtons = decorationButtons(page: number)
         overlay.onSelect = { [weak self] value in self?.acceptOCRSelection(value, page: number) }
+        overlay.onPanel = { [weak self, weak overlay] value in
+            self?.selectionPanelChanged(overlay: overlay, page: number, value: value)
+        }
+        overlay.onSearch = { [weak self] value in self?.onSelectionSearch?(value.text) }
+        overlay.onChat = { [weak self] value in self?.onSelectionChat?(number, value.text, value.sentence) }
         overlay.onError = { [weak self] in self?.error = "当前文字层无法确认这段选区的位置。" }
         overlay.onHighlight = { [weak self] value, color in
             guard let self, let chars = self.characterPages[number] else { return }
@@ -1306,6 +1354,10 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
     var canonicalPoint: ((CGPoint) -> CGPoint?)?
     var project: ((CGRect) -> CGRect?)?
     var onSelect: ((ReaderNativePDFSelection.Value) -> Void)?
+    /// 选区定下来 / 清掉：交给文档去显示原版那种选区窗口（nil = 收起）。
+    var onPanel: ((ReaderNativePDFSelection.Value?) -> Void)?
+    var onSearch: ((ReaderNativePDFSelection.Value) -> Void)?
+    var onChat: ((ReaderNativePDFSelection.Value) -> Void)?
     var onError: (() -> Void)?
     /// 选区菜单里的「划线」。颜色是四支笔的键名（yellow/green/blue/pink）。
     /// ⚠ 这四个键必须与阅读器色板一致：那是**用户自己的墨水**，存在他的笔记里，
@@ -1429,7 +1481,10 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         if let id = cardMarkerAt(location) { onOpenCard?(id); return }
         if let id = highlightAt?(location) { onEditHighlight?(id); return }
         guard let index = hit(location) else { return }
-        resolve(index, index); showMenu()
+        // 单击一个词 = 直接查词（原版 15-phrase-wordpop「单击单词 → 单词小框」），
+        // 不先弹一排按钮让人再点一次。拖选 / 长按才出选区窗口。
+        resolve(index, index)
+        if let value = selected { onPanel?(nil); onLookup?(value, "dict") }
     }
     @objc private func selectText(_ gesture: UILongPressGestureRecognizer) {
         guard let selectionCore else { return }
@@ -1485,9 +1540,47 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         if gesture.state == .ended { handleAnchor = nil; showMenu() }
         if gesture.state == .cancelled || gesture.state == .failed { handleAnchor = nil }
     }
+    /// 选区定下来：出原版那种选区窗口（`#sel-toolbar`：左色板 + 右预览/按钮），
+    /// 不再弹系统编辑菜单 —— 2026-09-23 用户："这和我们之前设计的不一样"。
     private func showMenu() {
-        guard let first = selected?.rects.first, let rect = project?(first) else { return }
-        editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: CGPoint(x: rect.midX, y: rect.minY)))
+        guard selected != nil else { return }
+        onPanel?(selected)
+    }
+
+    /// 选区在窗口里的框（选区窗口贴着它摆）。
+    func selectionWindowRect() -> CGRect? {
+        guard let selected, window != nil else { return nil }
+        var union = CGRect.null
+        for rect in selected.rects { if let projected = project?(rect) { union = union.union(projected) } }
+        guard !union.isNull else { return nil }
+        return convert(union, to: nil)
+    }
+
+    /// 选区窗口上的按钮。实现与原来菜单里的同名动作逐一相同。
+    func perform(_ key: String) {
+        guard let value = selected else { return }
+        switch key {
+        case "copy":
+            UIPasteboard.general.string = value.text
+        case "dict", "translate", "phrase", "explain":
+            onLookup?(value, key)
+        case "grammar":
+            onGrammar?(value)
+        case "ocr":
+            var union = CGRect.null
+            for rect in value.rects { union = union.union(rect) }
+            guard !union.isNull, union.width >= 0.5, union.height >= 0.5 else { return }
+            onRecognize?(union)
+        case "search":
+            onSearch?(value)
+        case "chat":
+            onChat?(value)
+        default:
+            if key.hasPrefix("highlight:") {
+                onHighlight?(value, String(key.dropFirst("highlight:".count)))
+                clearSelection()
+            }
+        }
     }
     func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
                              suggestedActions: [UIMenuElement]) -> UIMenu? {
@@ -1555,8 +1648,10 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         }
     }
     func clearSelection() {
+        let had = selected != nil
         start = nil; handleAnchor = nil; selected = nil
         editMenu.dismissMenu(); updateHandles(); setNeedsDisplay()
+        if had { onPanel?(nil) }
     }
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
