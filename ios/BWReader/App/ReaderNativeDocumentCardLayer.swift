@@ -195,7 +195,7 @@ struct ReaderNativeAnchoredCards: View {
         if item.visible, !item.floating, let rect = documentRect(item) {
             ReaderNativePlacedCard(item: item, reader: reader, model: model, rect: rect,
                                    available: layer.viewport, space: .named(Self.space),
-                                   unitScale: layer.scale, toWindow: layer.toWindow)
+                                   unitScale: layer.scale, toWindow: layer.toWindow, inDocumentLayer: true)
                 .background(GeometryReader { proxy in
                     Color.clear.preference(key: ReaderNativeCardFramesKey.self,
                                            value: [proxy.frame(in: .named(Self.space))])

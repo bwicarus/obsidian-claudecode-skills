@@ -297,7 +297,8 @@ private struct ReaderNativeConversationArtifactCard: View {
                 Text("含 \(sources.count) 项来源，详见内容资料")
                     .font(.caption2).foregroundStyle(ReaderNativeTheme.muted)
             }
-            ReaderNativeConversationAction(part: part, model: model)
+            // 页卡上不放「内容资料」：原版页卡没有这个按钮（侧栏生成物里才有）。
+            if !bare { ReaderNativeConversationAction(part: part, model: model) }
         }
         .padding(bare ? 0 : 14)
         .frame(maxWidth: .infinity, alignment: .leading)

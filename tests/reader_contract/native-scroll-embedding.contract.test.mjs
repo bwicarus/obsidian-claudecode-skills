@@ -76,3 +76,12 @@ test("清空对话常驻在顶部菜单；侧栏有本机缓存", () => {
   assert.match(MODEL, /ReaderNativeConversationCache\.hasConversation\(rawMessages\)/);
   assert.match(MODEL, /ReaderNativeConversationCache\.clear\(conversationMode\)/);
 });
+
+test("屏幕层：拖动手势与卡片位置同一坐标系，换窗口坐标要加本层起点", () => {
+  // 2026-09-23："移动时卡片的位置和松手后预计锁定的词差距很大，松手后瞬移到预定位置"。
+  // 根因：rect 是本层坐标、手势取 .global，落点少加了本层起点。
+  assert.match(CARDS, /\.coordinateSpace\(name: Self\.screenSpace\)/);
+  assert.match(CARDS, /space: \.named\(Self\.screenSpace\)/);
+  assert.match(CARDS, /toWindow: \{ point in CGPoint\(x: point\.x \+ frame\.minX, y: point\.y \+ frame\.minY\) \}/);
+  assert.doesNotMatch(CARDS, /toWindow: \{ point in point \}/);
+});

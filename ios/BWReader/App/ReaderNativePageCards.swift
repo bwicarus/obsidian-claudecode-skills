@@ -199,6 +199,8 @@ struct ReaderNativePageCards: View {
 
     // ⚠ 拆成几个小函数不是为了好看：整段写在一个 ViewBuilder 里，CI 上 Swift
     //   直接报"无法在合理时间内完成类型检查"（2026-09-23 那次构建就挂在这里）。
+    static let screenSpace = "reader-screen-cards"
+
     @ViewBuilder
     private func cards(in geometry: GeometryProxy) -> some View {
         let frame = geometry.frame(in: .global)
@@ -212,6 +214,11 @@ struct ReaderNativePageCards: View {
                 placement(item, frame: frame, size: geometry.size)
             }
         }
+        // ⚠ 手势与卡片位置必须在**同一个坐标系**：卡片 rect 是这一层的本地坐标，
+        //   手势若取 .global（窗口坐标），落点就少加了这一层的起点（顶栏/侧栏的偏移）——
+        //   2026-09-23 用户："移动时卡片的位置和松手后预计锁定的词差距很大，但松手后
+        //   确实瞬移到了刚才的预定位置"。统一用本层命名坐标系，换窗口坐标时再加起点。
+        .coordinateSpace(name: Self.screenSpace)
         // 投放区判据要知道这一层在窗口里的位置（手指是按窗口坐标记的）。
         .onAppear { reader.cardDrag.screenFrame = frame }
         .onChange(of: frame) { _, value in reader.cardDrag.screenFrame = value }
@@ -233,8 +240,8 @@ struct ReaderNativePageCards: View {
             let rect = cardRect(item, frame: frame)
             if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < size.width && rect.minY < size.height {
                 ReaderNativePlacedCard(item: item, reader: reader, model: model, rect: rect, available: size,
-                                       space: .global, unitScale: 1,
-                                       toWindow: { point in point })
+                                       space: .named(Self.screenSpace), unitScale: 1,
+                                       toWindow: { point in CGPoint(x: point.x + frame.minX, y: point.y + frame.minY) })
                     .offset(x: rect.minX, y: rect.minY)
                     .zIndex(10)
             }
@@ -303,6 +310,8 @@ struct ReaderNativePlacedCard: View {
     let unitScale: CGFloat
     /// 本地坐标 → 窗口坐标。落点、投放区判据都按窗口坐标算。
     let toWindow: (CGPoint) -> CGPoint
+    /// 在文档层里（跟 PDF 滚的那层）：rect 已按便签 w/h 算好，不再用网页那套尺寸。
+    var inDocumentLayer = false
     @GestureState private var translation: CGSize = .zero
     /// 松手到新位置回来之间的**暂态位移**。
     ///
@@ -407,7 +416,7 @@ struct ReaderNativePlacedCard: View {
     private var savedSize: CGSize? {
         // 文档层：rect 由 noteGeometry 算出，**已经含了**保存过的尺寸，而且单位就是
         // 这一层的单位；再按屏幕尺寸换一遍会差一个缩放倍数。
-        if unitScale != 1 || space != .global { return nil }   // rect 已按便签 w/h 算好
+        if inDocumentLayer { return nil }   // rect 已按便签 w/h 算好
         return item.size.map { reader.nativePageCardRect(CGRect(origin: .zero, size: $0), in: .zero).size }
     }
     /// 壳宽照原版 `_formW`：圆点 40 / 长条 300 / 方块按卡片自己的宽。
