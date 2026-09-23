@@ -46,21 +46,12 @@ test("③ 藏着＝原生也看不见（visible 是从 DOM 量的）", () => {
   assert.match(CARDS, /if item\.visible && rect\.maxX > 0/);
 });
 
-test("④ 词锚描边由原生补，因为网页那份画不出来", () => {
-  // .pgmark 是网页在 pgbind-layer 里画的，要 __charBoxes；接管后 item.markers
-  // 是空的 —— 这张卡钉在正文哪一段，屏幕上完全看不出来。
-  //
-  // ⚠ 但只在**没有原生正文**时由这一层补。原生 PDFKit 接管后，框改由
-  // ReaderNativePDFViewport 画在跟随页面滚动的那一层（见下面 ⑤）——
-  // 两份同时画，滚动时就是残影，点击还落在慢半拍的那份上（2026-09-22 实报）。
-  const fallback = CARDS.slice(CARDS.indexOf("if reader.nativePDFDocument == nil,"));
-  assert.match(fallback, /item\.markers\.isEmpty, item\.bound, let boxes = nativeMarkers, !boxes\.isEmpty/);
-  assert.match(fallback, /RoundedRectangle\(cornerRadius: 3\)/);
-  // 不猜序号：序号是网页排的，猜一个可能跟别处对不上。
-  assert.doesNotMatch(fallback.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n"),
-    /marker\.number|ordinal/);
-  // 原生解不出绑定时返回空数组而不是 nil —— 那是「确实没钉在正文上」。
-  assert.match(WEBVIEW, /let rects = geometry\.bindingRects\.map \{/);
+test("④ 页卡层不再自己补画词锚描边", () => {
+  // 曾经在"网页标记为空"时由这一层用原生几何补一圈描边。那条分支只在
+  // nativePDFDocument == nil 时进，而那时原生几何必然拿不到 —— 它是死的。
+  // 原生正文下框统一由 PDFKit 页内 overlay 画（⑤）。
+  assert.doesNotMatch(CARDS, /let boxes = nativeMarkers/);
+  assert.doesNotMatch(WEBVIEW, /func nativePageMarkerRects\(/);
 });
 
 test("⑤ 锁定框画在**每一页自己的 overlay view** 里，跟着页面滚", () => {
@@ -91,14 +82,16 @@ test("⑤ 锁定框画在**每一页自己的 overlay view** 里，跟着页面�
 test("⑥ 原生正文下，页卡层一个网页标记都不画（那份按窗口坐标摆，必然拖影）", () => {
   // 2026-09-23 用户截图：框"太细颜色太浅、滚动有残影"——那条细青线加序号正是
   // 这层画的网页标记，它在原生正文模式下原来没有被挡住。
-  assert.match(CARDS, /reader\.nativePDFDocument == nil \? item\.markers : \[\]/);
+  const placement = CARDS.slice(CARDS.indexOf("private func placement("), CARDS.indexOf("private func cardRect("));
+  assert.match(placement, /if reader\.nativePDFDocument == nil \{\s*webMarkers\(item, frame: frame\)\s*\}/);
 });
 
 test("⑦ 原生解锚一律用便签 id，不用界面上的 placement id", () => {
   // placement id 是 'placement-' + hash(...)，跟便签 id 永远对不上：拿它比，
   // 页内锁定框点了就是"还没加载好"，卡身也一直退回网页坐标。
   assert.match(CARDS, /nativePageCardGeometry\(\s*id: item\.noteID/);
-  assert.match(CARDS, /nativePageMarkerRects\(\s*id: item\.noteID/);
+  assert.match(CARDS, /moveNativeCard\(id: item\.noteID/);
+  assert.match(CARDS, /resizeNativeCard\(id: item\.noteID/);
   assert.match(WEBVIEW, /placements\.first\(where: \{ \$0\.noteID == noteID \}\)/);
   assert.match(SCRIPT, /return \[\{ id, noteId: item\.id,/);
 });

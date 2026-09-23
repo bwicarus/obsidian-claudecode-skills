@@ -91,9 +91,10 @@ struct ReaderNativeCardFinish {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         tone.getRed(&r, green: &g, blue: &b, alpha: &a)
         // color-mix 在带透明度时按预乘插值，再除回去。
-        let alpha = 0.15 + 0.9 * 0.85
-        func channel(_ t: CGFloat, _ base: CGFloat) -> Double {
-            Double((0.15 * t + 0.85 * 0.9 * base / 255) / alpha)
+        let alpha: Double = 0.15 + 0.9 * 0.85
+        func channel(_ t: CGFloat, _ base: Double) -> Double {
+            let premultiplied: Double = 0.15 * Double(t) + 0.85 * 0.9 * base / 255
+            return premultiplied / alpha
         }
         self.tone = Color(uiColor: tone)
         fill = Color(red: channel(r, 28), green: channel(g, 30), blue: channel(b, 34)).opacity(alpha)
@@ -166,83 +167,82 @@ struct ReaderNativePageCards: View {
         }
     }
 
+    // ⚠ 拆成几个小函数不是为了好看：整段写在一个 ViewBuilder 里，CI 上 Swift
+    //   直接报"无法在合理时间内完成类型检查"（2026-09-23 那次构建就挂在这里）。
     @ViewBuilder
     private func cards(in geometry: GeometryProxy) -> some View {
+        let frame = geometry.frame(in: .global)
         ZStack(alignment: .topLeading) {
-                // 松手会锁在哪 —— 光带＝钉在这段内容上，横线＝钉在这个版面位置。
-                // ⚠ 自成一层：它每秒更新十来次，混在这一层里就会把每张卡一起重算。
-                ReaderNativeDropPreviewLayer(model: reader.cardDropPreviews,
-                                             origin: geometry.frame(in: .global).origin)
-                // 边缘投放区（删除 / 收藏）。⚠ 判据用**手指**位置，不是卡左上角。
-                ReaderNativeCardDropZones(finger: dragFinger, size: geometry.size)
-                ForEach(model.placements) { item in
-                    // ⚠ 原生正文接管时坐标必须来自 PDFKit 解锚：网页那套 rect 是从
-                    //   DOM 推的，而接管后网页不渲页、滚动也不同步，它已经不对应
-                    //   屏幕上的任何东西。拿不到才退回网页那条路。
-                    let nativeMarkers = reader.nativePageMarkerRects(
-                        id: item.noteID, in: geometry.frame(in: .global))
-                    // ⚠ 原生正文接管时**一个标记都不在这层画**：锁定框与序号都由 PDFKit
-                    //   页内 overlay 画（ReaderNativePDFTextOverlay），跟着页面一起滚。
-                    //   这层是按窗口坐标摆的，滚动时永远慢一帧 —— 2026-09-23 用户截图里
-                    //   那条"细、浅、带残影"的青线加序号就是这里画的网页那份标记。
-                    ForEach(Array((reader.nativePDFDocument == nil ? item.markers : []).enumerated()),
-                            id: \.element.id) { index, marker in
-                        let box = nativeMarkers.map { index < $0.count ? $0[index] : .zero }
-                            ?? reader.nativePageCardRect(marker.rect, in: geometry.frame(in: .global))
-                        Button { openBoundCard(item) } label: {
-                            ZStack {
-                                if marker.outline {
-                                    RoundedRectangle(cornerRadius: 3)
-                                        .stroke(ReaderNativeTheme.accent.opacity(item.open ? 1 : 0.65), lineWidth: 1.2)
-                                } else {
-                                    Text(marker.number.isEmpty ? "•" : marker.number)
-                                        .font(.system(size: max(9, min(14, box.height)), weight: .semibold))
-                                        .foregroundStyle(ReaderNativeTheme.accent)
-                                }
-                            }.frame(width: box.width, height: box.height).contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel((item.open ? "收起" : "展开") + item.title + "，标记 " + marker.number)
-                        .offset(x: box.minX, y: box.minY)
-                    }
-                    // ⚠ 词锚标记（.pgmark / 序号）是网页在 pgbind-layer 里画的，要
-                    //   __charBoxes 才画得出来 —— 接管后一个都没有，于是 item.markers
-                    //   是空的：**这张卡钉在正文哪一段，屏幕上完全看不出来**。
-                    //   原生自己解得出那几个框，就用它们补一个描边（没有序号，
-                    //   因为序号是网页排的，这里不去猜一个可能对不上的号）。
-                    // ⚠ 原生正文自己画锁定框（ReaderNativePDFViewport 的 Canvas +
-                    //   真控件层，跟着页面滚），这一层就不要再画一遍 ——
-                    //   两份同时在，滚动时就是"有残影"，点击也落在慢半拍的那份上
-                    //   （2026-09-22 用户连报两次）。
-                    if reader.nativePDFDocument == nil,
-                       item.markers.isEmpty, item.bound, let boxes = nativeMarkers, !boxes.isEmpty {
-                        ForEach(Array(boxes.enumerated()), id: \.offset) { _, box in
-                            Button { openBoundCard(item) } label: {
-                                RoundedRectangle(cornerRadius: 3)
-                                    .stroke(ReaderNativeTheme.accent.opacity(item.open ? 1 : 0.65), lineWidth: 1.2)
-                                    .frame(width: box.width, height: box.height)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel((item.open ? "收起" : "展开") + item.title)
-                            .offset(x: box.minX, y: box.minY)
-                        }
-                    }
-                    // 卡身同理：原生接管时用 PDFKit 解出来的位置和尺寸
-                    // （noteGeometry 会按页宽/base_w 的比例缩放，并处理折叠态）。
-                    let rect = reader.nativePageCardGeometry(
-                        id: item.noteID, size: item.size, in: geometry.frame(in: .global))
-                        ?? reader.nativePageCardRect(item.rect, in: geometry.frame(in: .global))
-                    if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < geometry.size.width && rect.minY < geometry.size.height {
-                        ReaderNativePlacedCard(item: item, reader: reader, model: model,
-                                               origin: geometry.frame(in: .global).origin,
-                                               rect: rect, available: geometry.size,
-                                               finger: $dragFinger)
-                            .offset(x: rect.minX, y: rect.minY)
-                            .zIndex(10)
-                    }
-                }
+            // 松手会锁在哪 —— 光带＝钉在这段内容上，横线＝钉在这个版面位置。
+            // ⚠ 自成一层：它每秒更新十来次，混在这一层里就会把每张卡一起重算。
+            ReaderNativeDropPreviewLayer(model: reader.cardDropPreviews, origin: frame.origin)
+            // 边缘投放区（删除 / 收藏）。⚠ 判据用**手指**位置，不是卡左上角。
+            ReaderNativeCardDropZones(finger: dragFinger, size: geometry.size)
+            ForEach(model.placements) { item in
+                placement(item, frame: frame, size: geometry.size)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func placement(_ item: ReaderNativePagePlacement, frame: CGRect, size: CGSize) -> some View {
+        // ⚠ 原生正文接管时**一个标记都不在这层画**：锁定框与序号都由 PDFKit
+        //   页内 overlay 画（ReaderNativePDFTextOverlay），跟着页面一起滚。
+        //   这层是按窗口坐标摆的，滚动时永远慢一帧 —— 2026-09-23 用户截图里
+        //   那条"细、浅、带残影"的青线加序号就是这里画的网页那份标记。
+        //   只有没有原生正文（网页在渲页）时，这层才替网页标记接点击。
+        if reader.nativePDFDocument == nil {
+            webMarkers(item, frame: frame)
+        }
+        // 卡身：原生接管时用 PDFKit 解出来的位置和尺寸
+        // （noteGeometry 会按页宽/base_w 的比例缩放，并处理折叠态）。
+        let rect = cardRect(item, frame: frame)
+        if item.visible && rect.maxX > 0 && rect.maxY > 0 && rect.minX < size.width && rect.minY < size.height {
+            ReaderNativePlacedCard(item: item, reader: reader, model: model,
+                                   origin: frame.origin, rect: rect, available: size,
+                                   finger: $dragFinger)
+                .offset(x: rect.minX, y: rect.minY)
+                .zIndex(10)
+        }
+    }
+
+    private func cardRect(_ item: ReaderNativePagePlacement, frame: CGRect) -> CGRect {
+        reader.nativePageCardGeometry(id: item.noteID, size: item.size, in: frame)
+            ?? reader.nativePageCardRect(item.rect, in: frame)
+    }
+
+    /// 网页标记（.pgmark 描边 / 序号）的可点替身 —— 位置是网页 DOM 给的窗口坐标。
+    private func webMarkerBoxes(_ item: ReaderNativePagePlacement, frame: CGRect) -> [(marker: ReaderNativePageMarker, box: CGRect)] {
+        item.markers.map { marker in (marker, reader.nativePageCardRect(marker.rect, in: frame)) }
+    }
+
+    @ViewBuilder
+    private func webMarkers(_ item: ReaderNativePagePlacement, frame: CGRect) -> some View {
+        let placed = webMarkerBoxes(item, frame: frame)
+        ForEach(placed.indices, id: \.self) { index in
+            webMarker(item, marker: placed[index].marker, box: placed[index].box)
+        }
+    }
+
+    private func webMarker(_ item: ReaderNativePagePlacement, marker: ReaderNativePageMarker, box: CGRect) -> some View {
+        let size: CGFloat = max(9, min(14, box.height))
+        return Button { openBoundCard(item) } label: {
+            ZStack {
+                if marker.outline {
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(ReaderNativeTheme.accent.opacity(item.open ? 1 : 0.65), lineWidth: 1.2)
+                } else {
+                    Text(marker.number.isEmpty ? "•" : marker.number)
+                        .font(.system(size: size, weight: .semibold))
+                        .foregroundStyle(ReaderNativeTheme.accent)
+                }
+            }
+            .frame(width: box.width, height: box.height)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel((item.open ? "收起" : "展开") + item.title + "，标记 " + marker.number)
+        .offset(x: box.minX, y: box.minY)
     }
 }
 
@@ -317,6 +317,13 @@ private struct ReaderNativePlacedCard: View {
     }
 
     private var finish: ReaderNativeCardFinish { ReaderNativeCardFinish(item.tone) }
+    /// 圆点态照 .vc-card.vc-dot：没有卡面、描边与阴影，只剩那枚标记。
+    private var isDot: Bool { item.form == "dot" }
+    private var surfaceFill: Color { isDot ? Color.clear : finish.fill }
+    private var surfaceBorder: Color { isDot ? Color.clear : finish.border }
+    private var dropShadow: Color { isDot ? Color.clear : Color.black.opacity(0.45) }
+    private var toneGlow: Color { isDot ? Color.clear : finish.glow.opacity(0.6) }
+    private var pickedRing: Color { ReaderNativeCardDropZone.dock.opacity(contextSelected ? 0.85 : 0) }
 
     /// 圆点态的那枚标记：40×40 圆角方（半径 13），照原版 `.vc-card-dot`：
     /// 底 = 色调 14% 混 rgba(22,26,38,.38)，图标用色调。
@@ -453,7 +460,7 @@ private struct ReaderNativePlacedCard: View {
 
     private var card: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if item.form == "dot" {
+            if isDot {
                 // 收起态：**整张卡就是那枚标记**（原版 `.vc-card.vc-dot`）。
                 formMarker.simultaneousGesture(moveGesture)
             } else {
@@ -479,12 +486,10 @@ private struct ReaderNativePlacedCard: View {
         .foregroundStyle(Color(uiColor: ReaderNativeCardInk.text))
         // 卡面：原版 .vc-card.vc-typed —— 色调 15% 混深灰、**不磨砂**
         // （`--vc-cardblur:none`，注释原话"去 blur 后加实"）。圆点态照 .vc-dot 近乎透明。
-        .background(item.form == "dot" ? Color.clear : finish.fill, in: RoundedRectangle(cornerRadius: corner))
-        .overlay(RoundedRectangle(cornerRadius: corner)
-            .stroke(item.form == "dot" ? Color.clear : finish.border, lineWidth: 0.5))
+        .background(surfaceFill, in: RoundedRectangle(cornerRadius: corner))
+        .overlay(RoundedRectangle(cornerRadius: corner).stroke(surfaceBorder, lineWidth: 0.5))
         // 选中环照原版 .vc-picked：1.5pt 的 rgba(123,108,255,.85)。
-        .overlay(RoundedRectangle(cornerRadius: corner)
-            .stroke(ReaderNativeCardDropZone.dock.opacity(contextSelected ? 0.85 : 0), lineWidth: 1.5))
+        .overlay(RoundedRectangle(cornerRadius: corner).stroke(pickedRing, lineWidth: 1.5))
         .clipShape(RoundedRectangle(cornerRadius: corner))
         // 长按＝带入/移出对话。⚠ 阈值取原版的 LP_MS = 600ms；
         //   用 simultaneousGesture 才不会把卡内按钮的点击吃掉。
@@ -508,8 +513,8 @@ private struct ReaderNativePlacedCard: View {
             }
         }
         // 阴影 + 色调辉光（.vc-card.vc-typed 的两层 box-shadow）。
-        .shadow(color: .black.opacity(item.form == "dot" ? 0 : 0.45), radius: 18, y: 12)
-        .shadow(color: item.form == "dot" ? .clear : finish.glow.opacity(0.6), radius: 7)
+        .shadow(color: dropShadow, radius: 18, y: 12)
+        .shadow(color: toneGlow, radius: 7)
         // 拖动中位移加在**影子**上（见 body），这里只保留松手到新几何之间的暂态位移。
         .offset(committed ?? .zero)
         // 手势被打断时 GestureState 自己归零而 onEnded 不一定来 —— 预览和投放区
@@ -587,7 +592,7 @@ private struct ReaderNativePlacedCard: View {
                     // 原生正文接管时走原生锚点：落点要换成**页内**归一化坐标。
                     // 网页那条路把它当网页视口坐标，而接管后视口里没有那一页 ——
                     // 卡会飞到别处。原生写失败才退回去。
-                    if await reader.moveNativeCard(id: item.id, windowPoint: point) {
+                    if await reader.moveNativeCard(id: item.noteID, windowPoint: point) {
                         // ⚠ 兜一手：暂态位移本来靠"新几何到了"来清（onChange(of: rect)）。
                         //   可要是落点跟原位几乎一样，rect 不变、那一下就永远不会来，
                         //   卡片会一直画在偏移后的位置上。等一拍还没来就自己清。
@@ -637,7 +642,7 @@ private struct ReaderNativePlacedCard: View {
         Task {
             // 原生接管时按卡片自身单位存（屏幕尺寸 ÷ 页宽/base_w 的比例）；
             // 否则每缩放一次书，卡片尺寸就被记错一次。
-            if await reader.resizeNativeCard(id: item.id, size: value) {
+            if await reader.resizeNativeCard(id: item.noteID, size: value) {
                 if scope == model.scope { resizing = nil }
                 return
             }

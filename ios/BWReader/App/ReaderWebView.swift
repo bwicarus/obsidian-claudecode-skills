@@ -455,36 +455,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             .offsetBy(dx: -container.minX, dy: -container.minY)
     }
 
-    /// 页卡的锚标记（钉在正文词上的那些框）。同上：原生接管时由 PDFKit 解锚。
-    /// 标记框的每帧缓存。
-    ///
-    /// ⚠ 这个函数在 SwiftUI 的 body 里被调，而 body 随 `geometryRevision`
-    /// 重算 —— 也就是**滚动的每一帧、每一张卡都要跑一遍**。
-    /// 原来每次都线性扫一遍 notes 再重算几何，卡一多就是每帧 O(n²) ——
-    /// 用户报的“滚动时没跟紧画面、有延迟还卡顿”就是它。
-    /// 缓存按 (revision, 容器位置) 失效：两者都没变就不可能有新答案。
-    private var markerRectCacheKey: (revision: Int, container: CGRect)?
-    private var markerRectCache: [String: [CGRect]] = [:]
-
-    func nativePageMarkerRects(id: String, in container: CGRect) -> [CGRect]? {
-        guard let document = nativePDFDocument else { return nil }
-        let key = (revision: document.geometryRevision, container: container)
-        if markerRectCacheKey?.revision != key.revision || markerRectCacheKey?.container != key.container {
-            markerRectCacheKey = key
-            markerRectCache.removeAll(keepingCapacity: true)
-        }
-        if let cached = markerRectCache[id] { return cached }
-        guard let note = document.notes.first(where: { $0["id"] as? String == id }),
-              let geometry = document.noteGeometry(note) else { return nil }
-        // 绑定解不出来时返回空数组而不是 nil：那是"这张卡确实没钉在正文上"，
-        // 跟"没有原生几何"是两回事，退回网页路径反而会画出错位的框。
-        let rects = geometry.bindingRects.map {
-            document.view.convert($0, to: nil).offsetBy(dx: -container.minX, dy: -container.minY)
-        }
-        markerRectCache[id] = rects
-        return rects
-    }
-
     /// 点正文里的锁定框 → 展开那张卡。
     ///
     /// ⚠ 走的是页卡自己的 `toggleBound` 控件 id，跟侧栏里点开是同一条路。

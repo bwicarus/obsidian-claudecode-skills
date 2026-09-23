@@ -25,15 +25,12 @@ const body = (source, from, to) => source.slice(source.indexOf(from), source.ind
 
 test("① 显示走 noteGeometry，拿不到才退回网页", () => {
   assert.match(CARDS, /reader\.nativePageCardGeometry\(/, "卡身位置");
-  assert.match(CARDS, /reader\.nativePageMarkerRects\(/, "锚标记位置");
   assert.match(CARDS, /\?\? reader\.nativePageCardRect\(/, "退路必须还在");
-  const geometry = body(WEBVIEW, "func nativePageCardGeometry(", "func nativePageMarkerRects(");
+  const geometry = body(WEBVIEW, "func nativePageCardGeometry(", "func openNativeBoundCard(");
   assert.match(geometry, /document\.noteGeometry\(note, presentationSize: size\)/);
   assert.match(geometry, /return nil/, "没有原生几何时返回 nil，由调用方退回 —— 不猜");
-  // 标记的绑定解不出来时是空数组而不是 nil：那是"这张卡确实没钉在正文上"，
-  // 跟"没有原生几何"不是一回事，退回网页反而会画出错位的框。
-  const markers = body(WEBVIEW, "func nativePageMarkerRects(", "func nativePageCardRect(");
-  assert.match(markers, /geometry\.bindingRects\.map/);
+  // 锚标记位置不在这层算：原生正文下由 PDFKit 页内 overlay 画（见
+  // native-bound-card-visibility ⑤），这层按窗口坐标摆必然拖影。
 });
 
 test("② 跟着 PDF 滚动/缩放重画", () => {
@@ -54,7 +51,7 @@ test("③ 拖动写页内归一化锚点，不是网页视口坐标", () => {
   const gesture = body(CARDS, "private var moveGesture", "private var resizeGesture");
   // 原生那条先走；成了就不再写网页锚点（分支体内 return）。
   const nativeFirst = gesture.slice(
-    gesture.indexOf("if await reader.moveNativeCard(id: item.id, windowPoint: point) {"),
+    gesture.indexOf("if await reader.moveNativeCard(id: item.noteID, windowPoint: point) {"),
     gesture.indexOf("guard let action = item.controls"),
   );
   assert.ok(nativeFirst.length > 0, "原生落点分支必须排在网页路径之前");
