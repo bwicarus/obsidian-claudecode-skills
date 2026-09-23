@@ -938,7 +938,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         canonicalPoint(local, from: view)
     }
 
-    private func layoutChanged() {    private func layoutChanged() {
+    private func layoutChanged() {
         // Observe actual native scrolling; no timer polls or web scroll relay.
         func firstScroll(_ root: UIView) -> UIScrollView? {
             if let scroll = root as? UIScrollView { return scroll }
