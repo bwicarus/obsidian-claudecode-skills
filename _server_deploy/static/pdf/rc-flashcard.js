@@ -173,7 +173,8 @@
     if (record.source && typeof record.source === 'object' && st.opts) {
       st.opts.repositorySource = record.source;
     }
-    var changed = false;
+    var changed = st.entityRev !== record.entityRev || st.stateRev !== record.stateRev;
+    st.entityRev = record.entityRev; st.stateRev = record.stateRev;
     Object.keys(record.states).forEach(function (key) {
       var index = Number(key), saved = record.states[key], card = st.cards[index];
       if (!Number.isInteger(index) || !card || !saved) return;
@@ -539,6 +540,7 @@
     }
     var mobile = window.BWReaderRuntime && window.BWReaderRuntime.ankiMobileExport;
     return { card: card, gid: st.gid, cardIndex: i, readonly: !!st.readonly,
+      entityRev: st.entityRev || 0, stateRev: st.stateRev || 0,
       controlledReview: !!st.controlledReview,
       canDesktop: !!(((st.opts && st.opts.localDraft) || entityIdOf(st.gid)) &&
         RC.computerVoice && typeof RC.computerVoice.addLocalAnkiCard === 'function'),
@@ -2179,6 +2181,22 @@
     });
   }
   RC.flashcard = {
+    acceptNativeRecord: function (record, index, action) {
+      var group = record && _groups[record.gid];
+      if (!group) return;
+      var containers = group.conts.filter(function (container) { return container && container.isConnected && container.__fc; });
+      containers.forEach(function (container) {
+        applyRepositoryRecord(container, record);
+        notifyState(container, 'native-card-committed', index);
+        if (action === 'add' || action === 'del') _advanceToNextDraft(container, index);
+      });
+      // The remaining external exporter observes an already committed card.
+      // It cannot redo confirmation and keeps its pending/unknown receipt gate.
+      if (action === 'add' && containers.length) {
+        var owner = containers[0], card = owner.__fc.cards[index];
+        if (card && !card._pcExportStatus && owner.__fc.opts.localDraft) exportToComputerAnki(owner, index, true);
+      }
+    },
     setNativePresentation: function (enabled) {
       window.__BW_NATIVE_CONVERSATION_DATA__ = !!enabled;
       if (enabled) {

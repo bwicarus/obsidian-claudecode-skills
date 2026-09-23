@@ -202,6 +202,17 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published var tocPanel: ReaderNativeTOCModel?
     @Published var navigationPanel: ReaderNativeNavigationModel?
     @Published private(set) var placements: [ReaderNativePagePlacement] = []
+
+    func nativeCardAction(_ token: String) -> (input: [String: Any], key: String)? {
+        let parts = messages.flatMap(\.parts) + placements.flatMap(\.parts)
+        for part in parts {
+            guard let input = part.data["nativeCard"] as? [String: Any],
+                  let ids = part.data["nativeCardActions"] as? [String: String],
+                  let match = ids.first(where: { $0.value == token }) else { continue }
+            return (input, match.key)
+        }
+        return nil
+    }
     private var nativeHTMLNotes: [ReaderNativePagePlacement]? = nil
     private var webPlacements: [ReaderNativePagePlacement] = []
     func setNativeHTMLNotes(_ values: [[String:Any]]?) {

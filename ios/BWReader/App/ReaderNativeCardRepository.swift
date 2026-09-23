@@ -105,6 +105,9 @@ struct ReaderNativeCardRepository {
     }
     private func execute(_ operation: String, args: [Any], mutation: String, at: Int64) throws -> Any {
         func arg(_ index: Int) -> Any? { args.indices.contains(index) ? args[index] : nil }
+        if operation == "interact" {
+            return try interact(R.object(arg(0), "card interaction"), mutation: mutation, at: at)
+        }
         if operation == "importLegacyBatch" {
             return try importLegacy(arg(0), options: arg(1) as? [String: Any] ?? [:], mutation: mutation, at: at)
         }
@@ -235,6 +238,50 @@ struct ReaderNativeCardRepository {
         }
         return try load(id)!
     }
+    /// Direct Swift UI actions share the repository transaction, including the
+    /// exact-state compatibility projection. A stale visible card cannot write
+    /// over a newer card or turn an already confirmed card back into a draft.
+    private func interact(_ input: [String: Any], mutation: String, at: Int64) throws -> [String: Any] {
+        let id = try R.id(input["gid"]), index = try R.integer(input["cardIndex"], "cardIndex")
+        guard let current = try load(id), let cards = current["cards"] as? [[String: Any]], index < cards.count,
+              let states = current["states"] as? [String: Any], let state = states[String(index)] as? [String: Any] else {
+            throw R.fail("NOT_FOUND", "卡片已删除或更新")
+        }
+        let entityRev = try R.integer(input["entityRev"], "entityRev"), stateRev = try R.integer(input["stateRev"], "stateRev")
+        guard entityRev == (current["entityRev"] as? NSNumber)?.int64Value,
+              stateRev == (current["stateRev"] as? NSNumber)?.int64Value else { throw R.fail("CONFLICT", "卡片已经更新，请使用最新卡面") }
+        guard state["phase"] as? String == "draft", state["removed"] as? Bool != true else { throw R.fail("TRANSITION", "这张卡已经不在草稿状态") }
+        var exact = state["exactState"] as? [String: Any] ?? [:]
+        guard !["_addPending", "_removePending", "_ratingPending", "_syncPending"].contains(where: { exact[$0] as? Bool == true }) else {
+            throw R.fail("TRANSITION", "卡片还有尚未确认的操作，请勿重复提交")
+        }
+        let options: [String: Any] = ["ifEntityRev": entityRev, "ifStateRev": stateRev]
+        switch input["action"] as? String {
+        case "edit":
+            let fields = cards[Int(index)]["type"] as? String == "cloze" ? ["cloze"] : ["front", "back"]
+            guard let field = input["field"] as? String, fields.contains(field), let text = input["text"] as? String,
+                  text.utf16.count <= 24000 else { throw R.fail("INPUT", "草稿字段或内容无效") }
+            exact[field] = text
+            return try execute("patchState", args: [id, index, ["exactState": exact], options], mutation: mutation + ":edit", at: at) as! [String: Any]
+        case "del":
+            return try execute("removeDraftCard", args: [id, index, options], mutation: mutation + ":remove", at: at) as! [String: Any]
+        case "add":
+            let content = cards.enumerated().map { offset, source -> [String: Any] in
+                var card = source
+                let saved = (states[String(offset)] as? [String: Any])?["exactState"] as? [String: Any] ?? [:]
+                let fields = source["type"] as? String == "cloze" ? ["cloze"] : ["front", "back"]
+                for field in fields { if let value = saved[field] { card[field] = value } }
+                return card
+            }
+            let saved = try execute("saveConfirmedCard", args: [["gid": id, "cards": content, "cardIndex": index], options], mutation: mutation + ":confirm", at: at) as! [String: Any]
+            exact["_st"] = "learn"; exact["_showBack"] = false; exact["_addPending"] = false
+            exact["_addQueued"] = false; exact["_addAid"] = NSNull()
+            exact["_ratingUnavailable"] = true; exact["_ratingUnavailableReason"] = "not-exported"
+            return try execute("patchState", args: [id, index, ["exactState": exact], ["ifStateRev": saved["stateRev"]!]], mutation: mutation + ":confirmed-state", at: at) as! [String: Any]
+        default: throw R.fail("INPUT", "不支持的原生卡片动作")
+        }
+    }
+
     private func importLegacy(_ value: Any?, options: [String: Any], mutation: String, at: Int64) throws -> [Any] {
         guard let items = value as? [Any], !items.isEmpty, items.count <= 500 else { throw R.fail("LEGACY", "legacy batch 必须包含 1-500 条记录") }
         let specs = try items.map(R.legacy)

@@ -2036,7 +2036,49 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return try localRuntimeServer.visualCaptureBroker.captureImage(region: nil)
     }
 
+    private func performNativeCardCommand(_ command: [String: Any]) async -> [String: Any]? {
+        guard command["action"] as? String == "liveAction", let token = command["actionId"] as? String,
+              let target = nativeConversation.nativeCardAction(token),
+              ["add", "del", "edit-front", "edit-back", "edit-cloze"].contains(target.key),
+              (target.input["entityRev"] as? NSNumber)?.int64Value ?? 0 > 0 else { return nil }
+        do {
+            guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
+                  let deviceID = nativeReadingStoreDeviceID,
+                  let state = ReaderNativeCardPresentation.interaction(target.input) else {
+                throw ReaderNativeCardRules.fail("UNAVAILABLE", "卡片上下文已切换")
+            }
+            let editing = target.key.hasPrefix("edit-")
+            if editing {
+                guard state["editable"] as? Bool == true else { throw ReaderNativeCardRules.fail("TRANSITION", "当前卡片不可编辑") }
+            } else {
+                guard let control = (state["controls"] as? [[String: Any]])?.first(where: { $0["key"] as? String == target.key }),
+                      control["disabled"] as? Bool == false else { throw ReaderNativeCardRules.fail("TRANSITION", "当前卡片操作不可用") }
+            }
+            let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+            guard try store.meta("legacyImport") == "done" else { throw ReaderNativeCardRules.fail("UNAVAILABLE", "卡库尚未就绪") }
+            var input = target.input.filter { ["gid", "cardIndex", "entityRev", "stateRev"].contains($0.key) }
+            input["action"] = editing ? "edit" : target.key
+            if editing { input["field"] = String(target.key.dropFirst(5)); input["text"] = command["text"] ?? NSNull() }
+            let receipt = try ReaderNativeCardRepository(store: store, deviceID: deviceID).perform([
+                "operation": "interact", "arguments": [input], "mutationId": "native-card-ui:" + UUID().uuidString])
+            markCloudSyncDirty(); scheduleNativePDFProjectionRefresh()
+            // Compatibility observers consume a receipt, never a command to
+            // perform the local mutation again. Their failure cannot undo a
+            // committed save or make the UI report it as an unknown mutation.
+            do {
+                _ = try await webView.callAsyncJavaScript(
+                    "window.RC?.flashcard?.acceptNativeRecord(record,index,action); window.__bwNativeConversation?.snapshot?.();",
+                    arguments: ["record": receipt["result"]!, "index": input["cardIndex"]!, "action": input["action"]!],
+                    in: nil, contentWorld: .page)
+            } catch { postClientLog("卡片已在原生卡库提交，兼容投影待刷新：" + error.localizedDescription) }
+            return ["ok": true, "committed": true]
+        } catch let error as ReaderNativeCardRules.Failure {
+            return ["ok": false, "code": error.code, "error": error.detail]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativeCardCommand(command) { return result }
         if let result = await performNativeHTMLNoteCommand(command) { return result }
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             // "showLegacy" 已删除：旧网页界面不再是一个可以被请求的目的地。

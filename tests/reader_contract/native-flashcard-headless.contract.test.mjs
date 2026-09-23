@@ -54,4 +54,8 @@ test('headless draft success uses committed semantic state rather than existence
   assert.equal(result.el, el);
   assert.equal(h.RC.flashcard.interactionState(h.body, 0).editable, true);
   assert.equal(h.counts().htmlWrites, 0);
+  const next = { ...record, entityRev: 1, stateRev: 2, states: { 0: { ...record.states[0], exactState: { front: '更新題' } } } };
+  h.RC.flashcard.acceptNativeRecord(next, 0, 'edit');
+  assert.equal(h.RC.flashcard.interactionState(h.body, 0).fields[0].value, '更新題');
+  assert.equal(h.RC.flashcard.presentationInput(h.body, 0).stateRev, 2);
 });
