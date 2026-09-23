@@ -58,3 +58,16 @@ test("从没写过的数据域（版本 0）不能让原生正文打不开", () 
   // 发布出去的包仍然严格（validate 走默认参数）。
   assert.match(CODEC, /rawBytes \+= try validateDomainPayload\(domain\)/);
 });
+
+test("原生正文只接管一次：并发的布局回调不能互相拆台", () => {
+  // 2026-09-23 实录：同一毫秒 3～4 条 activate failed —— 布局回调连发几下、各排一个 Task，
+  // 后到的撞上「视口已被占用」失败，失败处理又把先到的成功卸掉，于是整本书打不开。
+  const mount = WEBVIEW.slice(WEBVIEW.indexOf("func mountNativePDFDocument()"), WEBVIEW.indexOf("/// 错误面板上的「重试」。"));
+  assert.match(mount, /let claim = ReaderNativeActivationClaim\(\)/);
+  assert.match(mount, /guard let self, let document, !claim\.claimed,/);
+  const claimAt = mount.indexOf("claim.claimed = true");
+  assert.ok(claimAt > 0 && claimAt < mount.indexOf("try await self.activateNativePDFDocument(document)"),
+    "认领必须在第一个 await 之前，否则排队的 Task 仍会并发进来");
+  assert.match(mount, /guard self\.nativePDFDocument === document else \{ return \}/);
+  assert.match(WEBVIEW, /@MainActor\nfinal class ReaderNativeActivationClaim \{/);
+});

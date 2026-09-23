@@ -1246,13 +1246,21 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             }
             // ⚠ 回调本身不是 MainActor 隔离的（与 onSelection 同一形态），所以一律
             //   先跳进 MainActor 再碰视图和模型。
+            // ⚠ 只接管一次。布局回调一次布局里会连发好几下，每下都排一个 Task —— 它们在
+            //   `document.onGeometry = nil` 生效之前就已经排进去了，于是几个 activate 并发：
+            //   先到的拿到视口，后到的撞上「视口已被占用」报 unavailable。2026-09-23 实录
+            //   同一毫秒 3～4 条 activate failed；后到的那个失败还把先到的成功拆掉了。
+            let claim = ReaderNativeActivationClaim()
             document.onGeometry = { [weak self, weak document] in
                 Task { @MainActor [weak self, weak document] in
-                    guard let self, let document,
+                    guard let self, let document, !claim.claimed,
                           document.view.bounds.width > 0, document.view.bounds.height > 0,
                           self.bookUserStateContextGeneration == generation else { return }
+                    claim.claimed = true
                     document.onGeometry = nil
                     do { try await self.activateNativePDFDocument(document) } catch {
+                        // 已经被换掉的文档失败了，与当前这本无关，别去拆当前的。
+                        guard self.nativePDFDocument === document else { return }
                         // 出声：静默失败的表现是「原生阅读区白着，没人知道为什么」。
                         // 卸下这份半挂的文档，让错误面板（带重试）顶上来，而不是一块白。
                         let reason = String(describing: error).prefix(160)
@@ -6223,4 +6231,11 @@ struct ReaderWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {}
+}
+
+/// 原生正文「接管阅读视口」只做一次的标记（见 mountNativePDFDocument）。
+/// MainActor 隔离：只在主线程的 Task 里读写，并发安全由隔离保证。
+@MainActor
+final class ReaderNativeActivationClaim {
+    var claimed = false
 }
