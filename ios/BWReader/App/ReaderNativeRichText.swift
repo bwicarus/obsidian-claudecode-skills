@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import SwiftSoup
+import ObjectiveC
 
 private extension NSAttributedString.Key {
     static let readerRuby = NSAttributedString.Key("ReaderRuby")
@@ -50,6 +51,7 @@ struct ReaderNativeRichText: UIViewRepresentable {
         let selected = view.selectedRange
         let rendered = ReaderNativeTextParser.render(content, format: format, font: font, color: color)
         view.attributedText = rendered
+        view.invalidateTextDecorations()
         view.textContainerInset = UIEdgeInsets(top: rendered.hasRuby ? font.pointSize * 0.6 : 0, left: 0, bottom: 0, right: 0)
         if selected.location != NSNotFound, NSMaxRange(selected) <= rendered.length { view.selectedRange = selected }
         coordinator.updating = false
@@ -60,6 +62,7 @@ struct ReaderNativeRichText: UIViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: ReaderNativeTextView, context: Context) -> CGSize? {
         guard let width = proposal.width, width > 0 else { return nil }
+        uiView.fitMathAttachments(width: width)
         return uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
     }
 
@@ -118,7 +121,41 @@ struct ReaderNativeRichText: UIViewRepresentable {
 private final class ReaderNativeRubyLabel: UILabel {}
 
 @MainActor
+private final class ReaderNativeRubyLayout: NSObject {
+    let bounds: CGRect
+    let inset: UIEdgeInsets
+    let container: CGSize
+    init(_ view: UITextView) { bounds = view.bounds; inset = view.textContainerInset; container = view.textContainer.size }
+    func matches(_ view: UITextView) -> Bool { bounds == view.bounds && inset == view.textContainerInset && container == view.textContainer.size }
+}
+
+@MainActor
 final class ReaderNativeTextView: UITextView {
+    private static var rubyLayoutKey: UInt8 = 0
+    private var fittedMathWidth: CGFloat = 0
+
+    func invalidateTextDecorations() {
+        fittedMathWidth = 0
+        objc_setAssociatedObject(self, &Self.rubyLayoutKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    func fitMathAttachments(width: CGFloat) {
+        let available = max(1, width - textContainerInset.left - textContainerInset.right - 2 * textContainer.lineFragmentPadding)
+        guard fittedMathWidth != available, let attributedText else { return }
+        fittedMathWidth = available
+        var changed = false
+        attributedText.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attributedText.length)) { value, _, _ in
+            guard let attachment = value as? NSTextAttachment, let image = attachment.image, image.size.width > 0 else { return }
+            let ratio = min(1, available / image.size.width)
+            let size = CGSize(width: image.size.width * ratio, height: image.size.height * ratio)
+            if attachment.bounds.size != size { attachment.bounds.size = size; changed = true }
+        }
+        if changed {
+            layoutManager.invalidateLayout(forCharacterRange: NSRange(location: 0, length: attributedText.length), actualCharacterRange: nil)
+            objc_setAssociatedObject(self, &Self.rubyLayoutKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+    }
+
     override func copy(_ sender: Any?) {
         let range = selectedRange
         guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= attributedText.length else { return }
@@ -144,6 +181,12 @@ final class ReaderNativeTextView: UITextView {
         guard !rebuildingRuby else { return }
         rebuildingRuby = true
         defer { rebuildingRuby = false }
+
+        // UIKit can lay the same text view out repeatedly while scrolling.
+        // Read the cache through Objective-C: inherited initializers can call
+        // this override before Swift reference properties are initialized.
+        if let saved = objc_getAssociatedObject(self, &Self.rubyLayoutKey) as? ReaderNativeRubyLayout, saved.matches(self) { return }
+        objc_setAssociatedObject(self, &Self.rubyLayoutKey, ReaderNativeRubyLayout(self), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
         subviews.compactMap { $0 as? ReaderNativeRubyLabel }.forEach { $0.removeFromSuperview() }
 

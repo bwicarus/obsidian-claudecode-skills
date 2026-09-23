@@ -257,6 +257,9 @@ enum ReaderNativeConversationScript {
       // 卡内的内联图片 → 不透明 id（Swift 拿不到任意 URL，只能按 id 取同一条本地资源路由）。
       function inlineImageActions(part, node, target) {
         const inlineImages = {};
+        // Native cards parse the original content and authorize image routes
+        // directly. Do not build inert DOM just to repeat that projection.
+        if (nativeMode) return inlineImages;
         if (!rc().voiceCard?.mediaRoute) return inlineImages;
         const nativeCard = part.data.nativeCard?.card;
         const values = nativeCard ? ['front','back','cloze','_displayFrontHtml','_displayBackHtml'].map(key => nativeCard[key]) : part.kind === 'anki' ?

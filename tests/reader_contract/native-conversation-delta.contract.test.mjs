@@ -41,3 +41,13 @@ test('explicit resync retransmits data even when bodies did not change', () => {
   assert.equal(next.upserts.length,1);
   assert.ok(next.revision > first.revision);
 });
+
+test('native inline images do not inspect the hidden document or card renderer', () => {
+  const from = script.indexOf('function inlineImageActions(');
+  const to = script.indexOf('// 学习卡组', from);
+  assert.ok(from > 0 && to > from);
+  const context = vm.createContext({});
+  vm.runInContext('let nativeMode=true;' + script.slice(from, to), context);
+  // No RC, DOM, action registry or inspection callback exists in this host.
+  assert.equal(JSON.stringify(context.inlineImageActions({}, null, null)), '{}');
+});

@@ -19,7 +19,10 @@ enum ReaderNativeCardPresentation {
               var card = input["card"] as? [String: Any] else { return data }
         if saved["removed"] as? Bool == true { return nil }
         card.merge(cards[index]) { _, next in next }
-        card.merge(saved["exactState"] as? [String: Any] ?? [:]) { _, next in next }
+        let stateFields: Set<String> = ["front", "back", "cloze", "_st", "_nid", "_next", "_showBack", "id", "card_id",
+            "_ratingUnavailable", "_ratingUnavailableReason", "_ratingPending", "_syncPending", "_ratingAid", "_ratingEase",
+            "_ratingCardId", "_addPending", "_addQueued", "_addAid", "_pcExportAid", "_pcExportStatus", "_mobileExportStatus"]
+        card.merge((saved["exactState"] as? [String: Any] ?? [:]).filter { stateFields.contains($0.key) }) { _, next in next }
         if saved["phase"] as? String == "confirmed" {
             if card["_st"] as? String == "draft" {
                 card["_st"] = "learn"; card["_ratingUnavailable"] = true; card["_ratingUnavailableReason"] = "not-exported"

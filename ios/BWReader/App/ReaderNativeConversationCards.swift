@@ -303,7 +303,7 @@ private struct ReaderNativeConversationArtifactCard: View {
                 if items.isEmpty { Text("此卡片的图片已移除。").font(.caption).foregroundStyle(.secondary) }
             } else {
                 if !part.text.isEmpty {
-                    ReaderNativeConversationMarkdown(text: readable(part.text))
+                    richContent(part.text)
                 }
                 Text("原件已保留，此类型的原生交互尚未迁移。")
                     .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
@@ -377,7 +377,7 @@ private struct ReaderNativeConversationArtifactCard: View {
                         .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
                 }
             }
-            if !field("tip").isEmpty { ReaderNativeConversationMarkdown(text: readable(field("tip"))) }
+            if !field("tip").isEmpty { richContent(field("tip")) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -392,7 +392,7 @@ private struct ReaderNativeConversationArtifactCard: View {
                         Text(readable(title)).font(.subheadline.weight(.medium)).textSelection(.enabled)
                     }
                     if let summary = item["s"] as? String, !summary.isEmpty {
-                        ReaderNativeConversationMarkdown(text: readable(summary))
+                        richContent(summary)
                     }
                     if let source = item["src"] as? String, !source.isEmpty {
                         Text(source).font(.caption2).foregroundStyle(ReaderNativeTheme.muted)

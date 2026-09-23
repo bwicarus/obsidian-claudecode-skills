@@ -33,15 +33,16 @@ struct ReaderNativePageCardBody: View {
         let format = part.string("format")
         if part.kind == "fact" {
             ReaderNativePageCardFact(answer: part.string("answer").isEmpty ? part.text : part.string("answer"),
-                                     detail: part.string("detail"), onSelection: selection(part))
+                                     detail: part.string("detail"), onSelection: selection(part), imageModel: model)
         } else if (part.kind == "general" || part.kind == "knowledge"),
                   format == "html" || part.string("text").range(of: "<[a-z][^>]*>", options: [.regularExpression, .caseInsensitive]) != nil {
             ReaderNativeCardHTML(html: part.string("text").isEmpty ? part.text : part.string("text"),
                                  onSelection: selection(part),inlineImages:part.data["inlineImages"] as? [String:String] ?? [:],imageModel:model)
         } else if part.kind == "general" || part.kind == "knowledge" {
             // .vc-if-g{font-size:13px;line-height:1.55}
-            ReaderNativeRichText(content: part.string("text").isEmpty ? part.text : part.string("text"),
+            ReaderNativeRichDocument(content: part.string("text").isEmpty ? part.text : part.string("text"),
                                  format: format.isEmpty ? "markdown" : format, onSelection: selection(part),
+                                 imageModel: model,
                                  font: .systemFont(ofSize: 13), color: ReaderNativeCardInk.text)
         } else {
             // 学习卡 / 天气 / 新闻 / 图片：交给已有的原生实现，但**不要它那层外壳**。
@@ -111,19 +112,20 @@ private struct ReaderNativeCardHTML: View {
 
     var body: some View {
         let blocks = ReaderNativeCardHTMLParser.blocks(html)
+        let images = inlineImages.merging(imageModel?.inlineImages(content: html, format: "html") ?? [:]) { _, native in native }
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .fact(let answer, let detail):
                     ReaderNativePageCardFact(answer: answer, detail: detail, answerFormat: "html",
-                                             detailFormat: "html", onSelection: onSelection,inlineImages:inlineImages,imageModel:imageModel)
+                                             detailFormat: "html", onSelection: onSelection,inlineImages:images,imageModel:imageModel)
                 case .general(let html):
-                    ReaderNativeRichDocument(content: html, format: "html", onSelection: onSelection,inlineImages:inlineImages,imageModel:imageModel,
+                    ReaderNativeRichDocument(content: html, format: "html", onSelection: onSelection,inlineImages:images,imageModel:imageModel,
                                          font: .systemFont(ofSize: 13), color: ReaderNativeCardInk.text)
                 case .rich(let html):
                     // .vc-card{font-size:14px;line-height:1.55}
                     ReaderNativeRichDocument(content: html, format: "html", onSelection: onSelection,
-                                             inlineImages:inlineImages,imageModel:imageModel,
+                                             inlineImages:images,imageModel:imageModel,
                                              font: .systemFont(ofSize: 14), color: ReaderNativeCardInk.text)
                 case .dictionary(let entry):
                     ReaderNativeCardDictionary(entry: entry)
