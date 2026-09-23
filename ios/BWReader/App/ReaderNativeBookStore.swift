@@ -1,0 +1,183 @@
+import Foundation
+import CoreFoundation
+import CryptoKit
+
+/// Native book mutations, using the existing record/journal schema. The main
+/// record, derived indexes and retry receipt either all commit or all roll back.
+struct ReaderNativeBookStore {
+    enum MutationError: LocalizedError {
+        case invalid(String), replayConflict, unavailable
+        var errorDescription: String? {
+            switch self {
+            case .invalid(let detail): return "书籍数据无效：" + detail
+            case .replayConflict: return "同一操作编号已用于不同内容，未重复写入"
+            case .unavailable: return "原生书籍数据库尚未准备好"
+            }
+        }
+    }
+    let store: ReaderNativeDataStore
+    let bookID: String
+    let deviceID: String
+    var now: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+    private var projection: ReaderNativeBookProjection { .init(store: store) }
+
+    func perform(_ request: [String: Any]) throws -> [String: Any] {
+        guard !bookID.isEmpty, !deviceID.isEmpty, deviceID.utf16.count <= 240,
+              let mutation = request["mutationId"] as? String, !mutation.isEmpty, mutation.utf16.count <= 240,
+              let operation = request["operation"] as? String, request["bookID"] as? String == bookID,
+              let value = request["value"], JSONSerialization.isValidJSONObject(request) else { throw MutationError.invalid("操作身份") }
+        let key = "native-book:\(bookID.utf16.count):\(bookID):\(mutation)"
+        let fingerprint = SHA256.hash(data: try Self.bytes(request)).map { String(format: "%02x", $0) }.joined()
+        let stamp = now()
+        return try store.inTransaction {
+            if let previous = try store.mutationResult(mutationId: key) {
+                guard let saved = try JSONSerialization.jsonObject(with: Data(previous.utf8)) as? [String: Any],
+                      saved["fingerprint"] as? String == fingerprint,
+                      var receipt = saved["receipt"] as? [String: Any] else { throw MutationError.replayConflict }
+                receipt["replayed"] = true
+                return receipt
+            }
+            let expected: Int64?
+            if let raw = request["expectedRevision"] {
+                guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                      number.doubleValue >= 0, number.doubleValue <= 9_007_199_254_740_991 else { throw MutationError.invalid("预期修订号") }
+                expected = number.int64Value
+            } else {
+                guard operation == "reading-position" else { throw MutationError.invalid("缺少预期修订号") }
+                expected = nil
+            }
+            let revision: Int64
+            switch operation {
+            case "notes":
+                guard let notes = value as? [[String: Any]] else { throw MutationError.invalid("注解列表") }
+                var ids = Set<String>()
+                for note in notes {
+                    guard let id = note["id"] as? String, !id.isEmpty, id.utf16.count <= 240,
+                          ids.insert(id).inserted else { throw MutationError.invalid("注解编号") }
+                }
+                revision = try writeState("document-notes-legacy", value: notes, expected: expected, mutation: mutation + ":notes", at: stamp)
+                let placements = Self.placements(notes)
+                try writeState("card-placements", value: placements, mutation: mutation + ":placements", at: stamp)
+                try writeState("entity-references", value: Self.references(placements), mutation: mutation + ":references", at: stamp)
+                try writeState("word-bindings", value: Self.wordBindings(notes), mutation: mutation + ":words", at: stamp)
+            case "pdf-highlights", "epub-highlights":
+                guard let items = value as? [[String: Any]] else { throw MutationError.invalid("划线列表") }
+                revision = try writeHighlights(operation == "pdf-highlights" ? "document-highlights" : "epub-highlights",
+                                               items: items, expected: expected, mutation: mutation, at: stamp)
+            case "reading-position":
+                guard value is [String: Any] else { throw MutationError.invalid("阅读位置") }
+                revision = try writeState(operation, value: value, expected: expected, mutation: mutation, at: stamp)
+            case "ink", "epub-ink":
+                guard value is [String: [[String: Any]]] else { throw MutationError.invalid("墨迹") }
+                revision = try writeState(operation, value: value, expected: expected, mutation: mutation, at: stamp)
+            default: throw MutationError.invalid("未登记的操作")
+            }
+            let receipt: [String: Any] = ["ok": true, "bookID": bookID, "mutationId": mutation, "revision": revision]
+            try store.rememberMutationWithinTransaction(key, json: Self.string(["fingerprint": fingerprint, "receipt": receipt]), now: stamp)
+            return receipt
+        }
+    }
+
+    @discardableResult
+    private func writeState(_ kind: String, value: Any, expected: Int64? = nil, mutation: String, at: Int64) throws -> Int64 {
+        try write(collection: "native-" + kind, id: bookID + ":" + kind, payload: value,
+                  expected: expected, mutation: mutation, at: at)
+    }
+    @discardableResult
+    private func write(collection: String, id: String, payload: Any, expected: Int64? = nil, mutation: String, at: Int64) throws -> Int64 {
+        let current = try store.record(collection: collection, id: id), revision = current?.rev ?? 0
+        if let expected, expected != revision { throw ReaderNativeDataStore.StoreError.revisionConflict(collection: collection, id: id, actual: revision) }
+        guard revision >= 0 && revision < 9_007_199_254_740_991 else { throw MutationError.invalid("修订号溢出") }
+        let record: [String: Any] = ["schema": 1, "collection": collection, "id": id, "rev": revision+1,
+            "updatedAt": at, "updatedBy": deviceID, "deleted": false,
+            "value": ["id": id, "documentId": bookID, "payload": payload, "updatedAt": at]]
+        let json = try Self.string(record), mutationID = "native-" + mutation
+        let change: [String: Any] = ["mutationId": mutationID, "operation": "put", "collection": collection, "record": record]
+        _ = try Self.bytes(change)
+        try store.commitWithinTransaction(record: .init(collection: collection, id: id, rev: revision+1,
+            updatedAt: at, deleted: false, json: json), mutationId: mutationID,
+            journalJSON: { cursor in
+                var envelope = change; envelope["cursor"] = cursor
+                return try! Self.string(envelope) // All constituent values were validated above.
+            }, expectedRev: revision, now: at)
+        return revision+1
+    }
+
+    private func writeHighlights(_ kind: String, items: [[String: Any]], expected: Int64?, mutation: String, at: Int64) throws -> Int64 {
+        let current = try projection.highlights(kind, bookID: bookID)
+        let meta = try projection.state(kind + "-split-meta", bookID: bookID)
+        if let expected, current.revision != expected {
+            throw ReaderNativeDataStore.StoreError.revisionConflict(collection: "native-" + kind, id: bookID, actual: current.revision)
+        }
+        // The existing resumable importer owns conversion of non-empty legacy
+        // arrays; a normal write may not reset their collection revision.
+        guard meta.payload != nil || current.items.isEmpty else { throw MutationError.unavailable }
+        var prior: [String: [String: Any]] = [:], seen = Set<String>(), order: [String] = []
+        for item in current.items {
+            guard let id = item["id"] as? String, !id.isEmpty, prior[id] == nil else { throw MutationError.invalid("原划线编号") }
+            prior[id] = item
+        }
+        func save(_ item: [String: Any], id: String) throws {
+            try write(collection: "native-" + kind + "-items", id: "native-\(kind)-item-v1:\(bookID.utf16.count):\(bookID):\(id)",
+                      payload: item, mutation: mutation + ":" + id, at: at)
+        }
+        for item in items {
+            guard let id = item["id"] as? String, !id.isEmpty, id.utf16.count <= 200,
+                  seen.insert(id).inserted, item["deleted"] as? Bool != true else { throw MutationError.invalid("划线编号重复或无效") }
+            order.append(id)
+            if let old = prior[id], try Self.bytes(old) == Self.bytes(item) { continue }
+            try save(item, id: id)
+        }
+        for id in prior.keys.sorted() where !seen.contains(id) { try save(["id": id, "deleted": true, "time": at / 1000], id: id) }
+        return try writeState(kind + "-split-meta", value: ["order": order], expected: meta.revision, mutation: mutation + ":meta", at: at)
+    }
+
+    static func placements(_ notes: [[String: Any]]) -> [[String: Any]] {
+        notes.compactMap { note in
+            guard let id = note["id"] as? String, !id.isEmpty,
+                  note["card"] is [String: Any] || note["html"] is [String: Any] || note["video"] is [String: Any] else { return nil }
+            let kind = note["card"] is [String: Any] ? "card" : (note["html"] is [String: Any] ? "html" : "video")
+            var entityIDs: [String] = []
+            for (field, keys) in [("card", ["gid", "cid", "id"]), ("html", ["cid", "id"]), ("video", ["id"])] {
+                for key in keys {
+                    let value = ((note[field] as? [String: Any])?[key] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !value.isEmpty && value.utf16.count <= 240 && !entityIDs.contains(value) { entityIDs.append(value) }
+                }
+            }
+            func dimension(_ key: String) -> Any {
+                guard let n = note[key] as? NSNumber, n.doubleValue.isFinite else { return NSNull() }; return n
+            }
+            return ["placementId": id, "noteId": id, "kind": kind, "anchor": note["anchor"] ?? NSNull(),
+                    "w": dimension("w"), "h": dimension("h"), "collapsed": note["collapsed"] as? Bool ?? false, "entityIds": entityIDs]
+        }
+    }
+    static func references(_ placements: [[String: Any]]) -> [[String: Any]] {
+        var grouped: [String: [String: Any]] = [:]
+        for placement in placements {
+            for id in placement["entityIds"] as? [String] ?? [] {
+                var value = grouped[id] ?? ["entityId": id, "kind": placement["kind"] ?? "", "placementIds": [String]()]
+                var ids = value["placementIds"] as? [String] ?? []
+                if let placementID = placement["placementId"] as? String, !ids.contains(placementID) { ids.append(placementID) }
+                value["placementIds"] = ids.sorted(); grouped[id] = value
+            }
+        }
+        return grouped.keys.sorted().compactMap { grouped[$0] }
+    }
+    static func wordBindings(_ notes: [[String: Any]]) -> [[String: Any]] {
+        notes.enumerated().compactMap { index, note in
+            guard let html = note["html"] as? [String: Any], let binding = html["bind"] as? [String: Any],
+                  binding["kind"] as? String == "page-chars", let text = binding["text"] as? String,
+                  let cid = html["cid"] as? String, !cid.isEmpty else { return nil }
+            let key = text.filter { !$0.isWhitespace }.lowercased()
+            guard !key.isEmpty, key.utf16.count <= 64 else { return nil }
+            return ["cid": cid, "noteId": note["id"] ?? "", "key": key, "text": String(text.prefix(64)),
+                    "page": (binding["page"] as? NSNumber)?.intValue ?? 0, "label": String((html["label"] as? String ?? "").prefix(120)),
+                    "at": note["created"] as? NSNumber ?? 0, "order": index]
+        }
+    }
+    private static func bytes(_ value: Any) throws -> Data {
+        try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed, .withoutEscapingSlashes])
+    }
+    private static func string(_ value: Any) throws -> String { String(decoding: try bytes(value), as: UTF8.self) }
+}

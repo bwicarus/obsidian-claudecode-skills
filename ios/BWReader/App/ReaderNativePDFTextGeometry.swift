@@ -53,8 +53,8 @@ final class ReaderNativePDFTextGeometry {
         } else { blockFilter = true }
         var mapped = try raw.enumerated().map { index, value -> Glyph in
             guard let text = value["c"] as? String,
-                  let x0 = value["x0"] as? Double, let y0 = value["y0"] as? Double,
-                  let x1 = value["x1"] as? Double, let y1 = value["y1"] as? Double,
+                  let x0 = (value["x0"] as? NSNumber)?.doubleValue, let y0 = (value["y0"] as? NSNumber)?.doubleValue,
+                  let x1 = (value["x1"] as? NSNumber)?.doubleValue, let y1 = (value["y1"] as? NSNumber)?.doubleValue,
                   [x0, y0, x1, y1].allSatisfy(\.isFinite), x1 >= x0, y1 >= y0 else { throw GeometryError.invalidPage }
             let line = (value["line"] as? NSNumber)?.intValue
             return Glyph(index: index, text: text, word: (value["w"] as? Int) ?? -1,

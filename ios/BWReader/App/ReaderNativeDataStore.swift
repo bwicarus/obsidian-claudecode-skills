@@ -205,6 +205,15 @@ final class ReaderNativeDataStore {
         return value
     }
 
+    /// Native compound commands use the same bounded receipt table as record
+    /// mutations. Call only inside the transaction that commits the command.
+    func rememberMutationWithinTransaction(_ id: String, json: String, now: Int64) throws {
+        try execute("INSERT INTO mutations (mutationId, rememberedAt, json) VALUES (?, ?, ?) "
+                    + "ON CONFLICT(mutationId) DO UPDATE SET rememberedAt = excluded.rememberedAt, json = excluded.json",
+                    bind: [.text(id), .int(now), .text(json)])
+        try trim(table: "mutations", orderBy: "rememberedAt", keep: 20_000)
+    }
+
     // MARK: - 写
 
     /// 一次提交：记录 + journal 条目 + mutation 备忘，**一个事务里做完**。

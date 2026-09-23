@@ -55,3 +55,49 @@ do {
     fatalError("corrupt data was presented as an empty book")
 } catch { }
 print("Native book projection: identity, split/legacy, tombstones, scope, domains, stable reads and corrupt-data checks passed")
+
+let writing = try ReaderNativeDataStore(path: ":memory:")
+let business = ReaderNativeBookStore(store: writing, bookID: book, deviceID: "test-device", now: { 100_000 })
+let read = ReaderNativeBookProjection(store: writing)
+let notes: [[String: Any]] = [["id": "placement-1", "anchor": ["kind":"pdf", "page":45], "created":100,
+    "html": ["cid":"card-1", "content":"原文仍保留", "label":"SARS", "bind":["kind":"page-chars", "page":45, "text":"SARS"]]]]
+let save: [String: Any] = ["mutationId":"save-1", "bookID":book, "operation":"notes", "value":notes, "expectedRevision":0]
+check(try business.perform(save)["revision"] as? Int == 1, "native note write failed")
+let writtenCursor = try writing.cursor()
+check(writtenCursor == 4, "notes and three derived indexes must commit together")
+check(try business.perform(save)["replayed"] as? Bool == true, "retry was not recognized")
+check(try writing.cursor() == writtenCursor, "retry created another write")
+let words = try read.state("word-bindings", bookID: book).payload as! [[String: Any]]
+check(words.first?["cid"] as? String == "card-1" && words.first?["key"] as? String == "sars", "word index identity differs")
+let placements = try read.state("card-placements", bookID: book).payload as! [[String: Any]]
+check(placements.first?["entityIds"] as? [String] == ["card-1"], "placement confused with card ID")
+var conflict = save; conflict["value"] = [["id":"changed"]]
+do { _ = try business.perform(conflict); fatalError("mutation ID reused for different content") }
+catch ReaderNativeBookStore.MutationError.replayConflict { }
+var stale = save; stale["mutationId"] = "stale"
+do { _ = try business.perform(stale); fatalError("stale snapshot overwrote notes") }
+catch ReaderNativeDataStore.StoreError.revisionConflict { }
+// Simulate a disk/constraint failure after the main note write but before the
+// last derived index. No partial note, journal or receipt may survive.
+try writing.execute("CREATE TRIGGER fail_words BEFORE UPDATE ON records WHEN NEW.collection = 'native-word-bindings' BEGIN SELECT RAISE(ABORT, 'simulated index failure'); END")
+var failing = save; failing["mutationId"] = "fail"; failing["expectedRevision"] = 1
+failing["value"] = [["id":"replacement"]]
+do { _ = try business.perform(failing); fatalError("expected index failure") }
+catch ReaderNativeDataStore.StoreError.sql { }
+check(try read.state("document-notes-legacy", bookID: book).revision == 1 && writing.cursor() == writtenCursor, "partial commit survived failure")
+try writing.execute("DROP TRIGGER fail_words")
+check(try business.perform(failing)["revision"] as? Int == 2, "failed transaction poisoned retry")
+
+let highlights: [[String: Any]] = [["id":"h1", "page":45, "text":"SARS"], ["id":"h2", "page":44, "text":"エボラ"]]
+let make: [String: Any] = ["mutationId":"hl1", "bookID":book, "operation":"pdf-highlights", "value":highlights, "expectedRevision":0]
+_ = try business.perform(make)
+let item2 = "native-document-highlights-item-v1:\(book.utf16.count):\(book):h2"
+var remove = make; remove["mutationId"] = "hl2"; remove["expectedRevision"] = 1; remove["value"] = [highlights[1]]
+_ = try business.perform(remove)
+check(try read.highlights("document-highlights", bookID: book).items.count == 1, "deleted highlight still live")
+check(try writing.record(collection: "native-document-highlights-items", id: item2)?.rev == 1, "unchanged highlight was needlessly rewritten")
+let item1 = "native-document-highlights-item-v1:\(book.utf16.count):\(book):h1"
+let tombstone = try writing.record(collection: "native-document-highlights-items", id: item1)!
+let recordJSON = try JSONSerialization.jsonObject(with: Data(tombstone.json.utf8)) as! [String: Any]
+check(((recordJSON["value"] as? [String: Any])?["payload"] as? [String: Any])?["deleted"] as? Bool == true, "highlight deletion lost its tombstone")
+print("Native book mutations: atomic indexes, journal, retry identity, stale-write rejection and tombstones passed")

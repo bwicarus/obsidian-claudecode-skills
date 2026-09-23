@@ -31,7 +31,7 @@ struct ReaderNativeBookProjection {
         }
     }
 
-    private func state(_ kind: String, bookID: String) throws -> (revision: Int64, payload: Any?) {
+    func state(_ kind: String, bookID: String) throws -> (revision: Int64, payload: Any?) {
         guard let record = try store.record(collection: "native-" + kind, id: bookID + ":" + kind),
               !record.deleted else { return (0, nil) }
         let value = try envelope(record, bookID: bookID)
@@ -49,7 +49,7 @@ struct ReaderNativeBookProjection {
         return value
     }
 
-    private func highlights(_ kind: String, bookID: String) throws -> (revision: Int64, items: [[String: Any]]) {
+    func highlights(_ kind: String, bookID: String) throws -> (revision: Int64, items: [[String: Any]]) {
         let meta = try state(kind + "-split-meta", bookID: bookID)
         // Legacy records are read in place until the existing split transaction
         // has completed. Reading is never permission to migrate or drop data.
