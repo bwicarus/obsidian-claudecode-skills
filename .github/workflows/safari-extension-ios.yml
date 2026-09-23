@@ -280,6 +280,11 @@ jobs:
           xcrun swiftc ios/BWReader/App/DirectVoiceProtocol.swift ios/BWReader/App/DirectVoiceSocket.swift ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeReplicationOutbox.swift ios/BWReader/App/ReaderNativeReplicationTransport.swift ios/BWReader/Tests/NativeReplication/main.swift -o "$RUNNER_TEMP/native-replication-test"
           "$RUNNER_TEMP/native-replication-test"
 
+      - name: Verify native conversation ordering and recovery
+        run: |
+          xcrun swiftc ios/BWReader/App/ReaderNativeConversationStore.swift ios/BWReader/Tests/NativeConversationStore/main.swift -o "$RUNNER_TEMP/native-conversation-test"
+          "$RUNNER_TEMP/native-conversation-test"
+
       - name: Verify native stroke geometry parity
         run: |
           node ios/BWReader/Tests/NativeStrokeRules/fixtures.mjs "$RUNNER_TEMP/native-stroke-fixtures.json"

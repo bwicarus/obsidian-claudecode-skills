@@ -139,8 +139,8 @@ struct ReaderNativeContextAttachment: Identifiable {
     }
 }
 
-/// A projection of the existing Reader conversation. The JavaScript bridge owns
-/// history, streaming reconciliation, artifact identities and all write actions.
+/// Native message ownership and presentation. Remaining legacy action owners
+/// communicate through scoped commands while their migration is completed.
 @MainActor
 final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var scope = ""
@@ -218,6 +218,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         return data
     }
     private var generation = UUID()
+    private var conversationStore = ReaderNativeConversationStore()
+    private var messageResyncPending = false
     private var retiredNavigationScopes = Set<String>()
     private var pendingSelections: [(id: String, text: String)] = []
     private var deliveringSelection = false
@@ -255,6 +257,27 @@ final class ReaderNativeConversationModel: ObservableObject {
         }
         guard !retiredNavigationScopes.contains(nextScope) else { return }
         if nextScope == scope, nextRevision <= revision { return }
+        let rawMessages: [[String:Any]]
+        let changedMessages: Bool
+        if let batch = payload["messageDelta"] as? [String:Any] {
+            do {
+                changedMessages = try conversationStore.apply(batch,scope:nextScope)
+                rawMessages = conversationStore.messages
+                messageResyncPending = false
+            } catch {
+                self.error = error.localizedDescription
+                requestMessageResync(scope:nextScope)
+                return
+            }
+        } else if let values = payload["messages"] as? [[String:Any]] {
+            rawMessages = values; changedMessages = true
+        } else {
+            guard nextScope == conversationStore.scope,
+                  (payload["messageRevision"] as? NSNumber)?.int64Value == conversationStore.revision else {
+                requestMessageResync(scope:nextScope); return
+            }
+            rawMessages = []; changedMessages = false
+        }
         if nextScope != scope {
             inspection = nil
             settingsPanel = nil
@@ -272,16 +295,15 @@ final class ReaderNativeConversationModel: ObservableObject {
             visibleMessageID = nil
         }
         var seen = Set<String>()
-        let rawMessages = payload["messages"] as? [[String: Any]] ?? []
-        var nextMessages = rawMessages
+        var nextMessages = changedMessages ? rawMessages
             .compactMap(ReaderNativeConversationMessage.init)
-            .filter { seen.insert($0.id).inserted }
+            .filter { seen.insert($0.id).inserted } : messages
         let nextMode = payload["conversationMode"] as? String == "review" ? "review" : "normal"
-        if ReaderNativeConversationCache.hasConversation(rawMessages) {
+        if changedMessages, ReaderNativeConversationCache.hasConversation(rawMessages) {
             cacheSuppressed.remove(nextMode)
             rememberConversation(rawMessages, mode: nextMode)
             showingCachedMessages = false
-        } else if !cacheSuppressed.contains(nextMode) {
+        } else if changedMessages, !cacheSuppressed.contains(nextMode) {
             // 页面还没把历史交过来（或取失败）：先给本机缓存，别让侧栏空着。
             let cached = cachedMessages(nextMode)
             showingCachedMessages = !cached.isEmpty
@@ -309,17 +331,26 @@ final class ReaderNativeConversationModel: ObservableObject {
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
         let nextCaptions = ReaderNativeCaptions(payload["captions"] as? [String: Any] ?? [:])
         if nextCaptions != captions { captions = nextCaptions }
-        messages = nextMessages
+        if changedMessages { messages = nextMessages }
         revision = nextRevision
         noteSnapshotCost(payload["payloadBytes"] as? Int ?? 0)
+    }
+
+    private func requestMessageResync(scope:String) {
+        guard !messageResyncPending else { return }
+        messageResyncPending = true
+        Task { [weak self] in
+            _ = await self?.commandHandler?(["action":"resyncMessages","scope":scope])
+            self?.messageResyncPending = false
+        }
     }
 
     /// 写本机缓存。⚠ 节流：快照一秒能来好几次；内容没变或 3 秒内写过就跳过。
     /// 流式回复还在长的时候不写（写进去的是半句话）。
     private func rememberConversation(_ raw: [[String: Any]], mode: String) {
         guard !raw.contains(where: { $0["streaming"] as? Bool == true }) else { return }
-        let last = raw.last
-        let signature = "\(mode)|\(raw.count)|\(last?["id"] as? String ?? "")|\((last?["text"] as? String ?? "").count)"
+        guard let digest = ReaderNativeConversationStore.fingerprint(raw) else { return }
+        let signature = mode + "|" + digest
         guard signature != lastCachedSignature, Date().timeIntervalSince(lastCachedAt) > 3 else { return }
         lastCachedSignature = signature
         lastCachedAt = Date()
@@ -372,6 +403,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     private(set) var lastCommandAt: Date?
 
     func resetForNavigation() {
+        conversationStore = ReaderNativeConversationStore(); messageResyncPending = false
         inspection = nil
         settingsPanel = nil
         readingSettingsPanel = nil

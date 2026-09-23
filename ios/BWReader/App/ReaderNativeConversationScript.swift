@@ -23,6 +23,8 @@ enum ReaderNativeConversationScript {
       let thread = null, threadObserver = null, timer = null, revision = 0;
       let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null, selectionSubscription = null, selectionRegistry = null;
       let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
+      let messagesDirty = true, messageProjection = [], messageActions = new Map();
+      let messageRevision = 0, messageSignatures = new Map(), messageOrder = [], resetMessages = true;
       let controls = null, controlsObserver = null, suspended = false;
       let captionElement = null, captionObserver = null;
       let settingsModels = null, settingsVoice = null;
@@ -281,7 +283,7 @@ enum ReaderNativeConversationScript {
         if (tries === 0) {
           try { window.__bwClientLog?.('log', '[card-group] missing gid=' + gid.slice(0, 40) + ' hint=' + hint); } catch (_) {}
         }
-        setTimeout(schedule, 1200 * (tries + 1));
+        setTimeout(scheduleMessages, 1200 * (tries + 1));
       }
       function liveArtifacts(messages) {
         for (const message of messages) {
@@ -768,13 +770,17 @@ enum ReaderNativeConversationScript {
           // Do not relabel the previous DOM as the new account's conversation.
           if (scopeKey) previousNodes.forEach(node => excludedNodes.add(node));
           scopeKey = nextKey; scope = 'reader-' + hash(nextKey); actions.clear(); nodeIDs = new WeakMap(); lastSignature = '';
+          messagesDirty = true; messageActions.clear(); messageProjection = [];
+          messageRevision = 0; messageSignatures.clear(); messageOrder = []; resetMessages = true;
           window.__bwNativeSelection = null;
           nativePageSelectionSequence = 0;
           settingsModels = null; settingsVoice = null;
           searchController?.abort(); searchResults.clear(); searchQuery = ''; searchSequence++;
           tocController?.abort(); tocEntries.clear(); tocOwner = null; tocSequence++;
         }
-        actions = new Map();
+        const rebuildMessages = messagesDirty;
+        actions = messagesDirty ? new Map() : new Map(messageActions);
+        if (messagesDirty) {
         const all = thread ? Array.from(thread.children).filter(el => el.matches('.asst-msg,.vc-card,.vc-if,.rc-turn')) : [];
         let reviewQuestion = '';
         const messages = all.filter(node => !excludedNodes.has(node)).map((node, index) => {
@@ -787,6 +793,11 @@ enum ReaderNativeConversationScript {
         }).filter(Boolean);
         previousNodes = all;
         liveArtifacts(messages);
+        messageProjection = messages;
+        messageActions = new Map(actions);
+        messagesDirty = false;
+        }
+        const messageDelta = rebuildMessages || resetMessages ? prepareMessageDelta(messageProjection) : null;
         // 原生正文接管 PDF 时，页卡由原生按便签数据自己画 —— 网页不挂、这里也不交。
         // （交了就是两份：一份网页按它自己的页挂出来，一份原生按 PDFKit 画，永远对不上。）
         const nativePageCards = !!window.RC?.readerNavigation?.nativeViewport;
@@ -812,7 +823,8 @@ enum ReaderNativeConversationScript {
           nativePinnedCards: (window.BWReaderRuntime?.contextSelections?.snapshot?.({maxText:0})?.items || [])
             .filter(item => item.kind === 'card' && String(item.id).startsWith('card:')).map(item => String(item.id).slice(5)),
           favoritesCount: (() => { try { return Number(rc().voiceCard?.favorite?.count?.()) || 0; } catch (_) { return 0; } })(),
-          sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(), messages, capabilities: capabilities() };
+          sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(),
+          messageRevision, capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -821,12 +833,28 @@ enum ReaderNativeConversationScript {
           //   pointerup / resize 和四个 MutationObserver 上，而滚动时消息根本没变。
           //   对话越长这份字符串越大，于是"用着用着就崩"和"点什么都崩"是同一件事。
           //   是不是这样，不能靠猜：把字节数报上去，崩的时候跟着现场一起送出来。
-          payload.payloadBytes = signature.length;
+          if (messageDelta) payload.messageDelta = messageDelta;
+          payload.payloadBytes = signature.length + (messageDelta ? JSON.stringify(messageDelta).length : 0);
           try { handler.postMessage(payload); } catch (_) {}
         }
       }
       function schedule() {
         if (!suspended && timer == null) timer = setTimeout(snapshot, 60);
+      }
+      function scheduleMessages() { messagesDirty = true; schedule(); }
+      function prepareMessageDelta(messages) {
+        const next = new Map(), upserts = [], order = [];
+        for (const message of messages) {
+          if (next.has(message.id)) continue;
+          const signature = JSON.stringify(message);
+          next.set(message.id, signature); order.push(message.id);
+          if (resetMessages || messageSignatures.get(message.id) !== signature) upserts.push(message);
+        }
+        if (!resetMessages && !upserts.length && order.length === messageOrder.length && order.every((id,i) => id === messageOrder[i])) return null;
+        const delta = {contract:'reader-native-conversation-delta/1', reset:resetMessages,
+          baseRevision:messageRevision, revision:++messageRevision, order, upserts};
+        messageSignatures = next; messageOrder = order; resetMessages = false;
+        return delta;
       }
       // 选区变化不改 DOM，所以不会触发那些 observer —— 不显式听一下的话，
       // 选区操作条要等到别的什么事发生才出现。
@@ -839,8 +867,8 @@ enum ReaderNativeConversationScript {
           if (installed.has(name) || typeof owner[name] !== 'function') return;
           const original = owner[name];
           owner[name] = function (...args) {
-            try { const result = original.apply(this, args); if (result?.then) result.then(schedule, schedule); return result; }
-            finally { schedule(); }
+            try { const result = original.apply(this, args); if (result?.then) result.then(scheduleMessages, scheduleMessages); return result; }
+            finally { scheduleMessages(); }
           };
           installed.add(name);
         });
@@ -894,9 +922,9 @@ enum ReaderNativeConversationScript {
         }
         const current = document.getElementById('asst-thread');
         if (current !== thread) {
-          threadObserver?.disconnect(); thread = current;
+          threadObserver?.disconnect(); thread = current; messagesDirty = true;
           if (thread) {
-            threadObserver = new MutationObserver(schedule);
+            threadObserver = new MutationObserver(scheduleMessages);
             threadObserver.observe(thread, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'hidden', 'data-turn-id', 'data-turn', 'disabled'] });
           }
         }
@@ -914,7 +942,7 @@ enum ReaderNativeConversationScript {
         const registry = window.BWReaderRuntime?.contextSelections;
         if (registry !== selectionRegistry) {
           selectionSubscription?.(); selectionRegistry = registry;
-          selectionSubscription = registry?.subscribe?.(schedule) || null;
+          selectionSubscription = registry?.subscribe?.(scheduleMessages) || null;
         }
         const currentControls = document.getElementById('asst-input');
         if (currentControls !== controls) {
@@ -1023,6 +1051,7 @@ enum ReaderNativeConversationScript {
             const target = actions.get(command.actionId);
             if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected) return { ok: false, error: '内容已更新，请重试' };
             await target.run(command);
+            messagesDirty = true;
           } else if (action === 'stop') {
             if (rc().assistant?.conversationService?.stop?.() !== true) return { ok: false, error: '当前没有可停止的文字回复' };
           } else if (action === 'clearConversation') {
@@ -1041,6 +1070,8 @@ enum ReaderNativeConversationScript {
             rc().assistant?.reloadHistory?.();
           } else if (action === 'snapshot') {
             // 只要一份新快照（末尾统一 schedule）；不重载对话历史。
+          } else if (action === 'resyncMessages') {
+            resetMessages = true; messagesDirty = true; lastSignature = '';
           } else if (action === 'nativePageSelection') {
             const value = command.value;
             if (!value || !Number.isSafeInteger(value.sequence) || value.sequence <= nativePageSelectionSequence ||
@@ -1480,7 +1511,8 @@ enum ReaderNativeConversationScript {
         if (!thread || !thread.isConnected || records.some(record => Array.from(record.addedNodes).some(node => node.nodeType === 1 && (['asst-thread', 'asst-input', 'asst-computer', 'asst-call'].includes(node.id) || node.querySelector?.('#asst-thread,#asst-input,#asst-computer,#asst-call'))))) schedule();
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
-      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:assistant-mode-changed', 'rc:review-presentation-changed', 'rc:placement-changed', 'rc:native-document-position', 'rc:favorites-changed', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
+      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:native-document-position', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
+      ['rc:assistant-mode-changed','rc:review-presentation-changed','rc:placement-changed','rc:favorites-changed','rc:flashcard-state-changed'].forEach(name => window.addEventListener(name,scheduleMessages));
       window.addEventListener('scroll', schedule, { capture: true, passive: true });
       window.addEventListener('resize', schedule, { passive: true });
       window.addEventListener('pointerup', schedule, { capture: true, passive: true });

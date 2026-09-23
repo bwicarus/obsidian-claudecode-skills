@@ -957,6 +957,9 @@
   }
   function notifyState(container, reason, index) {
     var st = container && container.__fc;
+    if (st) {
+      try { window.dispatchEvent(new CustomEvent('rc:flashcard-state-changed', {detail:{gid:st.gid,reason:reason,cardIndex:index}})); } catch (_) {}
+    }
     try {
       if (st && st.opts &&
           typeof st.opts.onStateChange === 'function') {
