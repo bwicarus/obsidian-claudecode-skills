@@ -87,7 +87,7 @@ struct ReaderNativeRichText: UIViewRepresentable {
             let range = textView.selectedRange
             guard range.location != NSNotFound, range.length > 0,
                   NSMaxRange(range) <= textView.attributedText.length else { releaseSelection(); return }
-            let selection = (textView.attributedText.string as NSString).substring(with: range)
+            let selection = ReaderNativeMath.selectedText(textView.attributedText, range: range)
             guard selection != lastSelection else { return }
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
@@ -119,6 +119,11 @@ private final class ReaderNativeRubyLabel: UILabel {}
 
 @MainActor
 final class ReaderNativeTextView: UITextView {
+    override func copy(_ sender: Any?) {
+        let range = selectedRange
+        guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= attributedText.length else { return }
+        UIPasteboard.general.string = ReaderNativeMath.selectedText(attributedText, range: range)
+    }
     /// 重入闸。⚠ 它是 **Bool**：零值读出来就是 false，即使内存还是零
     /// 也不会解引用任何东西 —— 这一点在下面那段里很关键。
     private var rebuildingRuby = false
@@ -187,18 +192,9 @@ enum ReaderNativeTextParser {
     static func render(_ content: String, format: String, font: UIFont, color: UIColor = .label) -> NSAttributedString {
         let output = NSMutableAttributedString(string: "")
         let base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-        if format != "html", let parsed = try? AttributedString(markdown: content, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            for run in parsed.runs {
-                var attributes = base
-                var traits: UIFontDescriptor.SymbolicTraits = []
-                if run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true { traits.insert(.traitBold) }
-                if run.inlinePresentationIntent?.contains(.emphasized) == true { traits.insert(.traitItalic) }
-                if let descriptor = font.fontDescriptor.withSymbolicTraits(traits) { attributes[.font] = UIFont(descriptor: descriptor, size: font.pointSize) }
-                if run.inlinePresentationIntent?.contains(.code) == true { attributes[.font] = UIFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular) }
-                if let link = run.link, ["http", "https"].contains(link.scheme?.lowercased() ?? "") { attributes[.link] = link }
-                output.append(NSAttributedString(string: String(parsed[run.range].characters), attributes: attributes))
-            }
-        } else if let document = try? SwiftSoup.parseBodyFragment(content), let body = document.body() {
+        let prepared = ReaderNativeMathSyntax.prepare(content)
+        let html = format == "html" ? ReaderNativeMathSyntax.restore(prepared.text, prepared: prepared) : ReaderNativeMarkdown.html(content)
+        if let document = try? SwiftSoup.parseBodyFragment(html), let body = document.body() {
             append(body, to: output, attributes: base)
         } else {
             output.append(NSAttributedString(string: content, attributes: base))
@@ -219,17 +215,41 @@ enum ReaderNativeTextParser {
         if ["script", "style", "iframe", "object", "embed", "rt", "rp"].contains(tag) { return }
         var style = attributes
         let font = style[.font] as? UIFont ?? UIFont.preferredFont(forTextStyle: .subheadline)
+        if tag == "span", let encoded = try? element.attr("data-reader-math"),
+           let data = Data(base64Encoded: encoded), let latex = String(data: data, encoding: .utf8),
+           let original = try? element.text() {
+            let display = (try? element.attr("data-reader-display")) == "1"
+            if let math = ReaderNativeMath.render(latex: latex, original: original, display: display,
+                font: font, color: style[.foregroundColor] as? UIColor ?? .label) {
+                if display && output.length > 0 && !output.string.hasSuffix("\n") { output.append(NSAttributedString(string: "\n", attributes: style)) }
+                output.append(math)
+                if display { output.append(NSAttributedString(string: "\n", attributes: style)) }
+            } else { output.append(NSAttributedString(string: original, attributes: style)) }
+            return
+        }
         var traits = font.fontDescriptor.symbolicTraits
         if ["b", "strong", "th", "h1", "h2", "h3", "h4"].contains(tag) { traits.insert(.traitBold) }
         if ["i", "em"].contains(tag) { traits.insert(.traitItalic) }
-        if let descriptor = font.fontDescriptor.withSymbolicTraits(traits) { style[.font] = UIFont(descriptor: descriptor, size: font.pointSize) }
+        let scale: CGFloat = ["h1": 1.6, "h2": 1.4, "h3": 1.2, "h4": 1.1][tag] ?? 1
+        if let descriptor = font.fontDescriptor.withSymbolicTraits(traits) { style[.font] = UIFont(descriptor: descriptor, size: font.pointSize * scale) }
         if ["code", "pre"].contains(tag) { style[.font] = UIFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular) }
         if tag == "u" { style[.underlineStyle] = NSUnderlineStyle.single.rawValue }
         if ["s", "del"].contains(tag) { style[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
         if tag == "a", let href = try? element.attr("href"), let url = URL(string: href),
            ["http", "https"].contains(url.scheme?.lowercased() ?? "") { style[.link] = url }
         if tag == "br" { output.append(NSAttributedString(string: "\n", attributes: style)); return }
-        if tag == "li" { output.append(NSAttributedString(string: "• ", attributes: style)) }
+        if tag == "li" {
+            var bullet = "• "
+            if let parent = element.parent(), parent.tagName() == "ol" {
+                let start = Int((try? parent.attr("start")) ?? "1") ?? 1
+                let index = parent.children().array().filter { $0.tagName() == "li" }.firstIndex { $0 === element } ?? 0
+                bullet = "\(start + index). "
+            }
+            output.append(NSAttributedString(string: bullet, attributes: style))
+        }
+        if tag == "input", (try? element.attr("type")) == "checkbox" {
+            output.append(NSAttributedString(string: element.hasAttr("checked") ? "☑ " : "☐ ", attributes: style)); return
+        }
         if tag == "img", let alt = try? element.attr("alt"), !alt.isEmpty {
             output.append(NSAttributedString(string: "[\(alt)]", attributes: style))
         }

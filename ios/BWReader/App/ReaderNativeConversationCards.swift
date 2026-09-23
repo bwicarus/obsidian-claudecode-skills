@@ -68,8 +68,7 @@ private struct ReaderNativeConversationMarkdown: View {
     let text: String
 
     var body: some View {
-        Text((try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-             ?? AttributedString(text))
+        ReaderNativeRichDocument(content: text)
             .font(.subheadline).lineSpacing(4)
             .foregroundStyle(ReaderNativeTheme.ink)
             .textSelection(.enabled)

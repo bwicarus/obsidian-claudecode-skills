@@ -20,6 +20,12 @@ settings:
     TARGETED_DEVICE_FAMILY: "1,2"
 
 packages:
+  swiftCmark:
+    url: https://github.com/swiftlang/swift-cmark.git
+    exactVersion: 0.9.0
+  swiftMath:
+    url: https://github.com/mgriebling/SwiftMath.git
+    exactVersion: 1.7.3
   swiftSoup:
     url: https://github.com/scinfu/SwiftSoup.git
     exactVersion: 2.13.9
@@ -98,6 +104,12 @@ targets:
         product: FlyingSocks
       - package: swiftSoup
         product: SwiftSoup
+      - package: swiftCmark
+        product: cmark-gfm
+      - package: swiftCmark
+        product: cmark-gfm-extensions
+      - package: swiftMath
+        product: SwiftMath
 
   BWReaderSafariExtension:
     type: app-extension

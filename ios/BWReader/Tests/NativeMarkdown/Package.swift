@@ -1,0 +1,7 @@
+// swift-tools-version: 5.9
+import PackageDescription
+let package = Package(name: "NativeMarkdownChecks", platforms: [.macOS(.v13)], dependencies: [
+    .package(url: "https://github.com/swiftlang/swift-cmark.git", exact: "0.9.0")
+], targets: [.executableTarget(name: "NativeMarkdownChecks", dependencies: [
+    .product(name: "cmark-gfm", package: "swift-cmark"), .product(name: "cmark-gfm-extensions", package: "swift-cmark")
+], path: ".", exclude: ["Package.swift"], sources: ["main.swift", "ReaderNativeMarkdown.swift", "ReaderNativeMathSyntax.swift"])])

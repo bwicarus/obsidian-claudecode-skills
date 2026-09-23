@@ -13,9 +13,11 @@ struct ReaderNativeRichDocument: View {
     var font: UIFont? = nil
     var color: UIColor? = nil
 
+    private var html: String { format == "html" ? content : ReaderNativeMarkdown.html(content) }
+
     var body: some View {
-        if format == "html", content.range(of: "<(table|img)\\b", options: [.regularExpression, .caseInsensitive]) != nil,
-           let blocks = ReaderNativeDocumentParser.blocks(content) {
+        if html.range(of: "<(table|img)\\b", options: [.regularExpression, .caseInsensitive]) != nil,
+           let blocks = ReaderNativeDocumentParser.blocks(html) {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     switch block {
@@ -35,7 +37,7 @@ struct ReaderNativeRichDocument: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            ReaderNativeRichText(content: content, format: format, onSelection: onSelection, font: font, color: color)
+            ReaderNativeRichText(content: html, format: "html", onSelection: onSelection, font: font, color: color)
         }
     }
 }
