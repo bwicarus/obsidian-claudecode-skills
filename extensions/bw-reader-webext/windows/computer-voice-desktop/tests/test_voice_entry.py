@@ -531,26 +531,6 @@ class WiredUpTests(unittest.TestCase):
             orphans, [],
             "这些推送没有任何生产代码在调用 —— 功能等于不存在: %s" % orphans)
 
-    def test_voice_entry_push_is_sent_from_the_start_path(self):
-        """入口推送必须挂在"音频通道刚通"那一步上。
-
-        那是唯一知道"用户此刻要开语音"的时刻;挪到别处(比如定时器)就会变成
-        没人要求也去催对面。
-        """
-        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
-            encoding="utf-8")
-        # 钉调用**位置**,不钉参数列表 —— 参数会变,"挂在 START 上"不该变。
-        start = source.split("private async Task<DirectStartActionResult> "
-                             "HandleStartAsync")[1]
-        start = start.split("private async Task<object> HandleStopAsync")[0]
-        self.assertIn("RequestVoiceEntryIfNobodyElseWill(", start)
-        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
-        hook = hook.split("private async Task<object> HandleStopAsync")[0]
-        # 三条判据缺一条都会做错事,见那段的 remarks。
-        self.assertIn("_codexVoiceControl.KeepActive", hook)
-        self.assertIn("Active == true", hook)
-        self.assertIn("DirectAppTargets.CodexDesktop", hook)
-
     def test_cold_launch_waits_are_sized_for_a_cold_launch(self):
         """刚被我们拉起来的 Codex，音频服务不可能 3 秒就绪。
 
@@ -574,42 +554,6 @@ class WiredUpTests(unittest.TestCase):
         self.assertTrue(ready)
         self.assertGreaterEqual(int(audio.group(1)), int(ready.group(1)))
         self.assertGreaterEqual(int(voice.group(1)), 20)
-
-    def test_voice_entry_cooldown_is_keyed_by_session_not_the_clock(self):
-        """用户再按一次是**新意图**,不是重复的幂等 START。
-
-        原来是一个全局时间戳,于是第一次失败后隔十几秒再按被当成重复挡掉 ——
-        用户看到的正是「再次点击…并没有发送内容到 codex」。
-        """
-        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
-            encoding="utf-8")
-        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
-        hook = hook.split("private async Task<object> HandleStopAsync")[0]
-        self.assertIn("_lastVoiceEntrySessionId", hook)
-        self.assertIn("sameSession", hook)
-
-    def test_bridge_starts_voice_when_push_cannot_be_sent(self):
-        """推送送不出去时，**桥自己把语音开起来**（2026-09-10 定的分工）。
-
-        Codex 明确表示"通过模拟快捷键控制桌面应用这条操作路线目前不能执行"，
-        并建议把桥端启动与它能做的（状态回报、处理通知、授权挂断）分开设计。
-        那就分开：起通话走桥自己那条已验证的链，推送继续负责挂断与状态回报。
-
-        ⚠ 走的必须是 SetActiveAsync（与保活收敛同一条链），不是另拼一条按键链
-        —— 2026-09-09 那次就是抄漏了"拉起 Codex"这一步。
-        """
-        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
-            encoding="utf-8")
-        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
-        hook = hook.split("private static void StartVoiceFromBridge")[0]
-        self.assertIn("StartVoiceFromBridge(control, requestId)", hook)
-        # ⚠ 只在推送真的送不出去之后 —— 推送能送到时它更便宜也更快。
-        self.assertIn("if (sent) return;", hook)
-        body = source.split("private static void StartVoiceFromBridge")[1]
-        body = body.split("private async Task<object> HandleStopAsync")[0]
-        self.assertIn("SetActiveAsync(active: true", body)
-        self.assertIn("NoteBridgeStart", body)
-        self.assertNotIn("while (true)", body)   # 不重试，见 remarks
 
     def test_thread_source_comes_from_the_session_record(self):
         """排除表要对着**会话来源**判，不是对着 thread/list 回的客户端名。
@@ -717,14 +661,6 @@ class WiredUpTests(unittest.TestCase):
         self.assertIn("catch (OperationCanceledException)", block)
         self.assertIn("!cancellationToken.IsCancellationRequested", block)
         self.assertIn("ReaderCodexEndpoint.Invalidate", block)
-
-    def test_dead_binding_stops_the_retry_loop_at_once(self):
-        """判死之后别再等 —— 重试救不回一条不存在的管道。"""
-        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
-            encoding="utf-8")
-        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
-        hook = hook.split("private static void StartVoiceFromBridge")[0]
-        self.assertIn("ReaderCodexEndpoint.Current() is null", hook)
 
     def test_cancelled_request_still_leaves_a_trace(self):
         """取消也要留痕 —— 静默返回让账本看起来像"一次都没试过"。"""
@@ -918,12 +854,9 @@ class SilenceContractTests(unittest.TestCase):
         '"提示板更新（"': "BoardSilenceLine",
         '"用户预先设定的自动关闭规则触发了："': "OperationSilenceLine",
         '"状态查询（requestId: "': "OperationSilenceLine",
-        '"指定操作（requestId: "': "OperationSilenceLine",
-        # ⚠ 唯一**故意不挂纪律**的一条（2026-09-11 用户提的"输入框直达通话"）：
-        #   其余五条是状态同步或运维指令，所以要求对面"不要在通话里念出来"；
-        #   而这一条**是他在说话**，要的就是对面像他开口一样正常回答。
-        #   给它挂上纪律的后果是最难查的那种：送到了，对面却按纪律故意不吭声。
-        '"来自用户："': None,
+        # ⚠ 2026-09-22/23 删掉两条：「指定操作」（请桌面 Codex 开语音）和
+        #   「来自用户：」（打字送进桌面 Codex 通话）—— 桌面端语音桥整条已删，
+        #   打字现在只交给语音核心的后台线程（DirectBridgeProtocol HandleCodexTypeAsync）。
     }
 
     def test_every_outbound_message_carries_the_rule(self):
@@ -1005,24 +938,6 @@ class VoiceEntryStormTests(unittest.TestCase):
 
     BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
 
-    def test_only_one_entry_task_may_be_in_flight(self):
-        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
-            encoding="utf-8")
-        body = source.split("RequestVoiceEntryIfNobodyElseWill")[-1]
-        head = body[:body.index("_ = Task.Run(")]
-        self.assertIn("_voiceEntryInFlight", head,
-                      "起任务之前没有总闸")
-        self.assertIn("Interlocked.Exchange(ref _voiceEntryInFlight, 1)", head)
-
-    def test_the_gate_is_always_released(self):
-        """漏放一次 = 从此再也起不了语音，而那种失效没有任何提示。"""
-        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
-            encoding="utf-8")
-        body = source.split("RequestVoiceEntryIfNobodyElseWill")[-1]
-        self.assertIn("finally", body[:body.index("PythonExecutable")])
-        self.assertIn("Interlocked.Exchange(ref _voiceEntryInFlight, 0)",
-                      body[:body.index("PythonExecutable")])
-
     def test_outbound_has_a_minimum_gap(self):
         """出站要留间隔，否则通道一恢复就把攒着的几条挤在同一秒送出去。"""
         source = (self.BRIDGE / "ReaderCodexPush.cs").read_text(
@@ -1042,49 +957,6 @@ class VoiceEntryStormTests(unittest.TestCase):
         self.assertIn("NoteFastBoardDelivered", board)
         decide = board.split("internal static bool ShouldPushFast")[1][:600]
         self.assertIn("lastDelivered", decide)
-
-
-class ChannelRebuildTests(unittest.TestCase):
-    """通道坏了要**当场**发现，不要等下一轮。"""
-
-    BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
-
-    def _entry_task(self):
-        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
-            encoding="utf-8")
-        body = source.split("RequestVoiceEntryIfNobodyElseWill")[-1]
-        return body[:body.index("private static void NoteBridgeGaveUp")]
-
-    def test_no_binding_means_build_one_before_sending(self):
-        """用户 2026-09-10 定的顺序：冷启动后先把通道建起来再谈发送。"""
-        body = self._entry_task()
-        build = body.index("TryEnsureChannelAsync")
-        send = body.index("RequestVoiceEntryAsync")
-        self.assertLess(build, send, "建通道必须排在发送之前")
-
-    def test_a_failed_send_rebuilds_immediately(self):
-        """发送失败**就是**"这条绑定不通"的实测证据，比等时钟强。
-
-        ⚠ 实录 2026-09-11 00:18:24：绑定指着 d1db7cb6，而 Codex 重启后管道名
-        早变了。当时要等满一轮 10 秒才轮到重建 —— 那 11 秒是白等的，因为失败
-        的那一刻我们就已经知道它坏了。
-        """
-        body = self._entry_task()
-        self.assertIn("hadBinding", body)
-        # 失败分支里必须再建一次
-        # ⚠ 窗口取到分支结束，别截固定字数 —— 2026-09-11 又加了一段注释，
-        # 1200 字又不够了。同一个写法今天骗过我第四次。
-        tail = body[body.index("else if (hadBinding)"):]
-        self.assertIn("TryEnsureChannelAsync", tail)
-        # "对面没有收下" = 目标线程死了，不是通道坏了；那种情况要换目标。
-        self.assertIn("ClearVoiceEntryTargetOverride", tail,
-                      "目标被拒时只会重建通道，不会换目标 —— 会原地空转")
-
-    def test_it_does_not_rebuild_twice_in_one_round(self):
-        """绑定为 null 时循环顶部已经建过了，失败分支不该再来一次。"""
-        body = self._entry_task()
-        self.assertIn("else if (hadBinding)", body,
-                      "失败就重建必须以「本来有绑定」为条件")
 
 
 class BoardFollowsTheCallTests(unittest.TestCase):
@@ -1118,30 +990,10 @@ class BoardFollowsTheCallTests(unittest.TestCase):
         #   · 板子 / 挂断 / 状态 → 活着的通话（没有就退回绑定）
         #   · 指定操作           → 最近那条语音对话（lastGood，不加在通话守卫）
         #   · 用户打字             → 正在通话的那条（读不到才退回绑定）
+        # 2026-09-23：「指定操作」「来自用户」两条随桌面语音桥删除，剩四条。
         self.assertEqual(
-            push.count("threadIdOverride:"), 6,
-            "带目标线程的外发不是六条了 —— 先数清楚再改")
-
-    def test_the_entry_goes_to_the_latest_voice_chat_not_the_binding(self):
-        """入口要发给**最近那条语音对话** —— F24 续的就是它。
-
-        ⚠ 实录对照（2026-09-10/11）：
-          16:52/16:56/19:38 绑定=01a08a2f（当时在用的那条）→ 三通复用同一条；
-          09-11 那五次      绑定=01a088fd（昨天的旧对话，因为新建的 voice_chat
-                            都没标题，mode:title 只能落在旧的上）→ 每次新开。
-        """
-        push = (self.BRIDGE / "ReaderCodexPush.cs").read_text(
-            encoding="utf-8")
-        # ⚠ 窗口取到方法结束，别用 NoteAttempt 当边界 —— 方法体前面就有一条
-        #（"没有可用绑定"那句），截在那儿等于根本没看到发送段。
-        body = push.split(
-            "internal static async Task<bool> RequestVoiceEntryAsync")[1]
-        body = body[:body.index("internal static")]
-        self.assertIn("InCallThreadId()", body,
-                      "入口还在发给绑定那条")
-        # ⚠ 必须是**不带在通话守卫**的那个：要的是"最后一条好的"，
-        # 散场之后仍然是它；用带守卫的那个会在没通话时退回绑定 —— 回到老毛病。
-        self.assertNotIn("InCallThreadIdIfActive", body)
+            push.count("threadIdOverride:"), 4,
+            "带目标线程的外发不是四条了 —— 先数清楚再改")
 
     def test_it_only_follows_while_a_call_is_really_live(self):
         """lastGood 是"最后一条好的"，通话结束后还留着。
@@ -1352,18 +1204,6 @@ class EveryOutboundSaysWhyTests(unittest.TestCase):
         self.assertGreaterEqual(
             push.count("Because("), 4,
             "有外发没声明原因 —— 它出问题时无法归因")
-
-    def test_the_entry_cause_carries_the_trigger_and_round(self):
-        """入口那条最要紧：要说清是哪次 START、第几轮、为什么这一轮要发。"""
-        protocol = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
-            encoding="utf-8")
-        body = protocol.split("RequestVoiceEntryIfNobodyElseWill")[-1]
-        self.assertIn("ReaderCodexPush.Because(", body)
-        cause = body[body.index("string why ="):][:600]
-        self.assertIn("sessionId", cause, "没说是哪次 START")
-        self.assertIn("round", cause, "没说第几轮")
-        self.assertIn("补发", cause, "没说这一轮为什么发")
-
 
 class ChannelChoiceTests(unittest.TestCase):
     """通道连哪条对话：一份设置，两个入口。"""

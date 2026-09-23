@@ -417,6 +417,26 @@ final class NativeVoiceBridge: ObservableObject {
         }
     }
 
+    /// 不在通话时打的字：临时连一下 Windows 桥，交给语音核心的**后台线程**，发完就断。
+    ///
+    /// 用户 2026-09-23：「我希望不语音对话时也能够打字到最新对应的后台ai那里」。
+    /// 桥那侧 codex-type 本来就不要求在通话（只要鉴权），缺的只是 App 这头没有连接。
+    /// 通话中直接复用那条连接。返回 false = 语音核心没接住，调用方退回文字助手。
+    func sendTypedToBackend(_ text: String) async -> Bool {
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return false }
+        if socket != nil { return await sendTyped(body) }
+        let transient = DirectVoiceSocket(configuration: .production) { _ in }
+        defer { Task { await transient.disconnect() } }
+        do {
+            try await transient.connect()
+            return try await transient.codexType(text: body)
+        } catch {
+            recordDiagnostic(category: "protocol", message: "打字交后台失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
     func stop() async {
         guard state.phase != .idle else {
             return

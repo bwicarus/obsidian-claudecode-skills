@@ -862,6 +862,18 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func performNativeConversationCommand(_ command: [String: Any]) async -> String? {
+        // 不在通话时，普通对话里打的字交给语音核心的后台线程（与通话中同一个归宿）。
+        // 语音核心不在（ReaderPC 没开）才退回下面原来的文字助手。
+        // 通话中的那条仍走网页 __vcSendText → 原生 sendTyped，不在这里拦。
+        if command["action"] as? String == "send",
+           nativeConversation.conversationMode == "normal",
+           !nativeConversation.voice.active, !nativeConversation.voice.busy,
+           let bridge = nativeVoiceBridge, !bridge.state.isActive, !bridge.state.isBusy,
+           let text = (command["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !text.isEmpty,
+           await bridge.sendTypedToBackend(text) {
+            return nil
+        }
         let receipt = await requestNativeConversationCommand(command)
         let ok = receipt["ok"] as? Bool == true
         // 顶栏「阅读工具」里的那些按钮点的是网页工具栏（译页/注音/生词下划线/图描述…），

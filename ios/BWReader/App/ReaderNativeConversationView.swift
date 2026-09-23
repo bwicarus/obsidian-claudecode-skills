@@ -12,6 +12,8 @@ struct ReaderNativeConversationView: View {
     @State private var resumeAtBottom = false
     @State private var confirmsClear = false
     @State private var resetsRecall = false
+    /// 硬件键盘 Shift+Return 放行的那一个换行（见 composer 的 onChange）。
+    @State private var keepsNextNewline = false
     @GestureState private var interacting = false
 
     private var isReview: Bool { model.conversationMode == "review" }
@@ -19,6 +21,18 @@ struct ReaderNativeConversationView: View {
     private var canSend: Bool {
         model.ready && model.supports("send") && !model.isPerforming("send") &&
             !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func submitDraft() {
+        guard canSend else { return }
+        let text = model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let original = model.draft
+        Task {
+            if await model.perform("send", parameters: ["text": text]), model.draft == original {
+                model.draft = ""
+                model.followsLatest = true
+            }
+        }
     }
 
     private var voiceAction: String? {
@@ -369,6 +383,27 @@ struct ReaderNativeConversationView: View {
                     .lineLimit(1...5).font(.subheadline)
                     .padding(11).background(ReaderNativeTheme.canvas, in: RoundedRectangle(cornerRadius: 14))
                     .disabled(!model.ready || !model.supports("send"))
+                    // ⚠ 多行 TextField 的回车默认是换行，onSubmit 根本不触发 ——
+                    //   用户 2026-09-23：「回车键无法发送信息」。
+                    //   约定跟常见聊天输入一致：回车发送，Shift+回车换行。
+                    //   硬件键盘走 onKeyPress；软键盘的回车不经 onKeyPress，
+                    //   只能从文字变化里认出「刚插进来的那一个换行」再撤掉它去发送。
+                    .onKeyPress(.return, phases: .down) { press in
+                        if press.modifiers.contains(.shift) {
+                            keepsNextNewline = true
+                            return .ignored
+                        }
+                        submitDraft()
+                        return .handled
+                    }
+                    .onChange(of: model.draft) { old, new in
+                        if keepsNextNewline { keepsNextNewline = false; return }
+                        guard new.count == old.count + 1,
+                              new.filter(\.isNewline).count == old.filter(\.isNewline).count + 1
+                        else { return }
+                        model.draft = old
+                        submitDraft()
+                    }
                 if model.busy && model.supports("stop") {
                     Button {
                         Task { await model.perform("stop") }
@@ -380,14 +415,7 @@ struct ReaderNativeConversationView: View {
                     .disabled(model.isPerforming("stop"))
                 }
                 Button {
-                    let text = model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let original = model.draft
-                    Task {
-                        if await model.perform("send", parameters: ["text": text]), model.draft == original {
-                            model.draft = ""
-                            model.followsLatest = true
-                        }
-                    }
+                    submitDraft()
                 } label: {
                     Group {
                         if model.isPerforming("send") { ProgressView() }

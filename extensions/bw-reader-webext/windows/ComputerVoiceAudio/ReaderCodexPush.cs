@@ -355,13 +355,6 @@ internal static class ReaderCodexPush
         NoteAttempt("voice-hangup-decision", requestId, ok, detail);
 
     /// 记一条尝试：内存里留最后一句给现有调用方，账本里留全量给排查的人。
-    /// 下一次入口推送跳过「最近那条语音对话」这个目标。
-    /// 由入口循环在「对面没有收下这条消息」之后设。
-    private static bool _skipEntryTargetOverride;
-
-    internal static void ClearVoiceEntryTargetOverride() =>
-        _skipEntryTargetOverride = true;
-
     private static void NoteAttempt(
         string purpose,
         string requestId,
@@ -901,125 +894,6 @@ internal static class ReaderCodexPush
     }
 
     /// <summary>
-    /// 请对面**开一次语音**（2026-09-09 用户拍板的启动方式）。
-    ///
-    /// 用户原话：「发送主动通知让 codex 通过脚本自己启动」、「他就只需要根据状态
-    /// 回报信息使用脚本，而脚本实际上是点击一次 f24 罢了」。所以这里只说"跑那个
-    /// 脚本"，不解释脚本在做什么 —— 具体步数、重试上限、放弃后怎么报错都写在
-    /// 能力说明 voice-entry.md 里，它已经登记在册。
-    ///
-    /// ⚠ **目标线程与挂断相反。** 挂断要发给正在通话的那条线程；入口是要把通话
-    /// **开起来**，此刻并没有通话线程，只能发给绑定的常规线程。把 inCallThreadId
-    /// 那套照搬过来会得到一个空目标然后静默不发 —— 而那正是这条链一直没人触发的
-    /// 那种沉默。
-    ///
-    /// ⚠ 这条推送**不保证**语音会开起来，只保证请求发出去了。开没开成要看台账
-    /// （梯子第 4 级）；对面放弃时会自己跑 voice_start_failed.py 留痕。
-    /// </summary>
-    internal static async Task<bool> RequestVoiceEntryAsync(
-        string requestId,
-        CancellationToken cancellationToken)
-    {
-        // ⚠ 这一条最要紧：入口指令原来"没绑定就不发"，于是冷启动时
-        // 整条链卡在等 AI 登记（账本里那句「通道没能建立（Codex 可能还没
-        // 加载完）」）。现在没绑定就自己派生一个再发。
-        ReaderCodexEndpoint.Binding? binding =
-            await ResolveBindingAsync("reader-voice-entry", cancellationToken)
-                .ConfigureAwait(false);
-        if (binding is null) return false;
-        string step = Path.Combine(
-            Environment.GetFolderPath(
-                Environment.SpecialFolder.LocalApplicationData),
-            "BWReader",
-            "voice_start_step.py");
-        // voice_start_failed.py 仍然随包分发，但现在由 voice_start_step.py
-        // --report-failure 在进程内调用，不再让 AI 另起一次运行。
-        // 指定操作：只说要跑什么、怎么判、跑几次。
-        //
-        // ⚠ **不叙述用途**（用户 2026-09-09 与 09-10 两次点明）：这是一条运维
-        // 指令，不是一段说明文。脚本自己带守卫（已在通话中不动作、台账读不到
-        // 不动作、冷却期内不动作），所以对面不需要先判断什么，照着跑就行。
-        string prompt =
-            OperationSilenceLine
-            + "指定操作（requestId: " + Trim(requestId) + "）。\n"
-            // ⚠ 只给**一行**，而且要说清"等它自己结束"（2026-09-13）。
-            //   会话记录里这条链原来要 3–6 个模型回合：跑一次 → exec 到点先
-            //   回来 → AI 每 5 秒空写 stdin 看结束没（170 次、中位 5 s）→
-            //   false 再跑 → 还不行跑第三个脚本。重试与上报现在都在脚本里。
-            + "请运行下面这一行**一次**，它自己会重试并在放弃时上报，"
-            + "你不用再做别的：\n"
-            + "    python \"" + step + "\" --attempts 2 --report-failure\n"
-            // ⚠ 会话记录实测（2026-09-13）：244 次 ≥5 秒的工具调用里，10 次期间
-            //   用户在说话，说的是「你听不到吗」。传输没阻塞，模型那一轮被卡着。
-            //   脚本现在自己重试、自己上报，模型不需要结果 —— 起了就回来。
-            + "用 exec_command 起它，yield_time_ms 给 1500，返回后**就当做完了**：\n"
-            + "不要 wait、不要 write_stdin 查看、不要再运行第二次 —— "
-            + "继续跟用户说话。它自己会重试，放弃时会自己上报，"
-            + "你不需要它的结果。\n"
-            + "同一编号再次出现表示上一次没有生效。";
-        try
-        {
-            // ⚠ **发给最近那条语音对话，不是绑定那条**（2026-09-11 实测）。
-            //
-            // 用户：「之前测试时是可以打开指定对话的语音的，而且本身软件的
-            // 设计也是语音快捷键按下时默认打开最近的语音对话，为何现在变成
-            // 打开新的对话了，是你的脚本问题吧」——是。
-            //
-            // 「指定操作」这条推送是**送进某条对话**的，Codex 在那条里跑脚本、
-            // 触发 F24。送进**最近那条语音对话** → 它续上；送进一条别的
-            // （比如按标题绑到的昨天那条）→ 它新开一条。
-            //
-            // 实录对照：
-            //   16:52 / 16:56 / 19:38  绑定 = 01a08a2f（当时正在用的那条）
-            //                          → 三通全部复用同一条对话
-            //   09-11 那五次           绑定 = 01a088fd（昨天 10:45 的旧对话，
-            //                          因为新建的 voice_chat 都没有标题，
-            //                          mode:title 只能落在旧的上）
-            //                          → 每一次都新开
-            //
-            // 我之前把这条写成"必须发给绑定那条"，理由是"发它时还没有通话"。
-            // 前半句对、后半句错：没有**正在进行**的通话，但**最近那条**一直在，
-            // 而那正是 F24 会续上的那条。
-            //
-            // ⚠ 这里用不加通话守卫的 InCallThreadId()（lastGood）——要的就是
-            // "最后一条好的"，散场之后仍然是它。这跟提示板那边**故意相反**：
-            // 板子要发给活着的通话，入口要发给将要被续上的那条。
-            // 上一轮若是「对面没有收下」（目标线程已死），这一轮别再发给它。
-            string entryTarget = _skipEntryTargetOverride
-                ? string.Empty
-                : DirectCodexVoiceControl.InCallThreadId();
-            _skipEntryTargetOverride = false;
-            await SendAsync(
-                binding,
-                prompt,
-                cancellationToken,
-                threadIdOverride: entryTarget.Length > 0 ? entryTarget : null,
-                purpose: "reader-voice-entry").ConfigureAwait(false);
-            NoteAttempt("reader-voice-entry", requestId, true,
-                "已请求开语音（" + Trim(requestId) + "）→ "
-                + (entryTarget.Length > 0
-                    ? entryTarget[..Math.Min(13, entryTarget.Length)]
-                      + "（最近那条语音对话）"
-                    : "绑定那条（还没有过语音对话）"));
-            return true;
-        }
-        catch (OperationCanceledException)
-        {
-            // 取消也要留痕：静默返回让账本看起来像"一次都没试过"，
-            // 而那正是 2026-09-10 那一晚查不动的原因之一。
-            NoteAttempt("reader-voice-entry", requestId, false,
-                "语音入口请求被取消（多半是预算耗尽）");
-            return false;
-        }
-        catch (Exception exception)
-        {
-            NoteAttempt("reader-voice-entry", requestId, false,
-                "语音入口请求发送失败：" + exception.Message);
-            return false;
-        }
-    }
-
-    /// <summary>
     /// 出站闸：**同一时刻只发一条，且两条之间留出间隔**
     /// （2026-09-10 用户：「重试后不希望通知积压在通道连通后输出复数通知」）。
     /// </summary>
@@ -1070,64 +944,6 @@ internal static class ReaderCodexPush
     private sealed class CauseScope(string? previous) : IDisposable
     {
         public void Dispose() => _cause.Value = previous;
-    }
-
-    /// <summary>把用户**打字说的话**送进正在通话的那条对话。</summary>
-    /// <remarks>
-    /// 用户 2026-09-11：「电脑语音模式时的输入框其实一直都没有设计和利用起来过，
-    /// 现在既然已经有了稳定的注入内容的途径，就可以把这个输入框利用起来了」。
-    ///
-    /// ⚠ **这条不带静默纪律**，跟这个文件里其它五条外发正好相反。
-    /// 板面和运维指令都要求"不要在通话里念出来、不要回应"，因为那是状态同步；
-    /// 而这一条**是他在说话**，要的就是对面像他开口一样正常回答。
-    /// 复用错前缀的后果是最难查的那种：送到了，对面却按纪律故意不吭声。
-    ///
-    /// 前缀用最短的「来自用户：」（他定的）：不写指令、不解释、不加条件 ——
-    /// 多一句话就多一分被当成"运维指令"对待的可能。
-    ///
-    /// ⚠ 目标是**正在通话的那条**，不是绑定那条：绑定可能还停在上一条
-    /// （今天实测过这种偏差）。读不到在通话哪条时才退回绑定。
-    /// </remarks>
-    internal static async Task<bool> SendTypedAsync(
-        string text,
-        string requestId,
-        CancellationToken cancellationToken)
-    {
-        string body = (text ?? string.Empty).Trim();
-        if (body.Length == 0)
-        {
-            NoteAttempt("reader-user-typed", requestId, false, "空文本，不发");
-            return false;
-        }
-        ReaderCodexEndpoint.Binding? binding =
-            await ResolveBindingAsync("reader-user-typed", cancellationToken)
-                .ConfigureAwait(false);
-        if (binding is null) return false;
-        string target = DirectCodexVoiceControl.InCallThreadIdIfActive();
-        using IDisposable _why = Because("用户在输入框里打字");
-        try
-        {
-            await SendAsync(
-                binding,
-                "来自用户：" + body,
-                cancellationToken,
-                threadIdOverride: target.Length > 0 ? target : null,
-                purpose: "reader-user-typed").ConfigureAwait(false);
-            NoteAttempt(
-                "reader-user-typed", requestId, true,
-                "已把打字内容送进通话（" + body.Length + " 字）→ "
-                + (target.Length > 0
-                    ? BoardTargetNote(target, binding)
-                    : "绑定那条（读不到通话在哪条）"));
-            return true;
-        }
-        catch (Exception error)
-        {
-            NoteAttempt(
-                "reader-user-typed", requestId, false,
-                "打字内容没送出去：" + error.Message);
-            return false;
-        }
     }
 
     /// 出站口封死了没有。**只在 --self-test 进程里为真。**

@@ -3037,9 +3037,9 @@ internal sealed class DirectBridgeProtocolSession
         string text = RequireString(message, "text", 4000);
         if (ExternalVoiceBackendEnabled() && !ReaderCodexPush.OutboundSealed)
         {
-            // 2026-09-14：通话另一头是语音核心，不是桌面 Codex —— 台账里永远查不到"在通话"，
-            // 旧闸会把每一句都以 not-in-call 退回。打字内容交给语音核心：语音会话在线就追加
-            // 进语音会话（v3 空闲时自动起一轮、语音模型开口答），不在线就让后台文字线程起一轮。
+            // 打字内容交给语音核心的后台线程 —— 在不在通话都一样（2026-09-23 用户：
+            // 「通话中打字时直接把信息传给后台ai就好」「不语音对话时也能够打字到最新对应的后台ai那里」）。
+            // 原来通话中是追加进语音会话、还带「【用户打字】」前缀，语音模型把前缀连原话念了出来。
             string? body = await VoiceCoreRequestBodyAsync(
                 "/typed",
                 JsonSerializer.Serialize(new { text }),
@@ -3067,14 +3067,14 @@ internal sealed class DirectBridgeProtocolSession
             ReaderCodexPush.NoteVoiceEntryOutcome(
                 "reader-user-typed", accepted,
                 accepted
-                    ? "打字内容已交给语音核心（" + (via == "voice" ? "追加进语音会话" : "后台文字线程起一轮") + "，" + text.Length + " 字）"
+                    ? "打字内容已交给后台（" + (via == "" ? "backend" : via) + "，" + text.Length + " 字）"
                     : "语音核心没接住打字内容");
             return new
             {
                 ok = accepted,
                 reason = accepted ? "sent" : "not-sent",
                 detail = accepted
-                    ? (via == "voice" ? "已追加进语音会话" : "已交给后台文字线程")
+                    ? "已交给后台"
                     : "语音核心没接住这句（它在跑吗？）",
             };
         }
