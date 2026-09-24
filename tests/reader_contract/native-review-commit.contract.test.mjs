@@ -59,3 +59,31 @@ test('browser null owner retains existing scheduler and reports only committed r
   assert.equal(await h.run(), true);
   assert.deepEqual(h.events, ['schedule', 'report', 'project', 'notify']);
 });
+
+test('native interval refinement passes the committed review to the atomic owner and never browser-patches on failure', async () => {
+  const calls = [], notices = [];
+  const code = source.slice(source.indexOf('  function _adoptExternalSchedule('), source.indexOf('  function _projectLegacyLocalAnswer('));
+  const local = { gid: 'card_aabb', cardIndex: 2, entityRev: 9, review: { reps: 4, lapses: 1, lastReviewedAt: 6000 } };
+  let fail = false;
+  const store = Native.createNativeDataStore({ deviceId: 'refine', port: {
+    read() { assert.fail('no browser read'); }, listCollection() { assert.fail('no enumeration'); }, commit() { assert.fail('no browser write'); },
+    async cardRepositoryCall(operation, args) {
+      if (fail) throw Error('disk unavailable');
+      calls.push({ operation, args }); return { result: { applied: true }, changes: [] };
+    }
+  } });
+  const repo = Repository.createCardRepository({ store });
+  const context = vm.createContext({ _nativeReviewUI: () => true, _cardRepository: () => repo,
+    _toast: message => notices.push(message), _externalScheduleFrom() { assert.fail('native owner computes the interval'); } });
+  vm.runInContext(code, context);
+  await context._adoptExternalSchedule(local, { interval: -600 }, 6000, 'answer-a');
+  assert.equal(calls[0].operation, 'adoptReviewSchedule');
+  assert.equal(calls[0].args[0].expectedReview.reps, 4);
+  assert.equal(calls[0].args[0].entityRev, 9);
+  assert.equal(calls[0].args[1].mutationId, 'sched:card_aabb:2:answer-a');
+  fail = true;
+  await context._adoptExternalSchedule(local, { interval: 3 }, 6000, 'answer-b');
+  assert.equal(calls.length, 1);
+  assert.match(notices[0], /本地评分已保存.*disk unavailable/);
+  store.close();
+});

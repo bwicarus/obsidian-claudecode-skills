@@ -23,6 +23,7 @@ final class ReaderNativeReviewQueue {
     private var scope = "current"
     private var task: Task<Response, Error>?
     private var cancelled = false
+    private var stagedRating: Object?
     static let cacheKey = "native-review-queue-v1"
 
     init(local: @escaping () throws -> Object, read: @escaping () throws -> String?,
@@ -31,7 +32,7 @@ final class ReaderNativeReviewQueue {
         self.local = local; self.read = read; self.write = write; self.fetch = fetch; self.now = now
     }
     func invalidate() {
-        task?.cancel(); task = nil; lease = ""; contextKey = ""; identity = Data()
+        task?.cancel(); task = nil; lease = ""; contextKey = ""; identity = Data(); stagedRating = nil
     }
     func cancel(_ id: String) {
         if lease == id { cancelled = true; task?.cancel(); task = nil }
@@ -79,6 +80,104 @@ final class ReaderNativeReviewQueue {
         return try Self.snapshot(value)
     }
     func peek() throws -> Object? { try cached() }
+
+    private static func sameCard(_ left: Object, _ right: Object) -> Bool {
+        for field in ["id", "note_id"] {
+            let first = ReaderNativeCardRules.string(left[field]), second = ReaderNativeCardRules.string(right[field])
+            if !first.isEmpty || !second.isEmpty { return first.utf16.elementsEqual(second.utf16) }
+        }
+        let entity = ReaderNativeCardRules.string(left["entity_id"])
+        if !entity.isEmpty || !ReaderNativeCardRules.string(right["entity_id"]).isEmpty {
+            return entity.utf16.elementsEqual(ReaderNativeCardRules.string(right["entity_id"]).utf16) &&
+                ReaderNativeCardRules.string(left["entity_index"]) == ReaderNativeCardRules.string(right["entity_index"])
+        }
+        let local = ReaderNativeCardRules.string(left["local_id"])
+        if !local.isEmpty { return local.utf16.elementsEqual(ReaderNativeCardRules.string(right["local_id"]).utf16) }
+        return ReaderNativeCardRules.same(left, right)
+    }
+
+    /// One action of undo is a reversible in-memory stage, not an external
+    /// scheduler undo. The persisted recovery snapshot keeps the original card
+    /// until the existing commit operation has a durable result.
+    func stageRating(_ input: Object) throws -> Object {
+        guard input["lease"] as? String == lease, !lease.isEmpty, !cancelled,
+              let id = input["stageId"] as? String, UUID(uuidString: id) != nil,
+              let raw = input["snapshot"] as? Object, let card = input["card"] as? Object,
+              let cardKey = input["cardKey"] as? String, !cardKey.isEmpty, cardKey.utf16.count <= 1024,
+              input["revealed"] as? Bool == true else { throw Failure(message: "请在当前卡片显示答案后评分") }
+        guard stagedRating == nil else { throw Failure(message: "上一张卡的暂存评分尚未处理") }
+        var source = try Self.snapshot(raw)
+        guard source["client_context_key"] as? String == contextKey else { throw Failure(message: "复习内容已切换") }
+        var cards = source["cards"] as! [Object]
+        let index = source["index"] as! Int
+        guard cards.indices.contains(index), ReaderNativeCardRules.same(cards[index], card) else { throw Failure(message: "当前复习卡已更新") }
+        let ease = try ReaderNativeCardRules.integer(input["ease"], "ease")
+        guard (1...4).contains(ease) else { throw Failure(message: "评分必须为 1 到 4") }
+        var completed = source["completed_ids"] as! [Any]
+        let completedBefore = completed
+        let local = card["_localReview"] as? Object
+        let cardID = ReaderNativeCardRules.string(card["id"])
+        let completedAdded = local == nil && ease != 1 && !completed.contains { ReaderNativeCardRules.string($0) == cardID }
+        if completedAdded {
+            guard !cardID.isEmpty else { throw Failure(message: "评分缺少外部卡片编号") }
+            completed.append(card["id"]!); completed = Array(completed.suffix(100))
+        }
+        let dueDecremented = local?["wasDue"] as? Bool == true && (source["due_total"] as! Int) > 0
+        cards.remove(at: index)
+        source["cards"] = cards; source["completed_ids"] = completed
+        source["index"] = min(index, max(0, cards.count - 1))
+        if dueDecremented { source["due_total"] = max(0, (source["due_total"] as! Int) - 1) }
+        source["native_queue_lease"] = lease
+        let stage: Object = ["nativeStageID": id, "nativeQueueLease": lease, "card": card, "ease": ease,
+            "pendingKey": contextKey + ":" + cardKey + ":" + String(index), "originalIndex": index,
+            "contextKey": contextKey, "dueDecremented": dueDecremented, "completedAdded": completedAdded,
+            "completedBefore": completedBefore, "snapshot": source]
+        stagedRating = stage
+        return ["stage": stage, "snapshot": source]
+    }
+
+    /// Take is single-use even if two UI/voice commands arrive together.
+    func takeRating(lease expectedLease: String, stageID: String) throws -> Object {
+        guard expectedLease == lease, let stage = stagedRating,
+              stage["nativeStageID"] as? String == stageID else { throw Failure(message: "暂存评分已处理或已切换") }
+        stagedRating = nil; return stage
+    }
+
+    func discardRating(lease expectedLease: String, stageID: String) {
+        guard expectedLease == lease, stagedRating?["nativeStageID"] as? String == stageID else { return }
+        stagedRating = nil
+    }
+
+    func undoRating(_ input: Object) throws -> Object {
+        guard input["lease"] as? String == lease, let stage = stagedRating,
+              (stage["nativeStageID"] as? String) == (input["stageId"] as? String),
+              let raw = input["snapshot"] as? Object else { throw Failure(message: "当前没有可撤回的暂存评分") }
+        var source = try Self.snapshot(raw)
+        guard source["client_context_key"] as? String == contextKey else { throw Failure(message: "复习内容已切换") }
+        let card = stage["card"] as! Object
+        var cards = (source["cards"] as! [Object]).filter { !Self.sameCard($0, card) }
+        let index = min(stage["originalIndex"] as! Int, cards.count)
+        cards.insert(card, at: index)
+        source["cards"] = cards; source["index"] = index; source["native_queue_lease"] = lease
+        if stage["dueDecremented"] as? Bool == true { source["due_total"] = (source["due_total"] as! Int) + 1 }
+        if stage["completedAdded"] as? Bool == true {
+            var restored = (source["completed_ids"] as! [Any]).filter {
+                ReaderNativeCardRules.string($0) != ReaderNativeCardRules.string(card["id"])
+            }
+            // Staging at the 100-item boundary evicts an older ID. Undo restores
+            // that ID as well, while retaining later compatible observations.
+            let retained = Set(restored.map { ReaderNativeCardRules.string($0) })
+            restored = (stage["completedBefore"] as! [Any]).filter {
+                !retained.contains(ReaderNativeCardRules.string($0))
+            } + restored
+            source["completed_ids"] = Array(restored.suffix(100))
+        }
+        // A failed save retains the stage so the user can retry undo; no score
+        // is sent to a scheduler by this path.
+        try save(source, request: lease)
+        stagedRating = nil
+        return ["stage": stage, "snapshot": source]
+    }
     @discardableResult
     func save(_ value: Object, request: String) throws -> Bool {
         // Late save chains from another book, scope or load are observations,
@@ -112,7 +211,7 @@ final class ReaderNativeReviewQueue {
             throw Failure(message: "复习请求缺少上下文或轮次")
         }
         guard try Self.bytes(context).count <= 32 * 1024 else { throw Failure(message: "复习上下文过大") }
-        task?.cancel(); task = nil; cancelled = false; lease = id; contextKey = key; scope = requestedScope
+        task?.cancel(); task = nil; cancelled = false; lease = id; contextKey = key; scope = requestedScope; stagedRating = nil
         identity = try Self.bytes(["scope": scope, "context": context])
         func preparedLocal() throws -> Object? {
             let result = try local()

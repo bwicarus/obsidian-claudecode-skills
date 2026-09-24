@@ -99,6 +99,52 @@ typealias Q = ReaderNativeReviewQueue
         arrived.held?.resume(); arrived.held = nil
         let replacement = try await wait.value
         precondition(replacement["kind"] as? String == "local" && arrived.cache == nil)
-        print("Native review acquisition: local authority, scopes, cache, cancellation and failures passed")
+        let scoring = Fixture()
+        let loaded = try await scoring.service.load(scoring.input())
+        let scoreLease = loaded["request"] as! String
+        var scoreSnapshot = loaded["snapshot"] as! Q.Object
+        let olderIDs = Array(100...199)
+        scoreSnapshot["completed_ids"] = olderIDs
+        let beforeStage = scoring.cache
+        let stageID = UUID().uuidString
+        let card = (scoreSnapshot["cards"] as! [Q.Object])[0]
+        let stageRequest: Q.Object = ["lease": scoreLease, "stageId": stageID,
+            "snapshot": scoreSnapshot, "card": card, "cardKey": "anki_card_7", "ease": 3, "revealed": true]
+        var invalid = stageRequest; invalid["revealed"] = false
+        do { _ = try scoring.service.stageRating(invalid); preconditionFailure("hidden answer rated") } catch {}
+        let staged = try scoring.service.stageRating(stageRequest)
+        let shortened = staged["snapshot"] as! Q.Object
+        precondition((shortened["cards"] as! [Q.Object]).isEmpty && scoring.cache == beforeStage)
+        do { _ = try scoring.service.stageRating(stageRequest); preconditionFailure("stage duplicated") } catch {}
+        scoring.service.discardRating(lease: scoreLease, stageID: UUID().uuidString)
+        let undo: Q.Object = ["lease": scoreLease, "stageId": stageID, "snapshot": shortened]
+        scoring.failSave = true
+        do { _ = try scoring.service.undoRating(undo); preconditionFailure("failed undo silently accepted") } catch {}
+        scoring.failSave = false
+        let restored = try scoring.service.undoRating(undo)["snapshot"] as! Q.Object
+        precondition((restored["cards"] as! [Q.Object]).count == 1)
+        precondition((restored["completed_ids"] as! [NSNumber]).map(\.intValue) == olderIDs)
+        precondition(scoring.calls.count == 1, "undo must not call an external scheduler")
+        _ = try scoring.service.stageRating(stageRequest)
+        _ = try scoring.service.takeRating(lease: scoreLease, stageID: stageID)
+        do { _ = try scoring.service.takeRating(lease: scoreLease, stageID: stageID); preconditionFailure("taken twice") } catch {}
+
+        let localScore = Fixture(); localScore.local = ["hasLocalCards": true, "entries": [], "dueTotal": 0]
+        let localLease = try await localScore.service.load(localScore.input())["request"] as! String
+        let first: Q.Object = ["entity_id": "same-entity", "entity_index": 0, "_localReview": ["wasDue": true]]
+        let sibling: Q.Object = ["entity_id": "same-entity", "entity_index": 1, "_localReview": ["wasDue": false]]
+        var localSnapshot = scoreSnapshot
+        localSnapshot["cards"] = [first, sibling]; localSnapshot["due_total"] = 0
+        let localID = UUID().uuidString
+        let localStage = try localScore.service.stageRating(["lease": localLease, "stageId": localID,
+            "snapshot": localSnapshot, "card": first, "cardKey": "same-entity:0", "ease": 1, "revealed": true])
+        let localRestored = try localScore.service.undoRating(["lease": localLease, "stageId": localID,
+            "snapshot": localStage["snapshot"]!])["snapshot"] as! Q.Object
+        precondition((localRestored["cards"] as! [Q.Object]).count == 2 && localRestored["due_total"] as? Int == 0)
+        _ = try await localScore.service.load(localScore.input(page: 9))
+        do { _ = try localScore.service.stageRating(["lease": localLease, "stageId": localID,
+            "snapshot": localSnapshot, "card": first, "cardKey": "same-entity:0", "ease": 1, "revealed": true])
+            preconditionFailure("stale page rated") } catch {}
+        print("Native review acquisition, reversible staging and failure recovery passed")
     }
 }

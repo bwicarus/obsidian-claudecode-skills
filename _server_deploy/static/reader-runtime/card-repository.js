@@ -1774,6 +1774,9 @@
       commitReview: function (input, options) {
         return nativeOwner ? nativeCommand('commitReview', [input, options || {}]) : Promise.resolve(null);
       },
+      adoptReviewSchedule: function (input, options) {
+        return nativeOwner ? nativeCommand('adoptReviewSchedule', [input, options || {}]) : Promise.resolve(null);
+      },
       subscribe: subscribe,
       tombstone: tombstone,
       status: function () {
@@ -1827,6 +1830,7 @@
     snapshot: delegate('snapshot'),
     reviewQueue: delegate('reviewQueue'),
     commitReview: delegate('commitReview'),
+    adoptReviewSchedule: delegate('adoptReviewSchedule'),
     tombstone: delegate('tombstone'),
     subscribe: function (listener, query) {
       return defaultRepository().subscribe(listener, query);

@@ -7293,6 +7293,13 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                         switch operation {
                         case "load": replyHandler(["ok": true, "value": try await service.load(request)], nil)
                         case "peek": replyHandler(["ok": true, "value": try service.peek() as Any? ?? NSNull()], nil)
+                        case "stageRating": replyHandler(["ok": true, "value": try service.stageRating(request)], nil)
+                        case "undoRating": replyHandler(["ok": true, "value": try service.undoRating(request)], nil)
+                        case "takeRating":
+                            replyHandler(["ok": true, "value": try service.takeRating(lease: request["lease"] as? String ?? "", stageID: request["stageId"] as? String ?? "")], nil)
+                        case "discardRating":
+                            service.discardRating(lease: request["lease"] as? String ?? "", stageID: request["stageId"] as? String ?? "")
+                            replyHandler(["ok": true, "value": true], nil)
                         case "save":
                             guard let snapshot = request["snapshot"] as? [String: Any], let lease = request["lease"] as? String else {
                                 throw ReaderNativeReviewQueue.Failure(message: "复习保存缺少轮次")

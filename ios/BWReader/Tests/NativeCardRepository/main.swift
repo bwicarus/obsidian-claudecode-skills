@@ -180,3 +180,42 @@ staleEntity["aid"] = "stale-entity"; staleEntity["entityRev"] = 999; staleEntity
 do { _ = try ui.perform(rating(staleEntity, "reject-entity")); preconditionFailure("stale content rated") }
 catch let error as R.Failure { precondition(error.code == "BW_CARD_REPOSITORY_CONFLICT") }
 print("Native ratings: scheduling parity, atomic history, rollback, retry and revision fences passed")
+
+// Refine only the committed review. A late response must not revert counters,
+// a second rating, or an edited card, and replay retains the same journal rows.
+let adoptionReview = ((rated["states"] as! [String: Any])["0"] as! [String: Any])["review"] as! [String: Any]
+let adoptionInput: [String: Any] = ["gid": gid, "cardIndex": 0, "aid": "rating-a", "reviewedAt": 6000,
+    "entityRev": rated["entityRev"]!, "expectedReview": adoptionReview, "next": ["interval": -600]]
+func adopt(_ input: [String: Any], _ mutation: String) -> [String: Any] {
+    ["operation": "adoptReviewSchedule", "arguments": [input], "mutationId": mutation]
+}
+let adopted = try ui.perform(adopt(adoptionInput, "native-interval"))["result"] as! [String: Any]
+precondition(adopted["applied"] as? Bool == true)
+let adoptedCard = adopted["record"] as! [String: Any]
+let adoptedReview = ((adoptedCard["states"] as! [String: Any])["0"] as! [String: Any])["review"] as! [String: Any]
+precondition((adoptedReview["dueAt"] as! NSNumber).int64Value == 606000)
+precondition((adoptedReview["intervalDays"] as! NSNumber).doubleValue == 0.01)
+precondition(adoptedReview["scheduleSource"] as? String == "anki-fsrs")
+for key in ["reps", "lapses", "ease", "lastReviewedAt", "status"] {
+    precondition(R.same(adoptedReview[key] as Any, adoptionReview[key] as Any), "interval refinement rewrote " + key)
+}
+let adoptionCursor = try localStore.cursor()
+_ = try ui.perform(adopt(adoptionInput, "native-interval"))
+let adoptionReplayCursor = try localStore.cursor()
+precondition(adoptionReplayCursor == adoptionCursor)
+var newerRating = ratingInput
+newerRating["aid"] = "newer-rating"; newerRating["reviewedAt"] = 7000; newerRating["ease"] = 1
+newerRating["stateRev"] = adoptedCard["stateRev"]!
+let newerRecord = try ui.perform(rating(newerRating, "newer-rating"))["result"] as! [String: Any]
+let newerCursor = try localStore.cursor()
+var lateInterval = adoptionInput; lateInterval["next"] = ["interval": 50]
+let lateAdoption = try ui.perform(adopt(lateInterval, "late-native-interval"))["result"] as! [String: Any]
+precondition(lateAdoption["applied"] as? Bool == false && lateAdoption["reason"] as? String == "stale")
+let lateCursor = try localStore.cursor()
+precondition(lateCursor == newerCursor)
+let newestReview = ((newerRecord["states"] as! [String: Any])["0"] as! [String: Any])["review"] as! [String: Any]
+var missingEvent = adoptionInput
+missingEvent["expectedReview"] = newestReview; missingEvent["reviewedAt"] = 7000; missingEvent["aid"] = "unknown-rating"
+do { _ = try ui.perform(adopt(missingEvent, "missing-event")); preconditionFailure("unproven interval written") }
+catch let error as R.Failure { precondition(error.code == "BW_CARD_REPOSITORY_CONFLICT") }
+print("Native Anki schedule refinement: seconds/days, counters, replay and stale rating fences passed")

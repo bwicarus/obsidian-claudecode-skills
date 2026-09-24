@@ -2436,9 +2436,12 @@ test("extension background permits only GET/POST and owns the private queue key"
 
 test('native review never mounts a hidden workspace or pager; reveal, stage and undo remain usable', async () => {
   const requests = [];
-  let cached;
+  let cached, original, staged, releaseStage, holdStage = false;
   const fixture = harness({ context: { file: 'localbook:book', page: 4 },
-    fetchImpl() { assert.fail('native acquisition must not call browser fetch'); },
+    fetchImpl(url) {
+      assert.equal(url, '/pdf/api/review-answer', 'only the not-yet-migrated external score adapter may fetch');
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+    },
     async nativeQueue({ action, request }) {
       assert.equal(action, 'reviewQueue'); requests.push(structuredClone(request));
       if (request.operation === 'load') return { ok: true, value: {
@@ -2448,6 +2451,24 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
       } };
       if (request.operation === 'save') { cached = request.snapshot; return { ok: true, value: true }; }
       if (request.operation === 'peek') return { ok: true, value: cached };
+      if (request.operation === 'stageRating') {
+        if (holdStage) { holdStage = false; await new Promise(resolve => { releaseStage = resolve; }); }
+        original = structuredClone(request.snapshot);
+        const snapshot = { ...original, cards: [], index: 0, completed_ids: [123], native_queue_lease: request.lease };
+        staged = { nativeStageID: request.stageId, nativeQueueLease: request.lease,
+          card: request.card, ease: request.ease, pendingKey: 'native-pending', contextKey: original.client_context_key,
+          originalIndex: 0, completedAdded: true, dueDecremented: false, snapshot };
+        return { ok: true, value: { stage: staged, snapshot } };
+      }
+      if (request.operation === 'undoRating') {
+        assert.equal(request.stageId, staged.nativeStageID);
+        return { ok: true, value: { stage: staged, snapshot: { ...original, native_queue_lease: request.lease } } };
+      }
+      if (request.operation === 'takeRating') {
+        assert.equal(request.stageId, staged.nativeStageID);
+        const taken = staged; staged = null;
+        return { ok: true, value: taken };
+      }
       return { ok: true };
     }
   });
@@ -2463,13 +2484,26 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
   assert.deepEqual(fixture.pagerBindings, []);
   fixture.RC.review.show();
   assert.equal(fixture.RC.review.presentationState().showingAnswer, true);
-  fixture.RC.review.answer(3);
+  await fixture.RC.review.answer(3);
   assert.equal(fixture.RC.review.presentationState().canUndo, true);
   assert.equal(fixture.RC.review.presentationState().count, 0);
-  assert.equal(fixture.RC.review.undoLastRating(), true);
+  assert.equal(await fixture.RC.review.undoLastRating(), true);
   assert.equal(fixture.RC.review.presentationState().current.id, 'anki_card_123');
   assert.deepEqual(fixture.calls, []);
   assert.equal(fixture.storageCalls.some(([action]) => action === 'set'), false);
+  holdStage = true;
+  const pendingStage = fixture.RC.review.answer(3);
+  await flushPromises();
+  assert.equal(fixture.RC.review.presentationState().ratingSaving, true);
+  const beforeReload = requests.length;
+  const reloading = fixture.RC.review.load();
+  await flushPromises();
+  assert.equal(requests.length, beforeReload, 'reload waits for the native stage receipt');
+  releaseStage(); await pendingStage; await reloading;
+  const after = requests.slice(beforeReload).map(r => r.operation);
+  assert.equal(after.filter(op => op === 'takeRating').length, 1);
+  assert.ok(after.indexOf('takeRating') < after.indexOf('load'));
+  assert.equal(fixture.calls.filter(c => c[0] === '/pdf/api/review-answer').length, 1);
   fixture.RC.review.setMode(false);
   await flushPromises();
   assert.ok(requests.some(request => request.operation === 'cancel'));

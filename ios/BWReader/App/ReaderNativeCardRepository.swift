@@ -160,6 +160,9 @@ struct ReaderNativeCardRepository {
         if operation == "commitReview" {
             return try commitReview(R.object(arg(0), "review command"), mutation: mutation, at: at)
         }
+        if operation == "adoptReviewSchedule" {
+            return try adoptReviewSchedule(R.object(arg(0), "review schedule"), mutation: mutation, at: at)
+        }
         if operation == "importLegacyBatch" {
             return try importLegacy(arg(0), options: arg(1) as? [String: Any] ?? [:], mutation: mutation, at: at)
         }
@@ -353,6 +356,48 @@ struct ReaderNativeCardRepository {
             updatedAt: at, deleted: false, json: String(decoding: R.bytes(history), as: UTF8.self)),
             mutationId: historyID, journalJSON: nil, expectedRev: 0, now: at)
         return patched
+    }
+
+    /// A delayed Anki interval may refine only the exact local review it was
+    /// requested for. Never rebuild counters from the pre-rating web snapshot.
+    private func adoptReviewSchedule(_ input: [String: Any], mutation: String, at: Int64) throws -> [String: Any] {
+        try R.fields(input, ["gid", "cardIndex", "aid", "reviewedAt", "next", "expectedReview", "entityRev"], "review schedule")
+        let id = try R.id(input["gid"]), index = try R.integer(input["cardIndex"], "cardIndex")
+        let aid = try R.text(input["aid"], "aid", 256, required: true)
+        let reviewedAt = try R.integer(input["reviewedAt"], "reviewedAt")
+        let expected = try R.object(input["expectedReview"], "expectedReview")
+        let next = try R.object(input["next"], "next")
+        let interval = try R.number(next["interval"], "Anki interval")
+        guard interval != 0 else { return ["applied": false, "reason": "no-interval"] }
+        guard let current = try load(id), let states = current["states"] as? [String: Any],
+              let state = states[String(index)] as? [String: Any] else {
+            throw R.fail("NOT_FOUND", "复习卡片已删除")
+        }
+        var review = state["review"] as? [String: Any] ?? [:]
+        guard state["phase"] as? String == "confirmed", state["removed"] as? Bool != true,
+              (state["flags"] as? [String: Any])?["archived"] as? Bool != true,
+              R.same(review, expected), (review["lastReviewedAt"] as? NSNumber)?.int64Value == reviewedAt,
+              try R.integer(current["entityRev"], "entityRev") == R.integer(input["entityRev"], "expected entityRev") else {
+            return ["applied": false, "reason": "stale", "record": current]
+        }
+        let digest = SHA256.hash(data: try R.bytes([id, index, aid])).map { String(format: "%02x", $0) }.joined()
+        guard let row = try store.record(collection: "native-review-history", id: "native-review:" + digest),
+              let history = try JSONSerialization.jsonObject(with: Data(row.json.utf8)) as? [String: Any],
+              let event = (history["value"] as? [String: Any])?["event"] as? [String: Any],
+              (event["reviewedAt"] as? NSNumber)?.int64Value == reviewedAt,
+              R.same(event["ease"] as Any, review["ease"] as Any) else {
+            throw R.fail("CONFLICT", "无法确认这次 Anki 回执对应的本地评分")
+        }
+        let days = interval > 0 ? interval : abs(interval) / 86400
+        let roundedDays = floor(days * 100 + 0.5) / 100
+        let due = Double(reviewedAt) + floor(days * 86400000 + 0.5)
+        guard due.isFinite, due <= 9_007_199_254_740_991 else { throw R.fail("INPUT", "Anki 到期时间无效") }
+        // Preserve ease, reps, lapses, status and all other committed fields.
+        review["intervalDays"] = roundedDays; review["dueAt"] = due; review["scheduleSource"] = "anki-fsrs"
+        if R.same(review, expected) { return ["applied": false, "reason": "unchanged", "record": current] }
+        let updated = try execute("patchState", args: [id, index, ["review": review], ["ifStateRev": current["stateRev"]!]],
+            mutation: mutation + ":schedule", at: at)
+        return ["applied": true, "record": updated]
     }
 
     /// Direct Swift UI actions share the repository transaction, including the

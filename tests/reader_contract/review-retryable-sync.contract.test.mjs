@@ -76,7 +76,9 @@ test("Anki 回读的真调度要写回本地，不能扔掉", () => {
     REVIEW,
     /function _projectLegacyLocalAnswer\(card, ease, aid, local, reviewedAt\)/,
   );
-  assert.match(REVIEW, /_projectLegacyLocalAnswer\(card, ease, aid, local, reviewedAt\);/);
+  assert.match(REVIEW, /_projectLegacyLocalAnswer\(card, ease, aid, Object\.assign\(\{\}, local, \{/);
+  assert.match(REVIEW, /review: Object\.assign\(\{\}, patchedState\.review\), entityRev: patched\.entityRev/,
+    "间隔回写必须使用已提交的复习状态，不能把计数退回评分前");
 });
 
 test("只用 interval 换算，不碰 Anki 的 due 语义", () => {

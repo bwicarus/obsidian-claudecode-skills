@@ -388,12 +388,23 @@ receipt in the existing device store before dispatch; known success is reused, w
 outcome is never silently submitted again, including after reload. A late confirmed receipt is
 saved even when its original view has left. The web adapter currently still mirrors the resulting
 state and manages navigation/staged ratings; it does not run a second improvement request.
-Local Reader checks: 2438 passed. New native receipt/cancellation cases and full App compilation
-are pending the next Apple build. No new installable full-migration package has been produced.
+Local Reader checks: 2438 passed. Native receipt/cancellation cases and full App compilation
+passed Apple build `35951809245` (`63e8761b`). No new installable full-migration package has been produced.
 
 User direction (2026-09-24): preserve functional equivalence during migration; discuss potential
 architecture upgrades and user-visible consolidation/removal before implementing them. Purely
 duplicate internal implementations may be consolidated under the approved native ownership.
+Use Apple native components and Liquid Glass for appropriate navigation/floating controls;
+maintain content legibility and system accessibility behavior rather than redesigning every surface.
+
+Review staging/one-step undo now has a Swift owner scoped to the active queue lease. Staging
+does not persist removal or send a score; undo saves the restored queue before consuming the
+stage, and taking a score is single-use. The App adapter waits for an in-flight stage before
+loading/exiting and discards obsolete card replies. Actual Anki interval adoption runs in the
+existing native card transaction, proves the matching local rating and preserves committed
+reps/lapses. A later score/content change rejects an obsolete scheduling response. Navigation
+and external score/outbox delivery still have JavaScript compatibility operations. This stage
+requires Apple validation; it is not an installable complete-native release.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 
