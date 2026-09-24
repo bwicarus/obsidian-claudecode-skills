@@ -33,7 +33,19 @@ struct ReaderNativeConversationPart: Identifiable {
         title = value["title"] as? String ?? ""
         text = value["text"] as? String ?? ""
         status = value["status"] as? String ?? "unknown"
-        data = ReaderNativeMediaArtifact.project(ReaderNativeCardPresentation.project(value["data"] as? [String: Any] ?? [:]))
+        var input = value["data"] as? [String:Any] ?? [:]
+        if let owner = value["actionId"] as? String, !owner.isEmpty { input["nativeActionOwner"] = owner }
+        data = ReaderNativeMediaArtifact.project(ReaderNativeCardPresentation.project(input))
+        if let owner = input["nativeActionOwner"] as? String {
+            let detail = input["nativeDetail"] as? [String:Any], original = detail?["content"] as? [String:Any]
+            let gid = (input["nativeCard"] as? [String:Any])?["gid"] as? String
+            let cid = original?["cid"] as? String
+            if let identity = gid ?? cid, !identity.isEmpty,
+               gid != nil || ["weather","news","fact","general","images","videos"].contains(detail?["kind"] as? String ?? "") {
+                data["pinId"] = "native-pin:" + owner
+                data["nativePinContextID"] = "card:" + identity
+            }
+        }
         actionId = (value["actionId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         actionLabel = value["actionLabel"] as? String
     }
@@ -227,13 +239,82 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var placements: [ReaderNativePagePlacement] = []
 
     private var committedCards: [String: [String: Any]] = [:]
+    private var removedMedia: [String:[Int:String]] = [:]
+    private var selectedContextIDs = Set<String>()
+    private var contextRecords: [[String:Any]]?
+    private var figureAttachments: [ReaderNativeContextAttachment] = []
+    private func refreshContextAttachments() {
+        guard let contextRecords else { return }
+        attachments = figureAttachments + contextRecords.compactMap { record in
+            guard let id = record["id"] as? String else { return nil }
+            return ReaderNativeContextAttachment(["id":scope + ":context:" + id,
+                "title":record["label"] as? String ?? "已选内容",
+                "text":String((record["text"] as? String ?? "").prefix(180)),"removeId":"native-context-remove:" + id])
+        }
+    }
     private func applyCommittedCards(_ parts: [ReaderNativeConversationPart]) -> [ReaderNativeConversationPart] {
-        parts.compactMap { part in
+        parts.compactMap { source in
+            let part = applySelectionState(applyMediaState(source))
             guard let input = part.data["nativeCard"] as? [String: Any], let gid = input["gid"] as? String,
                   let record = committedCards[gid] else { return part }
             guard let data = ReaderNativeCardPresentation.applying(record, to: part.data) else { return nil }
             var updated = part; updated.data = data; return updated
         }
+    }
+
+    private func applySelectionState(_ source: ReaderNativeConversationPart) -> ReaderNativeConversationPart {
+        guard let id = source.data["nativePinContextID"] as? String else { return source }
+        var part = source; part.data["pinned"] = selectedContextIDs.contains(id); return part
+    }
+
+    private func applyMediaState(_ source: ReaderNativeConversationPart) -> ReaderNativeConversationPart {
+        guard var detail = source.data["nativeDetail"] as? [String:Any],
+              var card = detail["content"] as? [String:Any], let cid = card["cid"] as? String,
+              ["images","videos"].contains(card["kind"] as? String ?? ""),
+              var data = card["data"] as? [String:Any], var originals = data["items"] as? [[String:Any]] else { return source }
+        for (index, digest) in removedMedia[cid] ?? [:] where originals.indices.contains(index) {
+            if ReaderNativeConversationStore.fingerprint([originals[index]]) == digest { originals[index]["_gone"] = 1 }
+        }
+        var part = source
+        data["items"] = originals; card["data"] = data; detail["content"] = card; part.data["nativeDetail"] = detail
+        part.data["items"] = (source.data["items"] as? [[String:Any]] ?? []).compactMap { item -> [String:Any]? in
+            guard let index = item["index"] as? Int, originals.indices.contains(index),
+                  (originals[index]["_gone"] as? NSNumber)?.boolValue != true else { return nil }
+            var result = item; result["selected"] = selectedContextIDs.contains("card:\(cid)/item:\(index)"); return result
+        }
+        return part
+    }
+
+    func acceptContextSelection(_ projection: [String:Any]) {
+        contextRecords = (projection["snapshot"] as? [String:Any])?["items"] as? [[String:Any]] ?? []
+        refreshContextAttachments()
+        let ids = Set(projection["selected"] as? [String] ?? [])
+        guard ids != selectedContextIDs else { return }
+        selectedContextIDs = ids
+        messages = messages.map { var value = $0; value.parts = applyCommittedCards(value.parts); return value }
+        mergePlacements()
+    }
+
+    func acceptMediaRemoval(card: [String:Any], index: Int) {
+        guard let cid = card["cid"] as? String, let items = (card["data"] as? [String:Any])?["items"] as? [[String:Any]],
+              items.indices.contains(index), let digest = ReaderNativeConversationStore.fingerprint([items[index]]) else { return }
+        removedMedia[cid,default:[:]][index] = digest
+        messages = messages.map { var value = $0; value.parts = value.parts.map(applyMediaState); return value }
+        mergePlacements()
+    }
+
+    func mediaAction(_ token: String) -> (card:[String:Any], index:Int, action:String)? {
+        guard !token.isEmpty else { return nil }
+        for part in messages.flatMap(\.parts) + placements.flatMap(\.parts) {
+            guard let card = (part.data["nativeDetail"] as? [String:Any])?["content"] as? [String:Any],
+                  ["images","videos"].contains(card["kind"] as? String ?? "") else { continue }
+            for item in part.data["items"] as? [[String:Any]] ?? [] {
+                guard let index = item["index"] as? Int else { continue }
+                if item["selectID"] as? String == token { return (card,index,"toggle") }
+                if item["removeID"] as? String == token { return (card,index,"remove") }
+            }
+        }
+        return nil
     }
     func acceptCardRecord(_ record: [String: Any]) {
         guard let gid = record["gid"] as? String, record["contract"] as? String == "card-repository/1" else { return }
@@ -399,6 +480,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         if nextScope != scope {
             inlineMedia.reset()
             committedCards = [:]
+            removedMedia = [:]
             committedReviewPresentation = nil
             inspection = nil
             settingsPanel = nil
@@ -445,7 +527,10 @@ final class ReaderNativeConversationModel: ObservableObject {
         favoritesCount = nativeFavoritesCount ?? (payload["favoritesCount"] as? NSNumber)?.intValue ?? 0
         selectionText = (payload["selection"] as? [String: Any])?["text"] as? String ?? ""
         readerSelectionText = (payload["readerSelection"] as? [String: Any])?["text"] as? String ?? ""
-        attachments = (payload["attachments"] as? [[String: Any]] ?? []).compactMap(ReaderNativeContextAttachment.init)
+        let attachmentValues = payload["attachments"] as? [[String:Any]] ?? []
+        figureAttachments = attachmentValues.filter { $0["kind"] as? String == "figure" }.compactMap(ReaderNativeContextAttachment.init)
+        if contextRecords != nil { refreshContextAttachments() }
+        else { attachments = attachmentValues.compactMap(ReaderNativeContextAttachment.init) }
         readingTools = (payload["readingTools"] as? [[String: Any]] ?? []).compactMap(ReaderNativeControl.init)
         if let navigation = payload["navigation"] as? [String: Any] { navigationPanel?.receive(navigation) }
         capabilities = Set(payload["capabilities"] as? [String] ?? [])
@@ -457,7 +542,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         noteSnapshotCost(payload["payloadBytes"] as? Int ?? 0)
     }
 
-    private func requestMessageResync(scope:String) {
+    func requestMessageResync(scope:String) {
         guard !messageResyncPending else { return }
         messageResyncPending = true
         Task { [weak self] in
@@ -526,6 +611,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     func resetForNavigation() {
         inlineMedia.reset()
         committedCards = [:]
+        removedMedia = [:]; selectedContextIDs = []; contextRecords = nil; figureAttachments = []
         conversationStore = ReaderNativeConversationStore(); messageResyncPending = false
         inspection = nil
         settingsPanel = nil

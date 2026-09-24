@@ -119,29 +119,29 @@ enum ReaderNativeConversationScript {
           const actionId = registerAction(key, node, () => {});
           const detail = { kind, title, content: original };
           actions.get(actionId).inspect = () => detail;
-          return { id: key, kind, title: '', text: '', status: 'unknown',
+          const result = { id: key, kind, title: '', text: '', status: 'unknown',
             data: { nativeDetail: detail }, actionId, actionLabel: tid ? '查看完整流程' : '查看原件' };
+          if (tid && part.nativePartID) result.data.nativeTurnPart = {id:part.nativePartID};
+          if (tid) result.data.nativeParentContextId = 'turn:' + tid;
+          return result;
         };
         if (part.kind === 'tool') return [descriptor(id, 'tool', part.label || part.tool || '工具调用', part)];
         if (part.kind === 'cards' && Array.isArray(part.cards)) return part.cards.map((card, index) => {
           const result = descriptor(id + '-c-' + index, 'anki', card.title || '学习卡片',
             { gid: part.gid, cardIndex: index, card });
           result.data.gid = String(part.gid || ''); result.data.draft = !!part.draft;
+          if (result.data.nativeTurnPart) result.data.nativeTurnPart.cardIndex = index;
           return result;
         });
         if (part.kind === 'card' && part.card) {
           const mounted = node.__vcCard || node.querySelector('.vc-card')?.__vcCard;
           const card = mounted?.cid && mounted.cid === part.card.cid ? mounted : part.card;
           const result = descriptor(id, card.kind || 'artifact', card.title || '生成物', card);
-          if (['images', 'videos'].includes(card.kind)) {
-            const registry = window.BWReaderRuntime?.contextSelections;
-            result.data.items = (card.data?.items || []).flatMap((item, index) => item._gone ? [] : [{
-              index, mediaID: 'native-artifact:' + registerAction(id + '-image-' + index, node, () => {}),
-              selected: !!registry?.isSelected('card:' + (card.cid || '') + '/item:' + index),
-              selectID: registerAction(id + '-image-select-' + index, node, () => rc().voiceCard.mediaAction(null, card, index, 'toggle')),
-              removeID: registerAction(id + '-image-remove-' + index, node, () => rc().voiceCard.mediaAction(null, card, index, 'remove'))
-            }]);
-          }
+          // Until this legacy producer is removed, a locally edited media
+          // original must travel as data rather than refer to an older source.
+          if (card !== part.card && JSON.stringify(card) !== JSON.stringify(part.card)) delete result.data.nativeTurnPart;
+          // Swift creates media controls from original slots and reads the
+          // shared native selection graph. No per-image web action registry.
           return [result];
         }
         // Unknown historical kinds keep their existing inspection adapter until
@@ -213,6 +213,7 @@ enum ReaderNativeConversationScript {
         return [artifact(id, node, part.title || part.label || (kind === 'hlcard' ? '操作记录' : '生成物'))];
       }
       function projectMessage(node, index) {
+        if (nativeMode && node.__bwNativeMessageHidden === true) return null;
         const id = messageID(node, index), tid = node.getAttribute('data-turn') || '';
         let presentation = null;
         try { if (tid) presentation = rc().turnCard?.presentationOf(tid); } catch (_) {}
@@ -249,6 +250,7 @@ enum ReaderNativeConversationScript {
         }
         return body || parts.length || streaming || presentation?.title ? {
           id, role, text: presentation || messageSource ? body : text(body), streaming, parts,
+          nativeTurnRef: nativeMode ? window.__bwNativeTurns?.reference?.(presentation) || node.__bwNativeTurnRef || undefined : undefined,
           title: text(presentation?.title, 240), statusText: text(presentation?.status?.text, 1000),
           progress: presentation?.progress || null
         } : null;
@@ -354,7 +356,8 @@ enum ReaderNativeConversationScript {
           const group = !nativeMode || part.kind === 'anki' || part.kind === 'artifact'
             ? flashGroup(node, part.data?.gid) : null;
           const cardIndex = Number(part.id.match(/-c-(\d+)$/)?.[1] || 0);
-          const pinOwner = [node, ...node.querySelectorAll('*')].find(el => el.__bwPinHoldBindings?.length);
+          const nativePin = nativeMode && ['anki','fact','general','weather','news','images','videos'].includes(part.kind);
+          const pinOwner = !nativePin && [node, ...node.querySelectorAll('*')].find(el => el.__bwPinHoldBindings?.length);
           const pin = pinOwner && rc().voiceCard?.contextControl?.(pinOwner);
           if (pin) {
             part.data.pinned = pin.selected;
@@ -930,7 +933,8 @@ enum ReaderNativeConversationScript {
       function scheduleMessages() { messagesDirty = true; schedule(); }
       function prepareMessageDelta(messages) {
         const next = new Map(), upserts = [], order = [];
-        for (const message of messages) {
+        for (const source of messages) {
+          const message = compactNativeMessage(source);
           if (next.has(message.id)) continue;
           const signature = JSON.stringify(message);
           next.set(message.id, signature); order.push(message.id);
@@ -941,6 +945,18 @@ enum ReaderNativeConversationScript {
           baseRevision:messageRevision, revision:++messageRevision, order, upserts};
         messageSignatures = next; messageOrder = order; resetMessages = false;
         return delta;
+      }
+      function compactNativeMessage(message) {
+        if (!message.nativeTurnRef) return message;
+        const result = {...message, parts:message.parts.map(part => {
+          if (!part.data?.nativeTurnPart) return part;
+          const data = {...part.data}; delete data.nativeDetail;
+          return {...part, data};
+        })};
+        // These values already live in ReaderNativeTurnStore. Send revision
+        // and operation handles only; Swift supplies the complete originals.
+        for (const key of ['text','role','streaming','title','statusText','progress']) delete result[key];
+        return result;
       }
       // 选区变化不改 DOM，所以不会触发那些 observer —— 不显式听一下的话，
       // 选区操作条要等到别的什么事发生才出现。

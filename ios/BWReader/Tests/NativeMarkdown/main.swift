@@ -148,6 +148,19 @@ do {
     precondition(rows[0]["nativeRoute"] as? String == "/pdf/api/asset/im_abcd?proxy=1")
     precondition(rows[0]["title"] as? String == "full title")
     precondition((rows[0]["mediaID"] as! String).hasPrefix("native-artifact:b:"))
+    let nativeData: [String:Any] = ["nativeDetail":["content":card],"nativeActionOwner":"scope:original"]
+    let nativeRows = Media.project(nativeData)["items"] as! [[String:Any]]
+    let cachedRows = Media.project(["nativeDetail":["content":card]])["items"] as! [[String:Any]]
+    precondition(cachedRows.count == 2 && cachedRows[0]["selectID"] as? String == "" && cachedRows[0]["removeID"] as? String == "",
+        "history lost its media or resurrected a stale action")
+    precondition(nativeRows.count == 2 && nativeRows[0]["index"] as? Int == 1,"native controls compacted original media slots")
+    precondition((nativeRows[0]["selectID"] as! String).hasPrefix("native-media:toggle:"))
+    precondition((nativeRows[0]["removeID"] as! String).hasPrefix("native-media:remove:"))
+    let repeatedRows = Media.project(nativeData)["items"] as! [[String:Any]]
+    precondition(nativeRows[0]["removeID"] as? String == repeatedRows[0]["removeID"] as? String,"same slot generated a new action on each render")
+    var otherScope = nativeData; otherScope["nativeActionOwner"] = "other:original"
+    let otherRows = Media.project(otherScope)["items"] as! [[String:Any]]
+    precondition(nativeRows[0]["removeID"] as? String != otherRows[0]["removeID"] as? String,"media action crossed conversation scope")
     precondition(Media.https("https://user:pass@example.com/a") == nil && Media.https("javascript:evil()") == nil)
     precondition(Media.video(["url": "https://youtube.com.evil.test/watch?v=abc_DEF-1234"])["id"] == "")
     precondition(Media.video(["url": "https://www.youtube.com/shorts/abc_DEF-1234"])["id"] == "abc_DEF-1234")

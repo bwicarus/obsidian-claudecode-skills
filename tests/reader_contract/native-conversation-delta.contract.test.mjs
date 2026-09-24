@@ -42,6 +42,28 @@ test('explicit resync retransmits data even when bodies did not change', () => {
   assert.ok(next.revision > first.revision);
 });
 
+test('native source references eliminate round-trip bodies while retaining live operation handles', () => {
+  const context=host();
+  const original='完整内容😀'.repeat(20000);
+  const source={id:'turn',nativeTurnRef:{session:'session',tid:'turn',revision:8},role:'assistant',text:original,streaming:false,
+    parts:[{id:'tool',kind:'tool',actionId:'inspect-tool',data:{nativeTurnPart:{id:'p1'},nativeDetail:{kind:'tool',content:{result:original}}}},
+      {id:'card',kind:'anki',data:{nativeTurnPart:{id:'p2',cardIndex:2},nativeDetail:{content:{card:{front:original}}},
+        nativeCardActions:{add:'save-card'},dragId:'drag-card'}},
+      {id:'edited',kind:'images',data:{nativeDetail:{content:{cid:'media',data:{items:[{_gone:1}]}}}}}]};
+  const first=context.prepareMessageDelta([source]);
+  assert.ok(JSON.stringify(first).length<1400,'native originals made another trip through WebKit');
+  const sent=first.upserts[0];
+  assert.equal(sent.text,undefined);
+  assert.equal(sent.parts[0].data.nativeDetail,undefined);
+  assert.equal(sent.parts[1].data.nativeCardActions.add,'save-card');
+  assert.equal(sent.parts[1].data.nativeTurnPart.cardIndex,2);
+  assert.equal(sent.parts[2].data.nativeDetail.content.data.items[0]._gone,1,'uncommitted media state was replaced with an old original');
+  assert.equal(source.parts[0].data.nativeDetail.content.result,original,'packing mutated source used by legacy inspection');
+  assert.equal(context.prepareMessageDelta([source]),null);
+  const next=context.prepareMessageDelta([{...source,nativeTurnRef:{...source.nativeTurnRef,revision:9}}]);
+  assert.equal(next.upserts.length,1,'native text-only update did not refresh presentation');
+});
+
 test('native artifact data retains full originals without rendering them for inspection or dropping', () => {
   const from = script.indexOf('function safeFields('), to = script.indexOf('function projectMessage(', from);
   const context = vm.createContext({});
@@ -66,10 +88,8 @@ test('native artifact data retains full originals without rendering them for ins
   assert.equal(context.projectPart(tool,'tool',node,'turn')[0].data.nativeDetail.content.result.content,'实际回执');
   const media={cid:'media',kind:'images',data:{items:[{url:'https://example.com/a'}, {_gone:1}, {url:'https://example.com/c'}]}};
   const image=context.projectPart({kind:'card',card:media},'media',node,'turn')[0];
-  assert.deepEqual(Array.from(image.data.items,x=>x.index),[0,2]);
-  assert.equal(image.data.items[1].selected,true);
-  assert.ok(image.data.items[0].mediaID.startsWith('native-artifact:'));
-  assert.ok(image.data.items[0].selectID && image.data.items[0].removeID);
+  assert.equal(image.data.items,undefined,'web created a second per-image control registry');
+  assert.equal(vm.runInContext("Array.from(actions.keys()).some(id=>id.startsWith('media-image-'))",context),false);
   assert.equal(JSON.stringify(image.data.nativeDetail.content),JSON.stringify(media));
 });
 
@@ -113,6 +133,23 @@ test('native media operations need no hidden image cell and notify removal only 
   assert.equal(events.length,2);
 });
 
+test('native media receipts notify once, keep offline retry possible, and never repeat a mutation', () => {
+  const source=readFileSync(new URL('../../_server_deploy/static/pdf/rc-voicecall.js',import.meta.url),'utf8');
+  const sent=[],RC={};
+  const context=vm.createContext({RC});
+  vm.runInContext(source.slice(source.indexOf('var _nativeMediaReceipts ='),source.indexOf('function _mediaItemAction(')),context);
+  const receipt={id:'removal-1',cid:'media',index:2,action:'remove',item:{aid:'im_abcd',title:'原图'}};
+  assert.equal(context._acceptNativeMediaReceipt(receipt),false,'missing notification port acknowledged a lost event');
+  RC.voiceCtx={event:(...args)=>sent.push(args)};
+  assert.equal(context._acceptNativeMediaReceipt(receipt),true);
+  assert.equal(context._acceptNativeMediaReceipt(receipt),true);
+  assert.equal(sent.length,1,'receipt retry notified twice');
+  assert.equal(sent[0][0],'removed_imgs');
+  assert.equal(sent[0][1].aid,'im_abcd');
+  assert.equal(sent[0][2].mergeMs,800);
+  assert.equal(receipt.item._gone,undefined,'notification rewrote the original event');
+});
+
 test('native semantic card mount does not render media, Markdown or start the web map engine', () => {
   const source=readFileSync(new URL('../../_server_deploy/static/pdf/rc-voicecall.js',import.meta.url),'utf8');
   const forbidden=()=>assert.fail('native media started hidden rendering');
@@ -143,6 +180,13 @@ test('committed native media context updates outgoing focus without creating a s
   visible=false;context._pinAdoptNativeMedia(registry);
   assert.equal(Object.keys(pins.map).length,0);assert.equal(cancel.length,1);
   visible=true;context._pinAdoptNativeMedia(registry);assert.equal(focus.length,2);
+  const whole={id:'card:m',kind:'card',label:'whole',text:'whole card',source:{cid:'m'},meta:{nativeOwner:true}};
+  const parent={toLegacy:()=>({items:[whole],labels:['whole']}),get:()=>item};
+  context._pinAdoptNativeMedia(parent);
+  assert.equal(Object.keys(pins.map).length,1,'covered media remained in focus alongside the whole card');
+  assert.equal(pins.ids.whole,'card:m');assert.equal(focus.at(-1)[0],'card');
+  context._pinAdoptNativeMedia(registry);
+  assert.equal(pins.ids.figure,'card:m/item:0');assert.equal(pins.ids.whole,undefined);
 });
 
 test('native inline images do not inspect the hidden document or card renderer', () => {
@@ -184,6 +228,7 @@ test('plain assistant replies retain Markdown without hidden parsing, media, lay
   assert.match(source, /renderMd\(aMsg, _at, false\);[^\n]*\n\s*if \(_nativeOwnsThread\(\)\) \{ _stopReveal\(\); return; \}/);
 
   const project = vm.createContext({
+    nativeMode:true, window:{},
     messageID: () => 'message', rc: () => ({}), flashGroup: () => null,
     cleanText: forbidden, text: value => value || '',
   });
@@ -194,4 +239,12 @@ test('plain assistant replies retain Markdown without hidden parsing, media, lay
   }, 0);
   assert.equal(message.text, body, 'native original text was truncated or replaced by DOM text');
   assert.equal(message.streaming, false);
+  const ref={session:'session',tid:'native-reply:request',revision:7};
+  node.__bwNativeTurnRef=ref;node.__bwNativeTurnText=body;
+  context.renderMd(node,body,true);
+  assert.equal(node.__bwNativeTurnRef,ref,'same native body lost its source reference');
+  context.renderMd(node,'连接中断，请重试',true);
+  assert.equal(node.__bwNativeTurnRef,undefined,'transport error still pointed to the preceding successful answer');
+  const hidden=project.projectMessage({__bwNativeMessageHidden:true},0);
+  assert.equal(hidden,null,'tool takeover repeated the preceding plain reply');
 });

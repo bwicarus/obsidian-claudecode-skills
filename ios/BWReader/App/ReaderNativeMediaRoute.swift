@@ -105,7 +105,27 @@ enum ReaderNativeMediaArtifact {
         guard let detail = data["nativeDetail"] as? [String: Any], let card = detail["content"] as? [String: Any],
               let kind = card["kind"] as? String, ["images", "videos"].contains(kind),
               let originals = (card["data"] as? [String: Any])?["items"] as? [[String: Any]] else { return data }
-        let controls = data["items"] as? [[String: Any]] ?? []
+        let controls: [[String:Any]]
+        if let owner = data["nativeActionOwner"] as? String, !owner.isEmpty {
+            // The native view owns media controls. Their identity is scoped to
+            // the original message/slot and does not depend on a web cell or
+            // callback remaining mounted after the sidebar is closed.
+            controls = originals.indices.map { index in
+                let key = owner + "\n" + text(card["cid"]) + "\n" + String(index)
+                let id = SHA256.hash(data:Data(key.utf8)).map { String(format:"%02x",$0) }.joined()
+                return ["index":index,"mediaID":"native-artifact:" + id,
+                        "selectID":"native-media:toggle:" + id,"removeID":"native-media:remove:" + id]
+            }
+        } else if let existing = data["items"] as? [[String:Any]], !existing.isEmpty {
+            controls = existing
+        } else {
+            // Restored history has originals but no live action lease. Keep
+            // the images visible without resurrecting stale mutation tokens.
+            controls = originals.indices.map { index in
+                ["index":index,"mediaID":"native-artifact:" + text(card["cid"]) + ":" + String(index),
+                 "selectID":"","removeID":""]
+            }
+        }
         var result = data
         result["items"] = controls.compactMap { control -> [String: Any]? in
             guard let index = control["index"] as? Int, originals.indices.contains(index), !gone(originals[index]) else { return nil }

@@ -10,6 +10,7 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
     private var sequence = 0
     private var state = ReaderNativeContextSelection()
     private var expiry: Task<Void, Never>?
+    var onProjection: (([String:Any]) -> Void)?
 
     init(webView: WKWebView, trustedBaseURL: URL) {
         self.webView = webView; self.trustedBaseURL = trustedBaseURL
@@ -19,6 +20,7 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
     func invalidate() {
         expiry?.cancel(); expiry = nil; session = nil; sequence = 0
         state = ReaderNativeContextSelection()
+        onProjection?(state.projection)
     }
     func reviewPairs(cardKey: String, validate: () throws -> Void) async throws -> [[String: Any]] {
         guard let session, let webView, let current = document(webView.url) else {
@@ -34,6 +36,54 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
         state.expire(now: ProcessInfo.processInfo.systemUptime)
         scheduleExpiry()
         return state.reviewPairs(cardKey: cardKey)
+    }
+    /// Native media controls share the existing selection graph and expiry.
+    /// Draining producers is an ordering barrier, not a lookup of DOM content.
+    func media(card: [String:Any], index: Int, action: String,
+               commit: () throws -> Void) async throws -> [String:Any] {
+        guard let session, let webView, let current = document(webView.url) else {
+            throw ReaderNativeContextSelection.Failure(message:"媒体上下文尚未就绪")
+        }
+        let ready = try await webView.callAsyncJavaScript(
+            "if (!window.BWReaderRuntime?.contextSelections?.settle) return false; await window.BWReaderRuntime.contextSelections.settle(); return true;",
+            arguments:[:], in:nil, contentWorld:.page)
+        guard ready as? Bool == true, self.session == session, document(webView.url) == current else { throw CancellationError() }
+        var candidate = state
+        let now = ProcessInfo.processInfo.systemUptime
+        candidate.expire(now:now)
+        let changes = try ReaderNativeMediaArtifact.selectionCommands(card:card,index:index,action:action,
+            selected:candidate.projection["selected"] as? [String] ?? [])
+        for change in changes { try candidate.apply(change,now:now) }
+        // Both source validation and native commit happen synchronously before
+        // assigning this graph. A rejected source leaves selection untouched.
+        try commit()
+        state = candidate; scheduleExpiry(); onProjection?(state.projection)
+        return ["session":session,"state":state.projection]
+    }
+    func toggleCard(_ record: [String:Any], validate: () throws -> Void) async throws -> [String:Any] {
+        guard let session, let webView, let current = document(webView.url) else {
+            throw ReaderNativeContextSelection.Failure(message:"卡片上下文尚未就绪")
+        }
+        let ready = try await webView.callAsyncJavaScript(
+            "if (!window.BWReaderRuntime?.contextSelections?.settle) return false; await window.BWReaderRuntime.contextSelections.settle(); return true;",
+            arguments:[:],in:nil,contentWorld:.page)
+        guard ready as? Bool == true, self.session == session, document(webView.url) == current else { throw CancellationError() }
+        try validate()
+        var candidate = state
+        try candidate.toggleCard(record,now:ProcessInfo.processInfo.systemUptime)
+        state = candidate; scheduleExpiry(); onProjection?(state.projection)
+        return ["session":session,"state":state.projection]
+    }
+    func deselect(_ id: String, validate: () throws -> Void) async throws -> [String:Any] {
+        guard let session, let webView, let current = document(webView.url) else { throw CancellationError() }
+        let ready = try await webView.callAsyncJavaScript(
+            "if (!window.BWReaderRuntime?.contextSelections?.settle) return false; await window.BWReaderRuntime.contextSelections.settle(); return true;",
+            arguments:[:],in:nil,contentWorld:.page)
+        guard ready as? Bool == true, self.session == session, document(webView.url) == current else { throw CancellationError() }
+        try validate()
+        try state.apply(["operation":"deselect","id":id],now:ProcessInfo.processInfo.systemUptime)
+        scheduleExpiry(); onProjection?(state.projection)
+        return ["session":session,"state":state.projection]
     }
     func selectReview(_ id: String, cardKey: String, on: Bool, validate: () throws -> Void) async throws -> [[String: Any]] {
         guard let session, let webView, let current = document(webView.url) else {
@@ -51,6 +101,7 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
         try validate()
         try state.selectReview(id, cardKey: cardKey, on: on, now: ProcessInfo.processInfo.systemUptime)
         scheduleExpiry()
+        onProjection?(state.projection)
         let accepted = try await webView.callAsyncJavaScript(
             "return window.__bwNativeContextSelections?.accept(payload) === true;",
             arguments: ["payload": ["session": session, "state": state.projection]], in: nil, contentWorld: .page)
@@ -104,7 +155,7 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
             } else if command["action"] as? String == "read" {
                 state.expire(now: now)
             } else { throw ReaderNativeContextSelection.Failure(message: "上下文操作无效") }
-            sequence = next; scheduleExpiry()
+            sequence = next; scheduleExpiry(); onProjection?(state.projection)
             var reply: [String: Any] = ["ok": true, "session": requestedSession, "sequence": sequence, "state": state.projection]
             if let media { reply["media"] = media }
             replyHandler(reply, nil)
@@ -130,6 +181,7 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
             let changed = self.state.expire(now: ProcessInfo.processInfo.systemUptime)
             self.scheduleExpiry()
             if changed {
+                self.onProjection?(self.state.projection)
                 // A new document rejects this callback by its random session ID.
                 _ = try? await webView.callAsyncJavaScript(
                     "return window.__bwNativeContextSelections?.accept(payload);",

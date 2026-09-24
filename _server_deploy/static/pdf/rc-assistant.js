@@ -1479,6 +1479,9 @@
   function renderMd(el, text, withMath) {
     if (_nativeOwnsThread()) {
       var source = { text: String(text || ''), streaming: withMath === false };
+      // Cancellation/transport errors may supply a local replacement after the
+      // native stream stopped. Do not keep pointing at the preceding answer.
+      if (el.__bwNativeTurnRef && el.__bwNativeTurnText !== source.text) delete el.__bwNativeTurnRef;
       var previous = el.__bwNativeMessageSource;
       if (previous && previous.text === source.text && previous.streaming === source.streaming) return;
       el.__bwNativeMessageSource = source;
@@ -2868,12 +2871,16 @@
       if (ev === 'meta') return;                       // rid 确认,不计数
       if (nativeState) {
         nativeTurnState = Object.assign(nativeTurnState || {}, nativeState);
+        if (nativeState.replyRef) {
+          aMsg.__bwNativeTurnRef = nativeState.replyRef;
+          aMsg.__bwNativeTurnText = ev === 'answer' ? nativeTurnState.displayText : nativeTurnState.finalDisplayText;
+        }
         if (typeof nativeState.answer === 'string') answer = nativeState.answer;
         sawTool = nativeState.sawTool; sawCliCard = nativeState.sawCliCard;
       } else if (ev === 'error') nativeTurnState = null;
       evSeen++;
       if (ev === 'done') { done = true; return; }
-      if (ev === 'tool' || ev === 'tool-done') delete aMsg.__bwNativeMessageSource;
+      if (ev === 'tool' || ev === 'tool-done') { delete aMsg.__bwNativeMessageSource; delete aMsg.__bwNativeTurnRef; }
       if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool"><span class="rc-i rc-i-wrench"></span> ' + esc(parsed) + '…</span>'; scrollDown(); try { window.__vcCapStatus && window.__vcCapStatus('<span class="rc-i rc-i-gear"></span>︎ ' + parsed + '…'); } catch (_) {} }   // 朗读字幕兼状态显示(侧栏关着也能看到)
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} try { window.__vcCapStatus && window.__vcCapStatus(null); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
@@ -2907,7 +2914,10 @@
       else if (ev === 'actions') { try { runActions(parsed); } catch (_) {} }   // 实时:工具一执行完就应用(高亮/跳页立即生效),不等 AI 输出完
       else if (ev === 'tool2' && parsed && parsed.name) {
         if (nativeState) {
-          if (nativeState.sawCliCard || nativeState.sawTool) { try { aMsg.style.display = 'none'; } catch (_) {} }
+          if (nativeState.sawCliCard || nativeState.sawTool) {
+            aMsg.__bwNativeMessageHidden = true;
+            try { aMsg.style.display = 'none'; } catch (_) {}
+          }
         } else if (parsed.task_id && (parsed.name === 'do_task' || parsed.name === 'make_paper' || parsed.name === 'read_check_report' || parsed.name === 'run_saved_task')) {   // #2 委托 CLI:CLI 卡接管 → 隐藏单独的编排答案气泡
           sawCliCard = true; try { aMsg.style.display = 'none'; } catch (_) {}
         } else if (!sawTool) {   // ★第一个工具调用出现 → 本轮进入「工具方块」模式:此后所有输出(含最终回答)都在卡内

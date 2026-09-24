@@ -57,6 +57,24 @@ struct ReaderNativeContextSelection {
         revision += 1
     }
 
+    /// Whole-card selection keeps the original group/slot metadata. The
+    /// maximal-node projection already handles text and image children.
+    mutating func toggleCard(_ input: [String:Any], now: TimeInterval) throws {
+        var record = try normalized(input)
+        let itemID = record["id"] as! String, itemKey = key(itemID)
+        expire(now:now)
+        if selected.contains(itemKey) {
+            try apply(["operation":"deselect","id":itemID],now:now)
+            return
+        }
+        let base = record["label"] as! String
+        let used = Set(selected.compactMap { records[$0]?["label"] as? String })
+        var label = base, index = 2
+        while used.contains(label) { label = String(base.prefix(220)) + "·" + String(index); index += 1 }
+        record["label"] = label
+        try apply(["operation":"select","id":itemID,"record":record],now:now)
+    }
+
     /// Commands contain normalized records from compatibility clients. Native
     /// callers can use the same API without creating a page/card DOM node.
     mutating func apply(_ command: [String: Any], now: TimeInterval) throws {
@@ -193,5 +211,79 @@ struct ReaderNativeContextSelection {
         return ["revision": revision, "selected": sorted(selected).map(id),
          "selectedRecords": sorted(selected).compactMap { records[$0] },
          "snapshot": snapshot(maxText: Int.max), "reviewPairs": pairs]
+    }
+}
+
+/// The same card-to-context policy as the old pin providers, using originals
+/// and canonical learning state rather than a mounted web card.
+enum ReaderNativeCardContext {
+    private static func text(_ value: Any?) -> String {
+        if let value = value as? String { return value }
+        if let value = value as? NSNumber { return value.stringValue }
+        return ""
+    }
+    private static func first(_ values: Any?...) -> String { values.map(text).first { !$0.isEmpty } ?? "" }
+    private static func clean(_ raw: String) -> String {
+        let raw = raw.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard raw.hasPrefix("{") || raw.hasPrefix("["),
+              let parsed = try? JSONSerialization.jsonObject(with:Data(raw.utf8)) else { return raw }
+        var values: [String] = []
+        func walk(_ node: Any, _ depth: Int) {
+            guard depth <= 3, values.count <= 40 else { return }
+            if let value = node as? String {
+                let value = value.trimmingCharacters(in:.whitespacesAndNewlines)
+                if !value.isEmpty { values.append(value) }
+            } else if let list = node as? [Any] { list.forEach { walk($0,depth + 1) } }
+            else if let object = node as? [String:Any] {
+                for key in ["title","label","heading","reading","meaning","content","text","body","summary","note","detail"] {
+                    if let value = object[key] { walk(value,value is String ? depth : depth + 1) }
+                }
+            }
+        }
+        walk(parsed,0)
+        return values.isEmpty ? raw : values.joined(separator:"；")
+    }
+    static func record(cid: String, parent: String, label: String, text: String,
+                       source: [String:Any], meta: [String:Any] = [:]) -> [String:Any] {
+        var meta = meta; meta["nativeOwner"] = true
+        return ["id":"card:" + cid,"parentId":parent,"kind":"card","label":String(label.prefix(120)),
+                "text":String(decoding:clean(text).utf16.prefix(2500),as:UTF16.self),"source":source,"meta":meta,"covers":[String]()]
+    }
+    static func learning(gid: String, cards: [[String:Any]], index: Int, parent: String) throws -> [String:Any] {
+        guard !gid.isEmpty, cards.indices.contains(index), (cards[index]["_removed"] as? NSNumber)?.boolValue != true else {
+            throw ReaderNativeContextSelection.Failure(message:"这张卡已移除或更新")
+        }
+        var source: [String:Any] = ["cid":gid,"gid":gid,"index":index]
+        for key in ["card_id","id","note_id","_nid","entity_id","entity_index","source_ref","source_url","deck","reason"] {
+            if let value = cards[index][key], !(value is NSNull), (value as? String) != "" { source[key] = value }
+        }
+        let content = cards.filter { ($0["_removed"] as? NSNumber)?.boolValue != true }.map { card in
+            let front = first(card["front"],card["question"],card["cloze"],card["text"]), back = first(card["back"],card["answer"])
+            return front + (back.isEmpty ? "" : " / " + back)
+        }.joined(separator:"\n")
+        return record(cid:gid,parent:parent,label:"学习卡片",text:content,source:source,
+            meta:["contract":"anki-card-context/1","cid":gid,"gid":gid,"cards":cards,"active_index":index])
+    }
+    static func semantic(_ card: [String:Any], parent: String) throws -> [String:Any] {
+        guard let cid = card["cid"] as? String, !cid.isEmpty else { throw ReaderNativeContextSelection.Failure(message:"卡片缺少编号") }
+        let kind = text(card["kind"]), data = card["data"] as? [String:Any] ?? [:], title = text(card["title"])
+        let items = data["items"] as? [[String:Any]] ?? []
+        let body: String
+        switch kind {
+        case "weather":
+            let parts = [text(data["loc"]),text(data["date"]),text(data["cond"]),
+                data["lo"] == nil || data["lo"] is NSNull ? "" : text(data["lo"]) + "-" + text(data["hi"]) + "°C",
+                data["precip"] == nil || data["precip"] is NSNull ? "" : "降水" + text(data["precip"]) + "%",text(data["tip"])]
+            body = (title.isEmpty ? "天气" : title) + ":" + parts.filter { !$0.isEmpty }.joined(separator:",")
+        case "news": body = (title.isEmpty ? "新闻" : title) + ":" + items.map { text($0["t"]) + "(" + text($0["s"]) + ")" }.joined(separator:";")
+        case "fact": body = title + ":" + text(data["answer"]) + " " + text(data["detail"])
+        case "images":
+            body = (title.isEmpty ? "配图" : title) + ":" + items.filter { ($0["_gone"] as? NSNumber)?.boolValue != true }.map {
+                first($0["title"],"图") + (text($0["src"]).isEmpty ? "" : "[源:" + text($0["src"]) + "]")
+            }.joined(separator:";") + "(图片本身在用户屏幕上;上下文只带元数据,不含图片/URL)"
+        case "videos": body = (title.isEmpty ? "视频" : title) + ":" + items.map { text($0["title"]) + "(" + text($0["channel"]) + ")" + text($0["url"]) }.joined(separator:";")
+        default: body = first(data["text"],card["brief"],title)
+        }
+        return record(cid:cid,parent:parent,label:title.isEmpty ? "卡片" : title,text:body,source:["cid":cid])
     }
 }

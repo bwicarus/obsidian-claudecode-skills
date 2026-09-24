@@ -3448,29 +3448,34 @@ if (window.__bwPwaProviderOnly) return;
     });
     if (dropped) _pinReproject();
   }
-  // Compatibility focus/chips observe committed native media selections. They
+  // Compatibility focus/chips observe committed native card/media selections. They
   // must not select again or deselect covered children in the native graph.
   function _pinAdoptNativeMedia(registry) {
     var projected = registry.toLegacy({ maxText: 2500 }), wanted = Object.create(null), changed = false;
+    var adopted = _pins.nativeContexts || (_pins.nativeContexts = Object.create(null));
     projected.items.forEach(function (item, index) {
-      if (item.kind === 'image-item' || item.kind === 'video-item') wanted[item.id] = { item: item, label: projected.labels[index] };
+      if (item.meta && item.meta.nativeOwner === true || item.kind === 'image-item' || item.kind === 'video-item')
+        wanted[item.id] = { item: item, label: projected.labels[index] };
     });
     Object.keys(_pins.map).forEach(function (label) {
       var id = _pins.ids[label], current = registry.get(id);
-      if (_pins.kinds[label] !== 'image' || (current && current.kind !== 'image-item' && current.kind !== 'video-item')) return;
+      if (!adopted[id] && (_pins.kinds[label] !== 'image' || (current && current.kind !== 'image-item' && current.kind !== 'video-item'))) return;
       if (wanted[id] && wanted[id].label === label) return;
       delete _pins.map[label]; delete _pins.els[label]; delete _pins.ids[label]; delete _pins.kinds[label]; delete _pins.cidOf[label];
+      delete adopted[id];
       Object.keys(_pins.cids).forEach(function (cid) { if (_pins.cids[cid] === label) delete _pins.cids[cid]; });
       changed = true;
     });
     var added = null;
     Object.keys(wanted).forEach(function (id) {
-      var record = wanted[id], item = record.item, label = record.label, cid = item.source.cid + '#' + item.source.item;
+      var record = wanted[id], item = record.item, label = record.label, media = item.kind === 'image-item' || item.kind === 'video-item';
+      var cid = String(item.source.cid || '') + (media ? '#' + item.source.item : '');
       if (_pins.ids[label] !== id || _pins.map[label] !== item.text) { changed = true; added = label; }
-      _pins.ids[label] = id; _pins.map[label] = item.text; _pins.kinds[label] = 'image'; _pins.cidOf[label] = cid; _pins.cids[cid] = label;
+      _pins.ids[label] = id; _pins.map[label] = item.text; _pins.kinds[label] = media ? 'image' : 'card';
+      _pins.cidOf[label] = cid; _pins.cids[cid] = label; adopted[id] = true;
     });
     if (!changed) return;
-    if (added && RC.outgoing) RC.outgoing.focus('image', {id: String(_pins.ids[added]).slice(0,120),
+    if (added && RC.outgoing) RC.outgoing.focus(_pins.kinds[added], {id: String(_pins.ids[added]).slice(0,120),
       cid: String(_pins.cidOf[added]).slice(0,80), label: added.slice(0,80), brief: String(_pins.map[added]).slice(0,160)});
     else if (Object.keys(_pins.map).length) _pinReproject();
     else if (RC.outgoing && RC.outgoing.cancelKind) RC.outgoing.cancelKind(['card','image','drawing','region']);
@@ -4131,6 +4136,17 @@ if (window.__bwPwaProviderOnly) return;
     //   无通话=pending 环留底,通话建立/文字 send 补投——根治"dc 没开时删图信息永久丢失+死环零消费")
     if (!it) return;
     try { RC.voiceCtx && RC.voiceCtx.event('removed_imgs', { aid: it.aid || '', title: it.title || '' }, { mergeMs: 800 }); } catch (e) {}
+  }
+  var _nativeMediaReceipts = new Set();
+  function _acceptNativeMediaReceipt(receipt) {
+    if (!receipt || typeof receipt.id !== 'string' || !receipt.id || receipt.action !== 'remove' || !receipt.item) return false;
+    if (_nativeMediaReceipts.has(receipt.id)) return true;
+    if (!RC.voiceCtx || typeof RC.voiceCtx.event !== 'function') return false;
+    // This is notification delivery only. Swift already changed selection and
+    // the media slot; retrying the same receipt cannot repeat either mutation.
+    RC.voiceCtx.event('removed_imgs', {aid:receipt.item.aid || '',title:receipt.item.title || ''}, {mergeMs:800});
+    _nativeMediaReceipts.add(receipt.id);
+    return true;
   }
   function _mediaItemAction(root, card, index, action) {
     var item = card && card.data && card.data.items && card.data.items[index];
@@ -5750,6 +5766,7 @@ if (window.__bwPwaProviderOnly) return;
       }).filter(Boolean);
     },
     mediaAction: _mediaItemAction,
+    acceptNativeMediaReceipt: _acceptNativeMediaReceipt,
     cardSize: {
       get: function (cid) {
         cid = _cardSizeCid(cid);

@@ -19,6 +19,33 @@ final class ReaderNativeTurnBridge: NSObject, WKScriptMessageHandlerWithReply {
         super.init()
     }
     deinit { saves.values.forEach { $0.task.cancel() } }
+    func removeMedia(card: [String:Any], index: Int) throws { try store.removeMedia(card:card,index:index) }
+    func replyReference(id: String, text: String, final: Bool) throws -> [String:Any] {
+        guard let session else { throw ReaderNativeTurnStore.Failure(message:"对话消息源尚未就绪") }
+        let tid = "native-reply:" + id
+        var candidate = store
+        var result = try candidate.apply(["action":"draft","tid":tid,"text":text,
+            "itemId":"reply","origin":"native-stream","role":"assistant"])
+        if final {
+            result = try candidate.apply(["action":"freeze","tid":tid,"itemId":"reply","origin":"native-stream","role":"assistant"])
+        }
+        guard let turn = (result["turns"] as? [[String:Any]])?.first,
+              let presentation = turn["presentation"] as? [String:Any], let revision = presentation["revision"] as? Int else {
+            throw ReaderNativeTurnStore.Failure(message:"原生回复未提交")
+        }
+        store = candidate
+        return ["session":session,"tid":tid,"revision":revision]
+    }
+    func conversationPayload(_ input: [String:Any]) throws -> [String:Any] {
+        guard var batch = input["messageDelta"] as? [String:Any], let messages = batch["upserts"] as? [[String:Any]] else { return input }
+        batch["upserts"] = try messages.map { message -> [String:Any] in
+            if let reference = message["nativeTurnRef"] as? [String:Any] {
+                guard let session, reference["session"] as? String == session else { throw CancellationError() }
+            }
+            return try store.conversationMessage(message)
+        }
+        var result = input; result["messageDelta"] = batch; return result
+    }
     func invalidate() {
         saves.values.forEach { $0.task.cancel() }; saves.removeAll()
         session = nil; sequence = 0; store = ReaderNativeTurnStore()
@@ -189,6 +216,10 @@ final class ReaderNativeTurnBridge: NSObject, WKScriptMessageHandlerWithReply {
         if (pending.length) { scheduled = true; queueMicrotask(flush); }
       }
       window.__bwNativeTurns = {
+        reference(presentation) {
+          if (!presentation || typeof presentation.tid !== 'string' || !Number.isSafeInteger(presentation.revision)) return null;
+          return {session,tid:presentation.tid,revision:presentation.revision};
+        },
         connect(fn) { if (accept) throw new Error('轮次视图已连接'); accept = fn; },
         enqueue(command) {
           if (failure) throw failure;

@@ -28,6 +28,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     var afterHistoryClear: ((String,UUID,Bool) -> Void)?
     var commitPDFEvents: ((ReaderNativeAssistantDocumentSession, [[String:Any]], Int) throws -> [String:Any])?
     var preparePDFBody: (([String:Any]) async throws -> [String:Any])?
+    var replyReference: ((String,String,Bool) throws -> [String:Any])?
 
     init(webView: WKWebView, trustedBaseURL: URL, gateway: ReaderNativeServerGateway) {
         self.webView = webView; self.trustedBaseURL = trustedBaseURL; self.gateway = gateway
@@ -317,7 +318,13 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         }
         try Task.checkCancellation()
         let projected: [[String: Any]] = try batch.committed(receipts).map { event in
-            return ["name": event.name, "data": event.data, "state": try turn.consume(event)]
+            var state = try turn.consume(event)
+            if ["answer","error","done"].contains(event.name), !turn.sawTool, !turn.sawCLICard {
+                guard let replyReference else { throw ReaderNativeAssistantStream.Failure("原生回复显示入口未准备好") }
+                let final = event.name != "answer", content = ReaderNativeAssistantTurn.content(turn.answer)
+                state["replyRef"] = try replyReference(id, final ? content.finalDisplayText : content.displayText, final)
+            }
+            return ["name": event.name, "data": event.data, "state":state]
         }
         var payload: [String:Any] = ["id":id,"sequence":next,"events":projected]
         if var nativeCommit {

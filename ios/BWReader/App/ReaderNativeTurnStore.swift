@@ -26,11 +26,88 @@ struct ReaderNativeTurnStore {
         var final = false
         var streamVersion = 0
         var historyReplay = false
+        var presentationRevision = 0
     }
     private(set) var turns: [String:Turn] = [:]
     private(set) var revision = 0
     private var streamVersion = 0
     private var current: String?
+    private var removedMedia: [String:[Int:Data]] = [:]
+
+    mutating func removeMedia(card: O, index: Int) throws {
+        guard let cid = card["cid"] as? String, !cid.isEmpty,
+              let items = (card["data"] as? O)?["items"] as? [O], items.indices.contains(index) else {
+            throw Failure(message:"媒体来源无效")
+        }
+        let expected = try JSONSerialization.data(withJSONObject:items[index],options:[.sortedKeys])
+        for original in turns.values {
+            for part in original.parts {
+                guard let value = part["card"] as? O, value["cid"] as? String == cid,
+                      let current = (value["data"] as? O)?["items"] as? [O] else { continue }
+                guard current.indices.contains(index) else { throw Failure(message:"媒体来源已改变") }
+                if (current[index]["_gone"] as? NSNumber)?.boolValue == true { continue }
+                guard try JSONSerialization.data(withJSONObject:current[index],options:[.sortedKeys]) == expected else {
+                    throw Failure(message:"媒体内容已更新，请重新选择")
+                }
+            }
+        }
+        // A local disposition is separate from append-only server history.
+        // Bind it to the original slot content so a replacement is not hidden.
+        removedMedia[cid,default:[:]][index] = expected
+    }
+    private func visibleMedia(_ card: O) -> O {
+        guard let cid = card["cid"] as? String, let removals = removedMedia[cid],
+              var data = card["data"] as? O, var items = data["items"] as? [O] else { return card }
+        for (index, expected) in removals where items.indices.contains(index) {
+            if (try? JSONSerialization.data(withJSONObject:items[index],options:[.sortedKeys])) == expected { items[index]["_gone"] = 1 }
+        }
+        var result = card; data["items"] = items; result["data"] = data; return result
+    }
+
+    /// Resolve the sidebar's lightweight references against the committed
+    /// source. A late WebKit projection may not relabel another turn or read a
+    /// different revision under an old set of action handles.
+    func conversationMessage(_ input: O) throws -> O {
+        guard let reference = input["nativeTurnRef"] as? O else { return input }
+        guard let id = reference["tid"] as? String, let turn = turns[id],
+              let version = reference["revision"] as? Int, version == turn.presentationRevision,
+              let handles = input["parts"] as? [O] else {
+            throw Failure(message:"对话来源已更新，正在同步最新内容")
+        }
+        let presentation = presentationMetadata(turn)
+        var message = input
+        message["text"] = turn.parts.filter { $0["kind"] as? String == "text" }
+            .compactMap { $0["text"] as? String }.joined(separator:"\n\n")
+        for key in ["role", "streaming", "title", "progress"] { message[key] = presentation[key] }
+        message["statusText"] = turn.status["text"] as? String ?? ""
+        message["parts"] = try handles.map { handle -> O in
+            var result = handle, data = handle["data"] as? O ?? [:]
+            guard let source = data["nativeTurnPart"] as? O else { return handle }
+            guard let partID = source["id"] as? String,
+                  let original = turn.parts.first(where: { $0["_nativeID"] as? String == partID }) else {
+                throw Failure(message:"生成物来源已改变，正在同步最新内容")
+            }
+            let detail: O
+            switch original["kind"] as? String {
+            case "tool":
+                detail = ["kind":"tool", "title":original["label"] as? String ?? original["tool"] as? String ?? "工具调用",
+                          "content":publicPart(original)]
+            case "cards":
+                guard let index = source["cardIndex"] as? Int, let cards = original["cards"] as? [O], cards.indices.contains(index) else {
+                    throw Failure(message:"学习卡位置已改变，正在同步最新内容")
+                }
+                detail = ["kind":"anki", "title":cards[index]["title"] as? String ?? "学习卡片",
+                          "content":["gid":original["gid"] as? String ?? "", "cardIndex":index, "card":cards[index]]]
+            case "card":
+                guard let card = original["card"] as? O else { throw Failure(message:"生成物内容缺失") }
+                detail = ["kind":card["kind"] as? String ?? "artifact", "title":card["title"] as? String ?? "生成物", "content":visibleMedia(card)]
+            default: throw Failure(message:"生成物来源类型不匹配")
+            }
+            data["nativeDetail"] = detail; result["data"] = data
+            return result
+        }
+        return message
+    }
 
     func historyPayload(tid: String, mode: String, file: String, page: Int, absorb: [String]) throws -> O? {
         guard ["normal","review"].contains(mode), file.utf16.count <= 8192, page >= 0,
@@ -191,7 +268,7 @@ struct ReaderNativeTurnStore {
     private mutating func mutate(_ action: String, _ command: O) throws -> O {
         var changed = Set<String>(), removed: [String] = []
         if action == "reset" {
-            removed = Array(turns.keys); turns = [:]; current = nil
+            removed = Array(turns.keys); turns = [:]; current = nil; removedMedia = [:]
         } else {
             let requested = try string(command["tid"]), id = lookup(requested)
             var turn = turns[id] ?? Turn(id:id)
@@ -300,6 +377,7 @@ struct ReaderNativeTurnStore {
             if action != "drop" {
                 guard turn.parts.count <= 10_000 else { throw Failure(message:"轮次内容过多") }
                 streamVersion = max(streamVersion,turn.streamVersion)
+                turn.presentationRevision = revision + 1
                 turns[turn.id] = turn; changed.insert(turn.id)
             }
         }
@@ -346,12 +424,19 @@ struct ReaderNativeTurnStore {
         }
         stream(&turn)
     }
+    private func presentationMetadata(_ t: Turn) -> O {
+        ["contract":"reader-turn-presentation/1","tid":t.id,"revision":t.presentationRevision,
+         "role":t.parts.contains { $0["kind"] as? String == "text" && $0["role"] as? String == "user" } ? "user" : "assistant",
+         "title":t.title,"status":t.status,"progress":t.progress as Any? ?? NSNull(),
+         "streaming":!t.drafts.isEmpty || (!(t.status["text"] as? String ?? "").isEmpty && t.status["done"] as? Bool != true)]
+    }
     private func projection(_ t: Turn) -> O {
-        let presentationParts = t.parts.map { p -> O in var v = publicPart(p); v["streaming"] = p["_streamDraft"] as? Bool == true; return v }
-        let presentation: O = ["contract":"reader-turn-presentation/1","tid":t.id,
-            "role":t.parts.contains { $0["kind"] as? String == "text" && $0["role"] as? String == "user" } ? "user" : "assistant",
-            "parts":presentationParts,"title":t.title,"status":t.status,"progress":t.progress as Any? ?? NSNull(),
-            "streaming":!t.drafts.isEmpty || (!(t.status["text"] as? String ?? "").isEmpty && t.status["done"] as? Bool != true)]
+        let presentationParts = t.parts.map { p -> O in
+            var v = publicPart(p); v["streaming"] = p["_streamDraft"] as? Bool == true
+            if let card = v["card"] as? O { v["card"] = visibleMedia(card) }
+            v["nativePartID"] = p["_nativeID"]; return v
+        }
+        var presentation = presentationMetadata(t); presentation["parts"] = presentationParts
         return ["id":t.id,"parts":t.parts,"drafts":t.drafts,"draft":t.currentDraft as Any? ?? NSNull(),"cliPart":t.cliPart as Any? ?? NSNull(),
                 "title":t.title,"status":t.status,"progress":t.progress as Any? ?? NSNull(),"meta":t.meta as Any? ?? NSNull(),
                 "taskId":t.taskID as Any? ?? NSNull(),"orchTaskId":t.orchestratorID as Any? ?? NSNull(),"live":t.live,"final":t.final,

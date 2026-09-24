@@ -2540,6 +2540,112 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
+    private func performNativePinCommand(_ command: [String:Any]) async -> [String:Any]? {
+        guard command["action"] as? String == "liveAction", let token = command["actionId"] as? String,
+              token.hasPrefix("native-pin:") || token.hasPrefix("native-context-remove:") else { return nil }
+        do {
+            guard !isLoading, isTrustedReaderURL(webView.url), let selections = nativeContextSelections,
+                  command["scope"] as? String == nativeConversation.scope else { throw CancellationError() }
+            let scope = nativeConversation.scope, generation = bookUserStateContextGeneration
+            if token.hasPrefix("native-context-remove:") {
+                let id = String(token.dropFirst("native-context-remove:".count))
+                let payload = try await selections.deselect(id) {
+                    guard self.nativeConversation.scope == scope, self.bookUserStateContextGeneration == generation else { throw CancellationError() }
+                }
+                _ = try? await webView.callAsyncJavaScript("return window.__bwNativeContextSelections?.accept(payload);",
+                    arguments:["payload":payload],in:nil,contentWorld:.page)
+                return ["ok":true,"committed":true]
+            }
+            guard let part = nativeConversation.artifactPart(token,field:"pinId") else { throw CancellationError() }
+            let expected = ReaderNativeConversationStore.fingerprint([part.data])
+            let parent = part.data["nativeParentContextId"] as? String ?? ""
+            let record: [String:Any]
+            var repository: ReaderNativeCardRepository?
+            var groupID: String?, groupFingerprint: String?
+            if let input = part.data["nativeCard"] as? [String:Any], let gid = input["gid"] as? String,
+               let index = input["cardIndex"] as? Int, let deviceID = nativeReadingStoreDeviceID {
+                let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-global").store
+                guard try store.meta("legacyImport") == "done" else { throw ReaderNativeContextSelection.Failure(message:"卡库正在载入") }
+                let repo = ReaderNativeCardRepository(store:store,deviceID:deviceID)
+                guard let group = try repo.load(gid), let cards = ReaderNativeCardPresentation.placementCards(group) else {
+                    throw ReaderNativeContextSelection.Failure(message:"学习卡已移除或尚未载入")
+                }
+                repository = repo; groupID = gid; groupFingerprint = ReaderNativeConversationStore.fingerprint([group])
+                record = try ReaderNativeCardContext.learning(gid:gid,cards:cards,index:index,parent:parent)
+            } else if let card = (part.data["nativeDetail"] as? [String:Any])?["content"] as? [String:Any] {
+                record = try ReaderNativeCardContext.semantic(card,parent:parent)
+            } else { throw ReaderNativeContextSelection.Failure(message:"卡片原件尚未就绪") }
+            let payload = try await selections.toggleCard(record) {
+                guard self.nativeConversation.scope == scope, self.bookUserStateContextGeneration == generation,
+                      let current = self.nativeConversation.artifactPart(token,field:"pinId"),
+                      ReaderNativeConversationStore.fingerprint([current.data]) == expected else { throw CancellationError() }
+                if let repository, let groupID {
+                    guard let current = try repository.load(groupID), ReaderNativeConversationStore.fingerprint([current]) == groupFingerprint else {
+                        throw ReaderNativeContextSelection.Failure(message:"学习卡已更新，请重新选择")
+                    }
+                }
+            }
+            // Selection is already committed in Swift. Compatibility observers
+            // only project focus/chips and notify voice; they do not reselect.
+            _ = try? await webView.callAsyncJavaScript("return window.__bwNativeContextSelections?.accept(payload);",
+                arguments:["payload":payload],in:nil,contentWorld:.page)
+            return ["ok":true,"committed":true]
+        } catch { return ["ok":false,"error":error.localizedDescription] }
+    }
+
+    private var pendingNativeMediaReceipts: [String:[String:Any]] = [:]
+    private var publishingNativeMediaReceipts = false
+    private func flushNativeMediaReceipts() async {
+        guard !publishingNativeMediaReceipts, !isLoading, isTrustedReaderURL(webView.url), !pendingNativeMediaReceipts.isEmpty else { return }
+        publishingNativeMediaReceipts = true
+        defer { publishingNativeMediaReceipts = false }
+        for (id, receipt) in pendingNativeMediaReceipts {
+            do {
+                let accepted = try await webView.callAsyncJavaScript(
+                    "if (!window.RC?.voiceCard?.acceptNativeMediaReceipt) return false; return window.RC.voiceCard.acceptNativeMediaReceipt(receipt);",
+                    arguments:["receipt":receipt],in:nil,contentWorld:.page)
+                if accepted as? Bool == true { pendingNativeMediaReceipts.removeValue(forKey:id) }
+            } catch { break }
+        }
+    }
+
+    private func performNativeMediaCommand(_ command: [String:Any]) async -> [String:Any]? {
+        guard command["action"] as? String == "liveAction", let token = command["actionId"] as? String,
+              token.hasPrefix("native-media:") else { return nil }
+        guard let target = nativeConversation.mediaAction(token) else { return ["ok":false,"error":"媒体内容已移除或更新"] }
+        do {
+            guard !isLoading, isTrustedReaderURL(webView.url), let selections = nativeContextSelections,
+                  command["scope"] as? String == nativeConversation.scope else { throw CancellationError() }
+            let scope = nativeConversation.scope, generation = bookUserStateContextGeneration
+            let expected = ReaderNativeConversationStore.fingerprint([target.card])
+            let payload = try await selections.media(card:target.card,index:target.index,action:target.action) {
+                guard self.nativeConversation.scope == scope, self.bookUserStateContextGeneration == generation,
+                      let current = self.nativeConversation.mediaAction(token), current.index == target.index,
+                      current.action == target.action, ReaderNativeConversationStore.fingerprint([current.card]) == expected else {
+                    throw ReaderNativeMediaArtifact.Failure(message:"媒体内容已更新，请重新选择")
+                }
+                if target.action == "remove" {
+                    try self.nativeTurns?.removeMedia(card:target.card,index:target.index)
+                    self.nativeConversation.acceptMediaRemoval(card:target.card,index:target.index)
+                    let id = UUID().uuidString
+                    let items = (target.card["data"] as? [String:Any])?["items"] as? [[String:Any]] ?? []
+                    self.pendingNativeMediaReceipts[id] = ["id":id,"cid":target.card["cid"] ?? "",
+                        "index":target.index,"action":"remove","item":items[target.index]]
+                }
+            }
+            // The graph and original disposition are already committed. The
+            // web observer only consumes the receipt/notification; it cannot
+            // run selection or deletion again or change the mutation result.
+            do {
+                _ = try await webView.callAsyncJavaScript(
+                    "window.__bwNativeContextSelections?.accept(payload); window.__bwNativeConversation?.snapshot?.();",
+                    arguments:["payload":payload],in:nil,contentWorld:.page)
+            } catch { postClientLog("媒体操作已提交，上下文投影待刷新：" + error.localizedDescription) }
+            await flushNativeMediaReceipts()
+            return ["ok":true,"committed":true]
+        } catch { return ["ok":false,"error":error.localizedDescription] }
+    }
+
     private func performNativeCardCommand(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "liveAction", let token = command["actionId"] as? String,
               let target = nativeConversation.nativeCardAction(token),
@@ -3789,6 +3895,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativePinCommand(command) { return result }
+        if let result = await performNativeMediaCommand(command) { return result }
         if let result = await performNativeArtifactCommand(command) { return result }
         if let result = await performNativeReviewLifecycle(command) { return result }
         if let result = await performNativeReviewTransition(command) { return result }
@@ -4236,12 +4344,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             let nativeContextSelections = ReaderNativeContextSelectionBridge(webView: webView,
                 trustedBaseURL: localRuntimeServer.baseURL)
             self.nativeContextSelections = nativeContextSelections
+            nativeContextSelections.onProjection = { [weak self] value in self?.nativeConversation.acceptContextSelection(value) }
             contentController.addScriptMessageHandler(nativeContextSelections, contentWorld: .page,
                 name: ReaderNativeContextSelectionBridge.messageName)
             contentController.addUserScript(WKUserScript(source: ReaderNativeContextSelectionBridge.script,
                 injectionTime: .atDocumentStart, forMainFrameOnly: true))
             let nativeTurns = ReaderNativeTurnBridge(webView:webView,trustedBaseURL:localRuntimeServer.baseURL,gateway:nativeServerGateway)
             nativeTurns.onFailure = { [weak self] message in self?.nativeConversation.report(message) }
+            nativeAssistantStream.replyReference = { [weak nativeTurns] id, text, final in
+                guard let nativeTurns else { throw CancellationError() }
+                return try nativeTurns.replyReference(id:id,text:text,final:final)
+            }
             nativeAssistantStream.beforeHistoryClear = { [weak nativeTurns] mode in
                 guard let nativeTurns else { throw CancellationError() }
                 return try await nativeTurns.beginClear(mode)
@@ -8031,7 +8144,16 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 }
                 return
             }
-            nativeConversation.receive(body)
+            do {
+                nativeConversation.receive(try nativeTurns?.conversationPayload(body) ?? body)
+                if !pendingNativeMediaReceipts.isEmpty { Task { @MainActor [weak self] in await self?.flushNativeMediaReceipts() } }
+            } catch {
+                // The source can advance while WebKit's observer batch is in
+                // flight. Refresh its handles; never publish a partial delta
+                // or reinterpret a stale turn as a new conversation.
+                if let scope = body["scope"] as? String { nativeConversation.requestMessageResync(scope:scope) }
+                return
+            }
             if nativeHTMLNotesEnabled, let values = body["nativePinnedCards"] as? [String], Set(values) != nativeHTMLPinned {
                 nativeHTMLPinned = Set(values)
                 publishNativeHTMLNotes()

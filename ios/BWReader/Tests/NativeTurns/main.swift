@@ -43,6 +43,52 @@ let cards: [O] = [["type":"basic","front":"word","back":"meaning"]]
 try run("import",["parts":[["kind":"cards","cards":cards,"draft":true]]],tid:"history")
 let gid = store.turns["history"]!.parts.first?["gid"] as! String
 check(gid == ReaderNativeTurnStore.cardID("history:0"),"history card identity changed")
+
+// Source references retain full bodies in Swift, not in an additional WebKit
+// payload. Stale versions and original-slot mismatches reject atomically.
+let sourceText = String(repeating:"原文😀", count:12000)
+try run("draft",["text":sourceText,"itemId":"source-answer"],tid:"source")
+try run("append",["part":["kind":"tool","tool":"reader_card","result":sourceText]],tid:"source")
+let sourceState = output(try run("append",["part":["kind":"cards","gid":"g-slots","cards":[["front":"first"],["front":"second"]]]],tid:"source"),id:"source")
+let sourceParts = sourceState["parts"] as! [O]
+let presentation = sourceState["presentation"] as! O
+let sourceReference: O = ["tid":"source","revision":presentation["revision"]!]
+let sourceMessage: O = ["id":"message-source","nativeTurnRef":sourceReference,
+    "text":"stale web text", "parts":[
+        ["id":"tool-slot","data":["nativeTurnPart":["id":sourceParts[1]["_nativeID"]!]],"actionId":"inspect-tool"],
+        ["id":"card-slot","data":["nativeTurnPart":["id":sourceParts[2]["_nativeID"]!,"cardIndex":1],"dragId":"place-second"]]
+    ]]
+let resolved = try store.conversationMessage(sourceMessage)
+check(resolved["text"] as? String == sourceText && resolved["streaming"] as? Bool == true,"native live text was replaced by a web preview")
+let resolvedParts = resolved["parts"] as! [O]
+let toolContent = ((resolvedParts[0]["data"] as! O)["nativeDetail"] as! O)["content"] as! O
+check(toolContent["result"] as? String == sourceText && resolvedParts[0]["actionId"] as? String == "inspect-tool","full tool original or operation identity lost")
+let cardData = resolvedParts[1]["data"] as! O
+let cardContent = (cardData["nativeDetail"] as! O)["content"] as! O
+check((cardContent["card"] as! O)["front"] as? String == "second" && cardContent["cardIndex"] as? Int == 1 && cardData["dragId"] as? String == "place-second","original card slot was renumbered")
+check((presentation["parts"] as! [O])[1]["nativePartID"] as? String == sourceParts[1]["_nativeID"] as? String,"source identity missing from compatibility projection")
+check(!(sourceState["persistedParts"] as! [O]).contains { $0["nativePartID"] != nil },"temporary source identity leaked to persisted history")
+var brokenMessage = sourceMessage
+brokenMessage["parts"] = [["id":"bad","data":["nativeTurnPart":["id":sourceParts[2]["_nativeID"]!,"cardIndex":9]]]]
+do { _ = try store.conversationMessage(brokenMessage); fatalError("invalid original slot accepted") } catch is ReaderNativeTurnStore.Failure { }
+try run("status",["text":"已完成","done":true],tid:"source")
+do { _ = try store.conversationMessage(sourceMessage); fatalError("late manifest replaced newer source state") } catch is ReaderNativeTurnStore.Failure { }
+let plain: O = ["id":"legacy","text":"历史正文","parts":[]]
+check(try store.conversationMessage(plain)["text"] as? String == "历史正文","plain history was discarded")
+let mediaCard: O = ["cid":"media-original","kind":"images","data":["items":[["title":"first","url":"https://example.com/a"],["title":"second","url":"https://example.com/b"]]]]
+let mediaState = output(try run("append",["part":["kind":"card","card":mediaCard]],tid:"media"),id:"media")
+let mediaVersion = (mediaState["presentation"] as! O)["revision"]!
+let mediaID = (mediaState["parts"] as! [O])[0]["_nativeID"]!
+let mediaMessage: O = ["id":"media","nativeTurnRef":["tid":"media","revision":mediaVersion],
+    "parts":[["id":"media-part","data":["nativeTurnPart":["id":mediaID]]]]]
+let historyBefore = try JSONSerialization.data(withJSONObject:store.historyPayload(tid:"media",mode:"normal",file:"book",page:1,absorb:[])!,options:[.sortedKeys])
+try store.removeMedia(card:mediaCard,index:1)
+let mediaResolved = try store.conversationMessage(mediaMessage)
+let mediaVisible = ((((mediaResolved["parts"] as! [O])[0]["data"] as! O)["nativeDetail"] as! O)["content"] as! O
+let visibleItems = (mediaVisible["data"] as! O)["items"] as! [O]
+check(visibleItems[0]["_gone"] == nil && visibleItems[1]["_gone"] as? Int == 1,"media removal hid the wrong original slot")
+let historyAfter = try JSONSerialization.data(withJSONObject:store.historyPayload(tid:"media",mode:"normal",file:"book",page:1,absorb:[])!,options:[.sortedKeys])
+check(historyBefore == historyAfter,"local media disposition rewrote append-only history")
 try run("reset")
 check(store.turns.isEmpty,"reset retained another mode's turns")
 try run("import",["parts":[["kind":"cards","cards":cards,"draft":true]]],tid:"history")
