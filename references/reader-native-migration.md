@@ -545,3 +545,13 @@ Follow-up: the PDF reading-settings panel now reads canonical preference/book re
 The App now sends preference intent (including first legacy-mirror migration) to Swift. `ReaderNativePreferences` owns envelope construction, tombstones, causal parents for global settings, expected-revision checks, durable replay receipts and journal writes in one SQLite transaction. The existing 55-key DataRegistry allowlist generates the packaged native catalog; no second settings namespace or database is introduced. Browser/extension PreferenceStore behavior is retained. Native failures leave dirty compatibility intent and never invoke the old writer as a fallback.
 
 PDF vocabulary/ruby flags read canonical settings directly. Transient translation/search state and the remaining settings UI commands still use compatibility adapters; this stage does not claim those modules or the full migration complete. Local verification: 234 focused checks, catalog parity against DataRegistry, deterministic ReaderBundle packaging. Apple workflow additionally compares 220 native/browser write envelopes and checks CAS, retries, transaction rollback and corrupt-record handling. Full App compilation is required before this candidate is considered validated.
+
+PDF assistant highlight/note edits and undo now commit original identities, derived indexes,
+retry receipts and history in a single native book transaction. Apple run `35966630474`
+(`612105dd`) passed including rollback, stale-state and repeated-edit undo checks.
+The native streaming transport now explicitly prepares an authoritative native book snapshot
+and commits local actions before presenting events. It keeps its writer through streaming,
+does not rebuild the request on reconnect, and never retries an uncertain local mutation.
+This closes a bypass introduced by replacing window.fetch with URLSession. Its temporary
+document adapter still handles the existing page-card saga; this is not full conversation
+migration. No installable migration release has been published.

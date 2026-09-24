@@ -9,6 +9,29 @@ struct ReaderNativeBookProjection {
     enum ProjectionError: Error { case invalidRequest, invalidResponse }
     let store: ReaderNativeDataStore
 
+    /// One transaction supplies the complete assistant authority. A broken or
+    /// oversized record is an error, never an empty/truncated replacement.
+    func assistantSnapshot(bookID: String, surface: String) throws -> [String:Any] {
+        guard !bookID.isEmpty, ["pdf", "epub"].contains(surface) else { throw ProjectionError.invalidRequest }
+        return try store.inTransaction {
+            let high = try highlights(surface == "pdf" ? "document-highlights" : "epub-highlights", bookID: bookID)
+            let notes = try state("document-notes-legacy", bookID: bookID)
+            let ink = try state(surface == "pdf" ? "ink" : "epub-ink", bookID: bookID)
+            guard notes.payload == nil || notes.payload is [[String:Any]], ink.payload == nil || ink.payload is [String:Any] else { throw ProjectionError.invalidResponse }
+            var revisions: [String:Any] = ["highlights":high.revision,"notes":notes.revision,"ink":ink.revision]
+            var result: [String:Any] = ["contract":"reader-native-\(surface)-assistant-state/1","file":"localbook:" + bookID,
+                "highlights":high.items,"notes":notes.payload ?? [],"ink":ink.payload ?? [:]]
+            if surface == "pdf" {
+                let pages = try state("user-pages", bookID: bookID)
+                guard pages.payload == nil || pages.payload is [[String:Any]] else { throw ProjectionError.invalidResponse }
+                revisions["user_pages"] = pages.revision; result["user_pages"] = pages.payload ?? []
+            }
+            result["revisions"] = revisions
+            guard try JSONSerialization.data(withJSONObject: result).count <= 6 * 1024 * 1024 else { throw ProjectionError.invalidResponse }
+            return result
+        }
+    }
+
     func exportReadingDomains(bookID: String) throws -> [ReaderBookUserStateDomainPayload] {
         guard !bookID.isEmpty else { throw ProjectionError.invalidRequest }
         return try store.inTransaction {

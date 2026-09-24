@@ -4277,6 +4277,10 @@ test("App assistant edits wait for Swift commit and never retry a failed native 
   const result = await harness({
     interfaceManifest: withGenericAssistantRoutesSupported(),
     nativeBookReply(message) {
+      if (message.action === 'bookAssistantSnapshot') return Promise.resolve({ok:true,snapshot:{
+        contract:'reader-native-pdf-assistant-state/1',file:DEFAULT_LOCAL_FILE,
+        revisions:{highlights:0,notes:0,ink:0,user_pages:0},highlights:[],notes:[],ink:{},user_pages:[]
+      }});
       commands.push(message);
       assert.equal(message.request.operation, 'assistant-actions');
       assert.deepEqual(message.request.value.actions, [submitted]);
@@ -4302,6 +4306,72 @@ test("App assistant edits wait for Swift commit and never retry a failed native 
   assert.equal(failed.ok,false);
   assert.equal(commands.length,2);
   assert.equal([...result.dataStoresState.document.values.keys()].some(k=>k.includes('native-document-highlights')),false);
+});
+
+test("native assistant session freezes authority and commits before exposing streamed edits", async () => {
+  const commands = [];
+  let release;
+  const state = {contract:'reader-native-pdf-assistant-state/1',file:DEFAULT_LOCAL_FILE,
+    revisions:{highlights:4,notes:9,ink:1,user_pages:0},highlights:[{id:'original'}],notes:[],ink:{},user_pages:[]};
+  const result = await harness({interfaceManifest:withGenericAssistantRoutesSupported(),nativeBookReply(message) {
+    commands.push(message);
+    if (message.action === 'bookAssistantSnapshot') return Promise.resolve({ok:true,snapshot:clone(state)});
+    assert.equal(message.request.operation,'assistant-actions');
+    assert.equal(message.request.value.expectedState.revisions.highlights,4);
+    return new Promise(resolve => { release = () => resolve({ok:true,result:{actions:[{fn:'_nativePDFRefreshAnnotations',args:[]}],revisions:{highlights:5,notes:9,ink:1,user_pages:0}}}); });
+  }});
+  const api = result.context.BWReaderRuntime.nativeLocalRuntime;
+  const id = '11111111-1111-4111-8111-111111111111';
+  const body = {rid:'stable-request',turn_id:'stable-turn',message:'add note',context:{page:7,visible_text:'原文'}};
+  const prepared = await api.beginAssistantSession(id,body,'/api/assistant/chat');
+  assert.equal(prepared.body.rid,body.rid); assert.equal(prepared.body.turn_id,body.turn_id);
+  assert.deepEqual(clone(prepared.body.context.native_local_state),state);
+  assert.equal(result.gatewayMessages.length,0,'preparing a native request must not also fetch through JS');
+  await assert.rejects(api.beginAssistantSession('22222222-2222-4222-8222-222222222222',body,'/api/assistant/chat'));
+  const action = {fn:'_assistEdit',args:[{type:'highlight',native_operation_id:'npdf_'+'9'.repeat(24),items:[{id:'new'}]}]};
+  let exposed = false;
+  const committed = api.commitAssistantEvents(id,1,[{name:'actions',data:JSON.stringify([action])},{name:'text',data:'done'}])
+    .then(value => { exposed=true; return value; });
+  for(let i=0;i<100&&!release;i++) await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(typeof release,'function'); assert.equal(exposed,false);
+  await assert.rejects(api.commitAssistantEvents(id,1,[]));
+  release();
+  const receipt = await committed;
+  assert.equal(JSON.parse(receipt.events[0].data)[0].fn,'_nativePDFRefreshAnnotations');
+  assert.equal(receipt.events[1].data,'done');
+  await assert.rejects(api.commitAssistantEvents(id,1,[]));
+  await api.commitAssistantEvents(id,2,[{name:'done',data:'{}'}]);
+  assert.equal(commands.filter(m=>m.action==='bookAssistantSnapshot').length,1);
+  assert.equal(commands.filter(m=>m.action==='bookMutation').length,1);
+  api.endAssistantSession(id);
+  await assert.rejects(api.commitAssistantEvents(id,3,[]));
+});
+
+test("failed native assistant commit is terminal and canceled preparation releases its writer", async () => {
+  let releaseSnapshot, fail=false, writes=0;
+  const result = await harness({interfaceManifest:withGenericAssistantRoutesSupported(),nativeBookReply(message) {
+    if(message.action==='bookAssistantSnapshot') return new Promise(resolve=>{releaseSnapshot=()=>resolve({ok:true,snapshot:{
+      contract:'reader-native-pdf-assistant-state/1',file:DEFAULT_LOCAL_FILE,revisions:{highlights:0,notes:0,ink:0,user_pages:0},highlights:[],notes:[],ink:{},user_pages:[]
+    }});});
+    writes++; if(fail) throw new Error('native commit lost');
+    throw new Error('unexpected write');
+  }});
+  const api=result.context.BWReaderRuntime.nativeLocalRuntime, id='11111111-1111-4111-8111-111111111111';
+  const body={rid:'request',message:'change',context:{}};
+  const pending=api.beginAssistantSession(id,body,'/api/assistant/chat');
+  for(let i=0;i<100&&!releaseSnapshot;i++) await new Promise(resolve=>setImmediate(resolve));
+  api.endAssistantSession(id); releaseSnapshot();
+  await assert.rejects(pending,/取消|失效|lease|writer/i);
+  releaseSnapshot=null;
+  const retry=api.beginAssistantSession(id,body,'/api/assistant/chat');
+  for(let i=0;i<100&&!releaseSnapshot;i++) await new Promise(resolve=>setImmediate(resolve));
+  releaseSnapshot(); await retry;
+  fail=true;
+  const events=[{name:'actions',data:JSON.stringify([{fn:'_assistEdit',args:[{type:'highlight',native_operation_id:'npdf_'+'a'.repeat(24),items:[{id:'h'}]}]}])}];
+  await assert.rejects(api.commitAssistantEvents(id,1,events),/native commit lost/);
+  await assert.rejects(api.commitAssistantEvents(id,1,events));
+  assert.equal(writes,1,'unknown native result must not be retried by the stream adapter');
+  api.endAssistantSession(id);
 });
 
 test("Pi page-card action receives exact renderer numbering and cannot expose success before App delete", async () => {

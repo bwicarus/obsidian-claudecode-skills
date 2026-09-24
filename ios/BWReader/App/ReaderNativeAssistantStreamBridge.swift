@@ -102,8 +102,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         guard command["action"] as? String == "start", tasks.isEmpty,
               let path = command["path"] as? String,
               path == "/api/assistant/chat" || (requestedSurface == .epub && path == "/pdf/api/epub-assistant"),
-              let body = command["body"] as? [String: Any], JSONSerialization.isValidJSONObject(body),
-              let data = try? JSONSerialization.data(withJSONObject: body) else {
+              let body = command["body"] as? [String: Any], JSONSerialization.isValidJSONObject(body) else {
             replyHandler(nil, "对话已在进行或请求参数无效"); return
         }
         let lease = epoch
@@ -113,7 +112,8 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             guard let self else { replyHandler(nil, "对话已关闭"); return }
             defer { if self.epoch == lease { self.tasks.removeValue(forKey: id); self.sequences.removeValue(forKey: id); self.turns.removeValue(forKey: id) } }
             do {
-                let stream = try ReaderNativeAssistantStream(initial: data, connect: { [weak self] body, response, chunk in
+                let prepared = try await self.beginDocumentSession(id: id, body: body, path: path, lease: lease)
+                let stream = try ReaderNativeAssistantStream(initial: prepared, connect: { [weak self] body, response, chunk in
                     guard let self else { throw CancellationError() }
                     try await self.connect(body, path: path, surface: requestedSurface, lease: lease, gatewayContext: gatewayContext,
                                            onResponse: response, onChunk: chunk)
@@ -124,10 +124,12 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                     try await self.deliver(events, id: id, lease: lease)
                 })
                 let result = try await stream.run()
+                await self.endDocumentSession(id: id)
                 try Task.checkCancellation()
                 guard self.epoch == lease else { throw CancellationError() }
                 replyHandler(["ok": true, "status": result.rawValue], nil)
             } catch {
+                await self.endDocumentSession(id: id)
                 if Task.isCancelled || self.epoch != lease { replyHandler(["ok": true, "status": "aborted"], nil) }
                 else { replyHandler(nil, error.localizedDescription) }
             }
@@ -266,8 +268,17 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         guard epoch == lease, let webView, surface(webView.url) != nil else { throw CancellationError() }
         let next = (sequences[id] ?? 0) + 1
         guard var turn = turns[id] else { throw CancellationError() }
-        let projected: [[String: Any]] = try events.map { event in
-            ["name": event.name, "data": event.data, "state": try turn.consume(event)]
+        let committed = try await webView.callAsyncJavaScript(
+            "return await window.BWReaderRuntime?.nativeLocalRuntime?.commitAssistantEvents(id,sequence,events);",
+            arguments:["id":id,"sequence":next,"events":events.map { ["name":$0.name,"data":$0.data] }], in:nil, contentWorld:.page)
+        guard epoch == lease, let receipt = committed as? [String:Any], receipt["ok"] as? Bool == true,
+              receipt["sequence"] as? Int == next, let values = receipt["events"] as? [[String:Any]], values.count == events.count else {
+            throw ReaderNativeAssistantStream.Failure("本机改动未确认，未显示完成或重复执行")
+        }
+        let projected: [[String: Any]] = try values.map { value in
+            guard let name = value["name"] as? String, let data = value["data"] as? String else { throw ReaderNativeAssistantStream.Failure("助手改动回执不完整") }
+            let event = ReaderNativeAssistantEvent(name:name,data:data)
+            return ["name": event.name, "data": event.data, "state": try turn.consume(event)]
         }
         let result = try await webView.callAsyncJavaScript(
             "return window.__bwNativeAssistantStream?.accept(payload);",
@@ -278,6 +289,27 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
               ack["sequence"] as? Int == next else { throw ReaderNativeAssistantStream.Failure("对话接收状态已改变，未重复执行事件") }
         sequences[id] = next
         turns[id] = turn
+    }
+
+    private func beginDocumentSession(id: String, body: [String:Any], path: String, lease: UUID) async throws -> Data {
+        guard epoch == lease, let webView else { throw CancellationError() }
+        let response = try await webView.callAsyncJavaScript(
+            "return await window.BWReaderRuntime?.nativeLocalRuntime?.beginAssistantSession(id,body,path);",
+            arguments:["id":id,"body":body,"path":path],in:nil,contentWorld:.page)
+        try Task.checkCancellation()
+        guard epoch == lease, let value = response as? [String:Any], value["ok"] as? Bool == true,
+              let prepared = value["body"] as? [String:Any], prepared["rid"] as? String == body["rid"] as? String,
+              prepared["turn_id"] as? String == body["turn_id"] as? String,
+              JSONSerialization.isValidJSONObject(prepared) else { throw ReaderNativeAssistantStream.Failure("助手书籍上下文未准备好") }
+        let data = try JSONSerialization.data(withJSONObject:prepared)
+        guard data.count <= 8 * 1024 * 1024 else { throw ReaderNativeAssistantStream.Failure("助手书籍上下文过大，未截断发送") }
+        return data
+    }
+
+    private func endDocumentSession(id: String) async {
+        guard let webView else { return }
+        _ = try? await webView.callAsyncJavaScript("return window.BWReaderRuntime?.nativeLocalRuntime?.endAssistantSession(id);",
+            arguments:["id":id],in:nil,contentWorld:.page)
     }
 
     private func surface(_ url: URL?) -> ReaderNativeInterfaceSurface? {

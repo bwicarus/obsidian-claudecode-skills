@@ -99,12 +99,21 @@ let ink = ((try payload(.ink) as? [String: Any])?["pdf"] as? [String: [[String: 
 let regions = ((try payload(.closedRegions) as? [String: Any])?["pdf"] as? [String: [[String: Any]]])?["45"]
 check(ink?.count == 1 && ink?.first?["t"] as? String == "pen", "region leaked into ink")
 check(regions?.count == 1 && regions?.first?["id"] as? String == "r1", "region lost")
+let authority = try projection.assistantSnapshot(bookID:book,surface:"pdf")
+check(authority["file"] as? String == "localbook:" + book, "assistant file identity changed")
+check((authority["revisions"] as? [String:Any])?["highlights"] as? Int64 == 4, "assistant split revision lost")
+check((authority["notes"] as? [[String:Any]])?.first?["id"] as? String == "n1", "assistant note content lost")
+check(((authority["ink"] as? [String:[[String:Any]]])?["45"])?.count == 2, "assistant snapshot discarded closed regions")
+let epubAuthority = try projection.assistantSnapshot(bookID:book,surface:"epub")
+check(epubAuthority["contract"] as? String == "reader-native-epub-assistant-state/1" && epubAuthority["user_pages"] == nil, "EPUB authority contains PDF state")
 check(try store.journalCount() == 0 && store.cursor() == 0, "projection changed store or queued sync")
 let first = try projection.exportReadingDomains(bookID: book)
 check(first == (try projection.exportReadingDomains(bookID: book)), "same state must have stable digests")
 try put("ink", NSNull(), revision: 2)
 check(try projection.exportReadingDomains(bookID: book).first { $0.name == .ink }!.empty, "null legacy state must be empty")
 try put("document-notes-legacy", "corrupt", revision: 10)
+do { _ = try projection.assistantSnapshot(bookID:book,surface:"pdf"); fatalError("corrupt assistant snapshot accepted") }
+catch ReaderNativeBookProjection.ProjectionError.invalidResponse { }
 do {
     _ = try projection.exportReadingDomains(bookID: book)
     fatalError("corrupt data was presented as an empty book")

@@ -10642,6 +10642,19 @@
   }
 
   function nativePDFAuthoritySnapshot(context) {
+    if (nativeBookWrites) {
+      return root.webkit.messageHandlers.bwNativeDataStore.postMessage({action:'bookAssistantSnapshot',bookID:bookId,surface:'pdf'})
+        .then(function (reply) {
+          if (!reply || reply.ok !== true || !reply.snapshot || reply.snapshot.file !== localFileRef() ||
+              reply.snapshot.contract !== NATIVE_PDF_ASSISTANT_STATE_CONTRACT) throw new RuntimeError('本机 PDF 状态未确认', 'BW_NATIVE_BOOK_WRITE');
+          var snapshot = reply.snapshot;
+          return nativePDFPageCardProjection(context, snapshot.revisions.notes).then(function (projection) {
+            if (projection) snapshot.page_cards = projection;
+            if (utf8(JSON.stringify(snapshot)).byteLength > 6 * 1024 * 1024) throw new RuntimeError('本机 PDF 批注状态过大', 'BW_NATIVE_PDF_ASSISTANT_STATE_LIMIT');
+            return snapshot;
+          });
+        });
+    }
     return Promise.all([
       readHighlightCollection('document-highlights'),
       storedStateRecord(stores.document, 'document-notes-legacy', 'documentId', bookId, []),
@@ -12739,6 +12752,14 @@
   }
 
   function nativeEPUBAuthoritySnapshot() {
+    if (nativeBookWrites) {
+      return root.webkit.messageHandlers.bwNativeDataStore.postMessage({action:'bookAssistantSnapshot',bookID:bookId,surface:'epub'})
+        .then(function (reply) {
+          if (!reply || reply.ok !== true || !reply.snapshot || reply.snapshot.file !== localFileRef() ||
+              reply.snapshot.contract !== NATIVE_EPUB_ASSISTANT_STATE_CONTRACT) throw new RuntimeError('本机 EPUB 状态未确认', 'BW_NATIVE_BOOK_WRITE');
+          return reply.snapshot;
+        });
+    }
     return Promise.all([
       readHighlightCollection('epub-highlights'),
       storedStateRecord(stores.document, 'document-notes-legacy', 'documentId', bookId, []),
@@ -15711,7 +15732,81 @@
     });
   }
 
+  // The native SSE transport bypasses window.fetch. Keep its document
+  // authority/commit adapter explicit: network reconnects never re-create
+  // a writer or rebuild the original request from a changed page.
+  var nativeAssistantSessions = new Map();
+  function endNativeAssistantSession(id) {
+    var session = nativeAssistantSessions.get(id);
+    if (session) {
+      session.closed = true;
+      if (session.writer) releaseNativePDFWriterLease(session.writer);
+      nativeAssistantSessions.delete(id);
+    }
+    return {ok:true};
+  }
+  function beginNativeAssistantSession(id, input, path) {
+    if (!/^[0-9a-f-]{36}$/i.test(String(id || '')) || nativeAssistantSessions.size ||
+        !input || typeof input !== 'object' || Array.isArray(input) || !input.rid ||
+        (path !== '/api/assistant/chat' && !(nativeInterfaceSurface === 'epub' && path === '/pdf/api/epub-assistant'))) {
+      return Promise.reject(new RuntimeError('助手书籍会话无效或已有会话', 'BW_NATIVE_ASSISTANT_SESSION'));
+    }
+    var session = {closed:false,writer:null,authority:null,sequence:0,failed:false,busy:false};
+    nativeAssistantSessions.set(id, session);
+    return bootPromise.then(function () {
+      if (session.closed) throw new RuntimeError('助手请求已取消','BW_NATIVE_ASSISTANT_SESSION');
+      var request = {method:'POST',body:JSON.stringify(input)};
+      if (nativeInterfaceSurface === 'pdf') {
+        session.writer = acquireNativePDFWriterLease('native-assistant-stream');
+        return nativePDFRequestBody(path, request, 'context', session.writer);
+      }
+      return nativeEPUBGenericRequestBody(path, request, 'context');
+    }).then(function (prepared) {
+      if (session.closed) throw new RuntimeError('助手请求已取消','BW_NATIVE_ASSISTANT_SESSION');
+      session.authority = prepared.snapshot;
+      // The older EPUB endpoint expects context.file in addition to the
+      // generic file_rel field. Both carry the same frozen local identity.
+      if (path === '/pdf/api/epub-assistant') prepared.body.context.file = localFileRef();
+      return {ok:true,body:prepared.body};
+    }).catch(function (error) {
+      if (nativeAssistantSessions.get(id) === session) endNativeAssistantSession(id);
+      throw error;
+    });
+  }
+  function commitNativeAssistantEvents(id, sequence, events) {
+    var session = nativeAssistantSessions.get(id);
+    if (!session || session.closed || session.failed || session.busy || !session.authority ||
+        sequence !== session.sequence + 1 || !Array.isArray(events) || events.length > 10000) {
+      return Promise.reject(new RuntimeError('助手事件已过期或重复，未再次执行','BW_NATIVE_ASSISTANT_SESSION'));
+    }
+    session.busy = true;
+    var chain = Promise.resolve(), output = [];
+    events.forEach(function (event) {
+      chain = chain.then(function () {
+        if (session.closed) throw new RuntimeError('助手会话已关闭','BW_NATIVE_ASSISTANT_SESSION');
+        if (!event || typeof event.name !== 'string' || typeof event.data !== 'string') throw new RuntimeError('助手事件无效','BW_NATIVE_ASSISTANT_SESSION');
+        if (event.name !== 'actions') { output.push(clone(event)); return; }
+        var actions = JSON.parse(event.data);
+        var committed = nativeInterfaceSurface === 'pdf'
+          ? nativePDFCommitActions(actions,session.authority,session.writer)
+          : nativeEPUBCommitAssistantActions(actions,session.authority.revisions);
+        return committed.then(function (result) {
+          if (session.closed) throw new RuntimeError('助手会话已关闭','BW_NATIVE_ASSISTANT_SESSION');
+          session.authority.revisions = result.revisions;
+          if (result.receipt && result.receipt.contract === 'reader-native-page-card-action/1') delete session.authority.page_cards;
+          output.push({name:'actions',data:JSON.stringify(result.actions)});
+        });
+      });
+    });
+    return chain.then(function () { session.sequence = sequence; return {ok:true,sequence:sequence,events:output}; })
+      .catch(function (error) { session.failed = true; throw error; })
+      .finally(function () { session.busy = false; });
+  }
+
   var api = {
+    beginAssistantSession: beginNativeAssistantSession,
+    commitAssistantEvents: commitNativeAssistantEvents,
+    endAssistantSession: endNativeAssistantSession,
     contract: CONTRACT,
     owner: 'native-app',
     deviceId: deviceId,

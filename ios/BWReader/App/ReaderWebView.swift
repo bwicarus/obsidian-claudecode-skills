@@ -7463,6 +7463,19 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 }
                 return
             }
+            if body["action"] as? String == "bookAssistantSnapshot" {
+                guard let bookID = nativeReadingStoreBookID, bookID == currentLocalBook?.id,
+                      nativeReadingStoreDeviceID != nil, body["bookID"] as? String == bookID,
+                      let surface = body["surface"] as? String,
+                      surface == (currentLocalBook?.format == .epub ? "epub" : "pdf") else {
+                    replyHandler(nil,"助手书籍状态未就绪或已经切换"); return
+                }
+                do {
+                    let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+                    replyHandler(["ok":true,"snapshot":try ReaderNativeBookProjection(store:store).assistantSnapshot(bookID:bookID,surface:surface)],nil)
+                } catch { replyHandler(nil,error.localizedDescription) }
+                return
+            }
             if body["action"] as? String == "bookMutation" {
                 guard let request = body["request"] as? [String: Any],
                       let bookID = nativeReadingStoreBookID, bookID == currentLocalBook?.id,
