@@ -3424,6 +3424,7 @@
     try { _pinReconcileInner(registry); } finally { _pinReconciling = false; }
   }
   function _pinReconcileInner(registry) {
+    if (window.__BW_NATIVE_CONVERSATION_DATA__ === true) _pinAdoptNativeMedia(registry);
     var live = Object.create(null);
     try {
       (registry.snapshot({ maxText: 1 }).items || []).forEach(function (it) { live[it.id] = true; });
@@ -3443,6 +3444,33 @@
       dropped += 1;
     });
     if (dropped) _pinReproject();
+  }
+  // Compatibility focus/chips observe committed native media selections. They
+  // must not select again or deselect covered children in the native graph.
+  function _pinAdoptNativeMedia(registry) {
+    var projected = registry.toLegacy({ maxText: 2500 }), wanted = Object.create(null), changed = false;
+    projected.items.forEach(function (item, index) {
+      if (item.kind === 'image-item' || item.kind === 'video-item') wanted[item.id] = { item: item, label: projected.labels[index] };
+    });
+    Object.keys(_pins.map).forEach(function (label) {
+      var id = _pins.ids[label], current = registry.get(id);
+      if (_pins.kinds[label] !== 'image' || (current && current.kind !== 'image-item' && current.kind !== 'video-item')) return;
+      if (wanted[id] && wanted[id].label === label) return;
+      delete _pins.map[label]; delete _pins.els[label]; delete _pins.ids[label]; delete _pins.kinds[label]; delete _pins.cidOf[label];
+      Object.keys(_pins.cids).forEach(function (cid) { if (_pins.cids[cid] === label) delete _pins.cids[cid]; });
+      changed = true;
+    });
+    var added = null;
+    Object.keys(wanted).forEach(function (id) {
+      var record = wanted[id], item = record.item, label = record.label, cid = item.source.cid + '#' + item.source.item;
+      if (_pins.ids[label] !== id || _pins.map[label] !== item.text) { changed = true; added = label; }
+      _pins.ids[label] = id; _pins.map[label] = item.text; _pins.kinds[label] = 'image'; _pins.cidOf[label] = cid; _pins.cids[cid] = label;
+    });
+    if (!changed) return;
+    if (added && RC.outgoing) RC.outgoing.focus('image', {id: String(_pins.ids[added]).slice(0,120),
+      cid: String(_pins.cidOf[added]).slice(0,80), label: added.slice(0,80), brief: String(_pins.map[added]).slice(0,160)});
+    else if (Object.keys(_pins.map).length) _pinReproject();
+    else if (RC.outgoing && RC.outgoing.cancelKind) RC.outgoing.cancelKind(['card','image','drawing','region']);
   }
   try {
     var _contextRegistry0 = _ctxSelectionRegistry();
@@ -4104,6 +4132,20 @@
   function _mediaItemAction(root, card, index, action) {
     var item = card && card.data && card.data.items && card.data.items[index];
     if (!Number.isInteger(index) || !item || item._gone) throw new Error('图片已移除或更新');
+    if (window.__BW_NATIVE_CONVERSATION_DATA__ === true) {
+      if (!window.__bwNativeContextSelections) throw new Error('原生媒体操作尚未就绪');
+      // Only the committed original and its notification remain here. Swift
+      // owns selection, sibling exclusion and expiry; no hidden cell is needed.
+      var original = JSON.stringify(item), cid = card.cid;
+      return window.__bwNativeContextSelections.media(card, index, action).then(function () {
+        if (card.cid !== cid || JSON.stringify(card.data.items[index]) !== original)
+          throw new Error('图片已更新，请重新选择');
+        if (action === 'remove') { item._gone = 1; _imgGoneNote(item); }
+        _pinSync(); _chipRender();
+        window.dispatchEvent(new CustomEvent('rc:assistant-message-changed'));
+        return true;
+      });
+    }
     var cell = root.querySelector('.vc-ig-cell[data-i="' + index + '"]');
     if (!cell) throw new Error('图片尚未准备好');
     if (action === 'remove') {
@@ -4139,6 +4181,7 @@
     _pinSync(); _chipRender();
   }
   function _igWire(root, card) {   // 88/98:图卡+视频卡交互——✕移除;点封面=只选中这一张(带入上下文,再点取消);视频▶=播放
+    if (window.__BW_NATIVE_CONVERSATION_DATA__ === true) return;
     if (!card || (card.kind !== 'images' && card.kind !== 'videos')) return;
     // 地图项就地升级成可拖可缩的活地图(用户 2026-08-26:卡片内直接能动,
     // 全屏另给按钮)。静态图仍是基底,升级失败就退回看得见的图。
@@ -4210,7 +4253,7 @@
     //   (原手建 .vc-if + vc-if-min 两态折叠退役)。_infoHtml 进 bd;主题色/图标按 kind 取(与浮层 1330 同源)。
     var _ck = { images: 'image', videos: 'video', weather: 'weather', news: 'news' }[card.kind] || 'text';
     var _cst = {}; try { _cst = (window.RC && RC.toolChip && RC.toolChip.styleOf) ? RC.toolChip.styleOf(_ck) : {}; } catch (e) {}
-    var d = _renderInflow(null, { text: _infoHtml(card), label: label, isHtml: true, type: _cst.color, icon: _cst.icon, form: 'full', cid: card.cid }).el;
+    var d = _renderInflow(null, { text: window.__BW_NATIVE_CONVERSATION_DATA__ === true ? '' : _infoHtml(card), label: label, isHtml: true, type: _cst.color, icon: _cst.icon, form: 'full', cid: card.cid }).el;
     _pinBind(d, label, function () { return _infoText(card); });
     try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: '<div class="vc-if-hd"><span>' + esc(label) + '</span></div>' + _infoHtml(card), isHtml: true, text: _infoText(card), cid: card.cid }; }); } catch (e) {}   // cid 跟随副本；#img:raw 调用时动态生成
     try { _igWire(d, card); } catch (e) {}   // 88:图卡交互(✕/单选)
@@ -4394,7 +4437,7 @@
       // 带 bind 的卡即使**绑不上**（那页没渲染 / 目标块已删）也不能到点就没：
       //   绑定这件事说明它是钉在某处的一次记录，退回浮层已经丢了位置，
       //   再让它自己消失就把内容也一起丢了。收成球留着，用户还能找回来。
-      var c = _cardPush(_infoHtml(card), label, true, false, card.cid,
+      var c = _cardPush(window.__BW_NATIVE_CONVERSATION_DATA__ === true ? '' : _infoHtml(card), label, true, false, card.cid,
                         { dot: true, form: 'full', type: _cst.color, icon: _cst.icon,
                           keepAsDot: !!card.bind });
       if (c && _pendBind) { _pendBind.card = c; _bindPending.push(_pendBind); _pendBind = null; }

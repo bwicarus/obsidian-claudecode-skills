@@ -50,7 +50,8 @@ test('native artifact data retains full originals without rendering them for ins
     const text=(v,limit=32000)=>String(v??'').slice(0,limit);
     const artifact=(id,node,title,body)=>{actions.set(id,{});return {id,kind:'artifact',title,text:body||'',data:{},actionId:id};};
     const registerAction=(id)=>{actions.set(id,{});return id;};
-    const rc=()=>({});
+    const window={BWReaderRuntime:{contextSelections:{isSelected:id=>id.endsWith('/item:2')}}};
+    const rc=()=>({voiceCard:{mediaPresentation:()=>{throw new Error('hidden media projection was used');}}});
     ${script.slice(from,to)}`, context);
   const original={cid:'original',kind:'fact',title:'标题',data:{answer:'完整正文'.repeat(10000),detail:'详情'},sources:[{url:'https://example.com'}]};
   const node={querySelector:()=>null};
@@ -62,6 +63,70 @@ test('native artifact data retains full originals without rendering them for ins
   assert.equal(replaced.data.nativeDetail.content.data.answer,'更新后的原文');
   const tool={kind:'tool',tool:'reader_card',status:'completed',result:{content:'实际回执'}};
   assert.equal(context.projectPart(tool,'tool',node,'turn')[0].data.nativeDetail.content.result.content,'实际回执');
+  const media={cid:'media',kind:'images',data:{items:[{url:'https://example.com/a'}, {_gone:1}, {url:'https://example.com/c'}]}};
+  const image=context.projectPart({kind:'card',card:media},'media',node,'turn')[0];
+  assert.deepEqual(Array.from(image.data.items,x=>x.index),[0,2]);
+  assert.equal(image.data.items[1].selected,true);
+  assert.ok(image.data.items[0].mediaID.startsWith('native-artifact:'));
+  assert.ok(image.data.items[0].selectID && image.data.items[0].removeID);
+  assert.equal(JSON.stringify(image.data.nativeDetail.content),JSON.stringify(media));
+});
+
+test('native media operations need no hidden image cell and notify removal only after acknowledgement', async () => {
+  const source=readFileSync(new URL('../../_server_deploy/static/pdf/rc-voicecall.js',import.meta.url),'utf8');
+  const requests=[],events=[];
+  let finish;
+  const context=vm.createContext({window:{__BW_NATIVE_CONVERSATION_DATA__:true,
+    __bwNativeContextSelections:{media(...args){requests.push(args);return new Promise(resolve=>{finish=resolve;});}},
+    dispatchEvent:e=>events.push(e.type)},
+    CustomEvent:class{constructor(type){this.type=type;}},
+    _imgGoneNote:item=>events.push('removed:'+item.title), _pinSync(){}, _chipRender(){}});
+  vm.runInContext(source.slice(source.indexOf('function _mediaItemAction('),source.indexOf('function _igWire(')),context);
+  const card={cid:'media',kind:'images',data:{items:[{title:'one'}]}};
+  const pending=context._mediaItemAction(null,card,0,'remove');
+  assert.equal(card.data.items[0]._gone,undefined);
+  assert.equal(events.length,0);
+  finish();await pending;
+  assert.equal(card.data.items[0]._gone,1);
+  assert.deepEqual(events,['removed:one','rc:assistant-message-changed']);
+  assert.throws(()=>context._mediaItemAction(null,card,0,'remove'),/已移除/);
+  const changed={cid:'media2',kind:'images',data:{items:[{title:'old'}]}};
+  const race=context._mediaItemAction(null,changed,0,'remove');
+  changed.data.items[0]={title:'new'};finish();await assert.rejects(race,/已更新/);
+  assert.equal(changed.data.items[0]._gone,undefined);
+  assert.equal(events.length,2);
+});
+
+test('native semantic card mount does not render media, Markdown or start the web map engine', () => {
+  const source=readFileSync(new URL('../../_server_deploy/static/pdf/rc-voicecall.js',import.meta.url),'utf8');
+  const forbidden=()=>assert.fail('native media started hidden rendering');
+  const context=vm.createContext({window:{__BW_NATIVE_CONVERSATION_DATA__:true},RC:{},
+    _renderInflow(_root,options){assert.equal(options.text,'');return {el:{}};},
+    _infoHtml:forbidden,_pinBind(){},_dragToDock(){},_upgradeMapCells:forbidden,injectCss(){}});
+  vm.runInContext(source.slice(source.indexOf('function _igWire('),source.indexOf('window.__vcInfoCardEl =')),context);
+  const card={cid:'image',kind:'images',data:{items:[{url:'https://example.com/image'}]}};
+  assert.equal(context._infoCardEl(card).__vcCard,card);
+});
+
+test('committed native media context updates outgoing focus without creating a second selection or cancelling a covered child',()=>{
+  const source=readFileSync(new URL('../../_server_deploy/static/pdf/rc-voicecall.js',import.meta.url),'utf8');
+  const from=source.indexOf('function _pinAdoptNativeMedia('),to=source.indexOf('  try {\n    var _contextRegistry0',from);
+  assert.ok(from>0&&to>from);
+  const focus=[],cancel=[];
+  const pins={map:{},els:{},ids:{},kinds:{},cidOf:{},cids:{}};
+  const context=vm.createContext({_pins:pins,RC:{outgoing:{focus:(...args)=>focus.push(args),cancelKind:x=>cancel.push(x)}},_pinReproject(){}});
+  vm.runInContext(source.slice(from,to),context);
+  const item={id:'card:m/item:0',kind:'image-item',label:'figure',text:'original image context',source:{cid:'m',item:0}};
+  let visible=true;
+  const registry={toLegacy:()=>({items:visible?[item]:[],labels:visible?['figure']:[]}),get:()=>item,
+    select(){assert.fail('native selection was repeated');},deselect(){assert.fail('covered native child was deselected');}};
+  context._pinAdoptNativeMedia(registry);
+  assert.equal(pins.ids.figure,'card:m/item:0');
+  assert.equal(focus[0][0],'image');assert.equal(focus[0][1].cid,'m#0');
+  context._pinAdoptNativeMedia(registry);assert.equal(focus.length,1);
+  visible=false;context._pinAdoptNativeMedia(registry);
+  assert.equal(Object.keys(pins.map).length,0);assert.equal(cancel.length,1);
+  visible=true;context._pinAdoptNativeMedia(registry);assert.equal(focus.length,2);
 });
 
 test('native inline images do not inspect the hidden document or card renderer', () => {

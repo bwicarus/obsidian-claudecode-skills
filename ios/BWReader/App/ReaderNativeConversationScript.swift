@@ -148,7 +148,16 @@ enum ReaderNativeConversationScript {
           const card = mounted?.cid && mounted.cid === part.card.cid ? mounted : part.card, data = card.data || {};
           const result = artifact(id, node, card.title || '生成物');
           actions.get(result.actionId).inspect = () => ({ kind: card.kind || 'artifact', title: result.title, content: card });
-          if (['images', 'videos'].includes(card.kind) && rc().voiceCard?.mediaPresentation) {
+          if (nativeMode && ['images', 'videos'].includes(card.kind)) {
+            result.kind = card.kind;
+            const registry = window.BWReaderRuntime?.contextSelections;
+            result.data.items = (card.data?.items || []).flatMap((item, index) => item._gone ? [] : [{
+              index, mediaID: 'native-artifact:' + registerAction(id + '-image-' + index, node, () => {}),
+              selected: !!registry?.isSelected('card:' + (card.cid || '') + '/item:' + index),
+              selectID: registerAction(id + '-image-select-' + index, node, () => rc().voiceCard.mediaAction(null, card, index, 'toggle')),
+              removeID: registerAction(id + '-image-remove-' + index, node, () => rc().voiceCard.mediaAction(null, card, index, 'remove'))
+            }]);
+          } else if (['images', 'videos'].includes(card.kind) && rc().voiceCard?.mediaPresentation) {
             result.kind = card.kind;
             const root = node.matches('.vc-card') ? node : node.querySelector('.vc-card');
             result.data.items = rc().voiceCard.mediaPresentation(card).map(item => {

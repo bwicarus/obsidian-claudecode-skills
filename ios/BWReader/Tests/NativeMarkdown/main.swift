@@ -121,10 +121,60 @@ try await MainActor.run {
         do { _ = try Placement.body(projected, file: "localbook:book", page: 8, x: invalid.0, y: invalid.1, pageWidth: 600); preconditionFailure("invalid drop accepted") }
         catch is ReaderNativeFavoritesService.Failure {}
     }
-    let retainedVideo = try Placement.semanticRecord(["kind": "videos", "cid": "video"])
-    precondition(retainedVideo == nil)
+    let media: [String: Any] = ["kind": "images", "cid": "images", "title": "地图与配图", "data": ["items": [
+        ["url": "https://example.com/removed.png", "title": "removed", "_gone": 1],
+        ["url": "https://example.com/image.png", "aid": "im_abc123", "title": "原图<script>"],
+        ["url": "https://maps.googleapis.com/maps/api/staticmap?center=35.68,139.69&zoom=9&markers=35.68%2C139.69", "title": "地图"]]]]
+    let imageRecord = try Placement.semanticRecord(media)!
+    let imageHTML = imageRecord["raw"] as! String
+    precondition(!imageHTML.contains("removed.png") && !imageHTML.contains("data-i=\"0\""))
+    for value in ["data-i=\"1\"", "data-aid=\"im_abc123\"", "/pdf/api/asset/im_abc123?proxy=1", "data-map-url", "vc-ig-map", "原图&lt;script&gt;"] { precondition(imageHTML.contains(value), "media placement lost \(value)") }
+    let video: [String: Any] = ["kind": "videos", "cid": "videos", "data": ["items": [
+        ["url": "https://youtu.be/abc_DEF-1234", "title": "视频", "channel": "来源"],
+        ["url": "https://www.bilibili.com/video/BV1xx411c7mD", "title": "B站视频"]]]]
+    let videoRecord = try Placement.semanticRecord(video)!, videoHTML = videoRecord["raw"] as! String
+    for value in ["data-video-id=\"abc_DEF-1234\"", "data-video-src=\"yt\"", "data-video-src=\"bili\"", "vc-vg-play", "来源"] { precondition(videoHTML.contains(value), "video placement lost \(value)") }
 }
 print("Native artifact placement: complete originals, Markdown, identity, sources, safe HTML and PDF coordinates passed")
+do {
+    typealias Media = ReaderNativeMediaArtifact
+    let card: [String: Any] = ["cid": "media", "kind": "images", "data": ["items": [
+        ["title": "removed", "_gone": 1], ["title": "full title", "url": "https://example.com/a", "aid": "im_abcd"],
+        ["title": "third", "url": "https://example.com/b"]]]]
+    let data: [String: Any] = ["nativeDetail": ["content": card], "items": [
+        ["index": 0, "mediaID": "native-artifact:a"], ["index": 1, "mediaID": "native-artifact:b"], ["index": 2, "mediaID": "native-artifact:c"]]]
+    let rows = Media.project(data)["items"] as! [[String: Any]]
+    precondition(rows.count == 2 && rows[0]["index"] as? Int == 1)
+    precondition(rows[0]["nativeRoute"] as? String == "/pdf/api/asset/im_abcd?proxy=1")
+    precondition(rows[0]["title"] as? String == "full title")
+    precondition((rows[0]["mediaID"] as! String).hasPrefix("native-artifact:b:"))
+    precondition(Media.https("https://user:pass@example.com/a") == nil && Media.https("javascript:evil()") == nil)
+    precondition(Media.video(["url": "https://youtube.com.evil.test/watch?v=abc_DEF-1234"])["id"] == "")
+    precondition(Media.video(["url": "https://www.youtube.com/shorts/abc_DEF-1234"])["id"] == "abc_DEF-1234")
+    precondition(Media.video(["src": "b站", "id": "BV1xx411c7mD"])["src"] == "bili")
+    precondition(Media.map("https://example.com/maps.googleapis.com/maps/api/staticmap?center=35,139") == nil)
+    let yandex = Media.map("https://static-maps.yandex.ru/1.x/?ll=139.69,35.68&z=12&pt=139.69,35.68,pm2rdm")!
+    precondition(yandex["lat"] as? Double == 35.68 && yandex["lon"] as? Double == 139.69)
+    var state = ReaderNativeContextSelection()
+    func apply(_ index: Int, _ action: String, _ now: Double) throws {
+        var next = state
+        for command in try Media.selectionCommands(card: card, index: index, action: action, selected: state.projection["selected"] as! [String]) { try next.apply(command, now: now) }
+        state = next
+    }
+    try apply(1, "toggle", 0)
+    precondition(state.projection["selected"] as! [String] == ["card:media/item:1"])
+    try apply(2, "toggle", 10)
+    precondition(state.projection["selected"] as! [String] == ["card:media/item:2"], "sibling selection must be released")
+    try apply(2, "toggle", 20)
+    precondition((state.projection["selected"] as! [String]).isEmpty)
+    try apply(1, "toggle", 30)
+    state.expire(now: 331)
+    precondition((state.projection["selected"] as! [String]).isEmpty, "native media must share expiry")
+    try apply(1, "toggle", 400); try apply(1, "remove", 401)
+    precondition((state.projection["selected"] as! [String]).isEmpty)
+    do { try apply(0, "toggle", 402); preconditionFailure("removed media accepted") } catch is Media.Failure {}
+}
+print("Native media: routes, original indices, maps/video identity, selection exclusion, expiry and removal passed")
 await MainActor.run {
     typealias Review = ReaderNativeReviewFaces
     let explicit = Review.source(["source_ref": "book:localbook:abc#p45", "source": ["url": "https://example.com/note"]])

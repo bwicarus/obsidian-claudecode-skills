@@ -141,6 +141,8 @@ struct ReaderNativeContextSelection {
         return ["contract": "context-selection/1", "items": items]
     }
     var projection: [String: Any] {
-        ["revision": revision, "selected": sorted(selected).map(id), "snapshot": snapshot(maxText: Int.max)]
+        ["revision": revision, "selected": sorted(selected).map(id),
+         "selectedRecords": sorted(selected).compactMap { records[$0] },
+         "snapshot": snapshot(maxText: Int.max)]
     }
 }

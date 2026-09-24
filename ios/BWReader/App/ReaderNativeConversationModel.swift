@@ -32,7 +32,7 @@ struct ReaderNativeConversationPart: Identifiable {
         title = value["title"] as? String ?? ""
         text = value["text"] as? String ?? ""
         status = value["status"] as? String ?? "unknown"
-        data = ReaderNativeCardPresentation.project(value["data"] as? [String: Any] ?? [:])
+        data = ReaderNativeMediaArtifact.project(ReaderNativeCardPresentation.project(value["data"] as? [String: Any] ?? [:]))
         actionId = (value["actionId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         actionLabel = value["actionLabel"] as? String
     }
@@ -314,6 +314,17 @@ final class ReaderNativeConversationModel: ObservableObject {
     }
     func nativeInlineResource(_ token: String) -> String? {
         inlineMedia.resource(token, isCurrent: containsMediaDocument)
+    }
+
+    func nativeArtifactResource(_ token: String) -> String? {
+        for part in messages.flatMap(\.parts) + placements.flatMap(\.parts) {
+            guard part.data["nativeDetail"] != nil else { continue }
+            for item in part.data["items"] as? [[String: Any]] ?? [] where item["mediaID"] as? String == token {
+                guard let route = item["nativeRoute"] as? String, !route.isEmpty else { return nil }
+                return route
+            }
+        }
+        return nil
     }
 
     func imageData(_ id: String) async throws -> Data {

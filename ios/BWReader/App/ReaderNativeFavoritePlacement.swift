@@ -8,7 +8,7 @@ enum ReaderNativeFavoritePlacement {
     /// Event originals use the same durable page HTML contract as favorites.
     /// Serialize only on a drop; no hidden card body or webpage layout is built.
     static func semanticRecord(_ card: [String: Any]) throws -> [String: Any]? {
-        guard let kind = card["kind"] as? String, ["weather", "news", "fact", "general"].contains(kind) else { return nil }
+        guard let kind = card["kind"] as? String, ["weather", "news", "fact", "general", "images", "videos"].contains(kind) else { return nil }
         guard let cid = card["cid"] as? String, !cid.isEmpty else {
             throw ReaderNativeFavoritesService.Failure(message: "卡片原件缺少身份编号")
         }
@@ -43,6 +43,45 @@ enum ReaderNativeFavoritePlacement {
             if !string(data["detail"]).isEmpty { html += "<div class=\"vc-if-fd\">" + (try markdown(data["detail"])) + "</div>" }
             html += "</div>"
             context = title + ":" + string(data["answer"]) + " " + string(data["detail"])
+        case "images", "videos":
+            let items = data["items"] as? [[String: Any]] ?? []
+            html = "<div class=\"vc-ig\">"
+            var descriptions: [String] = []
+            for (index, item) in items.enumerated() where !ReaderNativeMediaArtifact.gone(item) {
+                let i = String(index), itemTitle = string(item["title"])
+                html += "<div class=\"vc-ig-cell\" data-i=\"" + i + "\""
+                let isMap = kind == "images" && ReaderNativeMediaArtifact.map(string(item["url"])) != nil
+                if isMap { html += " data-map-url=\"" + escaped(item["url"]) + "\"" }
+                html += "><button type=\"button\" class=\"vc-ig-x\" data-i=\"" + i + "\" aria-label=\"移除\"><span class=\"rc-i rc-i-close\"></span></button>"
+                if kind == "images" {
+                    if isMap { html += "<button type=\"button\" class=\"vc-ig-map\" data-i=\"" + i + "\" aria-label=\"全屏地图\">⛶</button>" }
+                    if let route = ReaderNativeMediaArtifact.imageRoute(item) {
+                        html += "<img class=\"vc-ig-img\" data-i=\"" + i + "\""
+                        if let aid = ReaderNativeMediaArtifact.assetID(item["aid"]) { html += " data-aid=\"" + escaped(aid) + "\"" }
+                        html += " data-source-url=\"" + escaped(item["url"]) + "\" src=\"" + escaped(route) + "\" alt=\"" + escaped(itemTitle) + "\">"
+                    } else { html += "<span class=\"rc-img-broken\">图片地址无效</span>" }
+                    if !itemTitle.isEmpty { html += "<div class=\"vc-ig-t\">" + escaped(itemTitle) + "</div>" }
+                    descriptions.append(itemTitle)
+                } else {
+                    let ref = ReaderNativeMediaArtifact.video(item), thumb = ReaderNativeMediaArtifact.thumbnail(item, video: ref)
+                    let bili = ref["src"] == "bili"
+                    let label = bili ? "B站" : ref["src"] == "yt" ? "YouTube" : string(item["src"])
+                    html += "<span class=\"vc-vg-tag" + (bili ? " bili" : "") + "\">" + escaped(label) + "</span><div class=\"vc-vg-wrap\">"
+                    if let route = ReaderNativeMediaRoute.route(thumb) {
+                        html += "<img class=\"vc-ig-img\" data-i=\"" + i + "\" loading=\"lazy\" referrerpolicy=\"same-origin\" data-source-url=\"" + escaped(thumb) + "\" src=\"" + escaped(route) + "\" alt=\"\">"
+                    } else { html += "<div class=\"vc-vg-empty\">无预览图</div>" }
+                    html += "<button type=\"button\" class=\"vc-vg-play\" data-i=\"" + i + "\""
+                    for key in ["id", "src", "url", "title"] { html += " data-video-" + key + "=\"" + escaped(ref[key]) + "\"" }
+                    html += " aria-label=\"播放\">▶</button></div><div class=\"vc-ig-t\">" + escaped(itemTitle)
+                    let channel = string(item["channel"])
+                    if !channel.isEmpty { html += "<br><span class=\"vc-vg-ch\">" + escaped(channel) + "</span>" }
+                    html += "</div>"
+                    descriptions.append(itemTitle + (channel.isEmpty ? "" : "(" + channel + ")") + " " + string(item["url"]))
+                }
+                html += "</div>"
+            }
+            html += "</div>"
+            context = (title.isEmpty ? (kind == "images" ? "配图" : "视频") : title) + ":" + descriptions.joined(separator: ";")
         default:
             let text = string(data["text"]).isEmpty ? string(card["brief"]) : string(data["text"])
             html = "<div class=\"vc-if-g\">" + (try markdown(text)) + "</div>"

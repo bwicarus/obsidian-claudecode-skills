@@ -2402,11 +2402,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               let part = nativeConversation.artifactPart(token, field: action == "liveAction" ? "dragId" : nil) else { return nil }
         let input = part.data["nativeCard"] as? [String: Any]
         let detail = part.data["nativeDetail"] as? [String: Any]
-        // EPUB still resolves its own reflow anchor. Media snapshots retain
-        // their existing renderer contract until their data adapter is migrated.
+        // EPUB still resolves its own reflow anchor. PDF placements serialize
+        // original data without consulting hidden card DOM or image elements.
         if action == "liveAction" {
             guard currentLocalBook?.format == .pdf,
-                  input != nil || ["weather", "news", "fact", "general"].contains(detail?["kind"] as? String ?? "") else { return nil }
+                  input != nil || ["weather", "news", "fact", "general", "images", "videos"].contains(detail?["kind"] as? String ?? "") else { return nil }
         } else if input == nil && detail == nil { return nil }
         do {
             guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
@@ -3545,6 +3545,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             let result: [String: Any]
             if id.hasPrefix("native-inline:") {
                 guard let route = self.nativeConversation.nativeInlineResource(id) else { throw URLError(.resourceUnavailable) }
+                result = ["ok": true, "resource": route]
+            } else if id.hasPrefix("native-artifact:") {
+                guard let route = self.nativeConversation.nativeArtifactResource(id) else { throw URLError(.resourceUnavailable) }
                 result = ["ok": true, "resource": route]
             } else {
                 result = await self.requestNativeConversationCommand([

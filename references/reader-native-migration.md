@@ -663,7 +663,16 @@ share the native queue lease, fixing the prior hashed/raw context mismatch.
 Focused conversation/review Node checks pass; the new Swift placement/lease
 checks join the next consolidated Apple build and are not yet verified.
 
-Remaining migration scope: media artifact effects and original event delivery;
+The following candidate moves media-card routes, video identity, map metadata,
+selection/sibling exclusion and selection expiry to native data operations.
+Image/video PDF drops serialize the complete originals through the native note
+transaction. The App no longer renders semantic card bodies or initializes
+hidden media/map widgets. The compatibility adapter observes committed
+selection state and retains the outgoing-focus/removal notification contracts;
+it does not create a second selection. Focused Reader checks pass; Swift media
+and placement checks remain queued for the consolidated Apple build.
+
+Remaining migration scope: original media event delivery and notification adapters;
 conversation command orchestration and legacy selection adapters; review mode,
 draft/effect coordination and account command outbox; PDF startup state and
 ReaderPC context publication still provided by compatibility code. EPUB body

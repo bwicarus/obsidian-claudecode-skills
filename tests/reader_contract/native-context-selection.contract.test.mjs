@@ -5,13 +5,15 @@ import vm from 'node:vm';
 
 const registrySource = fs.readFileSync(new URL('../../_server_deploy/static/reader-runtime/context-selection-registry.js',import.meta.url),'utf8');
 const bridge = fs.readFileSync(new URL('../../ios/BWReader/App/ReaderNativeContextSelectionBridge.swift',import.meta.url),'utf8').split('static let script = #"""')[1].split('"""#')[0];
-function setup() {
+function setup(options = {}) {
   const server = vm.createContext({}); vm.runInContext(registrySource,server);
   const ids = new Set(), requests = [], events = [];
   let session = '', sequence = 0, fail = false, gate = null;
   const run = code => vm.runInContext(code,server);
   const projection = () => JSON.parse(JSON.stringify({revision:run('BWReaderRuntime.contextSelections.version()'),
     selected:[...ids].filter(id=>{server.id=id;return run('BWReaderRuntime.contextSelections.isSelected(id)');}),
+    selectedRecords:[...ids].filter(id=>{server.id=id;return run('BWReaderRuntime.contextSelections.isSelected(id)');})
+      .map(id=>{server.id=id;return run('BWReaderRuntime.contextSelections.get(id)');}),
     snapshot:run('BWReaderRuntime.contextSelections.snapshot({maxText:Number.MAX_SAFE_INTEGER})')}));
   const context = vm.createContext({console,crypto:{randomUUID:()=> 'session-test'},
     CustomEvent:class {constructor(type,init){this.type=type;this.detail=init?.detail;}},
@@ -30,6 +32,13 @@ function setup() {
         run(`var c=JSON.parse(command), r=BWReaderRuntime.contextSelections;
           if(c.record)r.upsert(Object.assign({},c.record,Object.hasOwn(c,'selected')?{selected:c.selected}:{}));
           if(c.operation!=='upsert')r[c.operation](c.id,c.on);`);
+      }
+      if(command.action==='media') {
+        const record=options.onMedia(command.value);
+        if(record.error)return {ok:true,session,sequence,state:projection(),media:record};
+        ids.add(record.id);server.record=JSON.stringify(record);
+        run('BWReaderRuntime.contextSelections.select(JSON.parse(record))');
+        return {ok:true,session,sequence,state:projection(),media:{cid:command.value.card.cid,index:command.value.index,action:command.value.action}};
       }
       return {ok:true,session,sequence,state:projection()};
     }}}}});
@@ -59,11 +68,35 @@ test('native selection keeps one entity, maximal-node context, full metadata and
   assert.deepEqual(s.requests.map(x=>x.action),['start','mutate','mutate','mutate','read','mutate','read']);
 });
 
+test('native media-created selections enter the shared registry after pending text selections, including covered children', async()=>{
+  const s=setup({onMedia:value=>({id:'card:images/item:2',parentId:'card:images',kind:'image-item',label:'配图·图3',text:'original image context',source:{cid:value.card.cid,item:value.index}})});
+  await s.invoke('settle');
+  const release=s.hold();
+  s.invoke('select',{id:'card:images',kind:'card',text:'whole card'});
+  const request=s.context.__bwNativeContextSelections.media({cid:'images'},2,'toggle');
+  release();await request;await s.invoke('settle');
+  assert.deepEqual(s.requests.filter(x=>['media','mutate'].includes(x.action)).map(x=>x.action),['mutate','media']);
+  assert.equal(s.invoke('isSelected','card:images/item:2'),true);
+  assert.equal(s.invoke('get','card:images/item:2').text,'original image context');
+  assert.deepEqual(s.value().items.map(x=>x.id),['card:images']);
+  s.invoke('deselect','card:images');await s.invoke('settle');
+  assert.deepEqual(s.value().items.map(x=>x.id),['card:images/item:2']);
+  s.fail();await assert.rejects(s.context.__bwNativeContextSelections.media({cid:'images'},2,'remove'),/native owner unavailable/);
+});
+
 test('native expiry updates the synchronous compatibility projection without resetting a JS timer',async()=>{
   const s=setup();s.invoke('select',{id:'a',text:'card'});await s.invoke('settle');
   s.expire('a');assert.equal(s.invoke('isSelected','a'),false);assert.deepEqual(s.value().items,[]);
   s.invoke('select','a');await s.invoke('settle');assert.equal(s.invoke('isSelected','a'),true);
   assert.equal(s.context.__bwNativeContextSelections.accept({session:'previous-book',state:s.projection()}),false);
+});
+
+test('a definitely rejected media operation does not poison subsequent text selections',async()=>{
+  const s=setup({onMedia:()=>({error:'图片已移除或更新'})});await s.invoke('settle');
+  await assert.rejects(s.context.__bwNativeContextSelections.media({cid:'gone'},0,'toggle'),/已移除/);
+  s.invoke('select',{id:'next',text:'next selection'});await s.invoke('settle');
+  assert.deepEqual(s.value().items.map(x=>x.id),['next']);
+  assert.equal(s.events.some(x=>x.type==='rc:context-selection-error'),false);
 });
 
 test('pending changes do not get overwritten by old acknowledgements and settle waits for them',async()=>{

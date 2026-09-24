@@ -46,14 +46,38 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
         }
         do {
             let now = ProcessInfo.processInfo.systemUptime
+            var media: [String: Any]?
             if command["action"] as? String == "mutate", let value = command["value"] as? [String: Any] {
                 try state.apply(value, now: now)
+            } else if command["action"] as? String == "media", let value = command["value"] as? [String: Any],
+                      let card = value["card"] as? [String: Any], let index = value["index"] as? Int,
+                      let action = value["action"] as? String {
+                // Uses the same ordered queue as text/card selections. Commit
+                // the entire deselect/select operation, or leave it untouched.
+                var candidate = state
+                candidate.expire(now: now)
+                let changes = try ReaderNativeMediaArtifact.selectionCommands(card: card, index: index,
+                    action: action, selected: candidate.projection["selected"] as? [String] ?? [])
+                for change in changes { try candidate.apply(change, now: now) }
+                state = candidate
+                media = ["cid": card["cid"] ?? "", "index": index, "action": action]
             } else if command["action"] as? String == "read" {
                 state.expire(now: now)
             } else { throw ReaderNativeContextSelection.Failure(message: "上下文操作无效") }
             sequence = next; scheduleExpiry()
-            replyHandler(["ok": true, "session": requestedSession, "sequence": sequence, "state": state.projection], nil)
-        } catch { replyHandler(nil, error.localizedDescription) }
+            var reply: [String: Any] = ["ok": true, "session": requestedSession, "sequence": sequence, "state": state.projection]
+            if let media { reply["media"] = media }
+            replyHandler(reply, nil)
+        } catch {
+            if command["action"] as? String == "media" {
+                // A definite rejected media operation did not mutate the graph.
+                // Keep the ordered channel usable; only uncertain transport
+                // failures stop it, not an item that disappeared before a tap.
+                sequence = next
+                replyHandler(["ok": true, "session": requestedSession, "sequence": sequence,
+                    "state": state.projection, "media": ["error": error.localizedDescription]], nil)
+            } else { replyHandler(nil, error.localizedDescription) }
+        }
     }
     private func scheduleExpiry() {
         expiry?.cancel(); expiry = nil
@@ -87,7 +111,7 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
         if (result?.session !== session || !Number.isSafeInteger(result.state?.revision) ||
             !Array.isArray(result.state?.selected) || result.state?.snapshot?.contract !== 'context-selection/1' ||
             !Array.isArray(result.state?.snapshot?.items)) throw new Error('原生上下文未获确认');
-        if (!current || result.state.revision >= current.revision) current = result.state;
+        if (!current || result.state.revision >= current.revision) current = JSON.parse(JSON.stringify(result.state));
         if (!pending && !error) publish();
       }
       function failed(reason) {
@@ -101,16 +125,27 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
       function enqueue(action, value) {
         pending++;
         const frozen = value == null ? null : JSON.parse(JSON.stringify(value));
+        let receipt;
         queue = queue.then(async () => {
           if (error) throw error;
           const next = ++sequence;
           const result = await handler.postMessage({version:1, action, session, sequence:next, value:frozen});
           if (!result?.ok || result.sequence !== next) throw new Error('原生上下文更新未获确认');
           receive(result);
+          receipt = result;
         }).catch(failed).finally(() => { pending--; if (!pending && !error) publish(); });
+        return queue.then(() => receipt);
       }
       window.__bwNativeContextSelections = {
         accept(payload) { if (payload?.session !== session) return false; receive(payload); return true; },
+        async media(card, index, action) {
+          const result = await enqueue('media', {card, index, action});
+          if (error) throw error;
+          if (result?.media?.error) throw new Error(result.media.error);
+          if (result?.media?.cid !== card.cid || result.media.index !== index || result.media.action !== action)
+            throw new Error('媒体操作未获确认');
+          return result.media;
+        },
         createRegistry(api) {
           if (registry) return registry;
           // Synchronous legacy callers retain a disposable optimistic projection.
@@ -126,6 +161,9 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
             projectedRevision = current.revision;
             const selected = new Set(current.selected);
             buffering++;
+            // Swift can create a media selection without any web node. Include
+            // covered children, so releasing a selected parent reveals them.
+            for (const record of current.selectedRecords || []) mirror.upsert(record);
             for (const id of rawSelected) if (!selected.has(id)) mirror.deselect(id);
             for (const id of selected) mirror.select(id);
             rawSelected = selected;
