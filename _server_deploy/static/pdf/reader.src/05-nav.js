@@ -109,7 +109,7 @@ RC.readerNavigation = {
   },
   performNativeViewport: async function (action, value) {
     const owner = this.nativeViewport;
-    if (!owner || typeof owner.perform !== 'function' || !['layout', 'scale', 'fit', 'crop'].includes(action)) throw new Error('原生阅读操作不可用');
+    if (!owner || typeof owner.perform !== 'function' || !['layout', 'scale', 'fit', 'crop', 'jump', 'back'].includes(action)) throw new Error('原生阅读操作不可用');
     const receipt = await owner.perform(action, value);
     if (owner !== this.nativeViewport || receipt?.ok !== true || !Number.isSafeInteger(receipt.position?.sequence)) throw new Error('原生阅读操作未完成');
     if (receipt.position.sequence > owner.sequence) this.acceptNativePosition(owner.token, receipt.position);
@@ -132,6 +132,7 @@ RC.readerNavigation = {
     }
     const changedPage = value.page !== currentPage;
     owner.sequence = value.sequence;
+    if (Object.prototype.hasOwnProperty.call(value, 'backPage')) window.__pageBackAnchor = Number.isInteger(value.backPage) ? value.backPage : null;
     currentPage = value.page; scale = value.scale;
     if (value.mode !== undefined && (readMode !== value.mode || _spreadOffset !== value.spreadOffset)) {
       readMode = value.mode; _spreadOffset = value.spreadOffset || 0;
@@ -300,6 +301,7 @@ window.__pageBackAnchor = null;
 window.jumpWithBack = function (target) {
   target = parseInt(target, 10);
   if (!target || target < 1) return;
+  if (RC.readerNavigation?.nativeViewport) return RC.readerNavigation.performNativeViewport('jump', target);
   const cur = (typeof currentPage !== 'undefined') ? currentPage : 1;
   if (window.__pageBackAnchor == null && target !== cur) window.__pageBackAnchor = cur;  // 第一次跳:记最早的来处
   const pending = goToPage(target);
@@ -308,6 +310,7 @@ window.jumpWithBack = function (target) {
   return pending;
 };
 window.pageGoBack = function () {
+  if (RC.readerNavigation?.nativeViewport) return RC.readerNavigation.performNativeViewport('back', null);
   const b = window.__pageBackAnchor;
   window.__pageBackAnchor = null;
   _hidePageBackBar();

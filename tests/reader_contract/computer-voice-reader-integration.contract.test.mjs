@@ -77,7 +77,7 @@ test("Reader structured cards acknowledge only an actual render", () => {
 
 test("Windows conversation delivery acknowledges only connected Reader bubbles", () => {
   const msgStart = assistant.indexOf("window.__asstVoiceMsg = function");
-  const msgEnd = assistant.indexOf("window.__asstVoiceLog = function", msgStart);
+  const msgEnd = assistant.indexOf("window.__asstVoiceLog = async function", msgStart);
   assert.ok(msgStart >= 0 && msgEnd > msgStart);
   const msg = assistant.slice(msgStart, msgEnd);
   assert.match(msg, /if \(!_tc \|\| !_tc\.el \|\| !_tc\.el\.isConnected\) return false/);

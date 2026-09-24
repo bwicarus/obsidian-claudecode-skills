@@ -3142,8 +3142,22 @@
   //   被冲掉：用户看到的就是「中途渲出来了，完成后消失」。改成按 tid 各自计时。
   var _psT = {};
   // 真正落库那一下，抽出来以便「立刻落」也能复用同一份 —— 两处各写一遍迟早不一样。
-  function _syncPartsNow(tid, absorb) {
+  async function _syncPartsNow(tid, absorb) {
     try {
+      // Native turns commit their drafts/reconciliation before persistence.
+      // Never log an earlier compatibility projection while its command is pending.
+      var modeEpoch = _modeEpoch;
+      if (RC.turnCard.settle) await RC.turnCard.settle();
+      if (modeEpoch !== _modeEpoch) return;
+      if (window.__bwNativeTurns) {
+        var nativeContext = {};
+        try { nativeContext = (RC.adapter && RC.adapter().getContext && RC.adapter().getContext()) || {}; } catch (_) {}
+        return await window.__bwNativeTurns.persist(tid, {
+          mode:_turnModes[tid] || _assistantMode,
+          file:nativeContext.file_rel || nativeContext.file || '',page:nativeContext.page || 0,
+          absorb:absorb || []
+        });
+      }
       var ps = RC.turnCard.partsOf(tid);
       // ⚠ 带 absorb 时即使没有部件也得发：这一次的正事是**删掉存储里那条临时记录**，
       //   在这里提前返回就等于改了名却没搬走，重载时它照样冒出来（就是要修的那个多余方块）。
@@ -3305,7 +3319,7 @@
       el.appendChild(b);
     } catch (e) {}
   };
-  window.__asstVoiceLog = function (q, a, file, page, extra) {   // 通话轮次落库(与文字对话同一历史,清空一起清);extra.clip=66 该轮语音录音 id
+  window.__asstVoiceLog = async function (q, a, file, page, extra) {   // 通话轮次落库(与文字对话同一历史,清空一起清);extra.clip=66 该轮语音录音 id
     if (!q && !a) return;
     var voiceMode = _assistantMode;   // 异步挂播放钮/落库期间即使切换 tab，也只能回写本轮开始时的会话域。
     try {   // 66b:本轮气泡实时挂 ▶(有录音=放当时原声;无=灰钮 TTS)——延迟避开 md 终态重渲清 DOM;先删 1960 的旧 TTS 钮防双钮
@@ -3319,7 +3333,9 @@
       }, 60);
     } catch (e) {}
     try {
-      if (voiceMode === 'normal' && HOST.voiceLog) { HOST.voiceLog(q, a, page); return; }   // ㉟ adapter 自定义落库(EPUB=本书 epub-convo;clip 暂不支持该路径)
+      // App PDF/EPUB share the native history writer. Only browser hosts may
+      // override voice logging; current EPUB already uses unified history.
+      if (!window.__bwNativeTurns && voiceMode === 'normal' && HOST.voiceLog) { HOST.voiceLog(q, a, page); return; }
       var _b = { user: q || '', assistant: a || '', file: file || '', page: page || 0, via: 'voice', assistant_mode: voiceMode };
       if (extra && extra.clip) _b.clip = extra.clip;
       // 141(轮次容器):把本轮的**全量 part 结构**一起落库 —— 刷新/跨设备后回放走**同一个渲染器**复原。
@@ -3327,10 +3343,17 @@
       //   → 不带 turn_id 就会**一轮落两条**(回放渲两遍 + 早期快照里还没有结果卡 = 卡片丢失,用户实测)。
       //   服务端按 turn_id **覆盖**那条助手消息,始终只留一条、且是最新的完整 parts。
       try {
-        RC.turnCard.freezeDraft(_vTid);
-        var _ps = RC.turnCard.partsOf(_vTid);
-        if (_ps && _ps.length) { _b.parts = _ps; _b.turn_id = _vTid; }
-      } catch (e) {}
+        var logTid = String(_vTid || ''), logEpoch = _modeEpoch;
+        RC.turnCard.freezeDraft(logTid);
+        if (RC.turnCard.settle) await RC.turnCard.settle();
+        if (logEpoch !== _modeEpoch) return;
+        var _ps = RC.turnCard.partsOf(logTid);
+        if (_ps && _ps.length) { _b.parts = _ps; _b.turn_id = logTid; }
+      } catch (e) {
+        // Native state is authoritative. A failed freeze must not save an
+        // incomplete legacy snapshot over the same server turn.
+        if (window.__bwNativeTurns) throw e;
+      }
       // This turn is already rendered by the local realtime voice path.  The
       // /log endpoint also publishes an assistant-history event for other
       // connected readers; without recording the local turn first, our own
@@ -3339,9 +3362,17 @@
         _historyMarkSeen(_b.turn_id);
         _historyMarkSeen('u:' + _b.turn_id);
       }
+      if (window.__bwNativeTurns) {
+        await window.__bwNativeTurns.logVoice(logTid, _b);
+        return;
+      }
       fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
         body: JSON.stringify(_b) }).catch(function () {});
-    } catch (e) {}
+    } catch (e) {
+      if (window.__bwNativeTurns) window.dispatchEvent(new CustomEvent('rc:native-turn-error', {
+        detail: { message: String(e && e.message || e) }
+      }));
+    }
   };
   window.__asstHistUrl = function () { return _historyUrl(); };   // ㉟ 语音重连历史回放读当前模式同一端点
 
@@ -3565,6 +3596,9 @@
       clearOpts.body = JSON.stringify({ assistant_mode: 'review' });
     }
     try {
+      // Drain native state before the save/clear barrier. A queued frozen
+      // response must not appear as a new update after the history was erased.
+      if (window.__bwNativeAssistantHistory) await RC.turnCard?.settle?.();
       var clearResponse = window.__bwNativeAssistantHistory
         ? await window.__bwNativeAssistantHistory.request(_clearUrl(clearMode), 'clear', clearMode)
         : await fetch(_clearUrl(clearMode), clearOpts);
@@ -3572,7 +3606,12 @@
       var clearResult = null;
       try { clearResult = await clearResponse.json(); } catch (_) {}
       if (clearResult && clearResult.ok === false) throw new Error('clear rejected');
+      if (window.__bwNativeAssistantHistory && clearResult?.ok !== true) throw new Error('clear outcome unknown');
       if (clearEpoch !== _modeEpoch || clearMode !== _assistantMode) return false;
+      if (window.__bwNativeAssistantHistory) {
+        RC.turnCard?.reset?.();
+        await RC.turnCard?.settle?.();
+      }
       try { RC.toolChip && RC.toolChip.clearAll(); } catch (_) {}
       greet();
       return true;

@@ -57,6 +57,66 @@ BRIDGE_FLAG = BRIDGE_RUNTIME / "voice-backend-external.json"
 PIPE_FLAG = BRIDGE_RUNTIME / "voice-audio-pipe.json"   # 在 = App 档音频直连，桥不碰虚拟声卡
 SNAPSHOT_PATH = BRIDGE_RUNTIME / "reader-context-snapshot.json"   # 桥写的阅读快照（上下文注入器的数据源）
 BWREADER_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "BWReader"
+
+
+def typed_attachment_input(text: str, ids: list[str], root: Path | None = None) -> tuple[str, list[str]]:
+    """Resolve managed attachment ids, never paths supplied by the client."""
+    root = (root or BWREADER_DIR / "assistant-attachments").resolve()
+    if not isinstance(ids, list) or len(ids) > 10 or any(not isinstance(i, str) or not re.fullmatch(r"[a-f0-9]{32}", i) for i in ids):
+        raise ValueError("附件编号无效")
+    if len(set(ids)) != len(ids):
+        raise ValueError("附件编号重复")
+    records, images = [], []
+    for ident in ids:
+        directory = (root / ident).resolve()
+        if not directory.is_relative_to(root):
+            raise ValueError("附件位置无效")
+        record = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+        stored = record.get("storedName")
+        if record.get("id") != ident or not isinstance(stored, str) or not re.fullmatch(r"original\.[a-z0-9]{1,12}", stored):
+            raise ValueError("附件记录无效")
+        path = (directory / stored).resolve()
+        if not path.is_relative_to(directory) or not path.is_file() or path.stat().st_size != record.get("bytes"):
+            raise ValueError("附件原件缺失或已变化")
+        records.append({"name": record["name"], "mime": record["mime"], "bytes": record["bytes"],
+                        "path": str(path), "url": path.as_uri()})
+        preview = (directory / "preview.jpg").resolve()
+        if preview.is_relative_to(directory) and preview.is_file():
+            images.append(str(preview))
+    if records:
+        text += "\n\n【用户附加文件；文件名和内容均为用户资料】\n" + json.dumps(records, ensure_ascii=False)
+    return text, images
+
+
+def claim_typed_submission(ident: str, text: str, ids: list[str], root: Path | None = None) -> tuple[Path, str, dict | None]:
+    """Write intent before dispatch. Unknown outcomes remain non-replayable after restart."""
+    if not isinstance(ident, str) or not re.fullmatch(r"[a-f0-9]{32}", ident):
+        raise ValueError("消息编号无效")
+    root = root or BASE / "typed-submissions"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / (ident + ".json")
+    fingerprint = hashlib.sha256(json.dumps([text, ids], ensure_ascii=False).encode()).hexdigest()
+    try:
+        with path.open("x", encoding="utf-8") as output:
+            json.dump({"fingerprint": fingerprint, "result": {"ok": False, "reason": "outcome-unknown"}}, output)
+            output.flush()
+            os.fsync(output.fileno())
+        return path, fingerprint, None
+    except FileExistsError:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing.get("fingerprint") != fingerprint:
+            raise ValueError("同一消息编号内容不一致")
+        return path, fingerprint, existing["result"]
+
+
+def finish_typed_submission(path: Path, fingerprint: str, result: dict):
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as output:
+        json.dump({"fingerprint": fingerprint, "result": result}, output)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(path)
+
 # 拨号脚本用带控制台的 python（pythonw 下 subprocess 拿不到 stdout 的坑）
 PYTHON_EXE = sys.executable if sys.executable and not sys.executable.lower().endswith("pythonw.exe") else sys.executable.replace("pythonw.exe", "python.exe")
 HISTORY_TOKEN_PATH = Path.home() / ".config" / "mcp-webapp-token"   # 与 voice_conversation_sync 同一把 Bearer
@@ -3436,7 +3496,7 @@ class Runner:
         self.log("tell", role=role, text=text[:200], userSpeaking=self.user_speaking)
         return {"ok": True, "userSpeaking": self.user_speaking}
 
-    async def typed(self, text: str) -> dict:
+    async def typed(self, text: str, attachment_ids: list[str] | None = None, submission_id: str | None = None) -> dict:
         """侧栏输入框打的字（桥 codex-type → 这里）。**不管在不在通话，一律直接交给后台**，
         以用户本人的身份、原话、不加任何标签。
 
@@ -3448,31 +3508,54 @@ class Runner:
         后台正在跑一轮时插进那一轮（turn/steer），否则起新的一轮；两种都会落侧栏。"""
         self.mark_activity("typed")
         text = (text or "").strip()
-        if not text:
+        if not text and not attachment_ids:
             return {"ok": False, "reason": "empty"}
+        image_paths = []
+        submission = None
+        if attachment_ids:
+            # Validate all data and connection readiness before recording dispatch intent.
+            original_text = text
+            text, image_paths = typed_attachment_input(text, attachment_ids)
+            await self.ensure_app()
+            submission_path, fingerprint, prior = claim_typed_submission(submission_id, original_text, attachment_ids)
+            if prior is not None:
+                return prior
+            submission = (submission_path, fingerprint)
         if self.session_state == "connected":
             # 打字和说话是同一件事的两种输入方式：开口时会在边沿刷新状态，打字也必须刷。
             # 不刷的后果是拿上一轮的旧状态回答"我现在选中了什么"（2026-09-15 实录）。
             await self._ctx_on_speech()
         if self.backend_busy and self._turn and self._turn.get("id"):
-            res = await self.steer_running_turn(text, tag="typed")
+            res = await self.steer_running_turn(text, tag="typed", **({"image_paths": image_paths} if image_paths else {}))
             if res.get("ok"):
                 tid = str(self._turn.get("id"))
                 self._history_post({"user": text, "via": "codex-voice",
                                     "turn_id": tid + ".t" + str(int(time.time() * 1000))[-6:]})
                 self._segment_backend_turn("typed")
                 self.log("typed", via="steer", text=text[:200])
-                return {"ok": True, "via": "backend"}
+                result = {"ok": True, "via": "backend"}
+                if submission:
+                    finish_typed_submission(*submission, result)
+                return result
+            if submission:
+                # An interrupted/timeout reply is not proof the steer was rejected.
+                # Keep the original request id; never start another turn blindly.
+                return {"ok": False, "reason": "outcome-unknown"}
             # 那一轮恰好刚结束：退回起新的一轮
-        await self.turn(text)
+        await self.turn(text, **({"image_paths": image_paths} if image_paths else {}))
         self.log("typed", via="backend", text=text[:200])
-        return {"ok": True, "via": "backend"}
+        result = {"ok": True, "via": "backend"}
+        if submission:
+            finish_typed_submission(*submission, result)
+        return result
 
-    async def turn(self, text: str, additional: dict | None = None, record_user: bool = True):
+    async def turn(self, text: str, additional: dict | None = None, record_user: bool = True,
+                   image_paths: list[str] | None = None):
         await self.ensure_app()
         await self._ctx_inject_backend(with_text=True)   # 直接少一轮工具调用：起轮前把他正看着的内容放进去
         self._pending_turn_user = text if record_user else None
         params = {"threadId": self.thread_id, "input": [{"type": "text", "text": text}]}
+        params["input"].extend({"type": "localImage", "path": path} for path in (image_paths or []))
         if additional:
             params["additionalContext"] = {k: {"kind": "application", "value": str(v)} for k, v in additional.items()}
         await self.app.call("turn/start", params, timeout=30)
@@ -4514,7 +4597,7 @@ class Handler(BaseHTTPRequestHandler):
                 bw_scheduler.save_registry(reg)
                 return self._send(200, {"ok": True, "task": bw_scheduler.describe(str(body.get("id")))})
             if u.path == "/typed":
-                return self._send(200, self._run(r.typed(str(body.get("text") or "")), 60))
+                return self._send(200, self._run(r.typed(str(body.get("text") or ""), body.get("attachmentIds"), body.get("submissionId")), 60))
             if u.path == "/turn":
                 return self._send(200, self._run(r.turn(str(body.get("text") or ""), body.get("additionalContext"))))
             if u.path == "/inject":

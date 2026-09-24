@@ -942,31 +942,26 @@ final class NativeBookOCRManager: ObservableObject {
         let pages = try await store.effectivePages(
             contentSHA256: expectedContentSHA256
         )
-        var hits: [NativeBookOCRSearchHit] = []
-        var total = 0
-        var hitPages = Set<Int>()
-        for page in pages where page.status == .ready {
-            let match = Self.searchPage(
-                page,
-                query: String(needle.prefix(256)),
-                remaining: cap - hits.count
-            )
-            total += match.total
-            hits.append(contentsOf: match.hits)
-            if match.total > 0 { hitPages.insert(page.page) }
-            if hits.count >= cap { break }
+        let totalPages = current.totalPages, query = String(needle.prefix(256))
+        let task = Task.detached(priority:.userInitiated) {
+            var hits: [NativeBookOCRSearchHit] = [], total = 0, hitPages = Set<Int>()
+            for page in pages where page.status == .ready {
+                try Task.checkCancellation()
+                let match = Self.searchPage(page,query:query,remaining:cap - hits.count)
+                total += match.total; hits.append(contentsOf:match.hits)
+                if match.total > 0 { hitPages.insert(page.page) }
+                if hits.count >= cap { break }
+            }
+            try Task.checkCancellation()
+            let readyPages = pages.filter { $0.status == .ready || $0.status == .readyEmpty }.count
+            return NativeBookOCRSearchResult(matches:hits,total:total,pages:hitPages.sorted(),
+                incomplete:readyPages < max(totalPages,pages.map(\.page).max() ?? 0) || hits.count >= cap)
         }
-        let readyPages = pages.filter {
-            $0.status == .ready || $0.status == .readyEmpty
-        }.count
-        let totalPages = max(current.totalPages, pages.map(\.page).max() ?? 0)
-        return NativeBookOCRSearchResult(
-            matches: hits,
-            total: total,
-            pages: hitPages.sorted(),
-            incomplete: readyPages < totalPages
-                || hits.count >= cap
-        )
+        let result = try await withTaskCancellationHandler(operation:{ try await task.value },onCancel:{ task.cancel() })
+        try Task.checkCancellation()
+        guard activeContentSHA256[bookID]?.caseInsensitiveCompare(expectedContentSHA256) == .orderedSame,
+              invalidatedContentSHA256[bookID] != expectedContentSHA256.lowercased() else { throw CancellationError() }
+        return result
     }
 
     /// The caller downloads every immutable manifest entry first, then passes
@@ -1531,21 +1526,20 @@ final class NativeBookOCRManager: ObservableObject {
         )
     }
 
-    private static func searchPage(
+    nonisolated private static func searchPage(
         _ page: NativeBookOCRPageCharacters,
         query: String,
         remaining: Int
     ) -> (hits: [NativeBookOCRSearchHit], total: Int) {
         guard remaining > 0 else { return ([], 0) }
-        var text = ""
+        var position = 0
         var spans: [(range: NSRange, character: NativeBookOCRCharacter)] = []
         for character in page.chars {
-            let start = (text as NSString).length
-            text.append(character.c)
-            let end = (text as NSString).length
-            spans.append((NSRange(location: start, length: end - start), character))
+            let length = character.c.utf16.count
+            spans.append((NSRange(location:position,length:length),character))
+            position += length
         }
-        let haystack = text as NSString
+        let haystack = page.chars.map(\.c).joined() as NSString
         var cursor = 0
         var total = 0
         var hits: [NativeBookOCRSearchHit] = []

@@ -73,6 +73,25 @@ try await MainActor.run {
     precondition(cached.front == (state["current"] as! [String: Any])["front"] as? String)
 }
 print("Native review faces: dividers, cloze, ruby, proven provenance, original content and GFM passed")
+await MainActor.run {
+    typealias Review = ReaderNativeReviewFaces
+    let explicit = Review.source(["source_ref": "book:localbook:abc#p45", "source": ["url": "https://example.com/note"]])
+    precondition(explicit.file == "localbook:abc" && explicit.page == 45)
+    let typed = Review.source(["source": ["documentId": "localbook:abc", "location": ["kind": "pdf", "page": 12]]])
+    precondition(typed.file == "localbook:abc" && typed.page == 12)
+    let original = "<div class='src'><a href='https://example.com/pdf/view?file=Books%2Fa.pdf&amp;page=9'>出处</a></div>"
+    let legacy = Review.source(["question": original, "answer": original])
+    precondition(legacy.file == "Books/a.pdf" && legacy.page == 9)
+    let ambiguous = Review.source(["question": original, "answer": original.replacingOccurrences(of: "page=9", with: "page=10")])
+    precondition(ambiguous.file == nil && ambiguous.url == nil)
+    for file in ["../secret.pdf", "%252e%252e/secret.pdf", "C:/secret.pdf", "/secret.pdf", "Books//a.pdf"] {
+        precondition(Review.source(["source_ref": "book:" + file + "#p1"]).file == nil)
+    }
+    precondition(Review.source(["source_url": "javascript:bad()"]).url == nil)
+    precondition(Review.source(["source_url": "https://user:pass@example.com/private"]).url == nil)
+    let epub = Review.source(["source": ["documentId": "localbook:epub", "location": ["kind": "epub", "cfi": "epubcfi(/6/4)"]]])
+    precondition(epub.file == nil && epub.locations.count == 1)
+}
 try await MainActor.run {
     let exported = try ReaderNativeAnkiProjection.html("**題**\n\n<ruby>漢字<rt>かんじ</rt></ruby>\n\n\\(x^2\\)\n\n![図](https://example.com/image.png)\n\n<img src='existing.png' onerror='bad()'><script>bad()</script>")
     for part in ["<strong>", "<ruby>", "\\(x^2\\)", "https://example.com/image.png", "existing.png"] { precondition(exported.contains(part), "Anki projection lost \(part): \(exported)") }

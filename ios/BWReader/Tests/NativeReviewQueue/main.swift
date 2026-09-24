@@ -101,7 +101,7 @@ typealias Q = ReaderNativeReviewQueue
         arrived.local = ["hasLocalCards": true, "entries": [], "dueTotal": 0]
         arrived.held?.resume(); arrived.held = nil
         let replacement = try await wait.value
-        precondition(replacement["kind"] as? String == "local" && arrived.cache == nil)
+        precondition(replacement["kind"] as? String == "local" && arrived.cache != nil)
         let scoring = Fixture()
         let navigation = Fixture()
         navigation.reply["cards"] = [["id": 7, "question": "one"], ["id": 8, "question": "two"]]
@@ -129,6 +129,7 @@ typealias Q = ReaderNativeReviewQueue
         var scoreSnapshot = loaded["snapshot"] as! Q.Object
         let olderIDs = Array(100...199)
         scoreSnapshot["completed_ids"] = olderIDs
+        _ = try scoring.service.save(scoreSnapshot, request: scoreLease)
         let beforeStage = scoring.cache
         let stageID = UUID().uuidString
         let card = (scoreSnapshot["cards"] as! [Q.Object])[0]
@@ -136,6 +137,8 @@ typealias Q = ReaderNativeReviewQueue
             "snapshot": scoreSnapshot, "card": card, "cardKey": "anki_card_7", "ease": 3, "revealed": true]
         var invalid = stageRequest; invalid["revealed"] = false
         do { _ = try scoring.service.stageRating(invalid); preconditionFailure("hidden answer rated") } catch {}
+        do { _ = try scoring.service.stageRating(stageRequest); preconditionFailure("caller revealed the answer without native state") } catch {}
+        _ = try scoring.service.interact(["lease": scoreLease, "cardId": "anki_card_7", "key": "reveal"])
         let staged = try scoring.service.stageRating(stageRequest)
         let shortened = staged["snapshot"] as! Q.Object
         precondition((shortened["cards"] as! [Q.Object]).isEmpty && scoring.cache == beforeStage)
@@ -152,6 +155,13 @@ typealias Q = ReaderNativeReviewQueue
         _ = try scoring.service.stageRating(stageRequest)
         _ = try scoring.service.takeRating(lease: scoreLease, stageID: stageID)
         do { _ = try scoring.service.takeRating(lease: scoreLease, stageID: stageID); preconditionFailure("taken twice") } catch {}
+        scoring.failSave = true
+        do { _ = try scoring.service.restoreRating(["lease": scoreLease, "stageId": stageID, "revealed": true]); preconditionFailure("failed restore lost its recovery record") } catch {}
+        scoring.failSave = false
+        let recovered = try scoring.service.restoreRating(["lease": scoreLease, "stageId": stageID, "revealed": true])
+        precondition(((recovered["snapshot"] as! Q.Object)["cards"] as! [Q.Object]).count == 1)
+        precondition(scoring.service.presentation()["showingAnswer"] as? Bool == true)
+        do { _ = try scoring.service.restoreRating(["lease": scoreLease, "stageId": stageID, "revealed": true]); preconditionFailure("same rejected score restored twice") } catch {}
 
         let localScore = Fixture(); localScore.local = ["hasLocalCards": true, "entries": [], "dueTotal": 0]
         let localLease = try await localScore.service.load(localScore.input())["request"] as! String
@@ -159,12 +169,38 @@ typealias Q = ReaderNativeReviewQueue
         let sibling: Q.Object = ["entity_id": "same-entity", "entity_index": 1, "_localReview": ["wasDue": false]]
         var localSnapshot = scoreSnapshot
         localSnapshot["cards"] = [first, sibling]; localSnapshot["due_total"] = 0
+        _ = try localScore.service.save(localSnapshot, request: localLease)
+        _ = try localScore.service.interact(["lease": localLease, "cardId": "same-entity_i0", "key": "reveal"])
         let localID = UUID().uuidString
         let localStage = try localScore.service.stageRating(["lease": localLease, "stageId": localID,
             "snapshot": localSnapshot, "card": first, "cardKey": "same-entity:0", "ease": 1, "revealed": true])
         let localRestored = try localScore.service.undoRating(["lease": localLease, "stageId": localID,
             "snapshot": localStage["snapshot"]!])["snapshot"] as! Q.Object
         precondition((localRestored["cards"] as! [Q.Object]).count == 2 && localRestored["due_total"] as? Int == 0)
+        var stale = localSnapshot; stale["index"] = 1
+        do {
+            _ = try localScore.service.stageRating(["lease": localLease, "stageId": UUID().uuidString,
+                "snapshot": stale, "card": sibling, "cardKey": "same-entity:1", "ease": 3, "revealed": true])
+            preconditionFailure("caller replaced the authoritative cursor")
+        } catch {}
+        let projected = try ReaderNativeReviewCards.local(["record": ["id": "card_abcd", "entityRev": 9, "stateRev": 3,
+            "source": ["documentId": "localbook:book", "location": ["page": 4]]],
+            "card": ["type": "cloze", "cloze": "{{c1::東京::都市}}へ行く", "deck": "Japanese"],
+            "cardIndex": 2, "due": true, "state": ["review": ["ease": 3], "projections": ["anki": ["pi-legacy": [
+                "status": "succeeded", "cardIds": [7654]]]]]])
+        precondition(projected["question"] as? String == "<b>[…]</b>へ行く")
+        precondition(projected["answer"] as? String == "<b>東京</b>へ行く")
+        precondition(projected["entity_index"] as? Int64 == 2 && projected["_legacyExternalCardId"] as? Int64 == 7654)
+        precondition(ReaderNativeReviewCards.stableID(projected) == "card_abcd_i2")
+        precondition(ReaderNativeReviewCards.stableID(["id": 17, "entity_id": "same", "entity_index": 2]) == "anki_card_17")
+        precondition((projected["_localReview"] as! Q.Object)["contentKeys"] as? [String] == ["cloze", "deck", "type"])
+        // Native callers may omit their former duplicate snapshot entirely.
+        let stagedWithoutMirror = try localScore.service.stageRating(["lease": localLease, "stageId": localID,
+            "card": first, "cardKey": "same-entity:0", "ease": 1, "revealed": true])
+        localScore.service.discardRating(lease: localLease, stageID: localID)
+        _ = stagedWithoutMirror
+        let restoredSelection = try localScore.service.selectCard(["lease": localLease, "current": first, "target": sibling])
+        precondition((restoredSelection["snapshot"] as! Q.Object)["index"] as? Int == 1)
         _ = try await localScore.service.load(localScore.input(page: 9))
         do { _ = try localScore.service.stageRating(["lease": localLease, "stageId": localID,
             "snapshot": localSnapshot, "card": first, "cardKey": "same-entity:0", "ease": 1, "revealed": true])
@@ -195,6 +231,60 @@ typealias Q = ReaderNativeReviewQueue
         let cancelledAnswer = Fixture(); cancelledAnswer.transportError = URLError(.cancelled)
         let cancelledReceipt = try await cancelledAnswer.service.answer(payload)
         precondition(cancelledReceipt["retryable"] as? Bool == false)
+
+        let editing = Fixture()
+        var canonical: Q.Object = ["id": "card_abcd", "entityRev": 1, "stateRev": 1,
+            "cards": [["type": "basic", "front": "原题", "back": "原答案"]],
+            "states": ["0": ["phase": "confirmed", "review": ["status": "new"]]], "source": [:]]
+        let reopening = Fixture()
+        func entry(_ id: String, _ answer: String) -> Q.Object {
+            var record = canonical; record["id"] = id
+            let card: Q.Object = ["type": "basic", "front": "题目", "back": answer]
+            return ["record": record, "card": card, "state": ["phase": "confirmed"], "cardIndex": 0, "due": false]
+        }
+        reopening.local = ["hasLocalCards": true, "dueTotal": 0, "entries": [entry("card_one", "旧答案"), entry("card_two", "旧答案")]]
+        let reopenedInput = reopening.input()
+        let reopenedLoad = try await reopening.service.load(reopenedInput)
+        let reopenedCards = (reopenedLoad["snapshot"] as! Q.Object)["cards"] as! [Q.Object]
+        _ = try reopening.service.selectCard(["lease": reopenedInput["request"]!, "current": reopenedCards[0], "target": reopenedCards[1]])
+        reopening.local["entries"] = [entry("card_two", "新答案"), entry("card_one", "旧答案")]
+        let resumed = try await reopening.service.load(reopening.input(force: false))["snapshot"] as! Q.Object
+        precondition(resumed["index"] as? Int == 0)
+        precondition((resumed["cards"] as! [Q.Object])[0]["answer"] as? String == "新答案", "resumed cached card content")
+        let sourceCard = try reopening.service.currentCard(context: "ctx-book-4", cardID: "card_two_i0")
+        precondition(sourceCard["entity_id"] as? String == "card_two")
+        do { _ = try reopening.service.currentCard(context: "ctx-book-4", cardID: "card_one_i0"); preconditionFailure("old source button admitted") } catch {}
+        reopening.failSave = true
+        do { _ = try await reopening.service.load(reopening.input(force: false)); preconditionFailure("resume save failure hidden") } catch {}
+        editing.local = ["hasLocalCards": true, "dueTotal": 0, "entries": [["record": canonical,
+            "card": (canonical["cards"] as! [Q.Object])[0], "state": (canonical["states"] as! Q.Object)["0"]!,
+            "cardIndex": 0, "due": false]]]
+        let editInput = editing.input(), editLease = editInput["request"] as! String
+        let editingLoad = try await editing.service.load(editInput)
+        _ = try editing.service.save(editingLoad["snapshot"] as! Q.Object, request: editLease)
+        _ = try editing.service.interact(["lease": editLease, "key": "reveal", "cardId": "card_abcd_i0"])
+        canonical["stateRev"] = 2
+        _ = try editing.service.reconcile(id: "card_abcd", record: canonical, request: editLease)
+        precondition(editing.service.presentation()["showingAnswer"] as? Bool == true, "metadata refresh hid the answer")
+        let editingSnapshot = try editing.service.peek()!
+        let editingCard = (editingSnapshot["cards"] as! [Q.Object])[0]
+        let editingStage = UUID().uuidString
+        _ = try editing.service.stageRating(["lease": editLease, "stageId": editingStage, "card": editingCard,
+            "cardKey": "card_abcd_i0", "ease": 3, "revealed": true])
+        canonical["entityRev"] = 2
+        canonical["cards"] = [["type": "basic", "front": "改后的题", "back": "原答案"]]
+        editing.failSave = true
+        do { _ = try editing.service.reconcile(id: "card_abcd", record: canonical, request: editLease); preconditionFailure("failed reconciliation changed the queue") } catch {}
+        precondition(editing.service.presentation()["count"] as? Int == 0)
+        editing.failSave = false
+        let revised = try editing.service.reconcile(id: "card_abcd", record: canonical, request: editLease)
+        precondition(revised["discardedStageId"] as? String == editingStage)
+        precondition(editing.service.presentation()["showingAnswer"] as? Bool == false)
+        precondition((editing.service.presentation()["current"] as! Q.Object)["front"] as? String == "改后的题")
+        do { _ = try editing.service.takeRating(lease: editLease, stageID: editingStage); preconditionFailure("changed card kept its former staged score") } catch {}
+        canonical["deleted"] = true
+        _ = try editing.service.reconcile(id: "card_abcd", record: canonical, request: editLease)
+        precondition(editing.service.presentation()["count"] as? Int == 0)
         print("Native review acquisition, reversible staging and failure recovery passed")
     }
 }

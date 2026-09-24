@@ -18,6 +18,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -106,6 +107,68 @@ class TypedTests(unittest.TestCase):
         self.assertNotIn("typedPrefix", s)
         self.assertNotIn("用户打字", s["prompt"] + s["backendThreadInstructions"])
         self.assertIn("前文。", s["prompt"])
+
+    def _attachment(self, root, ident="a" * 32, preview=True):
+        directory = root / "assistant-attachments" / ident
+        directory.mkdir(parents=True)
+        (directory / "original.png").write_bytes(b"original")
+        (directory / "metadata.json").write_text(json.dumps({"id": ident, "name": "图.png", "mime": "image/png",
+            "bytes": 8, "storedName": "original.png", "sha256": "unused"}), encoding="utf-8")
+        if preview:
+            (directory / "preview.jpg").write_bytes(b"preview")
+        return ident
+
+    def test_image_is_visual_input_and_retry_does_not_start_again(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(vcr, "BWREADER_DIR", Path(d)), patch.object(vcr, "BASE", Path(d) / "voice"):
+            ident = self._attachment(Path(d))
+            r = self._runner(connected=False, busy=False)
+            first = asyncio.run(r.typed("看看这张图", [ident], "b" * 32))
+            again = asyncio.run(r.typed("看看这张图", [ident], "b" * 32))
+            self.assertTrue(first["ok"])
+            self.assertEqual(first, again)
+            self.assertEqual(len(r.app.calls), 1)
+            content = r.app.calls[0][1]["input"]
+            self.assertEqual(content[1], {"type": "localImage", "path": str(Path(d) / "assistant-attachments" / ident / "preview.jpg")})
+            self.assertIn("original.png", content[0]["text"])
+            with self.assertRaisesRegex(ValueError, "内容不一致"):
+                asyncio.run(r.typed("另一个问题", [ident], "b" * 32))
+
+    def test_file_only_message_is_valid_without_fake_image_input(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(vcr, "BWREADER_DIR", Path(d)), patch.object(vcr, "BASE", Path(d) / "voice"):
+            ident = self._attachment(Path(d), preview=False)
+            r = self._runner(connected=False, busy=False)
+            self.assertTrue(asyncio.run(r.typed("", [ident], "c" * 32))["ok"])
+            self.assertEqual(len(r.app.calls[0][1]["input"]), 1)
+
+    def test_attachment_steer_failure_never_falls_back_to_another_turn(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(vcr, "BWREADER_DIR", Path(d)), patch.object(vcr, "BASE", Path(d) / "voice"):
+            ident = self._attachment(Path(d))
+            r = self._runner(connected=False, busy=True)
+            r.settings["turnSteerEnabled"] = True
+            async def uncertain(method, params, timeout=None):
+                r.app.calls.append((method, params))
+                raise TimeoutError("reply lost")
+            r.app.call = uncertain
+            result = asyncio.run(r.typed("图", [ident], "d" * 32))
+            self.assertEqual(result["reason"], "outcome-unknown")
+            self.assertEqual(len(r.app.calls), 1)
+            self.assertEqual(r.app.calls[0][0], "turn/steer")
+            # A new process sees the persisted intent, too.
+            second = self._runner(connected=False, busy=False)
+            self.assertFalse(asyncio.run(second.typed("图", [ident], "d" * 32))["ok"])
+            self.assertEqual(second.app.calls, [])
+
+    def test_unmanaged_ids_and_missing_files_never_dispatch(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(vcr, "BWREADER_DIR", Path(d)), patch.object(vcr, "BASE", Path(d) / "voice"):
+            r = self._runner(connected=False, busy=False)
+            for ids in [["../metadata.json"], ["a" * 32] * 11, ["a" * 32, "a" * 32], [123]]:
+                with self.assertRaises(ValueError):
+                    asyncio.run(r.typed("图", ids, "d" * 32))
+            ident = self._attachment(Path(d))
+            (Path(d) / "assistant-attachments" / ident / "original.png").unlink()
+            with self.assertRaises(ValueError):
+                asyncio.run(r.typed("图", [ident], "d" * 32))
+            self.assertEqual(r.app.calls, [])
 
 
 if __name__ == "__main__":

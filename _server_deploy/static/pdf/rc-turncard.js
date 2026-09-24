@@ -1211,4 +1211,139 @@
     onOpsChange: function (fn) { if (typeof fn === 'function') _opsListeners.push(fn); },
     opsChanged: _opsChanged,
   };
+
+  // In the App, the functions below are compatibility views of Swift-owned
+  // turns. They enqueue commands, then reuse existing artifact action handles
+  // from the committed projection. The browser keeps the synchronous owner.
+  if (window.__bwNativeTurns) {
+    var nativeTurns = window.__bwNativeTurns, nativeEpoch = 0, nativeApply = false;
+    var original = Object.assign({}, RC.turnCard), changeListener = null;
+    function enabled() { return _nativePresentation(); }
+    function sendTurn(command) {
+      command.generation = nativeEpoch;
+      nativeTurns.enqueue(command);
+    }
+    function ensure(tid, target, options) {
+      var t = open(tid, target, options);
+      if (t && !t._nativeOpened) {
+        t._nativeOpened = true;
+        sendTurn({action:'open',tid:t.tid,meta:t.meta,historyReplay:t.historyReplay});
+      }
+      return t;
+    }
+    function change(tid, action, values) {
+      var t = ensure(tid);
+      if (t) sendTurn(Object.assign({action:action,tid:t.tid},values || {}));
+      return t;
+    }
+    function disposition(p) { return JSON.stringify((p.items || []).map(function (it) { return [!!it.undone,!!it.gone]; })); }
+    function commitOperations(tid) {
+      var t = _lookup(tid), updates = [];
+      if (!t) return;
+      t.parts.forEach(function (p) {
+        if (p.kind !== 'hlcard' || !p._nativeID || p._nativeDisposition === disposition(p)) return;
+        p._nativeDisposition = disposition(p);
+        updates.push({id:p._nativeID,items:(p.items || []).map(function (it,index) { return {index:index,undone:!!it.undone,gone:!!it.gone}; })});
+      });
+      if (updates.length) sendTurn({action:'operationState',tid:t.tid,parts:updates});
+    }
+    function acceptTurns(result) {
+      // Each batch is committed before this callback. A reset submitted while
+      // an older batch was running must not remount the older conversation.
+      if (result.generation !== nativeEpoch) return;
+      nativeApply = true;
+      try {
+        (result.removed || []).forEach(function (id) { original.drop(id); });
+        (result.turns || []).forEach(function (state) {
+          var t = _turns[state.id];
+          if (!t || !t._nativeOpened) return;
+          var previous = new Map(t.parts.map(function (p) { return [p._nativeID,p]; })), next = [];
+          (state.parts || []).forEach(function (value) {
+            var p = previous.get(value._nativeID), oldItems = p && p.kind === 'hlcard' ? JSON.stringify(p.items) : '';
+            if (p) {
+              previous.delete(value._nativeID);
+              Object.keys(p).forEach(function (key) { if (key !== '_el' && key !== '_nativeDisposition' && !(key in value)) delete p[key]; });
+              Object.assign(p,value);
+              if (p.kind === 'hlcard' && oldItems !== JSON.stringify(p.items)) _rerenderPart(t,p);
+            } else {
+              p = value;
+              // Reconciliation is a replay: it must not register a new draft
+              // simply because history attached an already existing entity.
+              var replay = t.historyReplay;
+              t.historyReplay = state.historyReplay || p.origin === 'runner';
+              try { var el = renderPart(t,p); if (el) p._el = el; }
+              finally { t.historyReplay = replay; }
+            }
+            if (p.kind === 'hlcard') p._nativeDisposition = disposition(p);
+            next.push(p);
+          });
+          previous.forEach(function (p) { try { p._el?.remove(); } catch (_) {} });
+          t.parts = next; t.draft = next.find(function (p) { return p._nativeID === state.draft; }) || null;
+          t._drafts = Object.create(null);
+          Object.keys(state.drafts || {}).forEach(function (key) { var p = next.find(function (p) { return p._nativeID === state.drafts[key]; }); if (p) t._drafts[key] = p; });
+          t._cliPart = next.find(function (p) { return p._nativeID === state.cliPart; }) || null;
+          t.presentationTitle = state.title; t.presentationStatus = state.status; t.prog = state.progress;
+          t.meta = state.meta; t.taskId = state.taskId; t.orchTaskId = state.orchTaskId;
+          t._live = state.live; t._liveFinal = state.final; t._streamVersion = state.streamVersion;
+          t._nativePresentation = state.presentation; t._nativePersistedParts = state.persistedParts;
+          t.el.className = 'asst-msg ' + (state.presentation.role === 'user' ? 'asst-u' : 'asst-a') + ' rc-turn';
+          if (state.meta?.turnId) t.el.setAttribute('data-turn-id',state.meta.turnId);
+        });
+        _streamVersion = result.streamVersion;
+        if (result.current && _turns[result.current]) _cur = result.current;
+      } finally { nativeApply = false; }
+      (result.persist || []).forEach(function (tid) { if (_turns[tid] && changeListener) changeListener(tid); });
+      _opsChanged();
+      window.dispatchEvent(new CustomEvent('rc:native-turn-update'));
+    }
+    nativeTurns.connect(acceptTurns);
+    Object.defineProperty(RC.turnCard,'onChange',{configurable:true,
+      get:function () { return function (tid) {
+        if (!enabled()) { if (changeListener) changeListener(tid); return; }
+        if (!nativeApply) commitOperations(tid);
+        nativeTurns.settle().then(function () { if (changeListener && _lookup(tid)) changeListener(tid); }).catch(function () {});
+      }; },
+      set:function (fn) { changeListener = typeof fn === 'function' ? fn : null; }
+    });
+    function wrap(name, fn) { RC.turnCard[name] = function () { return enabled() ? fn.apply(null,arguments) : original[name].apply(null,arguments); }; }
+    wrap('open',ensure);
+    wrap('addPart',function (tid,part) { change(tid,'append',{part:part}); return null; });
+    wrap('draftText',function (tid,text,role,itemId,origin) { change(tid,'draft',{text:String(text || ''),role:role || 'assistant',itemId:itemId == null ? undefined : String(itemId),origin:origin || 'app'}); });
+    wrap('freezeDraft',function (tid,itemId,origin,role) { change(tid,'freeze',{itemId:itemId == null ? undefined : String(itemId),origin:origin || 'app',role:role || 'assistant'}); });
+    wrap('title',function (tid,text) { change(tid,'title',{text:text}); });
+    wrap('status',function (tid,text,done) { change(tid,'status',{text:text,done:!!done}); });
+    wrap('busy',function (tid,text) { change(tid,'busy',{text:text}); });
+    wrap('idle',function (tid) { change(tid,'idle'); });
+    wrap('setTaskId',function (tid,id) { change(tid,'task',{taskId:id}); });
+    wrap('setOrchTaskId',function (tid,id) { change(tid,'orchestrator',{taskId:id}); });
+    wrap('cliPart',function (tid,part) { change(tid,'cli',{part:part}); });
+    wrap('progress',function (tid,event) { var t = change(tid,'progress',{event:event}); return t?.prog || null; });
+    wrap('renderTurn',function (tid,parts,target,options) { var t = ensure(tid,target,options); if (!t) return null; sendTurn({action:'import',tid:t.tid,parts:parts || []}); return t.el; });
+    wrap('reconcile',function (tid,message,options) { var t = ensure(tid); if (!t) return null; sendTurn({action:'reconcile',tid:tid,message:message,options:options || {}}); return t.el; });
+    wrap('partsOf',function (tid) { return JSON.parse(JSON.stringify(_lookup(tid)?._nativePersistedParts || [])); });
+    wrap('presentationOf',function (tid) { return JSON.parse(JSON.stringify(_lookup(tid)?._nativePresentation || null)); });
+    wrap('drop',function (tid) { if (!_lookup(tid)) return false; sendTurn({action:'drop',tid:tid}); return original.drop(_lookup(tid).tid); });
+    wrap('rename',function (oldTid,newTid) {
+      var t = _turns[oldTid]; if (!t || !newTid || oldTid === newTid) return false;
+      sendTurn({action:'rename',tid:oldTid,newTid:newTid});
+      if (_turns[newTid]) {
+        // Move existing artifact handles before removing the old shell. The
+        // committed native merge decides which survive; no draft is registered twice.
+        var target = _turns[newTid];
+        t.parts.forEach(function (p) { if (p._el) target.bd.appendChild(p._el); });
+        target.parts = target.parts.concat(t.parts);
+        original.drop(oldTid);
+      }
+      else { delete _turns[oldTid]; t.tid = newTid; _turns[newTid] = t; t.el.setAttribute('data-turn',newTid); t.el.setAttribute('data-turn-id',newTid); }
+      if (_cur === oldTid) _cur = newTid; return true;
+    });
+    wrap('reset',function () { nativeEpoch++; sendTurn({action:'reset'}); original.reset(); });
+    wrap('prune',function () {
+      Object.keys(_turns).forEach(function (tid) {
+        var t = _turns[tid]; if (!t?.el?.isConnected) { sendTurn({action:'drop',tid:tid}); original.drop(tid); }
+      });
+      if (_cur && !_turns[_cur]) _cur = null;
+    });
+    RC.turnCard.settle = function () { return enabled() ? nativeTurns.settle() : Promise.resolve(); };
+  }
 })();

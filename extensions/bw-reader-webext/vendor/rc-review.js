@@ -63,6 +63,20 @@ if (window.__bwPwaProviderOnly) return;
   var _nativeDraftLease = '';
   var _nativeStageWork = null;
   var _nativeNavigationWork = null;
+  var _nativeRatingCommitWork = null;
+  var _nativeReconcileWork = Promise.resolve();
+  var _nativeQueuePresentation = null;
+
+  function _acceptNativeReviewState(state) {
+    if (!state || state.lease !== _nativeQueueLease || !Number.isSafeInteger(state.revision) ||
+        !Array.isArray(state.queueIds)) return;
+    if (_nativeQueuePresentation && _nativeQueuePresentation.lease === state.lease &&
+        state.revision <= _nativeQueuePresentation.revision) return;
+    _nativeQueuePresentation = state;
+    _showingAnswer = state.showingAnswer === true;
+    _cardExpanded = state.expanded !== false;
+    _improveMode = state.improveMode;
+  }
 
   function _nativeReviewUI() { return window.__BW_NATIVE_CONVERSATION_DATA__ === true; }
   function _nativeQueuePort() {
@@ -73,7 +87,18 @@ if (window.__bwPwaProviderOnly) return;
     if (!port) throw new Error('原生复习入口不可用');
     var response = await port.postMessage({ action: 'reviewQueue', request: Object.assign({ operation: operation }, values || {}) });
     if (!response || response.ok !== true) throw new Error(response && response.error || '原生复习请求未完成');
+    if (response.value && response.value.snapshot && response.nativeReviewState && _nativeQueuePresentation &&
+        response.nativeReviewState.lease === _nativeQueuePresentation.lease &&
+        response.nativeReviewState.revision < _nativeQueuePresentation.revision) throw new Error('复习队列已更新，请重试当前操作');
+    _acceptNativeReviewState(response.nativeReviewState);
     return response.value;
+  }
+  async function _nativeReviewInteraction(key, values) {
+    var lease = _nativeQueueLease, cardId = _current() ? _stableCardId(_current()) : '';
+    await Promise.all([_cacheWriteChain, _nativeReconcileWork]);
+    if (lease !== _nativeQueueLease || cardId !== (_current() ? _stableCardId(_current()) : '')) throw new Error('复习卡已变化');
+    await _nativeQueueCall('interact', Object.assign({ lease: lease, cardId: cardId, key: key }, values || {}));
+    render();
   }
   async function _nativeImprovementCall(operation, values) {
     var port = _nativeQueuePort();
@@ -898,6 +923,7 @@ if (window.__bwPwaProviderOnly) return;
         gid: record.id,
         cardIndex: cardIndex,
         contentFingerprint: _cardContentFingerprint(card),
+        contentKeys: Object.keys(card).sort(),
         entityRev: Number(record.entityRev || 0),
         stateRev: Number(record.stateRev || 0),
         review: Object.assign({}, state.review || {}),
@@ -930,6 +956,7 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function _acceptCardRepositoryChange(event) {
+    if (_nativeReviewUI()) return _reconcileNativeRecord(event);
     var entityId = String(event && event.cardId || '');
     var record = event && event.record;
     if (!entityId || !_queue.length) {
@@ -973,8 +1000,20 @@ if (window.__bwPwaProviderOnly) return;
       var next = _localReviewCard(
         record, nextCard, nextState, cardIndex, local.wasDue === true
       );
-      if (String(local.contentFingerprint || '') !==
-          next._localReview.contentFingerprint) {
+      function sameContent(left, right) {
+        if (left === right) return true;
+        if (!left || !right || typeof left !== 'object' || typeof right !== 'object' ||
+            Array.isArray(left) !== Array.isArray(right)) return false;
+        var keys = Object.keys(left);
+        return keys.length === Object.keys(right).length && keys.every(function (key) {
+          return Object.prototype.hasOwnProperty.call(right, key) && sameContent(left[key], right[key]);
+        });
+      }
+      var previousContent = Array.isArray(local.contentKeys) ? Object.fromEntries(local.contentKeys.map(function (key) {
+        return [key, queued[key]];
+      })) : null;
+      if (previousContent ? !sameContent(previousContent, nextCard) :
+          String(local.contentFingerprint || '') !== next._localReview.contentFingerprint) {
         _queue[queueIndex] = next;
         changedContent = true;
         if (queueIndex === _idx) changedCurrentContent = true;
@@ -1027,6 +1066,34 @@ if (window.__bwPwaProviderOnly) return;
     return { updated: true, rendered: true };
   }
 
+  function _reconcileNativeRecord(event) {
+    var entityId = String(event && event.cardId || '');
+    if (!entityId || (!_queue.length && !_stagedRating)) return Promise.resolve({ updated: false, rendered: false });
+    var lease = _nativeQueueLease, epoch = _queueRequestEpoch;
+    // Capture predecessors before installing this work; later UI actions may
+    // join it without creating a cycle with a repository event from that action.
+    var before = Promise.all([_nativeReconcileWork, _nativeStageWork, _nativeNavigationWork, _cacheWriteChain]);
+    var work = before.then(async function () {
+      if (lease !== _nativeQueueLease || epoch !== _queueRequestEpoch) return { updated: false, rendered: false };
+      var result = await _nativeQueueCall('reconcile', { lease: lease, entityId: entityId });
+      if (lease !== _nativeQueueLease || epoch !== _queueRequestEpoch || !result || !result.updated) return { updated: false, rendered: false };
+      if (result.discardedStageId && _stagedRating && _stagedRating.nativeStageID === result.discardedStageId) {
+        delete _ratingPending[_stagedRating.pendingKey]; _stagedRating = null;
+        _presentationNotice = '卡片已更新，请按新内容重新评分';
+      }
+      if (result.changedCurrent) _rememberAndDeactivateSelections();
+      _applyQueueSnapshot(result.snapshot, !result.changedCurrent);
+      _showingAnswer = _nativeQueuePresentation && _nativeQueuePresentation.showingAnswer === true;
+      render(); _activateCurrentSelections(); _notifyAssistant('card-updated');
+      return { updated: true, rendered: _mode };
+    }).catch(function (error) {
+      if (lease === _nativeQueueLease && epoch === _queueRequestEpoch) _toast('复习卡刷新失败：' + String(error && error.message || error));
+      return { updated: false, rendered: false, error: String(error && error.message || error) };
+    });
+    _nativeReconcileWork = work;
+    return work;
+  }
+
   // The Voice/Codex mutation tool already executes inside the owning Reader
   // page.  Ask the open Review surface to consume the canonical write
   // directly instead of relying only on an IndexedDB/BroadcastChannel change
@@ -1042,6 +1109,10 @@ if (window.__bwPwaProviderOnly) return;
     }
     var queueIndex = _localQueueIndex(entityId, cardIndex);
     var wasCurrent = _mode && queueIndex >= 0 && queueIndex === _idx;
+    if (_nativeReviewUI()) return _reconcileNativeRecord({ cardId: entityId }).then(function (result) {
+      return { status: result.error ? 'failed' : queueIndex < 0 ? 'not-loaded' : wasCurrent ? 'rendered' : 'cached',
+        rendered: result.rendered === true };
+    });
     var result = _acceptCardRepositoryChange({
       contract: 'reader-card-repository/1',
       cardId: entityId,
@@ -1421,7 +1492,7 @@ if (window.__bwPwaProviderOnly) return;
     body.appendChild(status);
   }
 
-  function _applyQueueSnapshot(snapshot) {
+  function _applyQueueSnapshot(snapshot, preserveCardUI) {
     _queue = snapshot.cards.slice();
     _idx = Math.max(
       0,
@@ -1435,9 +1506,11 @@ if (window.__bwPwaProviderOnly) return;
     _completed = Array.isArray(snapshot.completed_ids)
       ? snapshot.completed_ids.slice(-100)
       : [];
-    _showingAnswer = false;
-    _improveExpanded = false;
-    _invalidateCardRequests(true);
+    if (!preserveCardUI) {
+      _showingAnswer = false;
+      _improveExpanded = false;
+      _invalidateCardRequests(true);
+    }
   }
 
   async function loadQueue(force) {
@@ -1687,11 +1760,7 @@ if (window.__bwPwaProviderOnly) return;
         rejectedIds: _rejectedForContext(contextKey).map(function (item) { return String(item.card && item.card.id); }) });
       if (!_queueRequestCurrent(epoch, contextKey)) return;
       if (!result || result.request !== request) throw new Error('复习返回轮次不匹配');
-      var snapshot = result.kind === 'local'
-        ? _queueSnapshot(contextKey, result.entries.map(function (entry) {
-            return _localReviewCard(entry.record, entry.card, entry.state, entry.cardIndex, entry.due === true);
-          }), 0, result.dueTotal, 0, [])
-        : result.snapshot;
+      var snapshot = result.snapshot;
       snapshot = _consumeRejectedSnapshot(contextKey, snapshot);
       snapshot.native_queue_lease = request;
       _applyQueueSnapshot(snapshot);
@@ -2151,6 +2220,7 @@ if (window.__bwPwaProviderOnly) return;
     if (next === _idx) return Promise.resolve(false);
     var target = _queue[next], targetId = _stableCardId(target);
     var epoch = _queueRequestEpoch, contextKey = _contextCacheKey, lease = _nativeQueueLease;
+    var reconciled = _nativeReconcileWork;
     function current() { return epoch === _queueRequestEpoch && contextKey === _contextCacheKey && lease === _nativeQueueLease; }
     _nativeNavigationWork = Promise.resolve().then(async function () {
       var staged = !!_stagedRating;
@@ -2158,7 +2228,7 @@ if (window.__bwPwaProviderOnly) return;
       if (!current() || staged && committed === false) return false;
       // Drain prior saves before the native selection transaction; otherwise
       // an older queued recovery write could restore the previous index.
-      await _cacheWriteChain;
+      await Promise.all([_cacheWriteChain, reconciled]);
       if (!current()) return false;
       target = _queue.find(function (card) { return _stableCardId(card) === targetId; });
       if (!target || !_current()) return false;
@@ -2218,6 +2288,13 @@ if (window.__bwPwaProviderOnly) return;
     if (_nativeNavigationWork) return _nativeNavigationWork.then(_showAnswer);
     if (_nativeStageWork) return _nativeStageWork.then(_showAnswer);
     if (!_current() || _showingAnswer) return;
+    if (_nativeReviewUI()) {
+      var lease = _nativeQueueLease, cardId = _stableCardId(_current());
+      return _commitStagedRating('show-answer').then(function () {
+        if (lease !== _nativeQueueLease || cardId !== (_current() ? _stableCardId(_current()) : '')) return;
+        return _nativeReviewInteraction('reveal');
+      });
+    }
     _commitStagedRating('show-answer');
     _showingAnswer = true;
     render();
@@ -2532,9 +2609,9 @@ if (window.__bwPwaProviderOnly) return;
         }));
       } catch (_) {}
       return true;
-    }).catch(function (error) {
+    }).catch(async function (error) {
       delete _ratingPending[pendingKey];
-      _restoreCommittedStage(stage);
+      await _restoreCommittedStage(stage);
       _toast('评分未保存，卡片已放回当前队列：' +
         String(error && error.message || '未知错误'));
       return false;
@@ -2594,6 +2671,7 @@ if (window.__bwPwaProviderOnly) return;
 
   function _restoreCommittedStage(stage) {
     if (!stage) return false;
+    if (_nativeReviewUI() && stage.nativeStageID) return _restoreNativeTakenRating(stage, true);
     var card = stage.card;
     _patchSharedCard(card, {
       _st: 'learn',
@@ -2646,8 +2724,30 @@ if (window.__bwPwaProviderOnly) return;
     return restored;
   }
 
+  async function _restoreNativeTakenRating(stage, revealed) {
+    if (stage.contextKey !== _contextCacheKey || stage.nativeQueueLease !== _nativeQueueLease) return false;
+    try {
+      await _cacheWriteChain;
+      var result = await _nativeQueueCall('restoreRating', { lease: stage.nativeQueueLease,
+        stageId: stage.nativeStageID, revealed: revealed });
+      if (stage.contextKey !== _contextCacheKey || stage.nativeQueueLease !== _nativeQueueLease) return false;
+      _rememberAndDeactivateSelections(); _invalidateCardRequests(true);
+      _applyQueueSnapshot(result.snapshot);
+      _showingAnswer = revealed; _improveExpanded = false;
+      delete _ratingPending[stage.pendingKey];
+      _patchSharedCard(stage.card, { _st: 'learn', _showBack: revealed,
+        _ratingPending: false, _syncPending: false }, 'review-staged-restored');
+      render(); _activateCurrentSelections(); _notifyAssistant('rating-restored');
+      return true;
+    } catch (error) {
+      _toast('评分恢复未完成，请重新读取复习队列：' + String(error && error.message || error));
+      return false;
+    }
+  }
+
   function _commitStagedRating(reason) {
     if (_nativeStageWork) return _nativeStageWork.then(function () { return _commitStagedRating(reason); });
+    if (_nativeRatingCommitWork) return _nativeRatingCommitWork;
     var stage = _stagedRating;
     if (!stage) return Promise.resolve(false);
     _stagedRating = null;
@@ -2664,20 +2764,24 @@ if (window.__bwPwaProviderOnly) return;
     } catch (error) {
       operation = Promise.reject(error);
     }
-    return Promise.resolve(operation).catch(async function (error) {
-      if (stage.nativeStageID) {
-        try { await _nativeQueueCall('discardRating', { lease: stage.nativeQueueLease, stageId: stage.nativeStageID }); } catch (_) {}
-      }
-      _restoreCommittedStage(stage);
+    var committing = Promise.resolve(operation).catch(async function (error) {
+      await _restoreCommittedStage(stage);
       _toast('上一评分未保存，卡片已放回：' +
         String(error && error.message || '未知错误'));
       return false;
-    }).then(function (result) {
+    }).then(async function (result) {
+      if (stage.nativeStageID && result !== false) {
+        await _cacheWriteChain;
+        await _nativeQueueCall('completeRating', { lease: stage.nativeQueueLease, stageId: stage.nativeStageID });
+      }
       return result;
     }).finally(function () {
       _ratingCommitBusy = Math.max(0, _ratingCommitBusy - 1);
+      if (_nativeRatingCommitWork === committing) _nativeRatingCommitWork = null;
       _publishPresentation();
     });
+    if (_nativeReviewUI()) _nativeRatingCommitWork = committing;
+    return committing;
   }
 
   function _answerCurrent(ease) {
@@ -2742,7 +2846,13 @@ if (window.__bwPwaProviderOnly) return;
     var cardVersion = JSON.stringify(card);
     var request = { lease: _nativeQueueLease, stageId: window.crypto.randomUUID(), snapshot: _currentQueueSnapshot(),
       card: card, cardKey: cardKey, revealed: _showingAnswer, ease: ease };
-    _nativeStageWork = _nativeQueueCall('stageRating', request).then(async function (result) {
+    _nativeStageWork = Promise.all([_cacheWriteChain, _nativeReconcileWork]).then(function () {
+      if (epoch !== _queueRequestEpoch || contextKey !== _contextCacheKey ||
+          cardKey !== _cardKey(_current()) || cardVersion !== JSON.stringify(_current())) {
+        throw new Error('复习卡已更新，请重新评分');
+      }
+      return _nativeQueueCall('stageRating', request);
+    }).then(async function (result) {
       if (epoch !== _queueRequestEpoch || contextKey !== _contextCacheKey || cardKey !== _cardKey(_current()) || cardVersion !== JSON.stringify(_current())) {
         // Discard a volatile stage invalidated by a repository update. No
         // scheduler has received it and the recovery queue still has the card.
@@ -2856,7 +2966,7 @@ if (window.__bwPwaProviderOnly) return;
           }, 'review-accepted');
         }
         delete _ratingPending[pendingKey];
-    }).catch(function (error) {
+    }).catch(async function (error) {
       if (
         _isRetryableSyncError(error) &&
         RC.outbox && typeof RC.outbox.send === 'function'
@@ -2880,7 +2990,7 @@ if (window.__bwPwaProviderOnly) return;
           return;
         } catch (_) {}
       }
-      var restored = _restoreRejectedAnswer(
+      var restored = stage.nativeStageID ? await _restoreNativeTakenRating(stage, false) : _restoreRejectedAnswer(
         card,
         originalIndex,
         ease,
@@ -2891,6 +3001,7 @@ if (window.__bwPwaProviderOnly) return;
         '答题同步失败' + (restored ? '，卡片已放回复习队列' : '') + '：' +
         String(error && error.message || '未知错误')
       );
+      return false;
     });
   }
 
@@ -3828,6 +3939,9 @@ if (window.__bwPwaProviderOnly) return;
   function setMode(on) {
     if (_nativeStageWork) return _nativeStageWork.then(function () { return setMode(on); });
     on = on === true || on === 'review';
+    if (_nativeReviewUI() && !on && _mode && (_stagedRating || _nativeRatingCommitWork)) {
+      return _commitStagedRating('mode-exit').then(function () { return setMode(false); });
+    }
     if (!_mounted && !mount()) {
       _mode = on;
       return _mode ? 'review' : 'normal';
@@ -3865,7 +3979,7 @@ if (window.__bwPwaProviderOnly) return;
     _notifyAssistant('mode-toggle');
     if (_mode) {
       var activeContextKey = _clientContextKey(_currentContext());
-      if (!_queue.length || activeContextKey !== _contextCacheKey) {
+      if (_nativeReviewUI() || !_queue.length || activeContextKey !== _contextCacheKey) {
         loadQueue(false);
       } else {
         // Hidden repository/tool updates refresh the queue without touching a
@@ -4066,20 +4180,21 @@ if (window.__bwPwaProviderOnly) return;
   // AI snapshotState. Original cards, scheduling and staged writes stay here.
   function _presentationState() {
     var card = _current();
-    var current = card ? Object.assign({ id: _stableCardId(card) }, _cardForAssistant(card)) : null;
-    // 相邻两张的正文。原生那边横滑翻卡要跟手,两侧必须是**真内容**——
-    // 只给 id 的话滑出来是一片空白,看着就像卡坏了。队列判断仍在这里,
-    // 原生只负责画(2026-09-22:"左右滑动没有过渡效果直接是刷新")。
+    var native = _nativeReviewUI() && _nativeQueuePresentation && _nativeQueuePresentation.lease === _nativeQueueLease &&
+      _nativeQueuePresentation.index === _idx && _nativeQueuePresentation.count === _queue.length ? _nativeQueuePresentation : null;
+    var current = native ? native.current : card ? Object.assign({ id: _stableCardId(card) }, _cardForAssistant(card)) : null;
+    // Swift supplies original neighbouring faces together with the committed
+    // cursor. The browser keeps its own existing projection.
     function _neighbour(offset) {
       var item = _queue[_idx + offset];
       return item ? Object.assign({ id: _stableCardId(item) }, _cardForAssistant(item)) : null;
     }
-    return JSON.parse(JSON.stringify({
+    var state = {
       active: _mode, contextKey: _contextCacheKey, scope: _scopeMode,
       loading: _queueBusy, index: _idx, count: _queue.length,
       dueTotal: _dueTotal, relatedTotal: _relatedTotal,
-      queueIds: _queue.map(_stableCardId), current: current,
-      previous: _neighbour(-1), next: _neighbour(1),
+      queueIds: native ? native.queueIds : _queue.map(_stableCardId), current: current,
+      previous: native ? native.previous : _neighbour(-1), next: native ? native.next : _neighbour(1),
       deleteKind: card && card._localReview ? 'reader-card' : _legacyReviewNoteId(card) ? 'anki-note' : '',
       showingAnswer: _showingAnswer, expanded: _cardExpanded,
       canUndo: !!_stagedRating, ratingSaving: _ratingCommitBusy > 0 || !!_nativeStageWork || !!_nativeNavigationWork,
@@ -4087,7 +4202,9 @@ if (window.__bwPwaProviderOnly) return;
       improveExpanded: _improveExpanded, improveMode: _improveMode,
       selectedPairs: selectedPairs(), draft: _draftState, commits: _commitState,
       notice: _presentationNotice,
-    }));
+    };
+    if (native) Object.assign(state, native);
+    return JSON.parse(JSON.stringify(state));
   }
 
   function _presentationSelections(node, answer) {
@@ -4176,13 +4293,13 @@ if (window.__bwPwaProviderOnly) return;
     }
     else if (key === 'expanded') {
       if (typeof command.enabled !== 'boolean') throw new Error('展开状态无效');
-      _cardExpanded = command.enabled;
-      render();
+      if (_nativeReviewUI()) await _nativeReviewInteraction('expanded', { enabled: command.enabled });
+      else { _cardExpanded = command.enabled; render(); }
     } else if (key === 'improveMode') {
       if (!['concise', 'verbose'].includes(command.value)) throw new Error('草稿模式无效');
       if (_improveMode !== command.value) _invalidateCardRequests(true);
-      _improveMode = command.value;
-      render();
+      if (_nativeReviewUI()) await _nativeReviewInteraction('improveMode', { value: command.value });
+      else { _improveMode = command.value; render(); }
     } else if (key === 'prepareDraft') {
       if (!['anki', 'note', 'all'].includes(command.target)) throw new Error('草稿目标无效');
       _commitStagedRating('prepare-draft');
@@ -4255,6 +4372,7 @@ if (window.__bwPwaProviderOnly) return;
     show: _showAnswer,
     answer: _answerCurrent,
     setCardExpanded: function (expanded) {
+      if (_nativeReviewUI()) return _nativeReviewInteraction('expanded', { enabled: expanded !== false });
       _cardExpanded = expanded !== false;
       render();
       return _cardExpanded;
@@ -4269,6 +4387,7 @@ if (window.__bwPwaProviderOnly) return;
       var nextMode = mode === 'concise' ? 'concise' : 'verbose';
       if (nextMode !== _improveMode) {
         _invalidateCardRequests(true);
+        if (_nativeReviewUI()) return _nativeReviewInteraction('improveMode', { value: nextMode });
         _improveMode = nextMode;
       }
       render();

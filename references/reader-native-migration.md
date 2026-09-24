@@ -555,3 +555,48 @@ does not rebuild the request on reconnect, and never retries an uncertain local 
 This closes a bypass introduced by replacing window.fetch with URLSession. Its temporary
 document adapter still handles the existing page-card saga; this is not full conversation
 migration. No installable migration release has been published.
+
+### Candidate work after `c4c2cebe` (not compiled or released)
+
+The page-card saga, turn state/history coordination, PDF search/navigation and assistant
+settings now have native implementations in the candidate working tree. The clear-history
+barrier drains pending turn writes and only discards handles after an explicit successful
+server acknowledgement. Native turn adapter/clear-boundary checks passed locally. Per the
+user's instruction, subsequent full App builds are deferred until the code changes are ready
+together; the successful Apple run `35967857219` does **not** validate these newer changes.
+
+The composer uses UIKit marked-text state for Chinese IME Return handling instead of inferring
+Send from a newline binding change. Paste, dictation and Shift-Return keep their distinct input
+paths. Candidate media attachments sit above the composer, with format icons and image
+thumbnails, using the existing attachment visual style. Images open the existing PencilKit
+editor full-screen; exporting a marked-up attachment crops to the original image bounds and
+creates a new attachment identity. Text is optional. Ordinary conversation images are added
+as `localImage` input; the separate review conversation retains its destination and receives
+file references. Original files are streamed into the server-managed `assistant-attachments`
+directory (64 MiB/file, 10 files/message), with immutable upload ids and optional JPEG previews.
+The sender persists message intent before dispatch and does not replay an uncertain image/file
+submission as a new turn. Eight typed-input checks and 52 existing turn-container checks passed.
+The actual realtime-completion caller is now connected to the native history writer (an
+earlier candidate inserted that call in an unreachable persistence branch). Twelve focused
+turn/clear/mode checks now cover the real completion entry, failed freeze/save, tab switches
+and browser-host behavior. Current EPUB no longer has a separate per-book voice-history
+override; that old comment was stale, not an additional active migration requirement.
+
+These attachment routes require the matching ReaderPC server update before App rollout.
+Neither server changes nor this candidate App have been installed. The attachment server's
+C# Release compilation passed with no warnings. Swift compilation, actual photo picking,
+Chinese keyboard interaction, Pencil editing and real delivery remain unverified. The broader
+migration still contains conversation/artifact action adapters and a
+review compatibility controller; this entry does not declare all hidden WebKit business logic
+removed. EPUB body and localized video WebKit remain the user-approved exceptions. The voice
+transport comparison is investigation only; no WebRTC/network migration is included here.
+
+The review queue now owns answer visibility, staged-rating restoration, native card faces
+and canonical refresh reconciliation. Opening a card's PDF/source link resolves its canonical
+provenance in Swift; EPUB anchors stay with the retained EPUB renderer. Local queue reopen
+keeps its cursor by stable identity while using newly read card content, and persists before
+presenting. The composer also reserves photo-library import slots before asynchronous iCloud
+exports, preventing Send from racing ahead of selected images. Software IME composition
+confirmation is held through the current event loop, alongside hardware-key marked-text
+handling. These changes join the same consolidated Apple verification; they are not an
+installed release or proof that every compatibility adapter has been removed.

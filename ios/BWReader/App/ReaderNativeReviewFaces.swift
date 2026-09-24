@@ -6,6 +6,66 @@ import SwiftSoup
 @MainActor
 enum ReaderNativeReviewFaces {
     struct Faces { let front: String; let back: String; let mode: String }
+    struct Source {
+        let file: String?
+        let page: Int?
+        let documentID: String
+        let locations: [[String: Any]]
+        let url: URL?
+    }
+
+    /// Resolve the canonical card's original provenance without creating HTML
+    /// nodes in a hidden webview. Ambiguous legacy material links are not guessed.
+    static func source(_ card: [String: Any]) -> Source {
+        let source = card["source"] as? [String: Any] ?? [:]
+        let locations = ["location", "anchor", "selection"].compactMap { source[$0] as? [String: Any] }
+        let documentID = trim(source["documentId"] as? String ?? source["bookId"] as? String ?? "")
+        let page = locations.compactMap { value -> Int? in
+            let raw = value["page"] ?? ((value["unit"] as? String)?.lowercased() == "page" ? value["index"] : nil)
+            guard let raw, !(raw is NSNull), let number = Double(String(describing: raw)), number.isFinite,
+                  number.rounded() == number, (1...10_000_000).contains(number) else { return nil }
+            return Int(number)
+        }.first
+        var legacy: [String: URL] = [:]
+        for html in [card["question"] ?? card["front"], card["answer"] ?? card["back"]].compactMap({ $0 as? String }) {
+            guard let document = try? SwiftSoup.parseBodyFragment(html) else { continue }
+            for node in (try? document.select(".url,.src").array()) ?? [] where (try? isMaterialLink(node)) == true {
+                guard let anchor = try? node.select("a[href]").first(), let href = try? anchor.attr("href"),
+                      let url = URL(string: href, relativeTo: URL(string: "https://reader.invalid/"))?.absoluteURL,
+                      let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+                      let file = query.first(where: { $0.name == "file" })?.value,
+                      let number = query.first(where: { $0.name == "page" })?.value else { continue }
+                legacy["book:" + file + "#p" + String(max(1, Int(number) ?? 1))] = url
+            }
+        }
+        let old = legacy.count == 1 ? legacy.first : nil
+        let refs = [card["source_ref"], source["sourceId"], source["documentId"], source["bookId"], old?.key]
+            .compactMap { $0 as? String }.map(trim).filter { !$0.isEmpty }
+        func book(_ ref: String) -> (String, Int)? {
+            var value = ref.replacingOccurrences(of: "(?i)^reader-book:", with: "book:", options: .regularExpression)
+            if !matches(value, "(?i)^book:"), matches(value, "(?i)#p[0-9]{1,7}$") { value = "book:" + value }
+            guard let pattern = try? NSRegularExpression(pattern: "(?i)^book:(.+)#p([0-9]{1,7})$"),
+                  let match = pattern.firstMatch(in: value, range: NSRange(location: 0, length: value.utf16.count)),
+                  let range = Range(match.range(at: 1), in: value), let digits = Range(match.range(at: 2), in: value) else { return nil }
+            let file = trim(String(value[range])).replacingOccurrences(of: "\\", with: "/")
+            guard safeFile(file), let number = Int(value[digits]) else { return nil }
+            return (file, max(1, number))
+        }
+        var target = refs.compactMap(book).first
+        if target == nil, let page, !documentID.isEmpty {
+            target = book("book:" + documentID.replacingOccurrences(of: "(?i)^(?:reader-)?book:", with: "", options: .regularExpression) + "#p" + String(page))
+        }
+        var links: [Any?] = [source["url"], card["source_url"], old?.value.absoluteString]
+        for location in locations { links.append(location["url"]); links.append((location["data"] as? [String: Any])?["url"]) }
+        if let ref = refs.first { links.append(ref.replacingOccurrences(of: "(?i)^web:", with: "", options: .regularExpression)) }
+        let url = links.compactMap { raw -> URL? in
+            guard let text = raw as? String, !matches(text, "[\\x00-\\x1f\\x7f]"),
+                  let url = URL(string: text), ["http", "https", "obsidian"].contains(url.scheme?.lowercased() ?? ""),
+                  url.user == nil, url.password == nil else { return nil }
+            return url
+        }.first
+        return Source(file: target?.0, page: target?.1 ?? page, documentID: documentID, locations: locations, url: url)
+    }
     private final class Cached: NSObject { let value: Faces; init(_ value: Faces) { self.value = value } }
     private static let cache: NSCache<NSString, Cached> = {
         let cache = NSCache<NSString, Cached>(); cache.countLimit = 48; cache.totalCostLimit = 4 * 1024 * 1024; return cache

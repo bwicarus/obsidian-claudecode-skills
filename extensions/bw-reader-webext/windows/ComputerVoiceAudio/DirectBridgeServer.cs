@@ -724,6 +724,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-library/list",
             new[] { "POST", "OPTIONS" },
             context => HandleLibraryListAsync(context, serviceToken));
+        foreach (string operation in new[] { "upload", "preview", "file" })
+        {
+            app.MapMethods("/assistant-attachments/" + operation + "/{id}",
+                new[] { operation == "file" ? "GET" : "POST", "OPTIONS" }, async context =>
+                {
+                    if (!AllowTailscaleClient(context, "assistant-attachment")) return;
+                    await ReaderAssistantAttachmentStore.HandleAsync(context, serviceToken).ConfigureAwait(false);
+                });
+        }
         // 取书（2026-09-02）：Pi 退出书库线路，设备从这里下书。GET ?name=<纯文件名>。
         app.MapMethods(
             "/reader-library/download",

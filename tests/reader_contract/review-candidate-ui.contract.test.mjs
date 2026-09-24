@@ -2436,7 +2436,7 @@ test("extension background permits only GET/POST and owns the private queue key"
 
 test('native review never mounts a hidden workspace or pager; reveal, stage and undo remain usable', async () => {
   const requests = [];
-  let cached, original, staged, releaseStage, holdStage = false;
+  let cached, original, staged, releaseStage, holdStage = false, nativeRevision = 0;
   const fixture = harness({ context: { file: 'localbook:book', page: 4 },
     fetchImpl() { assert.fail('App review must not call browser fetch'); },
     async nativeQueue({ action, request }) {
@@ -2448,6 +2448,11 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
       } };
       if (request.operation === 'save') { cached = request.snapshot; return { ok: true, value: true }; }
       if (request.operation === 'peek') return { ok: true, value: cached };
+      if (request.operation === 'interact') {
+        assert.equal(request.key, 'reveal'); assert.equal(request.cardId, 'anki_card_123');
+        return { ok: true, value: true, nativeReviewState: { lease: request.lease, revision: ++nativeRevision,
+          queueIds: ['anki_card_123'], showingAnswer: true, expanded: true, improveMode: 'verbose' } };
+      }
       if (request.operation === 'stageRating') {
         if (holdStage) { holdStage = false; await new Promise(resolve => { releaseStage = resolve; }); }
         original = structuredClone(request.snapshot);
@@ -2483,7 +2488,7 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
   assert.equal(fixture.document.getElementById('rc-review-css'), null);
   assert.deepEqual(fixture.learningCardRenders, []);
   assert.deepEqual(fixture.pagerBindings, []);
-  fixture.RC.review.show();
+  await fixture.RC.review.show();
   assert.equal(fixture.RC.review.presentationState().showingAnswer, true);
   await fixture.RC.review.answer(3);
   assert.equal(fixture.RC.review.presentationState().canUndo, true);
@@ -2583,11 +2588,12 @@ test('native local review publishes semantic Markdown and cloze data without cal
     fetchImpl() { assert.fail('native local cards do not need a network'); },
     async nativeQueue({ request }) {
       if (request.operation !== 'load') return { ok: true, value: true };
-      return { ok: true, value: { request: request.request, kind: 'local', dueTotal: 0, entries: [{
-        record: { id: 'card_abcd', entityRev: 4, stateRev: 6, source: { kind: 'reader', bookId: 'book' } },
-        card: { type: 'cloze', cloze: '**語**は{{c1::言葉::ヒント}}。', deck: '日本語' },
-        state: { review: { status: 'new' }, projections: {} }, cardIndex: 2, due: false
-      }] } };
+      return { ok: true, value: { request: request.request, kind: 'local', snapshot: {
+        ts: Date.now(), client_context_key: request.contextKey, due_total: 0, related_total: 0, completed_ids: [], index: 0,
+        cards: [{ question: '**語**は<b>[…]</b>。', answer: '**語**は<b>言葉</b>。',
+          entity_id: 'card_abcd', entity_index: 2, deck: '日本語',
+          _localReview: { gid: 'card_abcd', entityRev: 4, stateRev: 6, cardIndex: 2, wasDue: false } }]
+      } } };
     }
   });
   fixture.document.createElement = () => { assert.fail('no hidden nodes for native local cards'); };

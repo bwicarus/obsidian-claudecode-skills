@@ -178,6 +178,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     /// 选区操作条读的是这一份。
     @Published private(set) var readerSelectionText = ""
     @Published private(set) var attachments: [ReaderNativeContextAttachment] = []
+    let mediaDraft = ReaderNativeMediaDraft()
     @Published private(set) var readingTools: [ReaderNativeControl] = []
     @Published private(set) var messages: [ReaderNativeConversationMessage] = []
     @Published private(set) var captions = ReaderNativeCaptions()

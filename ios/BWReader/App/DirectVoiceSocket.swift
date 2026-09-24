@@ -357,6 +357,12 @@ actor DirectVoiceSocket {
 
     /// A side-effect-free STATUS request useful before presenting the call UI.
     func status() async throws -> DirectVoiceRuntimeStatus {
+        try parseStatusResult(await statusDetails())
+    }
+
+    /// Read-only settings detail. Uses STATUS only; never requests audio,
+    /// microphone permission, START or desktop application activation.
+    func statusDetails() async throws -> DirectJSONValue {
         if state == .disconnected || state == .failed {
             try await connect()
         }
@@ -366,7 +372,8 @@ actor DirectVoiceSocket {
             timeoutNanoseconds:
                 DirectVoiceProtocol.requestTimeoutNanoseconds
         )
-        return try parseStatusResult(payload)
+        _ = try parseStatusResult(payload)
+        return payload
     }
 
     /// 把用户**打字说的话**送进正在进行的那通 Codex 语音。
@@ -378,10 +385,16 @@ actor DirectVoiceSocket {
     /// 静静失败 —— 实测就是"输入框绿了、回答却来自文字助手"。
     ///
     /// 桥那侧不在通话时回 `{ok:false, reason:"not-in-call"}`，不是异常。
-    func codexType(text: String) async throws -> Bool {
+    func codexType(text: String, attachmentIDs: [String] = [], submissionID: String? = nil) async throws -> Bool {
+        var fields: [String: DirectJSONValue] = ["text": .string(text)]
+        if !attachmentIDs.isEmpty {
+            guard let submissionID else { return false }
+            fields["attachmentIds"] = .array(attachmentIDs.map { .string($0) })
+            fields["submissionId"] = .string(submissionID)
+        }
         let payload = try await request(
             action: "codex-type",
-            fields: ["text": .string(text)],
+            fields: fields,
             timeoutNanoseconds:
                 DirectVoiceProtocol.requestTimeoutNanoseconds
         )
@@ -1021,9 +1034,20 @@ actor DirectVoiceSocket {
             "localOptIn",
             "lastError",
             "media",
-        ])
+        ], optional:["codexVoice"])
         let media = try object.requireObject("media")
         try media.requireExactKeys(["hostReady", "captureActive"])
+        if let raw = object["codexVoice"] {
+            let voice = try requireObject(raw,label:"STATUS voice")
+            try voice.requireExactKeys(["status","active","source","shortcutSent"],optional:["keepActive","ladder","push"])
+            let status = try voice.requireString("status",maximum:32)
+            guard ["available","unavailable","error"].contains(status),
+                  (status == "available" ? voice["active"]?.boolValue != nil : voice["active"] == .null),
+                  voice["source"] == .null || voice["source"]?.stringValue != nil else {
+                throw failure("BW_COMPUTER_VOICE_DIRECT_SCHEMA","STATUS voice 字段无效",retryable:false)
+            }
+            _ = try voice.requireBool("shortcutSent")
+        }
         if let lastError = object["lastError"] {
             guard lastError == .null || lastError.objectValue != nil else {
                 throw failure(

@@ -19,6 +19,8 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
     private var pending: ReaderNativePDFDocument.Position?
     private var delivery: Task<Void, Never>?
     private var jumping = false
+    private var pageOffset = 0
+    private var backPage: Int?
     var restorePosition: ((Int) throws -> [String:Any]?)?
     var savePosition: ((String, [String:Any]) throws -> Void)?
     var reportFailure: ((String) -> Void)?
@@ -34,10 +36,11 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
     func initialPosition() async throws -> [String: Any] {
         guard let webView, trusted(webView.url) else { throw unavailable() }
         let value = try await webView.callAsyncJavaScript(
-            "return window.RC?.readerNavigation?.nativeState();",
+            "const state = window.RC?.readerNavigation?.nativeState(); return state && {...state, pageOffset: window._pageOffset?.() || 0};",
             arguments: [:], in: nil, contentWorld: .page)
         guard let result = value as? [String: Any], let file = result["file"] as? String,
               !file.isEmpty, (result["total"] as? NSNumber)?.intValue ?? 0 > 0 else { throw unavailable() }
+        pageOffset = min(10_000_000,max(-10_000_000,(result["pageOffset"] as? NSNumber)?.intValue ?? 0))
         return try restorePosition?((result["total"] as! NSNumber).intValue) ?? result
     }
 
@@ -85,7 +88,7 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
         let previous = token
         token = nil; delivery?.cancel(); delivery = nil; pending = nil
         document?.onPosition = nil; document = nil; isCurrent = nil
-        file = ""; bookID = ""; digest = ""; jumping = false
+        file = ""; bookID = ""; digest = ""; jumping = false; backPage = nil; pageOffset = 0
         guard let previous, let webView else { return }
         Task { @MainActor [weak webView] in
             _ = try? await webView?.callAsyncJavaScript(
@@ -113,6 +116,57 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
     private func valid(_ lease: String) -> Bool {
         token == lease && isCurrent?() == true && trusted(webView?.url)
             && document?.matches(bookID: bookID, contentSHA256: digest) == true
+    }
+
+    func displayPage(_ page: Int) -> Int {
+        let printed = page - pageOffset
+        return pageOffset != 0 && printed >= 1 ? printed : page
+    }
+
+    func state() throws -> [String:Any] {
+        guard let lease = token, valid(lease), let document else { throw unavailable() }
+        let page = document.position.page, total = document.view.document?.pageCount ?? 0
+        return ["ready":total > 0,"unit":"页","position":page,"total":total,
+                "display":displayPage(page),"firstDisplay":displayPage(1),"lastDisplay":displayPage(total),
+                "totalLabel":String(displayPage(total)),"backLabel":backPage.map { "回到第 \(displayPage($0)) 页" } ?? "",
+                "previous":page > 1,"next":page < total]
+    }
+
+    /// All native entry points share the same return anchor and persisted
+    /// viewport. The webpage receives a projection, never executes the jump.
+    func navigate(_ action: String, value: Any? = nil) async throws -> [String:Any] {
+        guard let lease = token, valid(lease), let document else { throw unavailable() }
+        let total = document.view.document?.pageCount ?? 0, current = document.position.page
+        let target: Int
+        switch action {
+        case "previous": target = max(1,current - 1)
+        case "next": target = min(total,current + 1)
+        case "back": target = backPage ?? current
+        case "page":
+            let raw = (value as? String ?? (value as? NSNumber)?.stringValue ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
+            guard raw.range(of:"^-?[0-9]+$",options:.regularExpression) != nil, let number = Int(raw), abs(Double(number)) <= 9_007_199_254_740_991 else { throw unavailable() }
+            target = min(total,max(1,number + pageOffset))
+        case "position", "jump":
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue.rounded() == number.doubleValue,
+                  number.doubleValue >= 1, number.doubleValue <= Double(total) else { throw unavailable() }
+            target = number.intValue
+        default: throw unavailable()
+        }
+        let previousBack = backPage, old = document.position
+        pending = nil; jumping = true
+        do {
+            if action == "back" { backPage = nil }
+            else if action == "jump", target != current, backPage == nil { backPage = current }
+            try document.go(to:target)
+            try persist(payload(document.position))
+        } catch {
+            backPage = previousBack; try? document.go(to:old.page,fraction:old.fraction); jumping = false
+            throw error
+        }
+        jumping = false
+        try await publish(document.position,lease:lease)
+        return try state()
     }
 
     /// Native settings use the same viewport/persistence path without making a
@@ -164,7 +218,8 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
         sequence += 1
         var value: [String: Any] = ["sequence": sequence, "page": position.page, "scale": Double(position.scale),
                 "fraction": Double(position.fraction), "visiblePages": position.visiblePages,
-                "mode": position.mode, "spreadOffset": position.spreadOffset, "cropEnabled": position.crop != nil]
+                "mode": position.mode, "spreadOffset": position.spreadOffset, "cropEnabled": position.crop != nil,
+                "backPage":backPage as Any? ?? NSNull()]
         if let crop = position.crop { value["crop"] = crop.percentages }
         return value
     }
@@ -190,12 +245,24 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
               let webView, message.webView === webView, trusted(message.frameInfo.request.url),
               let body = message.body as? [String: Any],
               Set(body.keys) == Set(["action", "token", "file", "bookID", "digest", "value"]),
-              let action = body["action"] as? String, ["page", "layout", "scale", "fit", "crop"].contains(action),
+              let action = body["action"] as? String, ["page", "jump", "back", "layout", "scale", "fit", "crop"].contains(action),
               let lease = body["token"] as? String,
               valid(lease), body["file"] as? String == file, body["bookID"] as? String == bookID,
               body["digest"] as? String == digest,
               let document else {
             replyHandler(nil, "翻页请求已过期或无效")
+            return
+        }
+        if action == "jump" || action == "back" {
+            Task { @MainActor [weak self] in
+                do {
+                    guard let self else { throw CancellationError() }
+                    guard self.valid(lease) else { throw self.unavailable() }
+                    _ = try await self.navigate(action,value:body["value"])
+                    guard self.valid(lease) else { throw self.unavailable() }
+                    replyHandler(["ok":true,"position":self.payload(document.position)],nil)
+                } catch { replyHandler(nil,error.localizedDescription) }
+            }
             return
         }
         do {

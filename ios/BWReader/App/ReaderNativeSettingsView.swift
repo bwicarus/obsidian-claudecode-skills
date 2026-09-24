@@ -261,7 +261,7 @@ struct ReaderNativeSettingsView: View {
             computerErrorSection("最近连接错误", failure: failure)
         }
         Section {
-            Text("刷新只读取连接状态，切换目标在下次连接生效。点击侧栏电脑按钮才建立音频连接；挂断停止音频桥接。")
+            Text("刷新只读取连接状态。点击侧栏电脑按钮才建立音频连接；挂断停止音频桥接。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

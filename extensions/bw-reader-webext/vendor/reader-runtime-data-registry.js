@@ -218,6 +218,13 @@
     { legacyKey: 'rc-prefer-book', collection: 'user-settings', semanticKey: 'assistant.prefer-book', codec: 'boolean-string' },
     { legacyKey: 'asst-followups-on', collection: 'user-settings', semanticKey: 'assistant.followups-visible', codec: 'boolean-string' },
 
+    { legacyKey: 'rc-voice-sub', collection: 'device-preferences', semanticKey: 'voice.subtitles', codec: 'boolean-string' },
+    { legacyKey: 'rc-voice-bridge', collection: 'device-preferences', semanticKey: 'voice.echo-bridge', codec: 'string' },
+    { legacyKey: 'rc-voice-card-hide', collection: 'device-preferences', semanticKey: 'voice.card-auto-hide', codec: 'boolean-string' },
+    { legacyKey: 'rc-voice-card-secs', collection: 'device-preferences', semanticKey: 'voice.card-seconds', codec: 'number-string' },
+    { legacyKey: 'rc-voice-cue', collection: 'device-preferences', semanticKey: 'voice.completion-cue', codec: 'boolean-string' },
+    { legacyKey: 'rc-voice-toolreply', collection: 'device-preferences', semanticKey: 'voice.tool-reply-mirror', codec: 'boolean-string' },
+
     { legacyKey: 'eph-gp-floating', collection: 'device-preferences', semanticKey: 'sidebar.floating', codec: 'boolean-string' },
     { legacyKey: 'eph-gp-blur', collection: 'device-preferences', semanticKey: 'sidebar.blur', codec: 'number-string' },
     { legacyKey: 'ep-side-width', collection: 'device-preferences', semanticKey: 'sidebar.width', codec: 'number-string' },

@@ -17,7 +17,7 @@ test('native navigation changes the visible card only after persistence; errors 
     const cards=[{id:'a'},{id:'b'}], sideEffects=[];
     const r={_nativeNavigationWork:null,_nativeStageWork:null,_stagedRating:null,_queue:cards,_queueBusy:false,_ratingCommitBusy:0,
       _queueRequestEpoch:1,_contextCacheKey:'context',_nativeQueueLease:'lease',_idx:0,_showingAnswer:true,_improveExpanded:true,
-      _cacheWriteChain:Promise.resolve(),_stableCardId:x=>x.id,_commitStagedRating:async()=>false,
+      _cacheWriteChain:Promise.resolve(),_nativeReconcileWork:Promise.resolve(),_stableCardId:x=>x.id,_commitStagedRating:async()=>false,
       _current:()=>cards[r._idx],_currentQueueSnapshot:()=>({cards,index:r._idx}),
       _nativeQueueCall:async(operation,input)=>{calls++;assert.equal(operation,'selectCard');assert.equal(input.target.id,'b');return result;},
       _rememberAndDeactivateSelections:()=>sideEffects.push('release'),_invalidateCardRequests(){},render(){},_activateCurrentSelections(){},

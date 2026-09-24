@@ -407,11 +407,11 @@ final class NativeVoiceBridge: ObservableObject {
     ///
     /// ⚠ 不抛：这条是"顺手补一句话"，失败不该把阅读器的输入流程弄断。
     /// 成没成由返回值说，调用方据此决定要不要退回文字助手。
-    func sendTyped(_ text: String) async -> Bool {
+    func sendTyped(_ text: String, attachmentIDs: [String] = [], submissionID: String? = nil) async -> Bool {
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty, let socket else { return false }
         do {
-            return try await socket.codexType(text: body)
+            return try await socket.codexType(text: body, attachmentIDs: attachmentIDs, submissionID: submissionID)
         } catch {
             return false
         }
@@ -422,18 +422,38 @@ final class NativeVoiceBridge: ObservableObject {
     /// 用户 2026-09-23：「我希望不语音对话时也能够打字到最新对应的后台ai那里」。
     /// 桥那侧 codex-type 本来就不要求在通话（只要鉴权），缺的只是 App 这头没有连接。
     /// 通话中直接复用那条连接。返回 false = 语音核心没接住，调用方退回文字助手。
-    func sendTypedToBackend(_ text: String) async -> Bool {
+    func sendTypedToBackend(_ text: String, attachmentIDs: [String] = [], submissionID: String? = nil) async -> Bool {
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return false }
-        if socket != nil { return await sendTyped(body) }
+        if socket != nil { return await sendTyped(body, attachmentIDs: attachmentIDs, submissionID: submissionID) }
         let transient = DirectVoiceSocket(configuration: .production) { _ in }
         defer { Task { await transient.disconnect() } }
         do {
             try await transient.connect()
-            return try await transient.codexType(text: body)
+            return try await transient.codexType(text: body, attachmentIDs: attachmentIDs, submissionID: submissionID)
         } catch {
             recordDiagnostic(category: "protocol", message: "打字交后台失败：\(error.localizedDescription)")
             return false
+        }
+    }
+
+    func settingsStatus() async -> [String:Any] {
+        let current = socket
+        let channel = current ?? DirectVoiceSocket(configuration:.production) { _ in }
+        defer { if current == nil { Task { await channel.disconnect() } } }
+        do {
+            let result = try await channel.statusDetails()
+            try Task.checkCancellation()
+            guard let status = try JSONSerialization.jsonObject(with:JSONEncoder().encode(result)) as? [String:Any] else {
+                throw DirectVoiceFailure(code:"BW_COMPUTER_VOICE_DIRECT_SCHEMA",message:"电脑通话状态无效",retryable:false)
+            }
+            return ["busy":state.isActive || state.isBusy,"state":state.isActive ? "active" : status["state"] ?? "unavailable",
+                    "reason":status["reason"] ?? NSNull(),"status":status,"errors":[]]
+        } catch {
+            let failure = error as? DirectVoiceFailure
+            return ["busy":state.isActive || state.isBusy,"state":state.isActive ? "active" : "offline",
+                    "reason":error.localizedDescription,"errors":[error.localizedDescription],
+                    "clientError":["code":failure?.code ?? "BW_COMPUTER_VOICE_STATUS","message":error.localizedDescription]]
         }
     }
 

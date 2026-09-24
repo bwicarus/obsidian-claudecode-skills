@@ -135,5 +135,7 @@ test("legacy cross-book navigation stays inside the native local-library lifecyc
   assert.match(WEB_VIEW, /remoteLibraryCoordinator\.download\([\s\S]*remoteBook,[\s\S]*localLibrary: localLibrary/);
   assert.match(WEB_VIEW, /fetchAndStageUserState\([\s\S]*for: remoteBook,[\s\S]*localBook: downloaded/);
   assert.match(WEB_VIEW, /restorationToken: nil,[\s\S]*initialPage: initialPage/);
-  assert.doesNotMatch(WEB_VIEW, /UIApplication\.shared\.open\(url\)[\s\S]*takeOverRemoteBookNavigation/);
+  const delegate = WEB_VIEW.slice(WEB_VIEW.indexOf("decidePolicyFor navigationAction: WKNavigationAction"));
+  assert.ok(delegate.indexOf("takeOverRemoteBookNavigation") >= 0);
+  assert.doesNotMatch(delegate, /UIApplication\.shared\.open\(url\)[\s\S]*takeOverRemoteBookNavigation/);
 });

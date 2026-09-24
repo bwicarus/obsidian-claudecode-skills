@@ -360,6 +360,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeServerGateway: ReaderNativeServerGateway?
     private var nativeAssistantStream: ReaderNativeAssistantStreamBridge?
     private var nativeContextSelections: ReaderNativeContextSelectionBridge?
+    private var nativeTurns: ReaderNativeTurnBridge?
+    private let nativeAssistantSettings = ReaderNativeAssistantSettings()
     private var nativePhraseService: ReaderNativePhraseService?
     private var nativeFavoritesService: ReaderNativeFavoritesService?
     private var nativeFavoritesContext: UInt64?
@@ -376,6 +378,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeBookOCRBridge: NativeBookOCRBridge?
     private var nativePDFMutationBridge: ReaderNativePDFMutationBridge?
     private var nativePDFNavigationBridge: ReaderNativePDFNavigationBridge?
+    private let nativePDFIndex = ReaderNativePDFIndex()
     private weak var activeNativePDFDocument: ReaderNativePDFDocument?
     /// 主阅读区挂上去的那份原生文档。**强引用在这里**：
     /// `prepareNativePDFDocument()` 的说明写着「调用方持有这个视口」，而在
@@ -1551,6 +1554,26 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func performNativeConversationCommand(_ command: [String: Any]) async -> String? {
+        if command["action"] as? String == "send", let ids = command["attachmentIds"] as? [String], !ids.isEmpty {
+            guard command["scope"] as? String == nativeConversation.scope else { return "对话已变化，请重新发送。" }
+            let text = command["text"] as? String ?? "请查看附件。"
+            if nativeConversation.conversationMode == "normal" {
+                guard let bridge = nativeVoiceBridge,
+                      await bridge.sendTypedToBackend(text, attachmentIDs: ids, submissionID: command["submissionId"] as? String) else {
+                    // No fallback: an unknown acknowledgement may already have started work.
+                    return "尚未确认后台收到附件。附件仍保留，可再次确认发送；请勿另建重复消息。"
+                }
+                return nil
+            }
+            // Review has a separate conversation. Preserve that destination and attach
+            // server file references rather than redirecting it to the voice thread.
+            var linked = command
+            linked.removeValue(forKey: "attachmentIds"); linked.removeValue(forKey: "submissionId")
+            linked.removeValue(forKey: "attachmentReferences")
+            linked["text"] = text + "\n\n" + (command["attachmentReferences"] as? String ?? "")
+            let receipt = await requestNativeConversationCommand(linked)
+            return receipt["ok"] as? Bool == true ? nil : (receipt["error"] as? String ?? "附件消息未获确认。")
+        }
         // 不在通话时，普通对话里打的字交给语音核心的后台线程（与通话中同一个归宿）。
         // 语音核心不在（ReaderPC 没开）才退回下面原来的文字助手。
         // 通话中的那条仍走网页 __vcSendText → 原生 sendTyped，不在这里拦。
@@ -1945,6 +1968,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeFigureTasks = [:]
         nativeOverlayPages = []
         nativeOverlayDocument = nil
+        nativePDFIndex.reset()
         nativePDFNavigationBridge?.invalidate()
         activeNativePDFDocument?.onSelection = nil
         activeNativePDFDocument?.onGeometry = nil
@@ -2950,7 +2974,116 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
+    private func performNativeReviewSource(_ command: [String: Any]) async -> [String: Any]? {
+        guard command["action"] as? String == "reviewAction", let value = command["value"] as? [String: Any],
+              value["key"] as? String == "source" else { return nil }
+        guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
+              let queue = nativeReviewQueue else { return ["ok": false, "error": "复习队列尚未就绪"] }
+        do {
+            let card = try queue.currentCard(context: value["contextKey"] as? String ?? "", cardID: value["cardId"] as? String ?? "")
+            let target = ReaderNativeReviewFaces.source(card)
+            if let file = target.file, let page = target.page {
+                let localID = file.hasPrefix("localbook:") ? String(file.dropFirst(10)) : file
+                if let library = currentLocalLibrary, let book = library.books.first(where: { $0.id == localID }) {
+                    if book.id == currentLocalBook?.id, book.format == .pdf, let navigation = nativePDFNavigationBridge {
+                        _ = try await navigation.navigate("jump", value: page)
+                        return ["ok": true]
+                    }
+                    let started = await openLocalBook(book, library: library, restorationToken: nil, initialPage: page)
+                    return ["ok": started, "error": started ? "" : "无法打开卡片出处"]
+                }
+                if !file.hasPrefix("localbook:"), Self.isSafeRemoteLibraryRelativePath(file), let base = localRuntimeServer?.baseURL,
+                   var url = URLComponents(url: base, resolvingAgainstBaseURL: false) {
+                    url.path = "/pdf/view"; url.queryItems = [.init(name: "file", value: file), .init(name: "page", value: String(page))]
+                    if let endpoint = url.url, takeOverRemoteBookNavigation(endpoint, sourceURL: webView.url) { return ["ok": true] }
+                }
+            }
+            let currentFile = currentLocalBook.map { "localbook:" + $0.id } ?? ""
+            let sameDocument = target.documentID.isEmpty || target.documentID == currentFile || target.documentID == "reader-book:" + currentFile
+            if sameDocument, currentLocalBook?.format == .pdf, let page = target.page, let navigation = nativePDFNavigationBridge {
+                _ = try await navigation.navigate("jump", value: page); return ["ok": true]
+            }
+            // EPUB's CFI/DOM anchors remain owned by its retained WebKit renderer.
+            if sameDocument, currentLocalBook?.format == .epub, !target.locations.isEmpty { return nil }
+            if let url = target.url {
+                let opened = await UIApplication.shared.open(url)
+                return ["ok": opened, "error": opened ? "" : "无法打开卡片出处链接"]
+            }
+            return ["ok": false, "error": "这张卡尚未记录可直接打开的原笔记链接"]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativeReviewSource(command) { return result }
+        if command["action"] as? String == "settingsRead", command["section"] as? String == "computer" {
+            guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
+                  let voice = nativeVoiceBridge else { return ["ok":false,"error":"电脑通话状态尚未就绪"] }
+            let scope = nativeConversation.scope, generation = bookUserStateContextGeneration
+            let value = await voice.settingsStatus()
+            guard !Task.isCancelled, nativeConversation.scope == scope, bookUserStateContextGeneration == generation else {
+                return ["ok":false,"error":"页面已切换"]
+            }
+            return ["ok":true,"value":value]
+        }
+        if ["settingsRead","settingsWrite"].contains(command["action"] as? String ?? ""),
+           ["models","voice","profiles"].contains(command["section"] as? String ?? "") {
+            guard !isLoading, isTrustedReaderURL(webView.url), let gateway = nativeServerGateway,
+                  command["scope"] as? String == nativeConversation.scope, let deviceID = nativeReadingStoreDeviceID else {
+                return ["ok":false,"error":"设置尚未就绪"]
+            }
+            let scope = nativeConversation.scope, generation = bookUserStateContextGeneration
+            let epoch = gateway.contextRevision, surface: ReaderNativeInterfaceSurface = currentLocalBook?.format == .epub ? .epub : .pdf
+            func current() throws {
+                guard !isLoading, nativeConversation.scope == scope, bookUserStateContextGeneration == generation,
+                      gateway.contextRevision == epoch, !Task.isCancelled else { throw CancellationError() }
+            }
+            do {
+                let catalog = try ReaderNativePreferences.Catalog.packaged.get()
+                _ = try await webView.callAsyncJavaScript("if (!window.__BW_READER_PREFERENCES__?.flush) throw new Error('设置尚未就绪'); await window.__BW_READER_PREFERENCES__.flush(); return true;",
+                    arguments:[:],in:nil,contentWorld:.page)
+                try current()
+                let result = try await nativeAssistantSettings.perform(command,scope:scope,gateway:gateway,surface:surface,raw:{ key in
+                    try current()
+                    let entry = try catalog.entry(key), store = try self.nativeDataStoreHost.bridge(for:entry.storeName).store
+                    guard try store.meta("legacyImport") == "done" else { throw ReaderBookUserStateWebAdapterError.unavailable }
+                    return try ReaderNativePreferences(store:store,deviceID:deviceID).raw(entry)
+                },write:{ key,raw in
+                    try current()
+                    let entry = try catalog.entry(key), store = try self.nativeDataStoreHost.bridge(for:entry.storeName).store
+                    guard try store.meta("legacyImport") == "done" else { throw ReaderBookUserStateWebAdapterError.unavailable }
+                    let result = try ReaderNativePreferences(store:store,deviceID:deviceID).commit(entry,raw:raw,mutation:"assistant-setting-" + UUID().uuidString)
+                    self.markCloudSyncDirty(); self.nativeReplicationService?.wake()
+                    let observed = try await self.webView.callAsyncJavaScript("if (window.__bwNativeConversation?.currentScope?.() !== scope) return false; await window.__bwNativePreferencesObserve(receipt); return true;",
+                        arguments:["scope":scope,"receipt":result],in:nil,contentWorld:.page)
+                    try current()
+                    guard observed as? Bool == true else { throw ReaderNativePreferences.Failure(message:"设置已保存，显示同步未完成，请重新打开核对") }
+                },refreshVoice:{
+                    try current()
+                    _ = try await self.webView.callAsyncJavaScript("if (window.__bwNativeConversation?.currentScope?.() !== scope) throw new Error('语音上下文已切换'); await window.RC?.voicecall?.pushCfg?.(); return true;",
+                        arguments:["scope":scope],in:nil,contentWorld:.page)
+                    try current()
+                },isCurrent:{ (try? current()) != nil })
+                try current(); return ["ok":true,"value":result]
+            } catch { return ["ok":false,"error":error.localizedDescription] }
+        }
+        if currentLocalBook?.format == .pdf,
+           ["navigationRead","navigationAction","searchRead","searchJump","tocRead","tocJump"].contains(command["action"] as? String ?? "") {
+            guard !isLoading, isTrustedReaderURL(webView.url), let book = currentLocalBook,
+                  let digest = currentLocalBookContentSHA256, let document = nativePDFDocument,
+                  let navigation = nativePDFNavigationBridge, command["scope"] as? String == nativeConversation.scope else {
+                return ["ok":false,"error":"阅读索引尚未就绪"]
+            }
+            let generation = bookUserStateContextGeneration, scope = nativeConversation.scope
+            do {
+                return try await nativePDFIndex.perform(command,bookID:book.id,digest:digest,scope:scope,
+                    document:document,navigation:navigation,isCurrent:{ [weak self, weak document] in
+                        guard let self, let document else { return false }
+                        return !self.isLoading && self.bookUserStateContextGeneration == generation
+                            && self.currentLocalBook?.id == book.id && self.nativePDFDocument === document
+                            && self.nativeConversation.scope == scope
+                    })
+            } catch { return ["ok":false,"error":error.localizedDescription] }
+        }
         if let result = await performNativeReadingSettings(command) { return result }
         if let result = await performNativeFavoritesCommand(command) { return result }
         if let result = await performNativeFigureCommand(command) { return result }
@@ -3295,6 +3428,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 name: ReaderNativeContextSelectionBridge.messageName)
             contentController.addUserScript(WKUserScript(source: ReaderNativeContextSelectionBridge.script,
                 injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            let nativeTurns = ReaderNativeTurnBridge(webView:webView,trustedBaseURL:localRuntimeServer.baseURL,gateway:nativeServerGateway)
+            nativeTurns.onFailure = { [weak self] message in self?.nativeConversation.report(message) }
+            nativeAssistantStream.beforeHistoryClear = { [weak nativeTurns] mode in
+                guard let nativeTurns else { throw CancellationError() }
+                return try await nativeTurns.beginClear(mode)
+            }
+            nativeAssistantStream.afterHistoryClear = { [weak nativeTurns] mode, token, cleared in nativeTurns?.endClear(mode,token:token,cleared:cleared) }
+            self.nativeTurns = nativeTurns
+            contentController.addScriptMessageHandler(nativeTurns,contentWorld:.page,name:ReaderNativeTurnBridge.messageName)
+            contentController.addUserScript(WKUserScript(source:ReaderNativeTurnBridge.script,injectionTime:.atDocumentStart,forMainFrameOnly:true))
             let nativeServerSyncBridge = ReaderNativeServerSyncBridge(
                 webView: webView,
                 trustedBaseURL: localRuntimeServer.baseURL
@@ -7381,27 +7524,39 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                             throw ReaderNativeReviewQueue.Failure(message: "复习请求无效")
                         }
                         let service = try self.prepareNativeReviewQueue()
+                        let value: Any
                         switch operation {
-                        case "load": replyHandler(["ok": true, "value": try await service.load(request)], nil)
-                        case "peek": replyHandler(["ok": true, "value": try service.peek() as Any? ?? NSNull()], nil)
-                        case "stageRating": replyHandler(["ok": true, "value": try service.stageRating(request)], nil)
-                        case "selectCard": replyHandler(["ok": true, "value": try service.selectCard(request)], nil)
-                        case "answer": replyHandler(["ok": true, "value": try await service.answer(request)], nil)
-                        case "undoRating": replyHandler(["ok": true, "value": try service.undoRating(request)], nil)
+                        case "load": value = try await service.load(request)
+                        case "peek": value = try service.peek() as Any? ?? NSNull()
+                        case "stageRating": value = try service.stageRating(request)
+                        case "selectCard": value = try service.selectCard(request)
+                        case "answer": value = try await service.answer(request)
+                        case "undoRating": value = try service.undoRating(request)
+                        case "interact": value = try service.interact(request)
+                        case "reconcile":
+                            guard let id = request["entityId"] as? String, let deviceID = self.nativeReadingStoreDeviceID else {
+                                throw ReaderNativeReviewQueue.Failure(message: "卡片更新缺少身份")
+                            }
+                            let store = try self.nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+                            let record = try ReaderNativeCardRepository(store: store, deviceID: deviceID).load(id, includeDeleted: true)
+                            value = try service.reconcile(id: id, record: record, request: request["lease"] as? String ?? "")
+                        case "restoreRating": value = try service.restoreRating(request)
+                        case "completeRating": service.completeRating(request); value = true
                         case "takeRating":
-                            replyHandler(["ok": true, "value": try service.takeRating(lease: request["lease"] as? String ?? "", stageID: request["stageId"] as? String ?? "")], nil)
+                            value = try service.takeRating(lease: request["lease"] as? String ?? "", stageID: request["stageId"] as? String ?? "")
                         case "discardRating":
                             service.discardRating(lease: request["lease"] as? String ?? "", stageID: request["stageId"] as? String ?? "")
-                            replyHandler(["ok": true, "value": true], nil)
+                            value = true
                         case "save":
                             guard let snapshot = request["snapshot"] as? [String: Any], let lease = request["lease"] as? String else {
                                 throw ReaderNativeReviewQueue.Failure(message: "复习保存缺少轮次")
                             }
-                            replyHandler(["ok": true, "value": try service.save(snapshot, request: lease)], nil)
+                            value = try service.save(snapshot, request: lease)
                         case "cancel":
-                            service.cancel(request["lease"] as? String ?? ""); replyHandler(["ok": true], nil)
+                            service.cancel(request["lease"] as? String ?? ""); value = true
                         default: throw ReaderNativeReviewQueue.Failure(message: "未知复习操作")
                         }
+                        replyHandler(["ok": true, "value": value, "nativeReviewState": service.presentation()], nil)
                     } catch { replyHandler(["ok": false, "error": error.localizedDescription], nil) }
                 }
                 return
@@ -7461,6 +7616,56 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 } catch {
                     replyHandler(["ok": false, "code": "BW_CARD_REPOSITORY_UNAVAILABLE", "error": error.localizedDescription], nil)
                 }
+                return
+            }
+            if body["action"] as? String == "bookPageCard" {
+                guard let bookID = nativeReadingStoreBookID, bookID == currentLocalBook?.id,
+                      currentLocalBook?.format == .pdf, let deviceID = nativeReadingStoreDeviceID,
+                      body["bookID"] as? String == bookID, let request = body["request"] as? [String:Any],
+                      let operation = request["operation"] as? String,
+                      ["action","direct","transition","recover"].contains(operation) else {
+                    replyHandler(nil,"页面卡片书籍上下文已改变"); return
+                }
+                do {
+                    let document = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+                    let global = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-global").store
+                    let documentCursor = try document.cursor(), globalCursor = try global.cursor()
+                    defer {
+                        if (try? document.cursor()) != documentCursor || (try? global.cursor()) != globalCursor {
+                            scheduleNativePDFProjectionRefresh(); markCloudSyncDirty()
+                            nativeReplicationService?.wake()
+                            // A direct edit or interrupted saga can commit an
+                            // entity without returning a placement receipt.
+                            // Refresh native faces from those committed rows,
+                            // including when the following book write failed.
+                            let changes = (try? global.journal(after:globalCursor,limit:4096)) ?? []
+                            var changedIDs = Set<String>()
+                            for change in changes {
+                                guard let value = try? JSONSerialization.jsonObject(with:Data(change.json.utf8)) as? [String:Any],
+                                      value["collection"] as? String == ReaderNativeCardRepository.entities,
+                                      let record = value["record"] as? [String:Any], let id = record["id"] as? String else { continue }
+                                changedIDs.insert(id)
+                            }
+                            let repository = ReaderNativeCardRepository(store:global,deviceID:deviceID)
+                            for id in changedIDs {
+                                if let result = try? repository.perform(["operation":"load","arguments":[id]]),
+                                   let record = result["result"] as? [String:Any] { nativeConversation.acceptCardRecord(record) }
+                            }
+                        }
+                    }
+                    guard try global.meta("legacyImport") == "done" else { throw ReaderNativePageCardActions.F("卡片数据库尚未准备好") }
+                    let receipt = try ReaderNativePageCardActions(
+                        book:.init(store:document,bookID:bookID,deviceID:deviceID),
+                        repository:.init(store:global,deviceID:deviceID),sanitizeHTML:ReaderNativePageCardHTML.sanitize).perform(request)
+                    if let result = receipt["result"] as? [String:Any], let journal = result["receipt"] as? [String:Any],
+                       let entity = journal["entity"] as? [String:Any], let id = entity["id"] as? String,
+                       let record = try ReaderNativeCardRepository(store:global,deviceID:deviceID).perform(["operation":"load","arguments":[id]])["result"] as? [String:Any] {
+                        nativeConversation.acceptCardRecord(record)
+                    }
+                    replyHandler(receipt,nil)
+                } catch let error as ReaderNativePageCardActions.F {
+                    replyHandler(["ok":false,"code":"BW_NATIVE_PDF_ASSISTANT_ACTION","status":error.conflict ? 409 : 400,"error":error.localizedDescription],nil)
+                } catch { replyHandler(nil,error.localizedDescription) }
                 return
             }
             if body["action"] as? String == "bookAssistantSnapshot" {
@@ -7719,6 +7924,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         noteWebContentTermination()
         nativeAssistantStream?.invalidate()
         nativeContextSelections?.invalidate()
+        nativeTurns?.invalidate()
         nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
         nativeReviewImprovements?.invalidate(); nativeReviewImprovements = nil; nativeReviewImprovementsContext = nil
         invalidateNativePDFDocument(reason: "webcontent-terminated")
@@ -7796,6 +8002,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
     ) {
         nativeAssistantStream?.invalidate()
         nativeContextSelections?.invalidate()
+        nativeTurns?.invalidate()
         nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
         nativeReviewImprovements?.invalidate(); nativeReviewImprovements = nil; nativeReviewImprovementsContext = nil
         invalidateNativePDFDocument(reason: "navigation-start")

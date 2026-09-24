@@ -275,6 +275,11 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderBookUserStatePackage.swift ios/BWReader/App/ReaderNativeBookProjection.swift ios/BWReader/App/ReaderNativeNoteRules.swift ios/BWReader/App/ReaderNativeStrokeRules.swift ios/BWReader/App/ReaderNativeNoteActions.swift ios/BWReader/App/ReaderNativeHighlightRules.swift ios/BWReader/App/ReaderNativeReadingPosition.swift ios/BWReader/App/ReaderNativeBookStore.swift ios/BWReader/App/ReaderNativeAssistantEdits.swift ios/BWReader/App/ReaderNativeReplicationOutbox.swift ios/BWReader/Tests/NativeBookProjection/main.swift -o "$RUNNER_TEMP/native-book-projection-test"
           "$RUNNER_TEMP/native-book-projection-test"
 
+      - name: Verify native page-card saga and interrupted writes
+        run: |
+          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderBookUserStatePackage.swift ios/BWReader/App/ReaderNativeBookProjection.swift ios/BWReader/App/ReaderNativeNoteRules.swift ios/BWReader/App/ReaderNativeStrokeRules.swift ios/BWReader/App/ReaderNativeNoteActions.swift ios/BWReader/App/ReaderNativeHighlightRules.swift ios/BWReader/App/ReaderNativeReadingPosition.swift ios/BWReader/App/ReaderNativeBookStore.swift ios/BWReader/App/ReaderNativeAssistantEdits.swift ios/BWReader/App/ReaderNativeReplicationOutbox.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeCardRepository.swift ios/BWReader/App/ReaderNativePageCardPlan.swift ios/BWReader/App/ReaderNativePageCardActions.swift ios/BWReader/Tests/NativePageCardActions/main.swift -o "$RUNNER_TEMP/native-page-card-test"
+          "$RUNNER_TEMP/native-page-card-test"
+
       - name: Check native replication frame limits and reply correlation
         run: |
           xcrun swiftc ios/BWReader/App/DirectVoiceProtocol.swift ios/BWReader/App/DirectVoiceSocket.swift ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeReplicationOutbox.swift ios/BWReader/App/ReaderNativeReplicationTransport.swift ios/BWReader/Tests/NativeReplication/main.swift -o "$RUNNER_TEMP/native-replication-test"
@@ -291,6 +296,11 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativeContextSelection.swift ios/BWReader/Tests/NativeContextSelection/main.swift -o "$RUNNER_TEMP/native-context-selection-test"
           "$RUNNER_TEMP/native-context-selection-test" "$RUNNER_TEMP/native-context-selection.json"
 
+      - name: Verify native live turns and history reconciliation
+        run: |
+          xcrun swiftc ios/BWReader/App/ReaderNativeTurnStore.swift ios/BWReader/Tests/NativeTurns/main.swift -o "$RUNNER_TEMP/native-turns-test"
+          "$RUNNER_TEMP/native-turns-test"
+
       - name: Verify native card repository parity
         run: |
           node tests/native_card_fixtures.cjs "$RUNNER_TEMP/native-card-fixtures.json"
@@ -299,7 +309,7 @@ jobs:
 
       - name: Verify native review queue acquisition and cancellation
         run: |
-          xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeReviewQueue.swift ios/BWReader/Tests/NativeReviewQueue/main.swift -o "$RUNNER_TEMP/native-review-queue-test"
+          xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeReviewCards.swift ios/BWReader/App/ReaderNativeReviewQueue.swift ios/BWReader/Tests/NativeReviewQueue/main.swift -o "$RUNNER_TEMP/native-review-queue-test"
           "$RUNNER_TEMP/native-review-queue-test"
 
       - name: Verify native review improvement confirmation and receipts

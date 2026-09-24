@@ -2146,6 +2146,7 @@ test("ready App note requests use Swift business commands and never retry a reje
   let rejected = false;
   const { context, dataStoresState } = await harness({
     nativeBookReply(message) {
+      if(message.action==='bookPageCard' && message.request.operation==='recover') return Promise.resolve({ok:true,result:{recovered:false}});
       commands.push(message);
       if (message.request.operation === 'replication-enqueue') return { ok: true, result: { ok: true, queued: true } };
       if (rejected) return { ok: false, code: 'BW_LOCAL_NOTES', status: 404, error: '未找到便签' };
@@ -4277,6 +4278,7 @@ test("App assistant edits wait for Swift commit and never retry a failed native 
   const result = await harness({
     interfaceManifest: withGenericAssistantRoutesSupported(),
     nativeBookReply(message) {
+      if(message.action==='bookPageCard' && message.request.operation==='recover') return Promise.resolve({ok:true,result:{recovered:false}});
       if (message.action === 'bookAssistantSnapshot') return Promise.resolve({ok:true,snapshot:{
         contract:'reader-native-pdf-assistant-state/1',file:DEFAULT_LOCAL_FILE,
         revisions:{highlights:0,notes:0,ink:0,user_pages:0},highlights:[],notes:[],ink:{},user_pages:[]

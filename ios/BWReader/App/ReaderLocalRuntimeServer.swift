@@ -1506,7 +1506,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         return jsonResponse(request, status: .ok, object: payload)
     }
 
-    private static func nativeTOCEntries(
+    static func nativeTOCEntries(
         in document: PDFDocument
     ) -> [[String: Any]] {
         guard let root = document.outlineRoot else { return [] }

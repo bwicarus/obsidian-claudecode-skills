@@ -442,7 +442,7 @@ struct ReaderNativeBookStore {
 
     private static func uuid() -> String { UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() }
 
-    private func writeNotes(_ notes: [[String: Any]], expected: Int64?, mutation: String, at: Int64) throws -> Int64 {
+    func writeNotes(_ notes: [[String: Any]], expected: Int64?, mutation: String, at: Int64) throws -> Int64 {
         let revision = try writeState("document-notes-legacy", value: notes, expected: expected, mutation: mutation + ":notes", at: at)
         let placements = Self.placements(notes)
         try writeState("card-placements", value: placements, mutation: mutation + ":placements", at: at)
@@ -452,7 +452,7 @@ struct ReaderNativeBookStore {
     }
 
     @discardableResult
-    private func writeState(_ kind: String, value: Any, expected: Int64? = nil, mutation: String, at: Int64) throws -> Int64 {
+    func writeState(_ kind: String, value: Any, expected: Int64? = nil, mutation: String, at: Int64) throws -> Int64 {
         try write(collection: "native-" + kind, id: bookID + ":" + kind, payload: value,
                   expected: expected, mutation: mutation, at: at)
     }

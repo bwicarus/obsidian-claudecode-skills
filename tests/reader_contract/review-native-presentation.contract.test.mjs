@@ -11,6 +11,7 @@ function fixture() {
   const card = { id: '123', front: '<ruby>語<rt>ご</rt></ruby>'.repeat(200), back: '完整答案', entity_id: 'original' };
   const state = {
     _mode: true, _contextCacheKey: 'book-a', _scopeMode: 'current',
+    _nativeReviewUI: () => false, _nativeQueuePresentation: null, _nativeQueueLease: '',
     _queueBusy: false, _idx: 0, _queue: [card], _dueTotal: 4, _relatedTotal: 2,
     _showingAnswer: false, _cardExpanded: true, _stagedRating: null, _ratingCommitBusy: 0, _nativeStageWork: null, _nativeNavigationWork: null,
     _improveExpanded: false, _improveMode: 'verbose', _draftState: null, _commitState: {}, _presentationNotice: '',
@@ -62,6 +63,22 @@ test('stale book and card commands cannot touch a scheduler, source or draft', a
   await assert.rejects(run('prepareDraft', { cardId: 'anki_card_other', target: 'anki' }), /已变化/);
   await assert.rejects(run('rate', { ease: 3 }), /不能评分/);
   assert.deepEqual(calls, []);
+});
+
+test('native committed neighbours and face state bypass duplicate browser projection', () => {
+  const { state } = fixture();
+  state._nativeReviewUI = () => true;
+  state._nativeQueueLease = 'native-lease';
+  state._nativeQueuePresentation = { lease: 'native-lease', revision: 9, index: 0, count: 1,
+    queueIds: ['anki_card_123'], current: { id: 'anki_card_123', front: '原生题面', back: '原生答案' },
+    previous: null, next: null, showingAnswer: true, expanded: false };
+  state._cardForAssistant = () => assert.fail('must not build web faces before using native data');
+  const result = state._presentationState();
+  assert.equal(result.current.front, '原生题面');
+  assert.equal(result.showingAnswer, true);
+  assert.equal(result.expanded, false);
+  result.current.front = 'mutated';
+  assert.equal(state._nativeQueuePresentation.current.front, '原生题面');
 });
 
 test('native rating still stages through original owner and can undo before external commit', async () => {

@@ -22,6 +22,8 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     private var observer: NSObjectProtocol?
     private var history: ReaderNativeAssistantHistory?
     private var historyContext: UInt64?
+    var beforeHistoryClear: ((String) async throws -> UUID)?
+    var afterHistoryClear: ((String,UUID,Bool) -> Void)?
 
     init(webView: WKWebView, trustedBaseURL: URL, gateway: ReaderNativeServerGateway) {
         self.webView = webView; self.trustedBaseURL = trustedBaseURL; self.gateway = gateway
@@ -204,7 +206,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             watchedEffectCounts[taskID] = actions.count
         }
         let next = (sequences[id] ?? 0) + 1
-        let result = try await webView.callAsyncJavaScript("return window.__bwNativeAssistantStream?.acceptTask(payload);",
+        let result = try await webView.callAsyncJavaScript("const receipt = window.__bwNativeAssistantStream?.acceptTask(payload); await window.RC?.turnCard?.settle?.(); return receipt;",
             arguments: ["payload": ["id": id, "sequence": next, "snapshot": snapshot]], in: nil, contentWorld: .page)
         guard epoch == lease, gateway.contextRevision == context, let ack = result as? [String: Any],
               ack["ok"] as? Bool == true, ack["sequence"] as? Int == next else {
@@ -233,9 +235,17 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             }
             let history = history!
             Task { @MainActor [weak self] in
+                var clearToken: UUID?, cleared = false
+                defer { if let clearToken { self?.afterHistoryClear?(mode,clearToken,cleared) } }
                 do {
-                    let response = try await (operation == "read" ? history.read(route) : history.clear(route))
                     guard let self, self.epoch == lease, self.gateway.contextRevision == context else { throw CancellationError() }
+                    if operation == "clear" {
+                        clearToken = try await self.beforeHistoryClear?(mode)
+                    }
+                    let response = try await (operation == "read" ? history.read(route) : history.clear(route))
+                    guard self.epoch == lease, self.gateway.contextRevision == context else { throw CancellationError() }
+                    if operation == "clear", (200..<300).contains(response.status),
+                       let result = try? JSONSerialization.jsonObject(with:response.body) as? [String:Any], result["ok"] as? Bool == true { cleared = true }
                     var reply: [String: Any] = ["ok": (200..<300).contains(response.status), "status": response.status,
                                                 "body": String(decoding: response.body, as: UTF8.self)]
                     if let presentation = response.presentation { reply["presentation"] = String(decoding: presentation, as: UTF8.self) }
@@ -281,7 +291,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             return ["name": event.name, "data": event.data, "state": try turn.consume(event)]
         }
         let result = try await webView.callAsyncJavaScript(
-            "return window.__bwNativeAssistantStream?.accept(payload);",
+            "const receipt = window.__bwNativeAssistantStream?.accept(payload); await window.RC?.turnCard?.settle?.(); return receipt;",
             arguments: ["payload": ["id": id, "sequence": next,
                                     "events": projected]],
             in: nil, contentWorld: .page)

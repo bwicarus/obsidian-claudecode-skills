@@ -192,7 +192,7 @@ enum ReaderNativeAssistantEdits {
         result["id"] = id; result["time"] = integer(input["time"]) ?? now / 1000
         return result
     }
-    private static func note(_ input: Object, fallbackID: Any?, file: String, now: Int64) throws -> Object {
+    static func note(_ input: Object, fallbackID: Any?, file: String, now: Int64) throws -> Object {
         let id = try recordID(input["id"] ?? fallbackID)
         var body = input.filter { ["anchor", "text", "color", "w", "h", "collapsed", "strokes", "video", "card", "html", "iar"].contains($0.key) }
         body["file"] = file

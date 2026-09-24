@@ -11412,11 +11412,32 @@
     return receipts.filter(function (_, index) { return keep.has(index); });
   }
 
+  function nativePageCardCommand(input) {
+    return root.webkit.messageHandlers.bwNativeDataStore.postMessage({action:'bookPageCard',bookID:bookId,request:input}).then(function (reply) {
+      if (!reply || reply.ok !== true || !reply.result) {
+        throw outgoingRequestError(reply && reply.error || '原生页面卡片操作未确认',reply && reply.code || 'BW_NATIVE_PDF_ASSISTANT_ACTION',reply && reply.status || 500);
+      }
+      if (stores.global && typeof stores.global.observeCommitted === 'function') stores.global.observeCommitted(reply.changes || []);
+      if (input.operation !== 'recover' || reply.result.recovered === true) announceLocalNotesChanged('native-page-card');
+      return reply.result;
+    });
+  }
+
   function nativePDFCommitPageCardAction(actions, actionIndex, expectedState, writerLease) {
     assertNativePDFWriterLease(writerLease);
     var action = actions[actionIndex];
     var descriptor = nativePDFActionDescriptor(action);
     var code = 'BW_NATIVE_PDF_ASSISTANT_ACTION';
+    if (nativeBookWrites) {
+      return serializeLocalStateMutation('document','pdf-assistant-bundle',function () {
+        assertNativePDFWriterLease(writerLease);
+        return nativePageCardCommand({operation:'action',data:descriptor.data,expectedState:expectedState}).then(function (result) {
+          var output = actions.map(clone);
+          output[actionIndex] = nativePDFSanitizeAction(action,descriptor);
+          return {actions:output,revisions:Object.assign({},nativePDFExpectedRevisions(expectedState),{notes:result.revision}),replayed:result.replayed === true,receipt:result.receipt};
+        });
+      });
+    }
     var plan = nativePDFPageCardPlan(descriptor.data, code);
     var operationID = nativePDFOperationID(action, descriptor);
     var fingerprint = nativePDFPageCardFingerprint(plan, operationID, descriptor.kind);
@@ -11694,12 +11715,25 @@
         );
       }
       var computerVoice = root.RC && root.RC.computerVoice;
-      if (!computerVoice || typeof computerVoice.pageCards !== 'function') {
+      if (!nativeBookWrites && (!computerVoice || typeof computerVoice.pageCards !== 'function')) {
         throw new RuntimeError(
           '当前页卡片精确序号不可用', 'BW_NATIVE_PDF_PAGE_CARDS_PROJECTION'
         );
       }
       return withNativePDFWriter('reader-page-card', function (writerLease) {
+        if (nativeBookWrites) {
+          return Promise.resolve().then(function () {
+            return computerVoice && typeof computerVoice.pageCards === 'function' ? computerVoice.pageCards() : null;
+          }).catch(function () {
+            // A committed operation can be replayed after its target was
+            // deleted. A new mutation still requires a valid native projection.
+            return null;
+          }).then(function (projection) {
+            var cache = nativePageCardSnapshotCache.get(Number(input.expectedRevision));
+            return nativePageCardCommand({operation:'direct',input:input,projection:projection,
+              cachedSnapshot:cache && cache.cards.get(String(input.expectedId || '')) || null});
+          });
+        }
         var requestFingerprint = nativePDFDirectPageCardRequestFingerprint(input, code);
         return storedStateRecord(
           stores.document, 'pdf-assistant-ops', 'documentId', bookId, [],
@@ -11823,6 +11857,10 @@
     var code = 'BW_NATIVE_PDF_PAGE_CARD_RECOVERY';
     var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
     return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
+      if (nativeBookWrites) {
+        assertNativePDFWriterLease(writerLease);
+        return nativePageCardCommand({operation:'recover'}).then(function (result) { return result.recovered === true; });
+      }
       var recovered = false;
 
       function sameNote(note, snapshot, placementID) {
@@ -12047,6 +12085,13 @@
       return withNativePDFWriter('reader-page-card-action', function (writerLease) {
         return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
           assertNativePDFWriterLease(writerLease);
+          if (nativeBookWrites) {
+            return nativePageCardCommand({operation:'transition',operationId:operationID,action:input.action}).then(function (result) {
+              var receipt = result.receipt;
+              return {ok:true,operationId:operationID,action:input.action,state:receipt.state,replayed:result.replayed === true,
+                page:receipt.page,number:receipt.number,id:receipt.placementId};
+            });
+          }
           return nativePDFPageCardRecordSet(bound).then(function (recordSet) {
             var receipts = storedList(clone(recordSet.records[3].payload), code);
             var journalIndex = receipts.findIndex(function (item) {

@@ -10150,12 +10150,12 @@
           ? refreshLearningCardPlacements(applied) : 0)
           .catch(function () { return 0; })
           .then(function () { return applied; });
-      }).then(function (applied) {
+      }).then(async function (applied) {
         // Canonical Reader storage is authoritative.  Refresh the owning App
         // immediately after that write, before AnkiConnect/media/sync work can
         // delay the visible Review card.  The Review surface itself checks the
         // stable id + cardIndex and only redraws the foreground card.
-        var viewUpdate = requestLearningCardViewRefresh(applied, cardIndex);
+        var viewUpdate = await requestLearningCardViewRefresh(applied, cardIndex);
         if (operation === "edit") nextCard = applied.cards[cardIndex];
         if (value.externalPolicy === "reader-only") {
           return {

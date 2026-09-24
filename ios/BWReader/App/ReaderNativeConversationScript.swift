@@ -1557,7 +1557,7 @@ enum ReaderNativeConversationScript {
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
       ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:native-document-position', 'bw-native-computer-voice-state', 'bw-native-figure-projection'].forEach(name => window.addEventListener(name, schedule));
-      ['rc:assistant-mode-changed','rc:assistant-message-changed','rc:review-presentation-changed','rc:placement-changed','rc:favorites-changed','bw:native-favorites-changed','rc:flashcard-state-changed'].forEach(name => window.addEventListener(name,scheduleMessages));
+      ['rc:native-turn-update','rc:assistant-mode-changed','rc:assistant-message-changed','rc:review-presentation-changed','rc:placement-changed','rc:favorites-changed','bw:native-favorites-changed','rc:flashcard-state-changed'].forEach(name => window.addEventListener(name,scheduleMessages));
       window.addEventListener('scroll', schedule, { capture: true, passive: true });
       window.addEventListener('resize', schedule, { passive: true });
       window.addEventListener('pointerup', schedule, { capture: true, passive: true });

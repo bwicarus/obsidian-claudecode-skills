@@ -136,11 +136,36 @@ final class NativePencilAnnotationSession: ObservableObject {
         drawing = PKDrawing()
     }
 
-    func renderedImage() -> UIImage? {
+    func resizeCanvas(_ size: CGSize, preservingImageAlignment: Bool) {
+        guard size.width > 0, size.height > 0, size != canvasSize else { return }
+        if preservingImageAlignment, canvasSize.width > 0, canvasSize.height > 0, !drawing.strokes.isEmpty {
+            let old = Self.aspectFitRect(imageSize: sourceImage.size, bounds: CGRect(origin: .zero, size: canvasSize))
+            let next = Self.aspectFitRect(imageSize: sourceImage.size, bounds: CGRect(origin: .zero, size: size))
+            let scale = next.width / old.width
+            drawing = drawing.transformed(using: CGAffineTransform(a: scale, b: 0, c: 0, d: scale,
+                tx: next.minX - old.minX * scale, ty: next.minY - old.minY * scale))
+        }
+        canvasSize = size
+    }
+
+    func renderedImage(cropToImage: Bool = false) -> UIImage? {
         guard canvasSize.width >= 1, canvasSize.height >= 1 else {
             return nil
         }
         let bounds = CGRect(origin: .zero, size: canvasSize)
+        if cropToImage {
+            if drawing.strokes.isEmpty { return sourceImage }
+            let fitted = Self.aspectFitRect(imageSize: sourceImage.size, bounds: bounds)
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = sourceImage.scale
+            let scale = sourceImage.size.width / fitted.width
+            return UIGraphicsImageRenderer(size: sourceImage.size, format: format).image { context in
+                sourceImage.draw(in: CGRect(origin: .zero, size: sourceImage.size))
+                context.cgContext.scaleBy(x: scale, y: scale)
+                context.cgContext.translateBy(x: -fitted.minX, y: -fitted.minY)
+                drawing.image(from: bounds, scale: max(1, scale)).draw(in: bounds)
+            }
+        }
         let format = UIGraphicsImageRendererFormat()
         format.scale = UIScreen.main.scale
         format.opaque = true
@@ -187,14 +212,16 @@ struct NativePencilAnnotationEditor: View {
     @State private var selectedColorHex = "#ff3b30"
     @State private var selectedWidth: CGFloat = 4
     let onSave: (UIImage) -> Void
+    private let editsAttachment: Bool
 
     private let colors = ["#ff3b30", "#007aff", "#111111", "#34c759"]
 
-    init(image: UIImage, onSave: @escaping (UIImage) -> Void) {
+    init(image: UIImage, editsAttachment: Bool = false, onSave: @escaping (UIImage) -> Void) {
         _session = StateObject(
             wrappedValue: NativePencilAnnotationSession(sourceImage: image)
         )
         self.onSave = onSave
+        self.editsAttachment = editsAttachment
     }
 
     var body: some View {
@@ -211,14 +238,15 @@ struct NativePencilAnnotationEditor: View {
                             canvasSize: $session.canvasSize,
                             tool: selectedTool,
                             colorHex: selectedColorHex,
-                            width: selectedWidth
+                            width: selectedWidth,
+                            allowsFingerDrawing: editsAttachment
                         )
                     }
                     .onAppear {
-                        session.canvasSize = proxy.size
+                        session.resizeCanvas(proxy.size, preservingImageAlignment: editsAttachment)
                     }
                     .onChange(of: proxy.size) { _, value in
-                        session.canvasSize = value
+                        session.resizeCanvas(value, preservingImageAlignment: editsAttachment)
                     }
                 }
 
@@ -268,7 +296,7 @@ struct NativePencilAnnotationEditor: View {
                 .background(.ultraThinMaterial)
             }
             .background(Color.black.ignoresSafeArea())
-            .navigationTitle("标注当前视口")
+            .navigationTitle(editsAttachment ? "编辑图片" : "标注当前视口")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -280,7 +308,7 @@ struct NativePencilAnnotationEditor: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
-                        guard let image = session.renderedImage() else { return }
+                        guard let image = session.renderedImage(cropToImage: editsAttachment) else { return }
                         onSave(image)
                         dismiss()
                     }
@@ -301,6 +329,7 @@ private struct NativePencilCanvas: UIViewRepresentable {
     let tool: NativePencilAnnotationTool
     let colorHex: String
     let width: CGFloat
+    let allowsFingerDrawing: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -311,7 +340,7 @@ private struct NativePencilCanvas: UIViewRepresentable {
         canvas.delegate = context.coordinator
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
-        canvas.drawingPolicy = .pencilOnly
+        canvas.drawingPolicy = allowsFingerDrawing ? .anyInput : .pencilOnly
         context.coordinator.applySelectedTool(
             to: canvas,
             tool: tool,
@@ -325,11 +354,6 @@ private struct NativePencilCanvas: UIViewRepresentable {
         context.coordinator.parent = self
         if canvas.drawing.dataRepresentation() != drawing.dataRepresentation() {
             canvas.drawing = drawing
-        }
-        if canvasSize != canvas.bounds.size, !canvas.bounds.isEmpty {
-            DispatchQueue.main.async {
-                canvasSize = canvas.bounds.size
-            }
         }
         context.coordinator.applySelectedTool(
             to: canvas,
@@ -380,7 +404,6 @@ private struct NativePencilCanvas: UIViewRepresentable {
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             parent.drawing = canvasView.drawing
-            parent.canvasSize = canvasView.bounds.size
         }
     }
 }

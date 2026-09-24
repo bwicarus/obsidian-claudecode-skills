@@ -3025,16 +3025,28 @@ internal sealed class DirectBridgeProtocolSession
         JsonElement message,
         CancellationToken cancellationToken)
     {
-        RequireExactKeys(
-            message,
-            "contract",
-            "type",
-            "requestId",
-            "text");
+        bool withAttachments = message.TryGetProperty("attachmentIds", out JsonElement attachments);
+        RequireExactKeys(message, withAttachments
+            ? ["contract", "type", "requestId", "text", "attachmentIds", "submissionId"]
+            : ["contract", "type", "requestId", "text"]);
         RequireAuthenticated();
         RequireVoiceAllowed();
         string requestId = RequireString(message, "requestId", 128);
         string text = RequireString(message, "text", 4000);
+        string[] attachmentIds = [];
+        string? submissionId = null;
+        if (withAttachments)
+        {
+            submissionId = RequireString(message, "submissionId", 32);
+            if (!ReaderAssistantAttachmentStore.ValidId(submissionId) || attachments.ValueKind != JsonValueKind.Array ||
+                attachments.GetArrayLength() is < 1 or > 10)
+                throw new DirectProtocolException("BW_ATTACHMENT_INVALID", "附件请求无效");
+            attachmentIds = attachments.EnumerateArray().Select(value => value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "").ToArray();
+            if (attachmentIds.Distinct(StringComparer.Ordinal).Count() != attachmentIds.Length ||
+                attachmentIds.Any(id => !ReaderAssistantAttachmentStore.ValidId(id)))
+                throw new DirectProtocolException("BW_ATTACHMENT_INVALID", "附件编号无效或重复");
+            foreach (string id in attachmentIds) _ = ReaderAssistantAttachmentStore.Read(id);
+        }
         if (ExternalVoiceBackendEnabled() && !ReaderCodexPush.OutboundSealed)
         {
             // 打字内容交给语音核心的后台线程 —— 在不在通话都一样（2026-09-23 用户：
@@ -3042,7 +3054,7 @@ internal sealed class DirectBridgeProtocolSession
             // 原来通话中是追加进语音会话、还带「【用户打字】」前缀，语音模型把前缀连原话念了出来。
             string? body = await VoiceCoreRequestBodyAsync(
                 "/typed",
-                JsonSerializer.Serialize(new { text }),
+                JsonSerializer.Serialize(new { text, attachmentIds, submissionId }),
                 "voice-core-typed:" + requestId).ConfigureAwait(false);
             bool accepted = false;
             string via = string.Empty;
