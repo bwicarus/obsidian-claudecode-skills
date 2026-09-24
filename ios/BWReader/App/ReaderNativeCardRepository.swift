@@ -396,11 +396,13 @@ struct ReaderNativeCardRepository {
         let due = Double(reviewedAt) + floor(days * 86400000 + 0.5)
         guard due.isFinite, due <= 9_007_199_254_740_991 else { throw R.fail("INPUT", "Anki 到期时间无效") }
         // Preserve ease, reps, lapses, status and all other committed fields.
-        review["intervalDays"] = roundedDays; review["dueAt"] = due; review["scheduleSource"] = "anki-fsrs"
-        if R.same(review, expected) { return ["applied": false, "reason": "unchanged", "record": current] }
+        review["intervalDays"] = roundedDays; review["dueAt"] = due
+        // Provenance belongs to this durable operation receipt. The shared
+        // review schema does not permit a scheduleSource field.
+        if R.same(review, expected) { return ["applied": false, "reason": "unchanged", "record": current, "scheduleSource": "anki-fsrs"] }
         let updated = try execute("patchState", args: [id, index, ["review": review], ["ifStateRev": current["stateRev"]!]],
             mutation: mutation + ":schedule", at: at)
-        return ["applied": true, "record": updated]
+        return ["applied": true, "record": updated, "scheduleSource": "anki-fsrs"]
     }
 
     /// Direct Swift UI actions share the repository transaction, including the

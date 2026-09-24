@@ -195,7 +195,7 @@ let adoptedCard = adopted["record"] as! [String: Any]
 let adoptedReview = ((adoptedCard["states"] as! [String: Any])["0"] as! [String: Any])["review"] as! [String: Any]
 precondition((adoptedReview["dueAt"] as! NSNumber).int64Value == 606000)
 precondition((adoptedReview["intervalDays"] as! NSNumber).doubleValue == 0.01)
-precondition(adoptedReview["scheduleSource"] as? String == "anki-fsrs")
+precondition(adopted["scheduleSource"] as? String == "anki-fsrs" && adoptedReview["scheduleSource"] == nil)
 for key in ["reps", "lapses", "ease", "lastReviewedAt", "status"] {
     precondition(R.same(adoptedReview[key] as Any, adoptionReview[key] as Any), "interval refinement rewrote " + key)
 }
