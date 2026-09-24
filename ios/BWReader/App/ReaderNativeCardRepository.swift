@@ -388,6 +388,64 @@ struct ReaderNativeCardRepository {
         }
     }
 
+    /// The standalone sidebar rating keeps its original Anki schedule. Unlike
+    /// the local review queue, it must not calculate a second local score.
+    func beginStandaloneRating(input:[String:Any], aid:String, ease:Int, event:[String:Any]) throws -> [String:Any] {
+        try store.inTransaction {
+            let gid = try R.id(input["gid"]), index = try R.integer(input["cardIndex"],"cardIndex")
+            guard (1...4).contains(ease), !aid.isEmpty, let record = try load(gid),
+                  (record["entityRev"] as? NSNumber)?.int64Value == (input["entityRev"] as? NSNumber)?.int64Value,
+                  (record["stateRev"] as? NSNumber)?.int64Value == (input["stateRev"] as? NSNumber)?.int64Value,
+                  let cards = record["cards"] as? [[String:Any]], cards.indices.contains(Int(index)),
+                  let state = (record["states"] as? [String:Any])?[String(index)] as? [String:Any],
+                  state["removed"] as? Bool != true, state["phase"] as? String == "confirmed" else { throw R.fail("CONFLICT","评分卡片已改变") }
+            let previous = state["exactState"] as? [String:Any] ?? [:]
+            var card = cards[Int(index)]; card.merge(previous) { _,next in next }
+            guard card["_st"] as? String != "done", card["_showBack"] as? Bool == true,
+                  !["_ratingPending","_syncPending","_ratingUnavailable","_removePending","_addPending"].contains(where:{ card[$0] as? Bool == true }) else {
+                throw R.fail("TRANSITION","评分尚未就绪或上一评分结果待核实")
+            }
+            func positive(_ value:Any?) -> Int64 {
+                guard let value, let number = Int64(String(describing:value)), number > 0, number <= 9_007_199_254_740_991 else { return 0 }; return number
+            }
+            let cardID = positive(card["card_id"] ?? card["anki_card_id"] ?? card["id"])
+            let noteID = positive(card["_nid"] ?? card["note_id"])
+            guard cardID > 0 || noteID > 0 else { throw R.fail("INPUT","缺少可验证的 Anki 编号") }
+            var body:[String:Any] = ["aid":aid,"ease":ease]
+            body[cardID > 0 ? "card_id" : "note_id"] = cardID > 0 ? cardID : noteID
+            var exact = previous
+            exact.merge(["_st":"done","_ratingPending":true,"_syncPending":false,"_ratingAid":aid,"_ratingEase":ease,"_ratingCardId":cardID > 0 ? cardID as Any : NSNull()]) { _,next in next }
+            let saved = try execute("patchState",args:[gid,index,["exactState":exact],["ifEntityRev":record["entityRev"]!,"ifStateRev":record["stateRev"]!]],mutation:aid+":begin",at:now()) as! [String:Any]
+            guard event["contract"] as? String == "command-outbox/2", event["url"] as? String == "/pdf/api/review-event",
+                  (event["body"] as? [String:Any])?["aid"] as? String == aid,
+                  let mutation = event["mutationId"] as? String else { throw R.fail("INPUT","评分事件缺失") }
+            let deliveryID = "standalone:" + aid + ":" + mutation
+            _ = try store.commitWithinTransaction(record:.init(collection:"native-review-delivery",id:deliveryID,rev:1,updatedAt:now(),deleted:false,
+                json:String(decoding:R.bytes(event),as:UTF8.self)),mutationId:nil,journalJSON:nil,expectedRev:0,now:now())
+            return ["record":saved,"body":body,"previous":previous,"gid":gid,"cardIndex":index,"aid":aid,"cardId":cardID,"entityRev":record["entityRev"]!]
+        }
+    }
+
+    func settleStandaloneRating(_ started:[String:Any], status:String, next:[String:Any] = [:]) throws -> [String:Any] {
+        try store.inTransaction {
+            let gid = try R.id(started["gid"]), index = try R.integer(started["cardIndex"],"cardIndex")
+            guard ["succeeded","rejected","queued","unknown"].contains(status), let aid = started["aid"] as? String,
+                  let record = try load(gid), let state = (record["states"] as? [String:Any])?[String(index)] as? [String:Any],
+                  state["removed"] as? Bool != true,
+                  (record["entityRev"] as? NSNumber)?.int64Value == (started["entityRev"] as? NSNumber)?.int64Value,
+                  var exact = state["exactState"] as? [String:Any], exact["_ratingAid"] as? String == aid else { throw R.fail("CONFLICT","迟到的评分结果不属于当前卡片") }
+            if status == "rejected" { exact = started["previous"] as? [String:Any] ?? [:] }
+            else {
+                exact["_ratingPending"] = status != "succeeded"; exact["_syncPending"] = status == "queued"
+                exact["_next"] = status == "succeeded" ? next as Any : NSNull()
+            }
+            if status == "succeeded" || status == "rejected" {
+                for key in ["_ratingAid","_ratingEase","_ratingCardId"] { exact[key] = NSNull() }
+            }
+            return try execute("patchState",args:[gid,index,["exactState":exact],["ifEntityRev":record["entityRev"]!,"ifStateRev":record["stateRev"]!]],mutation:aid+":"+status,at:now()) as! [String:Any]
+        }
+    }
+
     func acknowledgeReviewDelivery(id: String, mutationID: String) throws {
         try store.inTransaction {
             guard let row = try store.record(collection: "native-review-delivery", id: id), !row.deleted else { return }

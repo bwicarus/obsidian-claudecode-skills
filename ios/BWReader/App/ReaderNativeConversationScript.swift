@@ -376,16 +376,9 @@ enum ReaderNativeConversationScript {
             part.kind = 'anki';
             part.data.nativeCard = nativeCard;
             part.data.activeInGroup = group.__fc.idx === cardIndex;
-            const ids = {};
-            for (const key of ['del','add','reveal','rate-1','rate-2','rate-3','rate-4','export-desktop','export-mobile']) {
-              ids[key] = registerAction(part.id + '-control-' + key, group, () =>
-                rc().flashcard.performInteraction(group, cardIndex, key));
-            }
-            for (const key of ['front','back','cloze']) {
-              ids['edit-' + key] = registerAction(part.id + '-field-' + key, group, command =>
-                rc().flashcard.performInteraction(group, cardIndex, 'edit', { field: key, value: command.text }));
-            }
-            part.data.nativeCardActions = ids;
+            // Swift issues and resolves action IDs against its current card
+            // data. There are no hidden webpage rating/edit closures to invoke.
+            part.data.nativeActionOwner = part.actionId;
           } else if (interaction && (part.kind === 'anki' || part.kind === 'artifact')) {
             part.kind = 'anki';
             part.data.live = true;

@@ -146,8 +146,16 @@ enum ReaderNativeCardPresentation {
 
     static func project(_ data: [String: Any]) -> [String: Any] {
         guard let input = data["nativeCard"] as? [String: Any], let state = interaction(input),
-              let ids = data["nativeCardActions"] as? [String: String], let presentation = state["presentation"] as? [String: Any] else { return data }
+              let presentation = state["presentation"] as? [String: Any] else { return data }
         var result = data
+        var ids = data["nativeCardActions"] as? [String:String] ?? [:]
+        if let owner = data["nativeActionOwner"] as? String, !owner.isEmpty {
+            for key in ["del","add","reveal","rate-1","rate-2","rate-3","rate-4","export-desktop","export-mobile","edit-front","edit-back","edit-cloze"] {
+                ids[key] = "native-card:" + owner + ":" + key
+            }
+            result["nativeCardActions"] = ids
+        }
+        guard !ids.isEmpty else { return data }
         for key in ["state", "editable", "pending"] { result[key] = state[key] }
         result["live"] = true
         result["faces"] = presentation["faces"]; result["notice"] = presentation["notice"]

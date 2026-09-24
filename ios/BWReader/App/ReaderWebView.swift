@@ -2646,14 +2646,71 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok":false,"error":error.localizedDescription] }
     }
 
+    private func rateNativeStandaloneCard(_ input:[String:Any], ease:Int) async throws -> [String:Any] {
+        guard let deviceID = nativeReadingStoreDeviceID, let book = currentLocalBook, let gateway = nativeServerGateway else { throw CancellationError() }
+        let global = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-global").store
+        let repository = ReaderNativeCardRepository(store:global,deviceID:deviceID)
+        let outbox = try nativeCommandOutbox.productionQueue()
+        let aid = "rv_" + UUID().uuidString.replacingOccurrences(of:"-",with:""), at = Int64(Date().timeIntervalSince1970 * 1000)
+        let gid = input["gid"] as? String ?? "", index = input["cardIndex"] as? Int ?? -1
+        let card = input["card"] as? [String:Any] ?? [:]
+        let eventID = "revlog:fc:\(gid):\(index):\(aid)"
+        let event:[String:Any] = ["id":eventID,"aid":aid,"gid":gid,"index":index,"ease":ease,"reviewedAt":at,
+            "source":"reader","queue":"flashcard","ankiCardId":String(describing:card["card_id"] ?? card["anki_card_id"] ?? card["id"] ?? "")]
+        let eventCommand = try outbox.prepareCommand(["queueKey":"revlog:"+eventID,"url":"/pdf/api/review-event","method":"POST","body":event,"ts":at])
+        let started = try repository.beginStandaloneRating(input:input,aid:aid,ease:ease,event:eventCommand)
+        let generation = bookUserStateContextGeneration, scope = nativeConversation.scope
+        nativeConversation.acceptCardRecord(started["record"] as! [String:Any]); markCloudSyncDirty()
+        do { try recoverNativeReviewDelivery(repository,outbox) }
+        catch { postClientLog("评分事件已保存，等待投递恢复：" + error.localizedDescription) }
+        var status = "unknown", next:[String:Any] = [:]
+        do {
+            let response = try await gateway.fetchData(path:"/pdf/api/review-answer",method:"POST",
+                body:ReaderNativeCardRules.bytes(started["body"]!),surface:book.format == .pdf ? .pdf : .epub)
+            if let result = try? JSONSerialization.jsonObject(with:response.data) as? [String:Any] {
+                if (200..<300).contains(response.status), result["ok"] as? Bool != false {
+                    status = "succeeded"; next = result["next"] as? [String:Any] ?? [:]
+                } else if response.status < 503,
+                          !["review_answer_outcome_unknown","review_answer_idempotency_unavailable"].contains(result["code"] as? String ?? "") { status = "rejected" }
+            }
+        } catch {
+            let failure = error as NSError
+            if failure.domain == NSURLErrorDomain, failure.code != NSURLErrorCancelled {
+                // The server deduplicates the original aid; never create a new
+                // rating on reconnection or let a second button press through.
+                let retry = try outbox.prepareCommand(["queueKey":"rev:"+aid,"url":"/pdf/api/review-answer","method":"POST","body":started["body"]!,"ts":at])
+                _ = try outbox.enqueue(retry); status = "queued"
+            }
+        }
+        let record = try repository.settleStandaloneRating(started,status:status,next:next)
+        markCloudSyncDirty()
+        if generation == bookUserStateContextGeneration, nativeConversation.scope == scope {
+            nativeConversation.acceptCardRecord(record); scheduleNativePDFProjectionRefresh()
+            webView.callAsyncJavaScript("window.RC?.flashcard?.observeNativeRating?.(receipt); window.__bwNativeConversation?.snapshot?.(); return true;",
+                arguments:["receipt":["record":record,"index":index,"aid":aid,"ease":ease,"cardId":started["cardId"]!,"status":status,"next":next]],in:nil,in:.page,completionHandler:nil)
+        }
+        if status == "unknown" { return ["ok":false,"error":"评分结果未知，已保留原编号并阻止重复评分"] }
+        if status == "rejected" { return ["ok":false,"error":"评分被拒绝，卡片已恢复"] }
+        return ["ok":true,"committed":true,"queued":status == "queued"]
+    }
+
     private func performNativeCardCommand(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "liveAction", let token = command["actionId"] as? String,
               let target = nativeConversation.nativeCardAction(token),
-              ["add", "del", "edit-front", "edit-back", "edit-cloze", "export-mobile", "export-desktop", "reveal"].contains(target.key),
-              (target.input["entityRev"] as? NSNumber)?.int64Value ?? 0 > 0 else { return nil }
-        // Queue-owned reviews have their own reveal/advance contract and are
-        // migrated with the review controller, not as independent saved cards.
-        if target.key == "reveal", target.input["controlledReview"] as? Bool == true { return nil }
+              ["add", "del", "edit-front", "edit-back", "edit-cloze", "export-mobile", "export-desktop", "reveal","rate-1","rate-2","rate-3","rate-4"].contains(target.key) else { return nil }
+        if target.input["controlledReview"] as? Bool == true, target.key == "reveal" || target.key.hasPrefix("rate-") {
+            let visible = nativeConversation.review
+            let card = visible["current"] as? [String:Any] ?? [:]
+            let targetID = target.input["gid"] as? String ?? "", currentID = card["id"] as? String ?? ""
+            guard !targetID.isEmpty, !currentID.isEmpty else { return ["ok":false,"error":"复习卡片已切换"] }
+            if target.key.hasPrefix("rate-"), targetID != currentID { return ["ok":false,"error":"不能给上一张复习卡评分"] }
+            var value:[String:Any] = ["key":target.key == "reveal" ? (targetID == currentID ? "reveal" : "select") : "rate",
+                "contextKey":visible["contextKey"] ?? "","cardId":currentID]
+            if targetID != currentID { value["targetId"] = targetID }
+            if target.key.hasPrefix("rate-") { value["ease"] = Int(target.key.suffix(1)) ?? 0 }
+            return await performNativeReviewTransition(["action":"reviewAction","scope":command["scope"] ?? "","value":value])
+                ?? ["ok":false,"error":"复习队列已改变"]
+        }
         do {
             guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
                   let deviceID = nativeReadingStoreDeviceID,
@@ -2672,6 +2729,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             }
             if target.key == "export-desktop", let gid = target.input["gid"] as? String, let index = target.input["cardIndex"] as? Int {
                 return await exportNativeAnkiPC(gid: gid, index: index)
+            }
+            if target.key.hasPrefix("rate-"), let ease = Int(target.key.suffix(1)) {
+                return try await rateNativeStandaloneCard(target.input,ease:ease)
             }
             let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
             guard try store.meta("legacyImport") == "done" else { throw ReaderNativeCardRules.fail("UNAVAILABLE", "卡库尚未就绪") }

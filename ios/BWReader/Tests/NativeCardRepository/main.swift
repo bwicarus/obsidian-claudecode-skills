@@ -243,3 +243,35 @@ try ui.acknowledgeReviewDelivery(id: pendingDelivery[0].id, mutationID: delivery
 _ = try ui.perform(rating(deliveryRating, "delivery-rating"))
 let settledDelivery = try ui.pendingReviewDeliveries(namespace: deliveryNamespace)
 precondition(settledDelivery.isEmpty, "score replay recreated an acknowledged delivery")
+
+func testStandaloneRating() throws {
+    let db = try ReaderNativeDataStore(path:":memory:")
+    let repo = ReaderNativeCardRepository(store:db,deviceID:"test",now:{ 9000 })
+    let gid = "card_standalone"
+    _ = try repo.perform(["operation":"registerDraft","arguments":[["gid":gid,"cards":[["front":"Q","back":"A"]],"source":["kind":"test","sourceId":"source"]]],"mutationId":"new"])
+    _ = try repo.perform(["operation":"saveConfirmedCard","arguments":[["gid":gid,"cardIndex":0]],"mutationId":"confirm"])
+    _ = try repo.perform(["operation":"patchState","arguments":[gid,0,["exactState":["_st":"learn","_showBack":true,"card_id":123,"_ratingUnavailable":false]]],"mutationId":"ready"])
+    func input() throws -> [String:Any] {
+        let current = try repo.load(gid)!
+        return ["gid":gid,"cardIndex":0,"entityRev":current["entityRev"]!,"stateRev":current["stateRev"]!]
+    }
+    let event:[String:Any] = ["contract":"command-outbox/2","url":"/pdf/api/review-event","body":["aid":"aid-one"],
+        "ownerNamespace":deliveryNamespace,"mutationId":deliveryMutation,"recordType":"mutation","queueKey":"test","method":"POST","ts":9000]
+    let prior = try repo.load(gid)!
+    try db.execute("CREATE TRIGGER fail_sidebar_delivery BEFORE INSERT ON records WHEN NEW.collection = 'native-review-delivery' BEGIN SELECT RAISE(ABORT, 'forced event failure'); END")
+    do { _ = try repo.beginStandaloneRating(input:input(),aid:"aid-one",ease:3,event:event); preconditionFailure("pending score without event") } catch is ReaderNativeDataStore.StoreError {}
+    let rolled = try repo.load(gid)!
+    precondition(R.same(prior,rolled))
+    try db.execute("DROP TRIGGER fail_sidebar_delivery")
+    let started = try repo.beginStandaloneRating(input:input(),aid:"aid-one",ease:3,event:event)
+    precondition((started["body"] as? [String:Any])?["card_id"] as? Int == 123)
+    do { _ = try repo.beginStandaloneRating(input:input(),aid:"aid-two",ease:3,event:event); preconditionFailure("duplicate rating allowed") } catch is R.Failure {}
+    let unknown = try repo.settleStandaloneRating(started,status:"unknown")
+    precondition((((unknown["states"] as? [String:Any])?["0"] as? [String:Any])?["exactState"] as? [String:Any])?["_ratingPending"] as? Bool == true)
+    let accepted = try repo.settleStandaloneRating(started,status:"succeeded",next:["interval":5])
+    let exact = ((accepted["states"] as! [String:Any])["0"] as! [String:Any])["exactState"] as! [String:Any]
+    precondition(exact["_ratingPending"] as? Bool == false && (exact["_next"] as? [String:Any])?["interval"] as? Int == 5)
+    do { _ = try repo.settleStandaloneRating(started,status:"rejected"); preconditionFailure("late failure rolled back accepted score") } catch is R.Failure {}
+}
+try testStandaloneRating()
+print("Standalone native rating: atomic event/state, concurrent rejection, unknown reservation and original receipt passed")

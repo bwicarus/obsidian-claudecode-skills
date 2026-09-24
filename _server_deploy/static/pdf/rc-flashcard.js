@@ -2196,7 +2196,28 @@
       return result;
     });
   }
+  var nativeRatingReceipts = new Set();
   RC.flashcard = {
+    observeNativeRating: function (receipt) {
+      if (!receipt || !receipt.record || !receipt.aid || !Number.isInteger(receipt.index)) return false;
+      var key = receipt.aid + ':' + receipt.status;
+      if (nativeRatingReceipts.has(key)) return true;
+      RC.flashcard.acceptNativeRecord(receipt.record, receipt.index, 'rating');
+      nativeRatingReceipts.add(key);
+      if (nativeRatingReceipts.size > 512) nativeRatingReceipts.delete(nativeRatingReceipts.values().next().value);
+      var group = _groups[receipt.record.gid];
+      if (group && receipt.status === 'succeeded') group.conts.forEach(function (container) {
+        var st = container && container.__fc;
+        if (st && st.cards[receipt.index]) dockToShell(container, st, st.cards[receipt.index]);
+      });
+      if (receipt.status === 'succeeded' || receipt.status === 'queued') {
+        window.dispatchEvent(new CustomEvent('rc:flashcard-reviewed', { detail: {
+          aid: receipt.aid, cardId: receipt.cardId || null, gid: receipt.record.gid,
+          ease: receipt.ease, next: receipt.next || {}, queued: receipt.status === 'queued'
+        } }));
+      }
+      return true;
+    },
     acceptNativeRecord: function (record, index, action) {
       var group = record && _groups[record.gid];
       if (!group) return;

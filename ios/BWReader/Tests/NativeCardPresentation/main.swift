@@ -60,3 +60,9 @@ precondition(ReaderNativeCardPresentation.placementCards(deletedGroup) == nil)
 var incompleteGroup = placed; incompleteGroup["states"] = ["0": ["phase": "draft"]]
 precondition(ReaderNativeCardPresentation.placementCards(incompleteGroup) == nil)
 print("Native card placements: canonical fields, identity, removed slots and unavailable originals passed")
+
+let owned = ReaderNativeCardPresentation.project(["nativeActionOwner":"scope:card-1",
+    "nativeCard":["gid":"same-group","cardIndex":0,"card":["type":"basic","_st":"draft","front":"Q","back":"A"]]])
+precondition((owned["nativeCardActions"] as? [String:String])?["add"] == "native-card:scope:card-1:add")
+precondition((owned["controls"] as? [[String:Any]])?.contains(where:{ $0["id"] as? String == "native-card:scope:card-1:add" }) == true)
+precondition((owned["fields"] as? [[String:Any]])?.first?["id"] as? String == "native-card:scope:card-1:edit-front")

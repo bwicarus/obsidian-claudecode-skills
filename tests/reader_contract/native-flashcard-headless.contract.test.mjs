@@ -72,3 +72,19 @@ test('desktop export delegates identity only and never runs the browser export o
   assert.equal(h.body.__fc.cards[0]._pcExportStatus, 'failed', 'dispatch alone must not manufacture a success receipt');
   assert.equal(h.counts().renders, 0);
 });
+
+test('native rating receipt updates semantic state once without resubmitting or saving the score', () => {
+  const h = harness();
+  h.RC.flashcard.mountReview(h.body, [{ type: 'basic', front: 'Q', back: 'A' }], { gid: 'card_rate' });
+  const receipt = { record: { gid: 'card_rate', entityRev: 1, stateRev: 2,
+    cards: [{ type: 'basic', front: 'Q', back: 'A' }],
+    states: { 0: { phase: 'confirmed', exactState: { _st: 'done', _showBack: true, _ratingPending: false, _next: { interval: 5 } } } } },
+    index: 0, aid: 'rating-original', ease: 3, cardId: 123, status: 'succeeded', next: { interval: 5 } };
+  h.window.fetch = () => assert.fail('rating observer sent a request');
+  h.window.BWReaderRuntime = { cardRepository: { patchState() { assert.fail('rating observer saved again'); } } };
+  assert.equal(h.RC.flashcard.observeNativeRating(receipt), true);
+  assert.equal(h.RC.flashcard.observeNativeRating(receipt), true);
+  assert.equal(h.body.__fc.cards[0]._st, 'done');
+  assert.equal(h.events.filter(event => event.aid === 'rating-original').length, 1);
+  assert.equal(h.counts().htmlWrites, 0);
+});
