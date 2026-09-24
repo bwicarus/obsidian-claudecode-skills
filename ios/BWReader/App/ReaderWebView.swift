@@ -358,6 +358,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeAnkiMobileMessageProxy:
         WeakScriptMessageHandlerWithReply?
     private var nativeServerGateway: ReaderNativeServerGateway?
+    private var nativeAssistantStream: ReaderNativeAssistantStreamBridge?
     private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
     private var nativeServerRemoteLibraryCancellable: AnyCancellable?
     private var nativeServerSyncBridge: ReaderNativeServerSyncBridge?
@@ -2305,6 +2306,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                   let notes = domains.first(where: { $0.name == .notes }) else { return }
             try document.applyOverlays(domains, bookID: access.record.id, contentSHA256: digest)
             try document.applyNotes(notes, bookID: access.record.id, contentSHA256: digest)
+            if nativeFigures.hasAttachments { publishNativeFigureProjection() }
             publishNativeHTMLNotes()
         } catch {
             // 出声但不打断阅读：投影失败不该让正文消失。
@@ -2778,6 +2780,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 contentWorld: .page,
                 name: ReaderNativeServerGateway.messageName
             )
+            let nativeAssistantStream = ReaderNativeAssistantStreamBridge(webView: webView,
+                trustedBaseURL: localRuntimeServer.baseURL, gateway: nativeServerGateway)
+            self.nativeAssistantStream = nativeAssistantStream
+            contentController.addScriptMessageHandler(nativeAssistantStream, contentWorld: .page,
+                                                       name: ReaderNativeAssistantStreamBridge.messageName)
+            contentController.addUserScript(WKUserScript(source: ReaderNativeAssistantStreamBridge.script,
+                injectionTime: .atDocumentStart, forMainFrameOnly: true))
             let nativeServerSyncBridge = ReaderNativeServerSyncBridge(
                 webView: webView,
                 trustedBaseURL: localRuntimeServer.baseURL
@@ -7051,6 +7060,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         //   崩了几次，没有任何地方说得出来。于是每次都只能靠猜。
         //   页面里的线索随进程一起没了，能留下证据的只有 App 进程这一侧。
         noteWebContentTermination()
+        nativeAssistantStream?.invalidate()
         invalidateNativePDFDocument(reason: "webcontent-terminated")
         nativeConversation.resetForNavigation()
         webContentProcessNeedsReload = true
@@ -7124,6 +7134,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         _ webView: WKWebView,
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
+        nativeAssistantStream?.invalidate()
         invalidateNativePDFDocument(reason: "navigation-start")
         nativeLookupTasks.values.forEach { $0.task.cancel() }
         nativeLookupTasks.removeAll()

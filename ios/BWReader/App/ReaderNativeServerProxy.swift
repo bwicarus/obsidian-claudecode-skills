@@ -141,6 +141,34 @@ final class ReaderNativeServerProxyBroker: @unchecked Sendable {
         let status: Int
         let data: Data
     }
+
+    /// Native SSE consumers receive bytes directly from URLSession, without
+    /// routing them back through the loopback HTTP server and WebKit Fetch.
+    func consumeStream(for prepared: ReaderNativeServerPreparedProxyRequest,
+                       onResponse: ReaderNativeAssistantStream.Response,
+                       onChunk: ReaderNativeAssistantStream.Chunk) async throws {
+        guard let url = prepared.request.url, url.scheme == "https",
+              url.host == ReaderNativeServerGateway.serverHost, url.port == nil else {
+            throw ReaderNativeServerProxyError.invalidUpstream
+        }
+        let key = "native-stream-" + UUID().uuidString
+        let transport = ReaderNativeServerUpstreamTransport { [weak self] in self?.finish(ticketToken: key) }
+        lock.lock()
+        guard scopeEpoch == prepared.scopeEpoch else { lock.unlock(); throw ReaderNativeServerProxyError.staleScope }
+        active[key] = transport; lock.unlock()
+        defer { transport.cancel(); finish(ticketToken: key) }
+        try await withTaskCancellationHandler {
+            let upstream = try await transport.start(prepared.request)
+            guard try await onResponse(upstream.response.statusCode) else { return }
+            for try await chunk in upstream.body {
+                try Task.checkCancellation()
+                lock.lock(); let current = scopeEpoch == prepared.scopeEpoch; lock.unlock()
+                guard current else { throw ReaderNativeAssistantStream.Failure("阅读上下文已切换") }
+                let keepGoing = try await onChunk(chunk)
+                if !keepGoing { return }
+            }
+        } onCancel: { transport.cancel() }
+    }
     /// Native feature controllers consume the already-authorized request
     /// directly. No loopback ticket, browser Fetch or hidden document is used.
     func data(for prepared: ReaderNativeServerPreparedProxyRequest, maximumBytes: Int = 8 * 1024 * 1024) async throws -> DataResponse {

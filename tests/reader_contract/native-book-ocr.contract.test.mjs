@@ -588,9 +588,9 @@ test("native update event and page formula reply keep the exact public shape", (
   assert.match(BRIDGE, /if let line = value\.line, line >= 0 \{ result\["line"\] = line \}/);
   assert.match(BRIDGE, /if let vertical = value\.vertical \{ result\["vertical"\] = vertical \}/);
   assert.match(BRIDGE, /"retryable": retryable/);
-  assert.match(BRIDGE, /private static func pageRevision/);
+  assert.match(BRIDGE, /static func pageRevision/);
   const revision = BRIDGE.slice(
-    BRIDGE.indexOf("private static func pageRevision("),
+    BRIDGE.indexOf("static func pageRevision("),
     BRIDGE.indexOf("private static func stageObject("),
   );
   assert.match(revision, /removeValue\(forKey: "created_at"\)/);

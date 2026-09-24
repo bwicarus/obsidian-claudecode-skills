@@ -19,11 +19,9 @@ struct ReaderNativeRemoteBookBinding: Equatable, Sendable {
 /// A narrow native gateway for network-only Reader actions. The local shell
 /// never receives server cookies or account tokens.
 ///
-/// Note: the file is still named `ReaderNativePiGateway.swift` because renaming
-/// it means touching the Xcode project; the types and the host it talks to are
-/// named after what they actually are (the Windows server), not the Pi. Swift authorizes and rewrites
-/// the request, then returns a one-use loopback URL whose body is streamed by
-/// ReaderLocalRuntimeServer as a normal Fetch Response/ReadableStream.
+/// Swift authorizes and rewrites requests for the Windows server. Native
+/// consumers use the transport directly; remaining browser consumers receive
+/// one-use loopback tickets and never receive upstream credentials.
 @MainActor
 final class ReaderNativeServerGateway: NSObject, WKScriptMessageHandlerWithReply {
     static let messageName = "bwNativeServerGateway"
@@ -56,6 +54,7 @@ final class ReaderNativeServerGateway: NSObject, WKScriptMessageHandlerWithReply
     private var currentRemoteBookBinding: ReaderNativeRemoteBookBinding?
     private var catalogRemoteBookBindings: [ReaderNativeRemoteBookBinding] = []
     private var scopeEpoch: UInt64 = 0
+    var contextRevision: UInt64 { scopeEpoch }
     private var continuations: [String: RemoteContinuation] = [:]
 
     init(
@@ -139,6 +138,27 @@ final class ReaderNativeServerGateway: NSObject, WKScriptMessageHandlerWithReply
         let prepared = try await prepareProxyRequest(authorized.request, authorizedEpoch: epoch)
         if let rid = authorized.registersContinuationRID { registerContinuation(rid: rid, routePath: authorized.request.routePath, epoch: epoch) }
         return try await serverProxyBroker.data(for: prepared)
+    }
+
+    func streamAssistant(path: String, body: Data, surface: ReaderNativeInterfaceSurface, expectedContext: UInt64,
+                         onResponse: ReaderNativeAssistantStream.Response,
+                         onChunk: ReaderNativeAssistantStream.Chunk) async throws {
+        guard expectedContext == scopeEpoch else { throw ReaderNativeAssistantStream.Failure("对话的书籍关联已改变") }
+        guard let request = Self.parse([
+            "contract": Self.requestContract, "action": "fetch", "method": "POST", "path": path,
+            "headers": ["Accept": "text/event-stream", "Content-Type": "application/json"],
+            "bodyEncoding": "base64", "body": body.base64EncodedString()
+        ]), let policy = interfaceManifest?.piRoutePolicy(path: request.routePath, method: request.method, surface: surface) else {
+            throw ReaderNativeAssistantStream.Failure("原生对话接口未登记")
+        }
+        let prepared: ReaderNativeServerPreparedProxyRequest
+        do {
+            let authorized = try authorize(request, remoteBookPolicy: policy.remoteBook)
+            let epoch = scopeEpoch
+            prepared = try await prepareProxyRequest(authorized.request, authorizedEpoch: epoch)
+            if let rid = authorized.registersContinuationRID { registerContinuation(rid: rid, routePath: authorized.request.routePath, epoch: epoch) }
+        } catch { throw ReaderNativeAssistantStream.Failure(error.localizedDescription) }
+        try await serverProxyBroker.consumeStream(for: prepared, onResponse: onResponse, onChunk: onChunk)
     }
 
     func userContentController(

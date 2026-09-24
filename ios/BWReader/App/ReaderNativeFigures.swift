@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// Session-scoped PDF figures and explicit attachments. Pages may be evicted;
 /// explicitly attached figures survive paging until removed or consumed.
@@ -42,16 +43,30 @@ final class ReaderNativeFigures {
     static func normalized(_ input: [[String: Any]], page: Int) -> [[String: Any]] {
         guard page > 0 else { return [] }
         return input.prefix(24).compactMap { figure in
-            let full = figure["fbox"] as? [Double]
-            guard let box = (full?.count == 4 ? full : figure["bbox"] as? [Double]), box.count == 4,
+            let full = numbers(figure["fbox"])
+            guard let box = (full?.count == 4 ? full : numbers(figure["bbox"])), box.count == 4,
                   box.allSatisfy({ $0.isFinite && abs($0) <= 16 }), box[2] > box[0], box[3] > box[1] else { return nil }
-            let badge = (figure["badge"] as? [Double]).flatMap { values -> [Double]? in
+            let badge = numbers(figure["badge"]).flatMap { values -> [Double]? in
                 values.count == 2 && values.allSatisfy({ $0.isFinite && abs($0) <= 16 }) ? values : nil
             }
             return ["id": String(page) + ":" + box.map(fixed3).joined(separator: ","), "page": page,
                 "box": box, "badge": badge as Any? ?? NSNull(), "caption": figure["caption"] as? String ?? "",
                 "desc": String((figure["desc"] as? String ?? "").prefix(6000)), "group": figure["group"] as? Bool == true]
         }
+    }
+
+    // Accept both JSON NSNumber arrays and coordinates assembled in Swift
+    // (which may contain integer literals). Neither strings nor booleans are
+    // coordinates; avoid Foundation's implicit boolean-to-number coercion.
+    private static func numbers(_ value: Any?) -> [Double]? {
+        guard let values = value as? [Any] else { return nil }
+        var result: [Double] = []
+        for value in values {
+            guard let number = value as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            result.append(number.doubleValue)
+        }
+        return result
     }
 
     func accept(_ response: [String: Any], page: Int) throws -> Bool {

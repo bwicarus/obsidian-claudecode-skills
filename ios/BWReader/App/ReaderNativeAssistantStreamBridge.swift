@@ -1,0 +1,190 @@
+import Foundation
+import UIKit
+import WebKit
+
+/// Transitional command adapter. URLSession, framing and reconnect cursors
+/// are native-owned. The existing event reducer still receives structured
+/// events until conversation actions/history are fully migrated.
+@MainActor
+final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerWithReply {
+    static let messageName = "bwNativeAssistantStream"
+    private weak var webView: WKWebView?
+    private let trustedBaseURL: URL
+    private let gateway: ReaderNativeServerGateway
+    private var epoch = UUID()
+    private var tasks: [String: Task<Void, Never>] = [:]
+    private var sequences: [String: Int] = [:]
+    private var activeWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var observer: NSObjectProtocol?
+
+    init(webView: WKWebView, trustedBaseURL: URL, gateway: ReaderNativeServerGateway) {
+        self.webView = webView; self.trustedBaseURL = trustedBaseURL; self.gateway = gateway
+        super.init()
+        observer = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                                          object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.resumeActiveWaiters() }
+        }
+    }
+
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        tasks.values.forEach { $0.cancel() }
+        activeWaiters.values.forEach { $0.resume(throwing: CancellationError()) }
+    }
+
+    func invalidate() {
+        epoch = UUID(); tasks.values.forEach { $0.cancel() }; tasks.removeAll(); sequences.removeAll()
+        let pending = activeWaiters; activeWaiters.removeAll()
+        pending.values.forEach { $0.resume(throwing: CancellationError()) }
+    }
+
+    private func resumeActiveWaiters() {
+        guard UIApplication.shared.applicationState == .active else { return }
+        let pending = activeWaiters; activeWaiters.removeAll()
+        pending.values.forEach { $0.resume() }
+    }
+
+    private func whenActive() async throws {
+        try Task.checkCancellation()
+        guard UIApplication.shared.applicationState != .active else { return }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled { waiter.resume(throwing: CancellationError()) }
+                else if UIApplication.shared.applicationState == .active { waiter.resume() }
+                else { activeWaiters[id] = waiter }
+            }
+        } onCancel: { Task { @MainActor [weak self] in
+            self?.activeWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+        } }
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
+                               replyHandler: @escaping (Any?, String?) -> Void) {
+        guard message.name == Self.messageName, message.frameInfo.isMainFrame,
+              let webView, message.webView === webView,
+              let requestedSurface = surface(webView.url), surface(message.frameInfo.request.url) == requestedSurface,
+              documentURL(webView.url) == documentURL(message.frameInfo.request.url),
+              let command = message.body as? [String: Any], command["version"] as? Int == 1,
+              let id = command["id"] as? String, UUID(uuidString: id) != nil else {
+            replyHandler(nil, "原生对话请求来源无效"); return
+        }
+        if command["action"] as? String == "cancel" {
+            tasks[id]?.cancel(); replyHandler(["ok": true], nil); return
+        }
+        guard command["action"] as? String == "start", tasks.isEmpty,
+              let path = command["path"] as? String,
+              path == "/api/assistant/chat" || (requestedSurface == .epub && path == "/pdf/api/epub-assistant"),
+              let body = command["body"] as? [String: Any], JSONSerialization.isValidJSONObject(body),
+              let data = try? JSONSerialization.data(withJSONObject: body) else {
+            replyHandler(nil, "对话已在进行或请求参数无效"); return
+        }
+        let lease = epoch
+        let gatewayContext = gateway.contextRevision
+        tasks[id] = Task { @MainActor [weak self] in
+            guard let self else { replyHandler(nil, "对话已关闭"); return }
+            defer { if self.epoch == lease { self.tasks.removeValue(forKey: id); self.sequences.removeValue(forKey: id) } }
+            do {
+                let stream = try ReaderNativeAssistantStream(initial: data, connect: { [weak self] body, response, chunk in
+                    guard let self else { throw CancellationError() }
+                    try await self.connect(body, path: path, surface: requestedSurface, lease: lease, gatewayContext: gatewayContext,
+                                           onResponse: response, onChunk: chunk)
+                }, deliver: { [weak self] events in
+                    guard let self else { throw CancellationError() }
+                    // Sequence advancement and consumer delivery share the UI
+                    // actor; a rejected/unknown delivery never resumes effects.
+                    try await self.deliver(events, id: id, lease: lease)
+                })
+                let result = try await stream.run()
+                try Task.checkCancellation()
+                guard self.epoch == lease else { throw CancellationError() }
+                replyHandler(["ok": true, "status": result.rawValue], nil)
+            } catch {
+                if Task.isCancelled || self.epoch != lease { replyHandler(["ok": true, "status": "aborted"], nil) }
+                else { replyHandler(nil, error.localizedDescription) }
+            }
+        }
+    }
+
+    private func connect(_ body: Data, path: String, surface: ReaderNativeInterfaceSurface, lease: UUID, gatewayContext: UInt64,
+                         onResponse: ReaderNativeAssistantStream.Response,
+                         onChunk: ReaderNativeAssistantStream.Chunk) async throws {
+        try await whenActive()
+        guard epoch == lease else { throw CancellationError() }
+        try await gateway.streamAssistant(path: path, body: body, surface: surface, expectedContext: gatewayContext,
+                                          onResponse: onResponse, onChunk: onChunk)
+    }
+
+    private func deliver(_ events: [ReaderNativeAssistantEvent], id: String, lease: UUID) async throws {
+        try Task.checkCancellation()
+        guard epoch == lease, let webView, surface(webView.url) != nil else { throw CancellationError() }
+        let next = (sequences[id] ?? 0) + 1
+        let result = try await webView.callAsyncJavaScript(
+            "return window.__bwNativeAssistantStream?.accept(payload);",
+            arguments: ["payload": ["id": id, "sequence": next,
+                                    "events": events.map { ["name": $0.name, "data": $0.data] }]],
+            in: nil, contentWorld: .page)
+        guard epoch == lease, let ack = result as? [String: Any], ack["ok"] as? Bool == true,
+              ack["sequence"] as? Int == next else { throw ReaderNativeAssistantStream.Failure("对话接收状态已改变，未重复执行事件") }
+        sequences[id] = next
+    }
+
+    private func surface(_ url: URL?) -> ReaderNativeInterfaceSurface? {
+        guard let url, url.scheme == trustedBaseURL.scheme, url.host == trustedBaseURL.host,
+              url.port == trustedBaseURL.port, url.path.hasPrefix(trustedBaseURL.path) else { return nil }
+        if url.path.hasSuffix("/shells/pdf.html") { return .pdf }
+        if url.path.hasSuffix("/shells/epub.html") { return .epub }
+        return nil
+    }
+
+    private func documentURL(_ url: URL?) -> URL? {
+        guard let url, var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        parts.fragment = nil; return parts.url
+    }
+
+    static let script = #"""
+    (() => {
+      if (window !== window.top || window.__bwNativeAssistantStream) return;
+      const handler = window.webkit?.messageHandlers?.bwNativeAssistantStream;
+      if (!handler) return;
+      const active = new Map();
+      function abortError() { const e = new Error('对话已停止'); e.name = 'AbortError'; return e; }
+      window.__bwNativeAssistantStream = {
+        async run(path, body, consume, signal) {
+          if (signal?.aborted) throw abortError();
+          const id = crypto.randomUUID(), entry = { consume, sequence: 0, cancelled: false };
+          const cancel = () => {
+            entry.cancelled = true;
+            Promise.resolve(handler.postMessage({version: 1, action: 'cancel', id})).catch(() => {});
+          };
+          active.set(id, entry);
+          signal?.addEventListener('abort', cancel, {once: true});
+          try {
+            const result = await handler.postMessage({version: 1, action: 'start', id, path,
+              body: JSON.parse(JSON.stringify(body))});
+            if (entry.cancelled || result?.status === 'aborted') throw abortError();
+            if (!result?.ok) throw new Error('原生对话流未完成');
+            return result.status;
+          } finally {
+            signal?.removeEventListener('abort', cancel);
+            active.delete(id);
+          }
+        },
+        accept(payload) {
+          const entry = active.get(payload?.id);
+          if (!entry || entry.cancelled || !Number.isSafeInteger(payload.sequence)) return {ok: false};
+          if (payload.sequence === entry.sequence) return {ok: true, sequence: entry.sequence};
+          if (payload.sequence !== entry.sequence + 1 || !Array.isArray(payload.events)) return {ok: false};
+          // Consume once. If a reducer throws part-way through a batch, native
+          // stops instead of replaying mutations whose outcome is unknown.
+          entry.sequence = payload.sequence;
+          for (const event of payload.events) {
+            let value; try { value = JSON.parse(event.data); } catch (_) { value = event.data; }
+            entry.consume(event.name, value);
+          }
+          return {ok: true, sequence: entry.sequence};
+        }
+      };
+    })();
+    """#
+}

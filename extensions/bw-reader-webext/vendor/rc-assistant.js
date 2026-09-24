@@ -2678,7 +2678,7 @@ if (window.__bwPwaProviderOnly) return;
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState !== 'visible' || !streaming) return;
     setTimeout(function () {
-      if (streaming && !_recovering && (Date.now() - _lastProgressTs > 3000)) {
+      if (streaming && !_abort?.native && !_recovering && (Date.now() - _lastProgressTs > 3000)) {
         _recovering = true; try { _abort && _abort.abort(); } catch (_) {}
       }
     }, 3000);
@@ -2889,7 +2889,25 @@ if (window.__bwPwaProviderOnly) return;
     }
     _recovering = false; _lastProgressTs = Date.now();
     var tries = 0;
-    while (!done && !aborted) {
+    if (window.__bwNativeAssistantStream) {
+      // Native URLSession owns reconnects and the consumed-event cursor. Never
+      // fall through to browser Fetch after an uncertain native submission.
+      var nativeAbort = new AbortController();
+      _abort = { native: true, abort: function () { nativeAbort.abort(); } };
+      try {
+        try { if (sentCtx && window.rcNoBook && window.rcNoBook()) sentCtx.no_book = true; } catch (_) {}
+        var nativeStatus = await window.__bwNativeAssistantStream.run(turnChatUrl, {
+          message: text, context: sentCtx, rid: rid, turn_id: _vTid, assistant_mode: turnMode,
+          media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined),
+          force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined,
+          voice: (turnMode === 'normal' && window.__asstVoiceOn && window.__asstVoiceOn()) ? 1 : undefined
+        }, function (name, data) { _lastProgressTs = Date.now(); _handleEv(name, data); }, nativeAbort.signal);
+        if (nativeStatus === 'gone') done = 'gone';
+      } catch (e) {
+        if (e && e.name === 'AbortError') aborted = true;
+        else { _handleEv('error', e?.message || '原生对话连接失败'); done = true; }
+      }
+    } else while (!done && !aborted) {
       try {
         try { if (sentCtx && window.rcNoBook && window.rcNoBook()) sentCtx.no_book = true; } catch (e) {}
         await _stream(tries === 0
