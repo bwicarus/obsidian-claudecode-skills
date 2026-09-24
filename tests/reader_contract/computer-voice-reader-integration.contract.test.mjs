@@ -596,11 +596,13 @@ test("电脑按钮按宿主分流，普通电话保持独立", () => {
       computerClickStart > injectStart &&
       computerClickEnd > computerClickStart,
   );
-  const computerClick = voicecall.slice(computerClickStart, computerClickEnd);
-  assert.match(computerClick, /if \(_reviewVoiceGate\(true\)\) return/);
+  assert.match(voicecall.slice(computerClickStart,computerClickEnd), /requestCall\('computer'\)/);
+  const callService = voicecall.slice(voicecall.indexOf('function requestCall('),injectStart);
+  const computerClick = callService.slice(0,callService.indexOf("} else if (kind === 'realtime')"));
+  assert.match(computerClick, /if \(_reviewVoiceGate\(true\)\) throw/);
   assert.match(
     computerClick,
-    /if \(!_nativeComputerVoiceAppAvailable\(\)\)[\s\S]*return/,
+    /if \(!_nativeComputerVoiceAppAvailable\(\)\) throw/,
   );
   assert.match(computerClick, /if \(ws \|\| _rtc\.on \|\| _connecting \|\| _reconnT \|\| _reconnPend\)[\s\S]*teardown\(false, true\)/);
   assert.match(computerClick, /_toggleNativeComputerVoiceApp\(\)/);
@@ -625,7 +627,8 @@ test("电脑按钮按宿主分流，普通电话保持独立", () => {
   );
   assert.ok(phoneClickEnd > phoneClickStart);
   const phoneClick = voicecall.slice(phoneClickStart, phoneClickEnd);
-  assert.match(phoneClick, /window\._voiceCallS2S/);
+  assert.match(phoneClick, /requestCall\('realtime'\)/);
+  assert.match(callService.slice(callService.indexOf("} else if (kind === 'realtime')")), /window\._voiceCallS2S/);
   assert.doesNotMatch(
     phoneClick,
     /_toggleNativeComputerVoiceApp|_computerVoiceStart|_setComputerVoiceDialPending|startFromUserGesture/,

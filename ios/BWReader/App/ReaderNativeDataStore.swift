@@ -335,6 +335,23 @@ final class ReaderNativeDataStore {
     /// ⚠ 手写事务而不是 `BEGIN`/`COMMIT` 散在各处：抛错时必须 ROLLBACK，
     /// 漏一次就会把后面所有写入都堵在一个没结束的事务里，表现是"突然什么都存不进去"。
     func inTransaction<T>(_ work: () throws -> T) throws -> T {
+        // Native operations compose (book write + replication receipt, page
+        // migration + journal phase). A nested BEGIN would reject a valid
+        // operation; a savepoint keeps inner failure local while the outer
+        // transaction still decides whether the whole operation commits.
+        if let handle, sqlite3_get_autocommit(handle) == 0 {
+            let name = "native_" + UUID().uuidString.replacingOccurrences(of:"-",with:"")
+            try execute("SAVEPOINT " + name)
+            do {
+                let value = try work()
+                try execute("RELEASE SAVEPOINT " + name)
+                return value
+            } catch {
+                try? execute("ROLLBACK TO SAVEPOINT " + name)
+                try? execute("RELEASE SAVEPOINT " + name)
+                throw error
+            }
+        }
         try execute("BEGIN IMMEDIATE")
         do {
             let value = try work()

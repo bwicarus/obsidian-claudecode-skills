@@ -23,6 +23,56 @@ struct ReaderNativeBookStore {
     var contentSHA256: String? = nil
     private var projection: ReaderNativeBookProjection { .init(store: store) }
 
+    /// The one-time IndexedDB import runs before this call. Keep the old
+    /// highlight array intact, and publish all split records and their marker
+    /// together; reopening after a failed transaction simply retries it.
+    func prepareHighlightsOnBoot() throws {
+        try store.inTransaction {
+            for kind in ["document-highlights","epub-highlights"] {
+                let meta = try projection.state(kind + "-split-meta",bookID:bookID)
+                if meta.revision > 0 { continue }
+                let old = try projection.state(kind,bookID:bookID)
+                guard let items = old.payload as? [[String:Any]], !items.isEmpty else { continue }
+                var seen = Set<String>(), order:[String] = []
+                let stamp = now(), mutation = "hl-split:" + kind + ":" + bookID
+                for item in items {
+                    guard let id = item["id"] as? String, !id.isEmpty, id.utf16.count <= 200,
+                          item["deleted"] as? Bool != true, seen.insert(id).inserted else { continue }
+                    order.append(id)
+                    try write(collection:"native-" + kind + "-items",
+                        id:"native-\(kind)-item-v1:\(bookID.utf16.count):\(bookID):\(id)",payload:item,
+                        mutation:mutation + ":" + id,at:stamp)
+                }
+                try writeState(kind + "-split-meta",value:["order":order],expected:0,mutation:mutation + ":meta",at:stamp)
+            }
+        }
+    }
+
+    /// Preserve the existing repair for old inserted/deleted PDF pages. Run
+    /// after file recovery, so rollback cannot restore the stale binding.
+    func repairBindingsOnBoot() throws {
+        try store.inTransaction {
+            let current = try projection.state("document-notes-legacy",bookID:bookID)
+            guard var notes = current.payload as? [[String:Any]] else { return }
+            var changed = false
+            for index in notes.indices {
+                guard let anchor = notes[index]["anchor"] as? [String:Any], anchor["kind"] as? String == "pdf",
+                      let page = anchor["page"] as? NSNumber, CFGetTypeID(page) != CFBooleanGetTypeID(),
+                      page.doubleValue.isFinite, page.doubleValue.rounded() == page.doubleValue else { continue }
+                for slot in ["card","html"] {
+                    guard var payload = notes[index][slot] as? [String:Any], var bind = payload["bind"] as? [String:Any],
+                          bind["kind"] as? String == "page-chars" else { continue }
+                    let old = (bind["page"] as? NSNumber)?.doubleValue ?? (bind["page"] as? String).flatMap(Double.init)
+                    guard let old, old.isFinite, old.rounded() == old, old != page.doubleValue else { continue }
+                    bind["page"] = page; payload["bind"] = bind; notes[index][slot] = payload; changed = true
+                }
+            }
+            if changed {
+                _ = try writeNotes(notes,expected:current.revision,mutation:"bind-repair-" + String(current.revision),at:now())
+            }
+        }
+    }
+
     /// Replay a captured local command through the same native transaction.
     /// The outbox ID also fences local effects and replication, so a lost
     /// transport acknowledgement cannot create a second note or replication.
@@ -541,7 +591,7 @@ struct ReaderNativeBookStore {
         return revision+1
     }
 
-    private func writeHighlights(_ kind: String, items: [[String: Any]], expected: Int64?, mutation: String, at: Int64) throws -> Int64 {
+    func writeHighlights(_ kind: String, items: [[String: Any]], expected: Int64?, mutation: String, at: Int64) throws -> Int64 {
         let current = try projection.highlights(kind, bookID: bookID)
         let meta = try projection.state(kind + "-split-meta", bookID: bookID)
         if let expected, current.revision != expected {

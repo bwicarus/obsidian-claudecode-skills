@@ -556,6 +556,9 @@ async function harness(options = {}) {
           bwNativeDataStore: {
             postMessage: async (message) => message.action === 'readingStoreReady'
               ? { ok: true, nativeBookWrites: true, nativePhrases: !!options.nativePhrases }
+              : message.action === 'prepareReadingStore' ? { ok: true }
+              : message.action === 'pdfPageState' && message.operation === 'read' ? { ok: true, transaction: null }
+              : message.action === 'pdfPageJob' && message.operation === 'recover' ? { ok: true }
               : options.nativeBookReply(clone(message)),
           },
         } : {}),

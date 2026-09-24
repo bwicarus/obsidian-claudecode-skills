@@ -128,6 +128,30 @@ test('native artifact data retains full originals without rendering them for ins
   assert.equal(image.data.items,undefined,'web created a second per-image control registry');
   assert.equal(vm.runInContext("Array.from(actions.keys()).some(id=>id.startsWith('media-image-'))",context),false);
   assert.equal(JSON.stringify(image.data.nativeDetail.content),JSON.stringify(media));
+  assert.equal(projected.actionId,undefined,'native action ID must be issued by Swift');
+  assert.equal(projected.data.nativeActionKey,'part');
+  const operations={kind:'hlcard',nativePartID:'p-operations',file:'book',items:[{id:'h1',pdf_page:4,text:'原文'}]};
+  const operation=context.projectPart(operations,'ops',{querySelector(){throw Error('hidden operation HTML read');}},'turn')[0];
+  assert.equal(operation.kind,'operations');
+  assert.equal(operation.data.nativeOperation.partID,'p-operations');
+  assert.equal(operation.data.nativeDetail.content,operations);
+  assert.equal(vm.runInContext('actions.size',context),0,'native originals kept hidden-node action closures');
+});
+
+test('operation controls use exact source identity, prevent duplicate mutation, and need no DOM', async()=>{
+  const source=readFileSync(new URL('../../_server_deploy/static/pdf/rc-turncard.js',import.meta.url),'utf8');
+  const start=source.indexOf('  var nativeOperationBusy ='),end=source.indexOf('  function markOp(',start);
+  const item={id:'h1',pdf_page:4,undone:false}, part={kind:'hlcard',_nativeID:'p1',items:[item]}, turn={tid:'t1',parts:[part]};
+  let finish,calls=0;
+  const runtime={_lookup:id=>id==='t1'?turn:null,RC:{turnCard:{settle:async()=>{}}},
+    opAction:async entry=>{calls++;await new Promise(resolve=>{finish=resolve;});entry.item.undone=true;return true;}};
+  vm.runInNewContext(source.slice(start,end)+'globalThis.perform=performOperation;',runtime);
+  const input={tid:'t1',partID:'p1',index:0,expectedID:'h1',expectedUndone:false,action:'toggle'};
+  const pending=runtime.perform(input);
+  await assert.rejects(runtime.perform(input),/正在保存/);
+  finish();await pending;
+  await assert.rejects(runtime.perform(input),/已变化/);
+  assert.equal(calls,1);
 });
 
 test('multi-group turns resolve the requested learning identity rather than the first mounted group', () => {

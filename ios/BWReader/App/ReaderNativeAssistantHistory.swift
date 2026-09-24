@@ -137,6 +137,29 @@ actor ReaderNativeAssistantHistory {
         return response
     }
 
+    /// Recovery reads only; never submits a second task. Older servers omit
+    /// request identity, so retain their last-assistant fallback. When an
+    /// identity is present it must match this request, not a neighboring turn.
+    func recover(_ route: Route, rid: String, turnID: String,
+                 wait: @Sendable () async throws -> Void = { try await Task.sleep(nanoseconds: 800_000_000) }) async throws -> [String: Any]? {
+        let lease = epoch, revision = revisions[route.family, default: 0]
+        for attempt in 0..<3 {
+            guard epoch == lease, revisions[route.family, default: 0] == revision else { throw CancellationError() }
+            let response = try await read(route)
+            guard epoch == lease, revisions[route.family, default: 0] == revision else { throw CancellationError() }
+            guard (200..<300).contains(response.status),
+                  let value = try JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+                  let messages = value["messages"] as? [[String: Any]], let last = messages.last else { return nil }
+            if last["role"] as? String == "assistant", let text = last["content"] as? String, !text.isEmpty {
+                if let savedRID = last["rid"] as? String, !savedRID.isEmpty, savedRID != rid { return nil }
+                if let savedTurn = last["turn_id"] as? String, !savedTurn.isEmpty, savedTurn != turnID { return nil }
+                return last
+            }
+            if attempt < 2 { try await wait(); try Task.checkCancellation() }
+        }
+        return nil
+    }
+
     func invalidate() {
         epoch = UUID()
         reads.values.forEach { $0.task.cancel() }; reads.removeAll()

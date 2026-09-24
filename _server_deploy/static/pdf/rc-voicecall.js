@@ -10927,6 +10927,22 @@
   }
 
   // ── 入口按钮：电脑客户端占原麦克风位置；普通电话保留在它右侧。──
+  function requestCall(kind) {
+    if (_reviewVoiceGate(true)) throw new Error('复习模式暂不支持此语音操作');
+    if (kind === 'computer') {
+      if (!_nativeComputerVoiceAppAvailable()) throw new Error('请安装或更新 BWReader App 后使用电脑客户端语音');
+      if (ws || _rtc.on || _connecting || _reconnT || _reconnPend) teardown(false, true);
+      if (!_toggleNativeComputerVoiceApp()) {
+        computerBtnConnecting(false);
+        throw new Error('无法联系 BWReader App 原生语音');
+      }
+    } else if (kind === 'realtime') {
+      if (ws || _reconnT || _reconnPend) { teardown(true); taPlaceholder(null); }
+      else if (window._voiceCallS2S) window._voiceCallS2S();
+      else toggle({mode:'s2s'});
+    } else throw new Error('语音入口无效');
+    return {accepted:true};
+  }
   function injectBtn() {
     var input = document.getElementById('asst-input');
     if (!input) return false;
@@ -10963,31 +10979,14 @@
     _ownComputerVoiceButton(c);
     _configureNativeComputerVoiceButton(c);
     c.addEventListener('click', function () {
-      if (_reviewVoiceGate(true)) return;
-      if (!_nativeComputerVoiceAppAvailable()) {
-        setSt('请安装或更新 BWReader App 后使用电脑客户端语音');
-        try { RC.toast('请安装或更新 BWReader App 后使用电脑客户端语音'); } catch (e) {}
-        return;
-      }
-      if (ws || _rtc.on || _connecting || _reconnT || _reconnPend) {
-        teardown(false, true);
-      }
       try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
-      if (!_toggleNativeComputerVoiceApp()) {
-        computerBtnConnecting(false);
-        setSt('无法联系 BWReader App 原生语音');
-        try { RC.toast('无法联系 BWReader App 原生语音'); } catch (e) {}
-      }
+      try { requestCall('computer'); }
+      catch (error) { setSt(error.message); try { RC.toast(error.message); } catch (_) {} }
     });
     b.addEventListener('click', function () {
-      if (_reviewVoiceGate(true)) return;
-      if (ws || _reconnT || _reconnPend) {   // 通话中/重连排队中 → 挂断(开关 off)
-        teardown(true);
-        taPlaceholder(null);
-        return;
-      }
       try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
-      if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' });
+      try { requestCall('realtime'); }
+      catch (error) { setSt(error.message); try { RC.toast(error.message); } catch (_) {} }
     });
     // 工具进行中按钮(v3-⑯b):调用开始出现转圈,点击=中止,结束自动消失
     var tb = document.createElement('button');
@@ -11360,6 +11359,7 @@
     return { accepted: true };
   }
   RC.voicecall = { toggle: toggle,
+    requestCall: requestCall,
     canStartNewTopic: canStartNewTopic,
     startNewTopic: startNewTopic,
     setRecallCutoff: function (seconds) {

@@ -171,6 +171,19 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
 
     /// Native settings use the same viewport/persistence path without making a
     /// round trip through the web command dispatcher.
+    func performToolbar(_ action: String) async throws {
+        guard let lease = token, valid(lease), let document else { throw unavailable() }
+        pending = nil; jumping = true
+        defer { jumping = false }
+        if action == "spread" {
+            let old = document.position
+            let mode = old.mode != "spread" || old.spreadOffset == 0 ? "spread" : "continuous"
+            document.setLayout(mode: mode, firstPageAlone: old.mode == "spread" && old.spreadOffset == 0)
+        } else if action != "fit" { throw unavailable() }
+        document.fitWidth()
+        try await publish(document.position, lease: lease)
+    }
+
     func applyCrop(_ crop: ReaderNativePDFCrop?, expectedBookID: String) async throws {
         guard let lease = token, valid(lease), bookID == expectedBookID, let document else { throw unavailable() }
         pending = nil; jumping = true

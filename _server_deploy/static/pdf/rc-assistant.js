@@ -2869,6 +2869,14 @@
     function _handleEv(ev, parsed, nativeState) {
       if (turnEpoch !== _modeEpoch) return;
       if (ev === 'meta') return;                       // rid 确认,不计数
+      if (ev === 'native-completion') {
+        nativeTurnState = nativeState; answer = nativeState.answer;
+        sawTool = nativeState.sawTool; sawCliCard = nativeState.sawCliCard;
+        traceData = nativeState.trace; _recTs = nativeState.recoveredAt;
+        aborted = nativeState.aborted; done = true;
+        if (nativeState.replyRef) { aMsg.__bwNativeTurnRef = nativeState.replyRef; aMsg.__bwNativeTurnText = nativeState.finalDisplayText; }
+        return;
+      }
       if (nativeState) {
         nativeTurnState = Object.assign(nativeTurnState || {}, nativeState);
         if (nativeState.replyRef) {
@@ -3004,7 +3012,7 @@
       await new Promise(function (rs) { setTimeout(rs, Math.min(400 * tries, 2000)); });
     }
     // 任务过期 / 兜底没续上 → 从服务端历史恢复(worker 跑完已落库,绝不丢)
-    if ((done === 'gone' || (!done && !aborted)) && !answer) {
+    if (!window.__bwNativeAssistantStream && (done === 'gone' || (!done && !aborted)) && !answer) {
       try { aMsg.innerHTML = '<span class="asst-tool">正在恢复…</span>'; } catch (_) {}
       var rec = await _recoverFromHistory(0, turnMode, turnEpoch);
       if (rec && rec.content) { answer = rec.content; nativeTurnState = null; traceData = rec.trace || traceData; _recTs = rec.ts || 0; }
@@ -3017,10 +3025,10 @@
       ? {text: nativeTurnState.finalDisplayText, followups: nativeTurnState.followups}
       : _splitFollowups(answer);
     try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(nativeTurnState?.voiceText ?? _stripTornFU(pf.text || ''), true); } catch (_) {}   // 语音对话:回答完,尾句也念(原文含标签,tap 自己解析;撕裂 FOLLOWUP 残段截掉)
-    if (sawCliCard) {
+    if (nativeTurnState?.target ? nativeTurnState.target === 'task' : sawCliCard) {
       // #2 委托 CLI:CLI 卡即回答,撤掉这个多余的编排答案气泡(连带追问建议按钮),跟语音模式一致。
       try { window.__bwNativeMessages?.remove(aMsg); aMsg.remove(); } catch (_) {}
-    } else if (sawTool && window.RC && RC.turnCard && RC.turnCard.has(_vTid)) {
+    } else if ((nativeTurnState?.target ? nativeTurnState.target === 'turn' : sawTool) && window.RC && RC.turnCard && RC.turnCard.has(_vTid)) {
       // ★用户设计:**有工具调用的轮 = 回答写进工具方块**(turn 卡 body,与语音/CLI 同一形态),气泡撤掉。
       //   感叹号信息并入卡:编排模型/耗时/tok/时刻 → meta part(流程面板顶部,⚙ 直达编排设置)。
       try {

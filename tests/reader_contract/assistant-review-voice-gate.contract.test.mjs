@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 const SOURCE = fs.readFileSync(
   new URL("../../_server_deploy/static/pdf/rc-voicecall.js", import.meta.url),
@@ -67,22 +68,22 @@ test("computer and phone clicks are blocked in review; hidden legacy mic stays i
   const computerClick = button.slice(computerStart, phoneStart);
   const phoneClick = button.slice(phoneStart);
 
-  assert.ok(
-    computerClick.indexOf("_reviewVoiceGate(true)") >= 0 &&
-      computerClick.indexOf("_reviewVoiceGate(true)") <
-        computerClick.indexOf("_toggleNativeComputerVoiceApp()"),
-    "review gate must run before the App native computer-voice toggle",
-  );
+  assert.match(computerClick, /requestCall\('computer'\)/);
   assert.doesNotMatch(
     computerClick,
     /_computerVoiceStart|_setComputerVoiceDialPending|startFromUserGesture/,
   );
-  assert.ok(
-    phoneClick.indexOf("_reviewVoiceGate(true)") >= 0 &&
-      phoneClick.indexOf("_reviewVoiceGate(true)") <
-        phoneClick.indexOf("window._voiceCallS2S"),
-    "review gate must run before ordinary phone voice",
-  );
+  assert.match(phoneClick, /requestCall\('realtime'\)/);
+  const calls = [], runtime = {_reviewVoiceGate:()=>true,
+    _nativeComputerVoiceAppAvailable:()=>true,_toggleNativeComputerVoiceApp:()=>{calls.push('computer');return true;},
+    window:{_voiceCallS2S:()=>calls.push('realtime')},ws:null,_rtc:{on:false},_connecting:false,_reconnT:null,_reconnPend:false,
+    teardown(){calls.push('stop');},taPlaceholder(){}};
+  vm.runInNewContext(functionBody('requestCall','injectBtn') + ';globalThis.run=requestCall;',runtime);
+  assert.throws(()=>runtime.run('computer'),/复习模式/); assert.throws(()=>runtime.run('realtime'),/复习模式/);
+  assert.deepEqual(calls,[]);
+  runtime._reviewVoiceGate=()=>false;
+  runtime.run('computer');runtime.run('realtime');
+  assert.deepEqual(calls,['computer','realtime'], 'native controls must not need hidden buttons');
   assert.match(longAction, /if \(_reviewVoiceGate\(true\)\) return/);
 
   assert.match(

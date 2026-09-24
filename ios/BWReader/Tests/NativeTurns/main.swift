@@ -108,4 +108,12 @@ let voice = try store.voicePayload(tid:"gaps",metadata:["assistant_mode":"normal
 check((voice["parts"] as? [O])?.count == 2,"voice save included an unfinished draft or caller snapshot")
 check(voice["user"] as? String == "再发一次" && voice["clip"] as? String == "recording" && voice["turn_id"] as? String == "gaps","voice identity or recording was dropped")
 check(voice["upsert_only"] == nil,"completed voice log stopped creating its original conversation row")
+let operationState = output(try run("append",["part":["kind":"hlcard","file":"book","items":[["id":"old-highlight","pdf_page":4,"text":"原文","undone":true]]]],tid:"operations"),id:"operations")
+let operationPartID = (operationState["parts"] as! [O])[0]["_nativeID"]!
+let redone = output(try run("operationState",["parts":[["id":operationPartID,"items":[["index":0,"id":"restored-highlight","undone":false,"gone":false]]]]],tid:"operations"),id:"operations")
+let operationMessage = try store.conversationMessage(["id":"operations","nativeTurnRef":["tid":"operations","revision":(redone["presentation"] as! O)["revision"]!],
+    "parts":[["id":"operations-part","data":["nativeTurnPart":["id":operationPartID]]]]])
+let operationOriginal = ((((operationMessage["parts"] as! [O])[0]["data"] as! O)["nativeDetail"] as! O)["content"] as! O
+let operationItem = (operationOriginal["items"] as! [O])[0]
+check(operationItem["id"] as? String == "restored-highlight" && operationItem["pdf_page"] as? Int == 4 && operationItem["text"] as? String == "原文","redo lost the replacement identity or changed its source anchor")
 print("Native turns: live/final reconciliation, invocation dedupe, independent drafts, rename, progress, atomic rejection and stable card identity passed")

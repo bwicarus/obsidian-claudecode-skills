@@ -290,6 +290,8 @@ private struct ReaderNativeConversationArtifactCard: View {
                         .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
                         .textSelection(.enabled)
                 }
+            } else if part.kind == "operations" {
+                operationContent
             } else if part.kind == "fact" {
                 richContent(firstText(part.string("answer"), part.text))
                 let detail = part.string("detail")
@@ -308,9 +310,9 @@ private struct ReaderNativeConversationArtifactCard: View {
                 if items.isEmpty { Text("此卡片的图片已移除。").font(.caption).foregroundStyle(.secondary) }
             } else {
                 if !part.text.isEmpty {
-                    richContent(part.text)
+                    richContent(part.text,format:part.string("format").isEmpty ? nil : part.string("format"))
                 }
-                Text("原件已保留，此类型的原生交互尚未迁移。")
+                Text("完整原件可在内容资料中查看。")
                     .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
             }
             if let sources = part.data["sources"] as? [Any], !sources.isEmpty {
@@ -327,6 +329,34 @@ private struct ReaderNativeConversationArtifactCard: View {
         .sheet(isPresented: $editing) {
             ReaderNativeCardEditor(fields: fields, model: model)
         }
+    }
+
+    @ViewBuilder
+    private var operationContent: some View {
+        let items = part.data["items"] as? [[String:Any]] ?? []
+        ForEach(items.indices,id:\.self) { index in
+            let item = items[index], undone = item["undone"] as? Bool == true
+            VStack(alignment:.leading,spacing:8) {
+                Text(item["label"] as? String ?? "操作记录").strikethrough(undone)
+                    .foregroundStyle(undone ? .secondary : .primary)
+                HStack {
+                    if let page = item["displayPage"] as? NSNumber {
+                        Button("第 \(page.intValue) 页",systemImage:"arrow.up.right") { performOperation(item,action:"jump") }
+                    }
+                    Spacer()
+                    Button(undone ? "重做" : "撤销",systemImage:undone ? "arrow.uturn.forward" : "arrow.uturn.backward") { performOperation(item,action:"toggle") }
+                }.font(.subheadline).buttonStyle(.bordered)
+                    .disabled(model.isPerforming("operationAction") || part.data["nativeOperation"] == nil)
+            }.padding(.vertical,4)
+        }
+        if items.isEmpty { Text("这些操作对应的内容已移除。").foregroundStyle(.secondary) }
+    }
+
+    private func performOperation(_ item:[String:Any],action:String) {
+        guard var value = part.data["nativeOperation"] as? [String:Any] else { return }
+        value["index"] = item["index"]; value["action"] = action
+        value["expectedID"] = item["id"]; value["expectedUndone"] = item["undone"]
+        Task { await model.perform("operationAction",parameters:["value":value]) }
     }
 
     @ViewBuilder

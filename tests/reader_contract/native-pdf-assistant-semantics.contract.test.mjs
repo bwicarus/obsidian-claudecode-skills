@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
 const ROOT = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
@@ -17,6 +18,19 @@ function functionBody(source, name, nextName) {
   assert.notEqual(end, -1, `missing boundary ${nextName}`);
   return source.slice(start, end);
 }
+
+test('native PDF context uses committed Swift sources without a hidden page or duplicate library scan',async()=>{
+  const source=read('_server_deploy/static/pdf/rc-computer-voice.js');
+  const calls=[],expected={kind:'pdf',file:'localbook:book',page:7,text:'原生正文'};
+  const context=vm.createContext({window:{__bwNativeAssistantStream:{pageContext:async value=>{calls.push(value);return expected;}}},
+    localAdapterVisibleText:()=> '可见段落',localDOMPageText:()=>{throw Error('hidden page read');},
+    localPageRecord:()=>{throw Error('duplicate character query');}});
+  vm.runInContext(functionBody(source,'buildLocalPageContext','maybePublishLocalPageContext'),context);
+  assert.equal(await context.buildLocalPageContext({kind:'pdf',file:'localbook:book',page:7},{}),expected);
+  assert.equal(calls[0].visibleText,'可见段落');
+  context.window.__bwNativeAssistantStream.pageContext=async()=>{throw Error('book changed');};
+  await assert.rejects(context.buildLocalPageContext({kind:'pdf',file:'localbook:book',page:7},{}),/book changed/,'failed native query may not publish old web state');
+});
 
 test("each native PDF assistant request carries the four complete App authorities", () => {
   const snapshot = functionBody(

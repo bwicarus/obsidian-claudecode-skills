@@ -124,3 +124,40 @@ check((partialContext["native_local_state"] as! O)["page_cards"] == nil,"partial
 check(partialContext["visible_text"] as? String == "original selected passage","existing passage was replaced")
 check(ReaderNativePDFContext.pages(["pages":[7,"7",0,"bad",8],"page":9]) == [7,8,9],"page list admitted invalid or duplicate entries")
 print("Native PDF context: source geometry, numbering, original identities, legacy faces and missing-source behavior passed")
+
+let pcInput:O = ["kind":"pdf","file":"localbook:book","page":7,"title":"原书","selectionState":"active","selection":"右","visibleText":"右"]
+let pcPlain = try ReaderNativePDFContext.readerPC(pcInput,authority:contextState,sources:[6:characterSource,7:characterSource,8:characterSource])
+let pcText = pcPlain["text"] as! String
+check(pcText.contains("【当前显示区域（重点）】\n右⟦CARD_START n=\"2\" id=\"right\""),"native visible word lost its exact card marker")
+check(!pcText.contains("【当前页之前】") && !pcText.contains("【当前页之后】"),"selection needlessly included neighboring pages")
+check(pcText.contains("unbound=\"true\"⟧問い / 答え"),"unbound learning card content disappeared")
+func layoutRegion(_ order:Int,_ range:[Int],_ row:Int,_ column:Int) -> O {
+    ["order":order,"ranges":[range],"kind":"manga-region","gridRow":row,"gridColumn":column,"bounds":[column*60, row*40, column*60+20,row*40+20]]
+}
+var structuredSource = characterSource
+structuredSource["layout"] = ["textSource":"vision","confidence":"high","mode":"manga","gridRows":2,
+    "regions":[layoutRegion(0,[0,0],0,0),layoutRegion(1,[1,1],0,3),layoutRegion(2,[2,2],1,0)]]
+let pcStructured = try ReaderNativePDFContext.readerPC(pcInput,authority:contextState,sources:[7:structuredSource])
+let structuredText = pcStructured["text"] as! String
+check(structuredText.contains("| 左 | 中左 | 中右 | 右 |"),"native manga projection lost columns")
+check(structuredText.contains("[02] 右⟦CARD_START n=\"2\" id=\"right\""),"block address no longer matches original source")
+var tableSource = characterSource
+var tableRegions = [layoutRegion(0,[0,0],0,0),layoutRegion(1,[1,1],0,1),layoutRegion(2,[2,2],1,0)]
+for i in tableRegions.indices { tableRegions[i]["kind"] = "table-cell"; tableRegions[i]["tableId"] = 1; tableRegions[i]["row"] = i/2; tableRegions[i]["column"] = i%2 }
+tableSource["layout"] = ["textSource":"vision","confidence":"high","mode":"table","regions":tableRegions,"tables":[["id":1,"rows":2,"columns":2]]]
+var noCards = contextState; noCards["notes"] = [O]()
+let pcTable = try ReaderNativePDFContext.readerPC(pcInput,authority:noCards,sources:[7:tableSource])["text"] as! String
+check(pcTable.contains("| 左 | 右 |\n| --- | --- |\n| 下 |  |"),"native real table changed cell ordering")
+check(!pcTable.contains("[01]"),"native table inserted block labels into data cells")
+var hugeNote = contextNote("large",index:0,text:"左")
+var hugeHTML = hugeNote["html"] as! O; hugeHTML["content"] = String(repeating:"大",count:100_000); hugeNote["html"] = hugeHTML
+var hugeState = contextState; hugeState["notes"] = [hugeNote]
+var noWindow = pcInput; noWindow.removeValue(forKey:"visibleText")
+let largeContext = try ReaderNativePDFContext.readerPC(noWindow,authority:hugeState,sources:[7:characterSource])
+let largeText = largeContext["text"] as! String
+check(largeContext["truncated"] as? Bool == true,"oversized context was not bounded")
+check(largeText.components(separatedBy:"⟦CARD_START").count == largeText.components(separatedBy:"⟦CARD_END⟧").count,"context truncation split a card marker")
+check(try JSONSerialization.data(withJSONObject:largeText,options:.fragmentsAllowed).count <= 224*1024,"context exceeds ReaderPC frame allowance")
+do { _ = try ReaderNativePDFContext.readerPC(pcInput,authority:contextState,sources:[:]); fatalError("missing current source treated as empty page") }
+catch is ReaderNativeAssistantEdits.Failure { }
+print("Native ReaderPC context: source markers, selection window, manga, table, unbound cards and bounded payload passed")

@@ -101,7 +101,9 @@ struct ReaderNativeTurnStore {
             case "card":
                 guard let card = original["card"] as? O else { throw Failure(message:"生成物内容缺失") }
                 detail = ["kind":card["kind"] as? String ?? "artifact", "title":card["title"] as? String ?? "生成物", "content":visibleMedia(card)]
-            default: throw Failure(message:"生成物来源类型不匹配")
+            case "hlcard":
+                detail = ["kind":"operations","title":"操作记录","content":publicPart(original)]
+            default: detail = ["kind":"artifact","title":original["title"] as? String ?? original["label"] as? String ?? "生成物","content":publicPart(original)]
             }
             data["nativeDetail"] = detail; result["data"] = data
             return result
@@ -340,12 +342,17 @@ struct ReaderNativeTurnStore {
                 for update in updates {
                     guard let index = turn.parts.firstIndex(where:{ $0["_nativeID"] as? String == update["id"] as? String }),
                           turn.parts[index]["kind"] as? String == "hlcard", let items = update["items"] as? [O] else { throw Failure(message:"操作记录已改变") }
-                    // Only disposition may change here; anchors/operations remain owned by the committed part.
+                    // Redo can recreate a deleted object under a new identifier.
+                    // Keep that confirmed identity and snapshot with its disposition;
+                    // operation kind and target anchors remain in the original part.
                     var currentItems = turn.parts[index]["items"] as? [O] ?? []
                     for value in items {
                         guard let i = value["index"] as? Int, currentItems.indices.contains(i) else { throw Failure(message:"操作记录位置已改变") }
                         currentItems[i]["undone"] = value["undone"] as? Bool == true
                         currentItems[i]["gone"] = value["gone"] as? Bool == true
+                        if let id = value["id"] as? String { currentItems[i]["id"] = id }
+                        else if let id = value["id"] as? NSNumber, CFGetTypeID(id) != CFBooleanGetTypeID() { currentItems[i]["id"] = id }
+                        if let note = value["note"] as? O { currentItems[i]["note"] = note }
                     }
                     turn.parts[index]["items"] = currentItems
                 }

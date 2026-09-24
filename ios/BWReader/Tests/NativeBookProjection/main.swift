@@ -567,3 +567,92 @@ func testQueuedBookCommands() throws {
 }
 try testQueuedBookCommands()
 print("Native queued book commands: transactional note/replication, stable retries and EPUB/PDF position ownership passed")
+
+func testNativeReadingBootAndContext() throws {
+    typealias O = [String:Any]
+    let db = try ReaderNativeDataStore(path:":memory:"), device = try ReaderNativeDataStore(path:":memory:")
+    let writer = ReaderNativeBookStore(store:db,bookID:"boot",deviceID:"test",now:{ 950_000 })
+    let projection = ReaderNativeBookProjection(store:db)
+    let highlight:O = ["id":"old","text":"source","pdf_page":2,"rects":[[1,2,3,4]]]
+    _ = try writer.writeState("document-highlights",value:[highlight,highlight,["id":"gone","deleted":true]],mutation:"old",at:1)
+    let original = try db.record(collection:"native-document-highlights",id:"boot:document-highlights")
+    try db.execute("CREATE TRIGGER fail_split BEFORE INSERT ON records WHEN NEW.collection = 'native-document-highlights-split-meta' BEGIN SELECT RAISE(ABORT, 'split failure'); END")
+    do { try writer.prepareHighlightsOnBoot(); fatalError("partial split saved") } catch is ReaderNativeDataStore.StoreError {}
+    check(try db.records(collection:"native-document-highlights-items").isEmpty,"split failure left items")
+    try db.execute("DROP TRIGGER fail_split")
+    try writer.prepareHighlightsOnBoot()
+    let cursor = try db.cursor()
+    try writer.prepareHighlightsOnBoot()
+    check(try db.cursor() == cursor && projection.highlights("document-highlights",bookID:"boot").items.count == 1,"split was not idempotent")
+    check(try db.record(collection:"native-document-highlights",id:"boot:document-highlights") == original,"legacy source changed")
+    let note:O = ["id":"n","anchor":["kind":"pdf","page":5],"html":["cid":"old-card","bind":["kind":"page-chars","page":"4","from":3,"to":5,"text":"source"]]]
+    _ = try writer.writeState("document-notes-legacy",value:[note],mutation:"old-note",at:2)
+    try writer.repairBindingsOnBoot()
+    let notes = try projection.state("document-notes-legacy",bookID:"boot").payload as! [O]
+    check(((notes[0]["html"] as! O)["bind"] as! O)["page"] as? Int == 5,"binding page not repaired")
+    check((try projection.state("word-bindings",bookID:"boot").payload as? [O])?.isEmpty == false,"binding index not repaired")
+    let repaired = try db.cursor(); try writer.repairBindingsOnBoot()
+    check(try db.cursor() == repaired,"repair repeated on every open")
+    let context:O = ["kind":"pdf","file":"localbook:boot","page":5,"title":"Original","text":"原文","textAvailable":true,"textSource":"app-local-visible-window","fallbackReason":NSNull(),"truncated":false]
+    func publish(_ value:O) throws -> O { try ReaderNativeReadingPosition.publishContext(value,store:device,bookID:"boot",deviceID:"test") }
+    check(try publish(context)["seq"] as? Int == 1,"initial context sequence")
+    check(try publish(context)["seq"] as? Int == 2,"context sequence was reset")
+    let journal = try device.record(collection:"native-outgoing-journal",id:"test:outgoing-journal")!
+    var changed = context; changed["file"] = "localbook:other"
+    do { _ = try publish(changed); fatalError("wrong book context accepted") } catch ReaderNativeBookStore.MutationError.invalid {}
+    changed = context; changed["textAvailable"] = false
+    do { _ = try publish(changed); fatalError("wrong availability accepted") } catch ReaderNativeBookStore.MutationError.invalid {}
+    check(try device.record(collection:journal.collection,id:journal.id) == journal,"invalid context changed journal")
+    try device.execute("CREATE TRIGGER fail_context BEFORE INSERT ON records WHEN NEW.collection = 'native-outgoing-journal' BEGIN SELECT RAISE(ABORT, 'context failure'); END")
+    do { _ = try publish(context); fatalError("failed context published") } catch is ReaderNativeDataStore.StoreError {}
+    try device.execute("DROP TRIGGER fail_context")
+    check(try publish(context)["seq"] as? Int == 3,"failed transaction consumed sequence")
+}
+try testNativeReadingBootAndContext()
+print("Native reading startup/context: atomic legacy import, binding repair, stable sequences and failed writes passed")
+
+func testNativePDFPageStateRecovery() throws {
+    typealias O = [String:Any]
+    let db = try ReaderNativeDataStore(path:":memory:"), device = try ReaderNativeDataStore(path:":memory:")
+    let writer = ReaderNativeBookStore(store:db,bookID:"pages",deviceID:"test",now:{ 990_000 })
+    let read = ReaderNativeBookProjection(store:db), service = ReaderNativePDFPageState(writer:writer,device:device)
+    let note:O = ["id":"original","anchor":["kind":"pdf","page":3],"html":["cid":"card","content":"unchanged","bind":["kind":"page-chars","page":3,"from":0,"to":1,"text":"原文"]]]
+    try db.inTransaction {
+        _ = try writer.writeNotes([note],expected:0,mutation:"seed",at:1)
+        try writer.writeState("ink",value:["3":[["id":"pen"]],"pdf|file|3":[["id":"other"]]],mutation:"ink",at:1)
+        try writer.writeState("reading-position",value:["kind":"pdf","pos":3,"ts":1],mutation:"pos",at:1)
+    }
+    try ReaderNativeReadingPosition.cache(document:db,device:device,bookID:"pages",deviceID:"test")
+    let original = try read.assistantSnapshot(bookID:"pages",surface:"pdf")
+    let plan:O = ["operation":"insert","id":"new-page","pivotPage":2,"after":1,"title":"Inserted","markdown":"body"]
+    let ticket = "npmt_" + String(repeating:"a",count:32)
+    let prepared:O = ["operation":"insert","pivotPage":2,"ticket":ticket,"oldContentSHA256":String(repeating:"b",count:64),"stagedContentSHA256":String(repeating:"c",count:64)]
+    let lease = try service.handle(["operation":"prepare","plan":plan,"prepared":prepared])["transaction"] as! O
+    check(lease["before"] == nil && lease["after"] == nil,"book state leaked across native boundary")
+    try device.execute("CREATE TRIGGER fail_position BEFORE INSERT ON records WHEN NEW.collection = 'native-reader-positions' BEGIN SELECT RAISE(ABORT, 'device failure'); END")
+    do { _ = try service.handle(["operation":"reconcile","ticket":ticket,"desired":"after"]); fatalError("partial cross-store operation reported success") } catch is ReaderNativeDataStore.StoreError {}
+    let pending = try service.handle(["operation":"read"])["transaction"] as! O
+    check((pending["journal"] as! O)["phase"] as? String == "document-applied","failed device write lost recoverable phase")
+    try device.execute("DROP TRIGGER fail_position")
+    _ = try service.handle(["operation":"reconcile","ticket":ticket,"desired":"after"])
+    let changed = try read.assistantSnapshot(bookID:"pages",surface:"pdf"), notes = changed["notes"] as! [O]
+    check((notes[0]["anchor"] as! O)["page"] as? Int == 4 && (((notes[0]["html"] as! O)["bind"] as! O)["page"] as? Int) == 4,"anchor/bind split during insert")
+    check((changed["ink"] as! O)["4"] != nil && (changed["ink"] as! O)["pdf|file|4"] != nil,"ink keys did not move")
+    _ = try service.handle(["operation":"reconcile","ticket":ticket,"desired":"before"])
+    let restored = try read.assistantSnapshot(bookID:"pages",surface:"pdf")
+    check(NSDictionary(dictionary:restored["ink"] as! O).isEqual(to:original["ink"] as! O),"rollback lost ink")
+    check(NSArray(array:restored["notes"] as! [O]).isEqual(to:original["notes"] as! [O]),"rollback lost note or bind")
+    _ = try service.handle(["operation":"remove","ticket":ticket])
+    check(try service.handle(["operation":"read"])["transaction"] is NSNull,"removed journal still active")
+    var second = prepared; second["ticket"] = "npmt_" + String(repeating:"d",count:32)
+    _ = try service.handle(["operation":"prepare","plan":plan,"prepared":second])
+    do { _ = try service.handle(["operation":"remove","ticket":ticket]); fatalError("old ticket removed new journal") } catch ReaderNativeBookStore.MutationError.invalid {}
+    let before = try read.state("document-notes-legacy",bookID:"pages")
+    var newer = before.payload as! [O]; newer[0]["text"] = "concurrent edit"
+    _ = try writer.writeNotes(newer,expected:before.revision,mutation:"concurrent",at:2)
+    let cursor = try db.cursor()
+    do { _ = try service.handle(["operation":"reconcile","ticket":second["ticket"]!,"desired":"after"]); fatalError("concurrent edit overwritten") } catch ReaderNativeBookStore.MutationError.invalid {}
+    check(try db.cursor() == cursor,"conflict partially changed earlier domains")
+}
+try testNativePDFPageStateRecovery()
+print("Native PDF page state: insert, crash between stores, rollback, tombstone reuse and concurrent edits passed")

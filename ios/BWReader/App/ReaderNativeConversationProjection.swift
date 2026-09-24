@@ -22,6 +22,22 @@ enum ReaderNativeConversationProjection {
         result["text"] = ""
         result["status"] = "saved"
         switch kind {
+        case "operations":
+            result["kind"] = kind
+            data["items"] = (original["items"] as? [[String:Any]] ?? []).enumerated().compactMap { index,item -> [String:Any]? in
+                guard item["gone"] as? Bool != true else { return nil }
+                let op = string(item,"op"), action = string(item,"act")
+                let label: String
+                switch op {
+                case "page-card": label = (action == "delete" ? "已删除" : "已修改") + ((item["number"] as? NSNumber).map { "第 \($0) 个" } ?? "自由") + "卡片"
+                case "note": label = action == "edit" ? "已修改便签" : "已创建便签"
+                case "userpage": label = (action == "delete" ? "已删除自建页" : "已改写自建页") + string(item,"title")
+                default: label = op.isEmpty ? "高亮：" + first(string(item,"text"),"（无文字）") : first(string(item,"label"),op)
+                }
+                let id = item["id"] as? String ?? (item["id"] as? NSNumber)?.stringValue ?? ""
+                return ["index":index,"id":id,"label":label,"undone":item["undone"] as? Bool == true,
+                    "page":item["pdf_page"] ?? item["page"] ?? NSNull(),"displayPage":item["disp_page"] ?? item["pdf_page"] ?? item["page"] ?? NSNull()]
+            }
         case "tool":
             result["kind"] = "tool"
             let status = toolStatus(original)
@@ -62,7 +78,8 @@ enum ReaderNativeConversationProjection {
             // Routes, original indices, maps and video identities are projected
             // by ReaderNativeMediaArtifact, after these action handles merge.
         default:
-            result["text"] = String(string(original, "brief").prefix(1600))
+            result["text"] = first(string(original,"text"),string(original,"html"),string(original,"brief"))
+            if !string(original,"html").isEmpty && string(original,"text").isEmpty { data["format"] = "html" }
         }
         result["data"] = data
         return result

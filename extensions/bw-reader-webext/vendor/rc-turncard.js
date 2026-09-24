@@ -69,7 +69,7 @@ if (window.__bwPwaProviderOnly) return;
     var bd = document.createElement('div'); bd.className = 'rc-turn-bd';
     var flow = document.createElement('div'); flow.className = 'rc-turn-flow'; flow.hidden = true;
     el.appendChild(bd); el.appendChild(flow);
-    th.appendChild(el);
+    th.appendChild(el); window.__bwNativeMessages?.publish(el,th);
     var t = _turns[tid] = { tid: tid, el: el, hd: null, bd: bd, flow: flow,
       parts: [], draft: null, orchTaskId: null,
       meta: (options.meta && typeof options.meta === 'object') ? options.meta : null,   // 历史来源(via/threadId/turnId):语音轮次的「保存为工具」要靠它送通知
@@ -133,7 +133,7 @@ if (window.__bwPwaProviderOnly) return;
     // The native conversation consumes structured text/tool state. Building
     // Markdown, math, images and status controls in a hidden duplicate view
     // would still execute their renderer and resource requests.
-    if (_nativePresentation() && (p.kind === 'text' || p.kind === 'tool' || p.kind === 'meta')) {
+    if (_nativePresentation() && (p.kind === 'text' || p.kind === 'tool' || p.kind === 'meta' || p.kind === 'hlcard')) {
       if (p.kind === 'tool') _ensureHead(t, p.label || p.tool || '工具');
       return null;
     }
@@ -312,6 +312,7 @@ if (window.__bwPwaProviderOnly) return;
   }
   // 就地重画一个 part(操作态变了:标题/按钮文字/删除线一起换新,折叠态保留)
   function _rerenderPart(t, p) {
+    if (_nativePresentation()) return;
     try {
       if (!(p._el && p._el.isConnected)) return;
       var open0 = !!p._el.querySelector('.rc-hlcard.open');
@@ -425,6 +426,28 @@ if (window.__bwPwaProviderOnly) return;
       _opsChanged();
       return true;
     });
+  }
+  var nativeOperationBusy = new Set();
+  async function performOperation(input) {
+    var t = _lookup(input && input.tid);
+    var p = t && t.parts.find(function (part) { return part.kind === 'hlcard' && part._nativeID === input.partID; });
+    var index = input && input.index;
+    var item = p && Number.isSafeInteger(index) && index >= 0 && (p.items || [])[index];
+    if (!item || item.gone || String(item.id || '') !== input.expectedID || !!item.undone !== input.expectedUndone) throw new Error('操作记录已变化，请重新选择');
+    if (input.action === 'jump') {
+      var page = _opPage(item).pdf;
+      if (!page || typeof window.jumpWithBack !== 'function') throw new Error('这条记录没有可跳转的位置');
+      await window.jumpWithBack(page); return {ok:true};
+    }
+    if (input.action !== 'toggle') throw new Error('操作记录指令无效');
+    var key = t.tid + ':' + p._nativeID + ':' + index;
+    if (nativeOperationBusy.has(key)) throw new Error('此操作正在保存');
+    nativeOperationBusy.add(key);
+    try {
+      if (!await opAction({tid:t.tid,file:p.file || '',item:item,part:p,turn:t})) throw new Error('操作未成功，已保留记录');
+      await RC.turnCard.settle?.();
+      return {ok:true};
+    } finally { nativeOperationBusy.delete(key); }
   }
   function markOp(pred, undone) {   // 别处(如卡片操作的小提示条)改了状态 → 同步条目并重画
     var hit = false;
@@ -800,7 +823,8 @@ if (window.__bwPwaProviderOnly) return;
       var replacement = Array.prototype.filter.call(stage.children || [], function (node) {
         return (node.getAttribute('data-turn-id') || node.getAttribute('data-turn')) === realId;
       })[0];
-      if (replacement) replacement.replaceWith(t.el); else stage.appendChild(t.el);
+      if (replacement) { window.__bwNativeMessages?.replace(t.el,replacement,stage); replacement.replaceWith(t.el); }
+      else { stage.appendChild(t.el); window.__bwNativeMessages?.publish(t.el,stage); }
     });
   }
 
@@ -916,7 +940,7 @@ if (window.__bwPwaProviderOnly) return;
       streaming: parts.some(function (p) { return p.streaming; }) || !!(state.text && !state.done)
     }));
   }
-  function reset() { _turns = {}; _cur = null; }
+  function reset() { Object.values(_turns).forEach(function(t) { window.__bwNativeMessages?.remove(t.el); }); _turns = {}; _cur = null; }
   function setNativePresentation(enabled) {
     enabled = !!enabled;
     if (_nativePresentation() === enabled) return;
@@ -968,7 +992,7 @@ if (window.__bwPwaProviderOnly) return;
       dst._live = dst._live || t._live;
       dst._streamVersion = Math.max(dst._streamVersion || 0, t._streamVersion || 0);
       if (dst.draft) dst._liveFinal = false;
-      try { if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (e) {}
+      try { window.__bwNativeMessages?.remove(t.el); if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (e) {}
       if (t._progressResize) t._progressResize.disconnect();
       delete _turns[oldTid];
       if (_cur === oldTid) _cur = newTid;
@@ -1000,7 +1024,7 @@ if (window.__bwPwaProviderOnly) return;
       var t = _turns[tid];
       if (!t || !t.el || !t.el.isConnected) {
         if (t && t._progressResize) t._progressResize.disconnect();
-        delete _turns[tid];
+        window.__bwNativeMessages?.remove(t?.el); delete _turns[tid];
       }
     });
     if (_cur && !_turns[_cur]) _cur = null;
@@ -1193,7 +1217,7 @@ if (window.__bwPwaProviderOnly) return;
     tid = String(tid || '');
     var t = tid && _turns[tid];
     if (!t) return false;
-    try { if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (_) {}
+    try { window.__bwNativeMessages?.remove(t.el); if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (_) {}
     if (t._progressResize) t._progressResize.disconnect();
     delete _turns[tid];
     return true;
@@ -1209,7 +1233,7 @@ if (window.__bwPwaProviderOnly) return;
     trackCli: trackCli,
     has: function (tid) { return !!_lookup(tid); },
     // 操作条(高亮/卡片改删/便签/自建页)的统一出口:顶部「操作」tab 用
-    opItems: opItems, opAction: opAction, markOp: markOp,
+    opItems: opItems, opAction: opAction, markOp: markOp, performOperation: performOperation,
     rename: rename, openFlow: openFlow, flowOpen: flowOpen, tidByTurnId: tidByTurnId,
     onOpsChange: function (fn) { if (typeof fn === 'function') _opsListeners.push(fn); },
     opsChanged: _opsChanged,
@@ -1239,14 +1263,14 @@ if (window.__bwPwaProviderOnly) return;
       if (t) sendTurn(Object.assign({action:action,tid:t.tid},values || {}));
       return t;
     }
-    function disposition(p) { return JSON.stringify((p.items || []).map(function (it) { return [!!it.undone,!!it.gone]; })); }
+    function disposition(p) { return JSON.stringify((p.items || []).map(function (it) { return [it.id,it.note,!!it.undone,!!it.gone]; })); }
     function commitOperations(tid) {
       var t = _lookup(tid), updates = [];
       if (!t) return;
       t.parts.forEach(function (p) {
         if (p.kind !== 'hlcard' || !p._nativeID || p._nativeDisposition === disposition(p)) return;
         p._nativeDisposition = disposition(p);
-        updates.push({id:p._nativeID,items:(p.items || []).map(function (it,index) { return {index:index,undone:!!it.undone,gone:!!it.gone}; })});
+        updates.push({id:p._nativeID,items:(p.items || []).map(function (it,index) { return {index:index,id:it.id,note:it.note,undone:!!it.undone,gone:!!it.gone}; })});
       });
       if (updates.length) sendTurn({action:'operationState',tid:t.tid,parts:updates});
     }

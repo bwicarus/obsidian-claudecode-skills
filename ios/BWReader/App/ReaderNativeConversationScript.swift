@@ -181,16 +181,19 @@ enum ReaderNativeConversationScript {
       }
       function nativePartHandles(part, id, node, tid) {
         const descriptor = (key, kind, title, original) => {
-          const actionId = registerAction(key, node, () => {});
           const detail = { kind, title, content: original };
-          actions.get(actionId).inspect = () => detail;
           const result = { id: key, kind, title: '', text: '', status: 'unknown',
-            data: { nativeDetail: detail }, actionId, actionLabel: tid ? '查看完整流程' : '查看原件' };
+            data: { nativeDetail: detail, nativeActionKey: key }, actionLabel: tid ? '查看完整流程' : '查看原件' };
           if (tid && part.nativePartID) result.data.nativeTurnPart = {id:part.nativePartID};
           if (tid) result.data.nativeParentContextId = 'turn:' + tid;
           return result;
         };
         if (part.kind === 'tool') return [descriptor(id, 'tool', part.label || part.tool || '工具调用', part)];
+        if (part.kind === 'hlcard') {
+          const result = descriptor(id, 'operations', '操作记录', part);
+          result.data.nativeOperation = {tid,partID:part.nativePartID};
+          return [result];
+        }
         if (part.kind === 'cards' && Array.isArray(part.cards)) return part.cards.map((card, index) => {
           const result = descriptor(id + '-c-' + index, 'anki', card.title || '学习卡片',
             { gid: part.gid, cardIndex: index, card });
@@ -209,9 +212,9 @@ enum ReaderNativeConversationScript {
           // shared native selection graph. No per-image web action registry.
           return [result];
         }
-        // Unknown historical kinds keep their existing inspection adapter until
-        // their original event contract has a native renderer.
-        return [artifact(id, node, part.title || part.label || (part.kind === 'hlcard' ? '操作记录' : '生成物'))];
+        // Historical extension kinds retain their original data for native
+        // inspection. Do not mount/read a hidden HTML view to recover it.
+        return [descriptor(id, 'artifact', part.title || part.label || '生成物', part)];
       }
       function projectPart(part, id, node, tid) {
         const kind = part.kind;
@@ -409,6 +412,21 @@ enum ReaderNativeConversationScript {
       function liveArtifacts(messages) {
         for (const message of messages) {
         for (const part of message.parts) {
+          if (nativeMode && part.data?.nativeActionKey) {
+            // Only producer metadata crosses this boundary. Swift owns the
+            // action identities and dispatch; no hidden node/closure is kept
+            // alive just to inspect, select or place an original artifact.
+            if (part.kind === 'anki') {
+              const group = flashGroup(null, part.data.gid);
+              const index = part.data.nativeDetail?.content?.cardIndex;
+              const input = group && rc().flashcard?.presentationInput?.(group, index);
+              if (input) {
+                part.data.nativeCard = input;
+                part.data.activeInGroup = group.__fc.idx === index;
+              } else part.data.liveReason = 'card-state-pending';
+            }
+            continue;
+          }
           if (part.kind === 'tool' || part.id.endsWith('-original')) continue;
           const target = actions.get(part.actionId), node = target?.node;
           if (!node?.isConnected) {
@@ -509,11 +527,14 @@ enum ReaderNativeConversationScript {
         }
       }
       function toolbarActions() {
-        const root = document.getElementById('header') || document.getElementById('ep-top');
         const navigation = rc().readerNavigation?.state?.();
         const paging = navigation?.ready ? [{
           id: 'native-page', title: navigation.display + ' / ' + navigation.totalLabel, key: 'page', disabled: false
         }] : [];
+        // PDF controls and their actions are owned by Swift. EPUB keeps its
+        // visible WebKit document controls; no PDF header scan or click handles.
+        if (rc().readerNavigation?.nativeViewport) return paging;
+        const root = document.getElementById('header') || document.getElementById('ep-top');
         if (!root) return paging;
         return paging.concat(Array.from(root.querySelectorAll('button')).filter(button => !button.hidden && button.getAttribute('aria-hidden') !== 'true').map((button, index) => ({
           id: registerAction('toolbar-' + (button.id || index), button, () => button.click()),
@@ -817,6 +838,7 @@ enum ReaderNativeConversationScript {
         if (typeof window.__asstSend === 'function') out.push('send');
         if (rc().assistant?.conversationService?.stop) out.push('stop');
         if (rc().assistant?.conversationService?.clear) out.push('clearConversation');
+        if (rc().turnCard?.performOperation) out.push('operationAction');
         if (conversationMode() === 'normal' && rc().voicecall?.canStartNewTopic?.()) out.push('newConversation');
         if (typeof rc().assistant?.openModelSettings === 'function') out.push('openModels');
         if (rc().assistant?.settingsService) out.push('nativeSettings');
@@ -828,8 +850,7 @@ enum ReaderNativeConversationScript {
         else if (document.getElementById('asst-review-toggle')) out.push('openReview');
         if (typeof window.openSearch === 'function' || document.getElementById('ep-search-btn')) out.push('openSearch');
         if (rc().readerTOC?.read && rc().readerTOC?.jump) out.push('nativeTOC', 'openTOC');
-        if (document.getElementById('asst-call')) out.push('toggleVoice');
-        if (document.getElementById('asst-computer')) out.push('toggleComputerVoice');
+        if (rc().voicecall?.requestCall) out.push('toggleVoice', 'toggleComputerVoice');
         if (actions.size) out.push('inspectArtifact');
         return out;
       }
@@ -1089,7 +1110,7 @@ enum ReaderNativeConversationScript {
             threadObserver.observe(thread, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'hidden', 'data-turn-id', 'data-turn', 'disabled'] });
           }
         }
-        const bar = document.getElementById('header') || document.getElementById('ep-top');
+        const bar = rc().readerNavigation?.nativeViewport ? null : document.getElementById('header') || document.getElementById('ep-top');
         if (toolbarElement !== bar) {
           toolbarObserver?.disconnect(); toolbarElement = bar;
           if (bar) { toolbarObserver = new MutationObserver(schedule); toolbarObserver.observe(bar, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'disabled', 'title'] }); }
@@ -1219,6 +1240,9 @@ enum ReaderNativeConversationScript {
             messagesDirty = true;
           } else if (action === 'stop') {
             if (rc().assistant?.conversationService?.stop?.() !== true) return { ok: false, error: '当前没有可停止的文字回复' };
+          } else if (action === 'operationAction') {
+            if (!rc().turnCard?.performOperation) return {ok:false,error:'操作记录尚未就绪'};
+            await rc().turnCard.performOperation(command.value);
           } else if (action === 'clearConversation') {
             if (!rc().assistant?.conversationService?.clear) return { ok: false, error: '对话尚未准备好' };
             await rc().assistant.conversationService.clear(command.value);
@@ -1226,9 +1250,8 @@ enum ReaderNativeConversationScript {
             if (conversationMode() !== 'normal' || !rc().voicecall?.canStartNewTopic?.()) return { ok: false, error: '当前通话不支持新话题' };
             rc().voicecall.startNewTopic();
           } else if (action === 'toggleVoice' || action === 'toggleComputerVoice') {
-            const button = document.getElementById(action === 'toggleVoice' ? 'asst-call' : 'asst-computer');
-            if (!button || button.disabled || button.classList.contains('vc-review-disabled')) return { ok: false, error: '当前无法使用这项语音功能' };
-            button.click();
+            if (!rc().voicecall?.requestCall) return {ok:false,error:'语音入口尚未准备好'};
+            rc().voicecall.requestCall(action === 'toggleVoice' ? 'realtime' : 'computer');
           } else if (action === 'hideLegacy') {
             setLegacy(false);
           } else if (action === 'refresh') {

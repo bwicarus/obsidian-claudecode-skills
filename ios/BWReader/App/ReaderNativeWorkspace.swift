@@ -36,6 +36,11 @@ struct ReaderNativeWorkspace<Document: View>: View {
         pinnedToolsRaw.split(separator: readerPinnedToolSeparator).map(String.init).filter { !$0.isEmpty }
     }
 
+    private var readingTools: [ReaderNativeControl] {
+        reader.nativePDFDocument == nil ? conversation.readingTools :
+            conversation.readingTools.filter { $0.key == "page" } + ReaderNativePDFToolbar.controls()
+    }
+
     private func toolIdentity(_ control: ReaderNativeControl) -> String {
         control.key.isEmpty ? "t:" + control.title : "k:" + control.key
     }
@@ -45,7 +50,7 @@ struct ReaderNativeWorkspace<Document: View>: View {
     ///   换本书又有了就该回来，静静清掉才是真丢东西。
     private var pinnedTools: [ReaderNativeControl] {
         let wanted = pinnedToolIDs
-        return conversation.readingTools
+        return readingTools
             .filter { $0.key != "page" && wanted.contains(toolIdentity($0)) }
             .sorted { a, b in
                 (wanted.firstIndex(of: toolIdentity(a)) ?? 0) < (wanted.firstIndex(of: toolIdentity(b)) ?? 0)
@@ -60,6 +65,12 @@ struct ReaderNativeWorkspace<Document: View>: View {
     }
 
     private func runReadingTool(_ control: ReaderNativeControl) {
+        if control.id.hasPrefix("native-pdf-") {
+            let action = String(control.id.dropFirst("native-pdf-".count))
+            if action == "library" { openLibrary(); return }
+            Task { await reader.runNativePDFToolbar(action) }
+            return
+        }
         // ⚠ 新建便签在原生接管时**必须**走原生那条路：网页的
         // createAtCenter 靠 document.elementFromPoint 找落点，接管后一页都不在
         // DOM 里，七个候选点全落空 —— 便签没建，连"放不了"的 toast 也看不见。
@@ -202,6 +213,9 @@ struct ReaderNativeWorkspace<Document: View>: View {
         .sheet(item: $reader.nativeHighlightEditor) { panel in
             ReaderNativeHighlightEditor(model: panel)
         }
+        .sheet(item: $reader.nativePDFToolPanel) { panel in
+            ReaderNativePDFToolView(model: panel)
+        }
         .sheet(item: $conversation.searchPanel) { panel in
             ReaderNativeSearchView(model: panel)
         }
@@ -268,15 +282,15 @@ struct ReaderNativeWorkspace<Document: View>: View {
                         .accessibilityLabel(control.title)
                 }
             }
-            if enabled && !conversation.readingTools.isEmpty {
+            if enabled && !readingTools.isEmpty {
                 Menu {
-                    ForEach(conversation.readingTools.filter { $0.key != "page" }) { control in
+                    ForEach(readingTools.filter { $0.key != "page" }) { control in
                         Button(control.title) { runReadingTool(control) }
                             .disabled(control.disabled)
                     }
                     Divider()
                     Menu("固定到顶栏…") {
-                        ForEach(conversation.readingTools.filter { $0.key != "page" }) { control in
+                        ForEach(readingTools.filter { $0.key != "page" }) { control in
                             Toggle(control.title, isOn: Binding(
                                 get: { pinnedToolIDs.contains(toolIdentity(control)) },
                                 set: { _ in togglePinned(control) }

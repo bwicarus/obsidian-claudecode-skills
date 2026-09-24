@@ -365,6 +365,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativePhraseService: ReaderNativePhraseService?
     private var nativeFavoritesService: ReaderNativeFavoritesService?
     private var nativeFavoritesContext: UInt64?
+    @Published var nativePDFToolPanel: ReaderNativePDFToolPanel?
+    private var nativePDFToolbarBusy = false
+    private var nativeTranslationBookID: String?
+    private var nativeTranslationEnabled = false
     private var nativeReviewQueue: ReaderNativeReviewQueue?
     private var nativeReviewLifecycleID: UUID?
     private var nativeReviewQueueContext: UInt64?
@@ -1010,8 +1014,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         let settingsGeneration = global.generation(collection: "user-settings")
         let deviceSettingsGeneration = device.generation(collection: "device-preferences")
         let raw = try await webView.callAsyncJavaScript("""
-            return {translation:window.__bwReaderPageTranslateOn?.()===true,
-                    overrides:Object.fromEntries(window.__vocabOverride||[]),
+            return {overrides:Object.fromEntries(window.__vocabOverride||[]),
                     mastered:Array.from(window.__masteredLocal||[]),
                     searchQuery:typeof _takePendingSearchQuery==='function'?_takePendingSearchQuery(page):''};
             """, arguments: ["page": page], in: nil, contentWorld: .page)
@@ -1024,6 +1027,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         flags["vocabulary"] = vocabulary
         flags["ruby"] = ruby
+        flags["translation"] = nativeTranslationBookID == currentLocalBook?.id && nativeTranslationEnabled
         let vocabularyGeneration = global.generation(collection: ReaderNativeVocabularyState.collection)
         let index = try nativeVocabularyOverlayStore.vocabulary(global)
         let calculation = Task.detached(priority: .userInitiated) { ReaderNativeVocabularyOverlay.localMarks(chars, state: index) }
@@ -1586,9 +1590,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
            !nativeConversation.voice.active, !nativeConversation.voice.busy,
            let bridge = nativeVoiceBridge, !bridge.state.isActive, !bridge.state.isBusy,
            let text = (command["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !text.isEmpty,
-           await bridge.sendTypedToBackend(text) {
-            return nil
+           !text.isEmpty {
+            let scope = nativeConversation.scope
+            switch await bridge.submitTypedToBackend(text) {
+            case .accepted: return nil
+            case .unconfirmed: return "后台接收结果尚未确认，未另开任务重复发送。"
+            case .unavailable:
+                guard nativeConversation.scope == scope else { return "对话已切换，请重新确认发送。" }
+            }
         }
         let receipt = await requestNativeConversationCommand(command)
         let ok = receipt["ok"] as? Bool == true
@@ -2460,8 +2469,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // EPUB still resolves its own reflow anchor. PDF placements serialize
         // original data without consulting hidden card DOM or image elements.
         if action == "liveAction" {
-            guard currentLocalBook?.format == .pdf,
-                  input != nil || ["weather", "news", "fact", "general", "images", "videos"].contains(detail?["kind"] as? String ?? "") else { return nil }
+            guard input != nil || ["weather", "news", "fact", "general", "images", "videos"].contains(detail?["kind"] as? String ?? "") else { return nil }
         } else if input == nil && detail == nil { return nil }
         do {
             guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
@@ -2485,6 +2493,34 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 }
                 guard let detail else { throw ReaderNativeFavoritesService.Failure(message: "生成物原件尚未就绪") }
                 return ["ok": true, "detail": detail]
+            }
+            if currentLocalBook?.format == .epub {
+                // EPUB's visible WebKit body resolves the reflow location;
+                // the original payload comes from native state, not a hidden
+                // card node or a reconstructed HTML preview.
+                let payload:[String:Any], group:String?
+                if let input, let gid = input["gid"] as? String {
+                    let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-global").store
+                    guard let record = try ReaderNativeCardRepository(store:store,deviceID:deviceID).load(gid),
+                          let cards = ReaderNativeCardPresentation.placementCards(record) else { throw ReaderNativeFavoritesService.Failure(message:"学习卡已更新") }
+                    payload = ["cards":cards]; group = gid
+                } else if let original = detail?["content"] as? [String:Any] {
+                    guard let record = try ReaderNativeFavoritePlacement.semanticRecord(original) else { throw ReaderNativeFavoritesService.Failure(message:"卡片原件类型不支持") }
+                    payload = ["content":record["raw"] ?? "","contextText":record["text"] ?? "","isHtml":true,
+                        "cid":record["cid"] ?? "","label":record["label"] ?? "卡片"]; group = nil
+                } else { throw ReaderNativeFavoritesService.Failure(message:"卡片原件缺失") }
+                guard let x = command["x"] as? Double, let y = command["y"] as? Double,
+                      x.isFinite, y.isFinite, (0...1).contains(x), (0...1).contains(y) else { throw ReaderNativeFavoritesService.Failure(message:"落点无效") }
+                let result = try await webView.callAsyncJavaScript("""
+                    if (window.__bwNativeConversation?.currentScope?.() !== scope) throw new Error('页面已切换');
+                    const owner = window.RC?.stickynote;
+                    if (!owner) throw new Error('正文尚未就绪');
+                    const accepted = gid ? await owner.placeCardAt(x*innerWidth,y*innerHeight,payload.cards,gid,null)
+                      : await owner.placeHtmlAt(x*innerWidth,y*innerHeight,payload,null);
+                    if (!accepted) throw new Error('卡片位置未保存');
+                    return true;
+                    """,arguments:["scope":nativeConversation.scope,"payload":payload,"gid":group as Any? ?? NSNull(),"x":x,"y":y],in:nil,contentWorld:.page)
+                return ["ok":result as? Bool == true,"committed":result as? Bool == true]
             }
             guard let book = currentLocalBook, let access = currentLocalBookAccess,
                   let document = nativePDFDocument, let digest = currentLocalBookContentSHA256,
@@ -2541,6 +2577,28 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func performNativePinCommand(_ command: [String:Any]) async -> [String:Any]? {
+        if command["action"] as? String == "liveAction", let token = command["actionId"] as? String, token.hasPrefix("native-text:") {
+            guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
+                  let part = nativeConversation.artifactPart(token,field:"selectId"), let selection = command["text"] as? String, selection.utf16.count <= 16_000 else {
+                return ["ok":false,"error":"选区所属内容已改变"]
+            }
+            do {
+                let scope = nativeConversation.scope
+                let accepted = try await webView.callAsyncJavaScript("""
+                    if (window.__bwNativeConversation?.currentScope?.() !== scope) return false;
+                    if (!text.trim()) {
+                      if (window.__bwNativeSelection?.owner === owner) window.__bwNativeSelection.active = false;
+                      return true;
+                    }
+                    window.__bwNativeSelection = {text:text.trim(),active:true,owner,scope};
+                    if (typeof window.__setFocusSel !== 'function') return false;
+                    window.__setFocusSel(text.trim(),'text');
+                    return window.__focusSel?.text === text.trim();
+                    """,arguments:["scope":scope,"owner":part.id,"text":selection],in:nil,contentWorld:.page)
+                guard scope == nativeConversation.scope, accepted as? Bool == true else { throw CancellationError() }
+                return ["ok":true]
+            } catch { return ["ok":false,"error":error.localizedDescription] }
+        }
         guard command["action"] as? String == "liveAction", let token = command["actionId"] as? String,
               token.hasPrefix("native-pin:") || token.hasPrefix("native-context-remove:") else { return nil }
         do {
@@ -3492,6 +3550,153 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativePhraseService?.wake()
     }
 
+    func runNativePDFToolbar(_ action: String) async {
+        guard !nativePDFToolbarBusy, let book = currentLocalBook, book.format == .pdf,
+              let document = nativePDFDocument, let deviceID = nativeReadingStoreDeviceID else { return }
+        nativePDFToolbarBusy = true; defer { nativePDFToolbarBusy = false }
+        do {
+            switch action {
+            case "spread", "fit":
+                guard let navigation = nativePDFNavigationBridge else { throw ReaderBookUserStateWebAdapterError.unavailable }
+                try await navigation.performToolbar(action)
+            case "note": createNativeStickyNote()
+            case "search": _ = await nativeConversation.perform("openSearch")
+            case "settings": _ = await nativeConversation.perform("openSettings")
+            case "crop":
+                let receipt = await performNativeReadingSettings(["action":"readingSettingsWrite","scope":nativeConversation.scope,
+                    "key":"cropEnabled","value":document.position.crop == nil])
+                guard receipt?["ok"] as? Bool == true else { throw ReaderNativePreferences.Failure(message:receipt?["error"] as? String ?? "裁边设置未完成") }
+            case "ruby", "translation":
+                let entry = try ReaderNativePreferences.Catalog.packaged.get().entry("pdf-ruby")
+                let store = try nativeDataStoreHost.bridge(for:entry.storeName).store
+                let owner = ReaderNativePreferences(store:store,deviceID:deviceID)
+                let ruby = try owner.raw(entry) == "1"
+                if nativeTranslationBookID != book.id { nativeTranslationEnabled = false; nativeTranslationBookID = book.id }
+                let nextRuby = action == "ruby" ? !ruby : false
+                let nextTranslation = action == "translation" ? !nativeTranslationEnabled : false
+                let receipt = try owner.commit(entry,raw:nextRuby ? "1" : "0",mutation:"native-toolbar-" + UUID().uuidString)
+                nativeTranslationEnabled = nextTranslation
+                // Compatibility observers receive state only. They do not run
+                // webpage ruby/translation renderers or query hidden page nodes.
+                _ = try await webView.callAsyncJavaScript("window.__bwNativePreferencesObserve(receipt); return true;",
+                    arguments:["receipt":receipt],in:nil,contentWorld:.page)
+                guard currentLocalBook?.id == book.id else { throw CancellationError() }
+                refreshNativePageOverlays(force:true)
+            case "favorite", "insert", "edit":
+                let page = document.position.page, scope = nativeConversation.scope
+                let newID = "u_" + String(UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased().prefix(8))
+                nativePDFToolPanel = ReaderNativePDFToolPanel(kind:action == "favorite" ? "favorite" : "userpage",page:action == "insert" ? page+1 : page) { [weak self] operation, value in
+                    guard let self, self.currentLocalBook?.id == book.id, self.nativeConversation.scope == scope else { throw ReaderBookUserStateWebAdapterError.contextChanged }
+                    return try await self.nativePDFToolRequest(tool:action,operation:operation,value:value,bookID:book.id,deviceID:deviceID,page:page,newID:newID,scope:scope)
+                }
+            default: throw ReaderBookUserStateWebAdapterError.unavailable
+            }
+        } catch { showTransientNotice(error.localizedDescription) }
+    }
+
+    private func nativePDFToolRequest(tool:String, operation:String, value:[String:Any], bookID:String,
+                                      deviceID:String, page:Int, newID:String, scope:String) async throws -> [String:Any] {
+        func current() throws {
+            guard currentLocalBook?.id == bookID, nativeConversation.scope == scope else { throw ReaderBookUserStateWebAdapterError.contextChanged }
+        }
+        try current()
+        if tool == "favorite" {
+            guard let gateway = nativeServerGateway else { throw ReaderBookUserStateWebAdapterError.unavailable }
+            let context = gateway.contextRevision
+            let target:[String:Any] = ["file":"localbook:" + bookID,"kind":"pdf","page":page]
+            var method = "GET", body:[String:Any]?
+            if operation == "favorite" {
+                if let folder = value["folder"] as? String {
+                    let selected = value["selected"] as? Bool == true
+                    method = selected ? "POST" : "PATCH"
+                    body = ["folder":folder,selected ? "item" : "remove_item":target]
+                } else {
+                    let name = (value["name"] as? String ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
+                    guard !name.isEmpty, name.utf16.count <= 80 else { throw ReaderNativeBookStore.MutationError.invalid("收藏夹名称") }
+                    method = "POST"; body = ["name":name,"item":target]
+                }
+            } else if operation != "load" { throw ReaderNativeBookStore.MutationError.invalid("收藏操作") }
+            let response = try await gateway.fetchData(path:"/pdf/api/favorites",method:method,body:try body.map { try ReaderNativeCardRules.bytes($0) },surface:.pdf)
+            try current()
+            guard gateway.contextRevision == context, (200..<300).contains(response.status),
+                  var result = try JSONSerialization.jsonObject(with:response.data) as? [String:Any], result["ok"] as? Bool == true else {
+                throw ReaderNativeBookStore.MutationError.invalid("收藏未确认，请刷新核对")
+            }
+            func decorate(_ row:[String:Any]) -> [String:Any] {
+                var row = row
+                // Gateway responses may retain the remote alias for this book.
+                let items = row["items"] as? [[String:Any]] ?? []
+                row["selected"] = items.contains { item in
+                    item["kind"] as? String == "pdf" && (item["page"] as? NSNumber)?.intValue == page &&
+                        gateway.matchesBookFile(item["file"] as? String ?? "",localBookID:bookID)
+                }
+                return row
+            }
+            if let folders = result["folders"] as? [[String:Any]] { result["folders"] = folders.map(decorate) }
+            if let row = result["folder"] as? [String:Any] { result["folder"] = decorate(row) }
+            return result
+        }
+        let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+        guard try store.meta("legacyImport") == "done" else { throw ReaderBookUserStateWebAdapterError.unavailable }
+        let projection = ReaderNativeBookProjection(store:store)
+        func records() throws -> [[String:Any]] {
+            let state = try projection.state("user-pages",bookID:bookID)
+            guard state.payload == nil || state.payload is [[String:Any]] else { throw ReaderNativeBookStore.MutationError.invalid("用户页数据") }
+            return state.payload as? [[String:Any]] ?? []
+        }
+        func plan(_ row:[String:Any], _ mode:String) -> [String:Any] {
+            ["operation":mode,"id":row["id"] ?? newID,"pivotPage":row["page"] ?? page+1,"after":page,
+             "title":row["title"] ?? "","markdown":row["md"] ?? "","titleProvided":false,"markdownProvided":false]
+        }
+        if operation == "load" {
+            if tool == "insert", !(try records()).contains(where: { $0["id"] as? String == newID }) {
+                _ = try await runNativePDFToolbarJob(["bookID":bookID,"deviceID":deviceID,"operation":"run",
+                    "plan":plan(["id":newID,"page":page+1],"insert")])
+                try current()
+            }
+            guard let row = try records().first(where: { tool == "insert" ? $0["id"] as? String == newID : ($0["page"] as? NSNumber)?.intValue == page }) else {
+                throw ReaderNativeBookStore.MutationError.invalid("当前页不是插入的我的页")
+            }
+            return ["record":row]
+        }
+        guard let id = value["id"] as? String, let version = value["revision"] as? Int else { throw ReaderNativeBookStore.MutationError.invalid("用户页版本") }
+        guard let record = try records().first(where: { $0["id"] as? String == id }), ((record["md_ver"] as? NSNumber)?.intValue ?? 0) == version else {
+            throw ReaderNativeBookStore.MutationError.invalid("用户页已被其他操作更新，请重新打开")
+        }
+        if operation == "save" {
+            guard let title = value["title"] as? String, title.utf16.count <= 120,
+                  let markdown = value["md"] as? String, markdown.utf16.count <= 100_000,
+                  nativePDFMutationCommandDepth == 0 else { throw ReaderNativeBookStore.MutationError.invalid("用户页内容或写入状态") }
+            try store.inTransaction {
+                let state = try projection.state("user-pages",bookID:bookID)
+                var rows = try records()
+                guard let index = rows.firstIndex(where: { $0["id"] as? String == id }) else { throw ReaderNativeBookStore.MutationError.invalid("用户页已删除") }
+                rows[index]["title"] = title; rows[index]["md"] = markdown
+                rows[index]["md_ver"] = version + 1; rows[index]["updated"] = Date().timeIntervalSince1970
+                let writer = ReaderNativeBookStore(store:store,bookID:bookID,deviceID:deviceID)
+                _ = try writer.writeState("user-pages",value:rows,expected:state.revision,mutation:"native-userpage-" + UUID().uuidString,at:writer.now())
+            }
+            markCloudSyncDirty()
+            return ["revision":version+1]
+        }
+        guard ["finish","delete"].contains(operation) else { throw ReaderNativeBookStore.MutationError.invalid("用户页操作") }
+        if operation == "finish", (record["synced_ver"] as? NSNumber)?.intValue == version { return ["ok":true] }
+        return try await runNativePDFToolbarJob(["bookID":bookID,"deviceID":deviceID,"operation":"run","plan":plan(record,operation == "delete" ? "delete" : "edit")])
+    }
+
+    private func runNativePDFToolbarJob(_ request:[String:Any]) async throws -> [String:Any] {
+        guard let bookID = request["bookID"] as? String, currentLocalBook?.id == bookID else { throw ReaderBookUserStateWebAdapterError.contextChanged }
+        let token = UUID().uuidString
+        _ = try await webView.callAsyncJavaScript("return await window.BWReaderRuntime.nativePDFToolbarBarrier.begin(token);",
+            arguments:["token":token],in:nil,contentWorld:.page)
+        let result:Result<[String:Any],Error>
+        do { result = .success(try await runNativePDFPageJob(request)) } catch { result = .failure(error) }
+        // Releasing this compatibility-producer barrier never replays a job.
+        _ = try? await webView.callAsyncJavaScript("return window.BWReaderRuntime.nativePDFToolbarBarrier.end(token);",
+            arguments:["token":token],in:nil,contentWorld:.page)
+        return try result.get()
+    }
+
     private func nativeReadingSettingsState(bookID: String, generation: UInt64) throws -> [String: Any] {
         guard bookUserStateContextGeneration == generation, currentLocalBook?.id == bookID,
               let document = nativePDFDocument, let deviceID = nativeReadingStoreDeviceID else {
@@ -4122,7 +4327,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "nativeVocabMark", "nativeFigureAttach",
             "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav", "nativeCreateNote",
             "nativeOcrSelection", "nativeEpubHighlight", "nativeEpubHighlightColors",
-            "anchorPreview"]
+            "anchorPreview", "operationAction"]
         guard let action = command["action"] as? String, allowed.contains(action),
               JSONSerialization.isValidJSONObject(command),
               isTrustedReaderURL(webView.url), !isLoading else {
@@ -4456,6 +4661,43 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 }, pageCard: { request in
                     try self.performNativePageCard(request,bookID:session.bookID,deviceID:deviceID)
                 })
+            }
+            nativeAssistantStream.prepareReaderPCContext = { [weak self] current in
+                guard let self, let document = self.nativePDFDocument, let book = self.currentLocalBook,
+                      book.format == .pdf, book.id == self.nativeReadingStoreBookID,
+                      current["file"] as? String == "localbook:" + book.id,
+                      let page = current["page"] as? Int, page == document.position.page else { throw CancellationError() }
+                let generation = self.bookUserStateContextGeneration, gatewayContext = self.nativeServerGateway?.contextRevision
+                let selected = current["selectionState"] as? String == "active" || !(current["selection"] as? String ?? "").trimmingCharacters(in:.whitespacesAndNewlines).isEmpty
+                var sources:[String:[String:Any]] = [:]
+                sources[String(page)] = try await document.sourceCharacters(page:page)
+                if !selected {
+                    for neighbour in [page-1,page+1] where neighbour > 0 {
+                        sources[String(neighbour)] = try? await document.sourceCharacters(page:neighbour)
+                    }
+                }
+                guard !Task.isCancelled, self.nativePDFDocument === document, document.position.page == page,
+                      self.bookUserStateContextGeneration == generation, self.nativeServerGateway?.contextRevision == gatewayContext else { throw CancellationError() }
+                let store = try self.nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+                let authority:[String:Any] = try store.inTransaction {
+                    let notes = try ReaderNativeBookProjection(store:store).state("document-notes-legacy",bookID:book.id)
+                    guard notes.payload == nil || notes.payload is [[String:Any]] else { throw ReaderNativeBookProjection.ProjectionError.invalidResponse }
+                    return ["file":"localbook:" + book.id,"notes":notes.payload ?? [],"revisions":["notes":notes.revision]]
+                }
+                let input = try JSONSerialization.data(withJSONObject:["current":current,"authority":authority,"sources":sources])
+                // Only immutable bytes cross the worker boundary. Large source
+                // and card projections must not run on the scrolling UI actor.
+                let worker = Task.detached(priority:.utility) {
+                    let value = try JSONSerialization.jsonObject(with:input) as! [String:Any]
+                    let sources = value["sources"] as! [String:[String:Any]]
+                    let keyed = Dictionary(uniqueKeysWithValues:sources.compactMap { key,value in Int(key).map { ($0,value) } })
+                    let result = try ReaderNativePDFContext.readerPC(value["current"] as! [String:Any],authority:value["authority"] as! [String:Any],sources:keyed)
+                    return try JSONSerialization.data(withJSONObject:result)
+                }
+                let output = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+                guard !Task.isCancelled, self.nativePDFDocument === document, document.position.page == page,
+                      self.bookUserStateContextGeneration == generation, self.nativeServerGateway?.contextRevision == gatewayContext else { throw CancellationError() }
+                return try JSONSerialization.jsonObject(with:output) as! [String:Any]
             }
             self.nativeAssistantStream = nativeAssistantStream
             contentController.addScriptMessageHandler(nativeAssistantStream, contentWorld: .page,
@@ -5880,9 +6122,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
-    /// Completes the native half of the legacy PDF insert-page contract. The
-    /// JavaScript runtime owns its IndexedDB page-anchor transaction; Swift
-    /// owns the actual PDF bytes and does not finalize its backup until the
+    /// Completes the file half of the recoverable PDF insert-page contract.
+    /// Native page state owns the anchor journal; Swift does not finalize the backup until the
     /// replacement has been rescanned, reopened and rebound to this WebView.
     private func settleNativePDFMutation(
         book: ReaderLocalBookRecord,
@@ -6011,6 +6252,73 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             expectedContentSHA256: settlement.contentSHA256,
             localBookAccess: settlement.access
         )
+    }
+
+    /// One native operation owns both PDF bytes and local page anchors. The
+    /// compatibility client only drains its producers and observes job status.
+    private func runNativePDFPageJob(_ request:[String:Any]) async throws -> [String:Any] {
+        guard nativePDFMutationCommandDepth == 0, let book = currentLocalBook, book.format == .pdf,
+              request["bookID"] as? String == book.id, let deviceID = request["deviceID"] as? String,
+              !deviceID.isEmpty, deviceID.utf16.count <= 240 else { throw ReaderNativePDFMutationError.busy }
+        nativePDFMutationCommandDepth += 1
+        defer { nativePDFMutationCommandDepth -= 1 }
+        let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+        let device = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-device").store
+        guard try store.meta("legacyImport") == "done", try device.meta("legacyImport") == "done" else { throw ReaderBookUserStateWebAdapterError.unavailable }
+        let state = ReaderNativePDFPageState(writer:.init(store:store,bookID:book.id,deviceID:deviceID),device:device)
+        func current() throws { guard currentLocalBook?.id == book.id else { throw ReaderNativePDFMutationError.bookChanged } }
+        func recover(_ prepared:[String:Any]? = nil) async throws -> [String:Any] {
+            try current()
+            let transaction = try state.handle(["operation":"read"])["transaction"] as? [String:Any]
+            let header = transaction?["journal"] as? [String:Any] ?? prepared
+            let result = try await handleNativePDFMutation(.recover(requestID:"npm_" + UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased(),localBookID:book.id,
+                ticket:header?["ticket"] as? String,oldContentSHA256:header?["oldContentSHA256"] as? String,stagedContentSHA256:header?["stagedContentSHA256"] as? String))
+            try current()
+            if let header, transaction != nil, let ticket = header["ticket"] as? String {
+                _ = try state.handle(["operation":"reconcile","ticket":ticket,"desired":result["outcome"] as? String == "committed" ? "after" : "before"])
+                _ = try state.handle(["operation":"remove","ticket":ticket])
+            } else if result["outcome"] as? String == "committed" {
+                throw ReaderNativePDFMutationError.commitFailed("PDF 已提交但页锚恢复记录缺失")
+            }
+            if result["outcome"] as? String != "none", nativePDFDocument != nil {
+                invalidateNativePDFDocument(reason:"page-mutation-settled")
+                mountNativePDFDocument()
+            }
+            return result
+        }
+        if request["operation"] as? String == "recover" { return try await recover() }
+        guard request["operation"] as? String == "run", let plan = request["plan"] as? [String:Any],
+              let operation = ReaderNativePDFMutationOperation(rawValue:plan["operation"] as? String ?? ""),
+              let pivot = plan["pivotPage"] as? Int, pivot > 0, let title = plan["title"] as? String,
+              let markdown = plan["markdown"] as? String else { throw ReaderNativePDFMutationError.invalidRequest }
+        func requestID() -> String { "npm_" + String(UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased().prefix(24)) }
+        var prepared:[String:Any]?
+        do {
+            let result = try await handleNativePDFMutation(.prepare(.init(requestID:requestID(),localBookID:book.id,operation:operation,
+                after:operation == .insert ? plan["after"] as? Int : nil,page:operation == .insert ? nil : pivot,title:title,markdown:markdown)))
+            prepared = result; try current()
+            guard let ticket = result["ticket"] as? String, result["pivotPage"] as? Int == pivot else { throw ReaderNativePDFMutationError.invalidRequest }
+            _ = try state.handle(["operation":"prepare","plan":plan,"prepared":result])
+            _ = try state.handle(["operation":"reconcile","ticket":ticket,"desired":"after"])
+            let committed = try await handleNativePDFMutation(.commit(requestID:requestID(),localBookID:book.id,ticket:ticket))
+            try current(); _ = try state.handle(["operation":"phase","ticket":ticket,"phase":"pdf-replaced"])
+            _ = try await handleNativePDFMutation(.finalize(requestID:requestID(),localBookID:book.id,ticket:ticket))
+            try current(); _ = try state.handle(["operation":"phase","ticket":ticket,"phase":"committed"])
+            guard try await recover()["outcome"] as? String == "committed" else { throw ReaderNativePDFMutationError.commitFailed("改页未获最终确认") }
+            var output:[String:Any] = ["ok":true,"mode":operation.rawValue,"mtime":committed["mtime"] ?? 0,
+                "warnings":(result["warnings"] as? [String] ?? []) + ["本机 OCR、分词与公式页已随 PDF 页号迁移；新插入页或改写页可按需重新预处理",
+                    "服务器页锚数据保留在旧内容摘要下；上传/同步新 PDF 前，联网页锚接口会拒绝旧绑定"]]
+            if operation == .insert { output["page"] = pivot }
+            markCloudSyncDirty(); nativeReplicationService?.wake(); scheduleNativePDFProjectionRefresh()
+            return output
+        } catch {
+            let original = error
+            if prepared != nil {
+                do { _ = try await recover(prepared) }
+                catch { throw ReaderNativePDFMutationError.commitFailed(original.localizedDescription + "；恢复未完成：" + error.localizedDescription) }
+            }
+            throw original
+        }
     }
 
     private func handleNativePDFMutation(
@@ -8483,6 +8791,57 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     replyHandler(result, nil)
                 }
                 catch { replyHandler(nil, error.localizedDescription) }
+                return
+            }
+            if body["action"] as? String == "pdfPageJob" {
+                Task { @MainActor in
+                    do { replyHandler(["ok":true,"result":try await runNativePDFPageJob(body)],nil) }
+                    catch { replyHandler(nil,error.localizedDescription) }
+                }
+                return
+            }
+            if body["action"] as? String == "pdfPageState" {
+                guard let bookID = body["bookID"] as? String, bookID == currentLocalBook?.id, currentLocalBook?.format == .pdf,
+                      let deviceID = body["deviceID"] as? String, !deviceID.isEmpty, deviceID.utf16.count <= 240 else {
+                    replyHandler(nil,"PDF 页锚所属书籍已切换"); return
+                }
+                do {
+                    let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+                    let device = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-device").store
+                    guard try store.meta("legacyImport") == "done", try device.meta("legacyImport") == "done" else { throw ReaderBookUserStateWebAdapterError.unavailable }
+                    let service = ReaderNativePDFPageState(writer:.init(store:store,bookID:bookID,deviceID:deviceID),device:device)
+                    replyHandler(try service.handle(body),nil)
+                } catch { replyHandler(nil,error.localizedDescription) }
+                return
+            }
+            if body["action"] as? String == "publishReadingContext" {
+                guard let bookID = body["bookID"] as? String, bookID == nativeReadingStoreBookID,
+                      bookID == currentLocalBook?.id, let deviceID = nativeReadingStoreDeviceID,
+                      deviceID == body["deviceID"] as? String, let context = body["context"] as? [String:Any] else {
+                    replyHandler(nil,"阅读上下文所属书籍已切换"); return
+                }
+                do {
+                    let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-device").store
+                    replyHandler(try ReaderNativeReadingPosition.publishContext(context,store:store,bookID:bookID,deviceID:deviceID),nil)
+                } catch { replyHandler(nil,error.localizedDescription) }
+                return
+            }
+            if body["action"] as? String == "prepareReadingStore" {
+                guard let bookID = body["bookID"] as? String, bookID == currentLocalBook?.id,
+                      let deviceID = body["deviceID"] as? String, !deviceID.isEmpty, deviceID.utf16.count <= 240 else {
+                    replyHandler(nil,"数据库所属书籍已切换"); return
+                }
+                do {
+                    let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+                    guard try store.meta("legacyImport") == "done" else { throw ReaderBookUserStateWebAdapterError.unavailable }
+                    let writer = ReaderNativeBookStore(store:store,bookID:bookID,deviceID:deviceID)
+                    switch body["phase"] as? String {
+                    case "highlights": try writer.prepareHighlightsOnBoot()
+                    case "notes" where currentLocalBook?.format == .pdf: try writer.repairBindingsOnBoot()
+                    default: throw ReaderBookUserStateWebAdapterError.unavailable
+                    }
+                    replyHandler(["ok":true],nil)
+                } catch { replyHandler(nil,error.localizedDescription) }
                 return
             }
             if body["action"] as? String == "readingStoreReady" {

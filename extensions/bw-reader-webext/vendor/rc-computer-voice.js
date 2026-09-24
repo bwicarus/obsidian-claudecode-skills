@@ -10861,6 +10861,9 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function buildLocalPageContext(current, runtime) {
+    if (current.kind === "pdf" && window.__bwNativeAssistantStream?.pageContext) {
+      return window.__bwNativeAssistantStream.pageContext(Object.assign({},current, {visibleText:localAdapterVisibleText()}));
+    }
     var page = Number(current.page) || 0;
     var visible = localAdapterVisibleText() || localDOMPageText(page, true);
     // 有选中内容时正文窗口收缩到**当前页**（用户 2026-08-31）：选中 =

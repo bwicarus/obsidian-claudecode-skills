@@ -38,6 +38,8 @@ struct ReaderNativeAssistantTurn {
     private(set) var sawTool = false
     private(set) var sawCLICard = false
     private(set) var done = false
+    private(set) var trace: [Any] = []
+    private(set) var recoveredAt: Double = 0
 
     mutating func consume(_ event: ReaderNativeAssistantEvent) throws -> [String: Any] {
         guard !done else { throw ReaderNativeAssistantStream.Failure("对话已结束，拒绝晚到事件") }
@@ -55,6 +57,7 @@ struct ReaderNativeAssistantTurn {
                     sawCLICard = true
                 } else { sawTool = true }
             }
+        case "trace": trace = value as? [Any] ?? []
         case "done": done = true
         default: break
         }
@@ -68,6 +71,30 @@ struct ReaderNativeAssistantTurn {
             projection["followups"] = content.followups
         }
         return projection
+    }
+
+    mutating func restore(_ message: [String: Any]) throws {
+        guard answer.isEmpty, let text = message["content"] as? String, !text.isEmpty else {
+            throw ReaderNativeAssistantStream.Failure("恢复回答与当前轮次不符")
+        }
+        answer = text
+        if let value = message["trace"] as? [Any] { trace = value }
+        recoveredAt = (message["ts"] as? NSNumber)?.doubleValue ?? 0
+    }
+
+    /// Final ownership and display decisions are made once in Swift. The
+    /// compatibility producer observes this result; it does not choose a
+    /// second answer, reparse follow-ups or run a separate recovery loop.
+    func completion(aborted: Bool, error: String? = nil) -> [String: Any] {
+        let raw = error.map { "⚠️ " + $0 } ?? answer
+        let content = Self.content(raw)
+        return ["answer": raw, "voiceText": content.voiceText,
+                "displayText": content.finalDisplayText, "finalDisplayText": content.finalDisplayText,
+                "followups": aborted ? [] : content.followups,
+                "sawTool": sawTool, "sawCliCard": sawCLICard, "done": true,
+                "target": sawCLICard ? "task" : (sawTool ? "turn" : "answer"),
+                "aborted": aborted, "trace": trace, "recoveredAt": recoveredAt,
+                "statusText": aborted ? "已停止" : "没拿到回答(可以重问一次)"]
     }
 
     struct Content {

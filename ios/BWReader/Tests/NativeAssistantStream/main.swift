@@ -59,6 +59,16 @@ actor Harness {
         catch is ReaderNativeAssistantStream.Failure {}
         let failed = try invalid.consume(event("error", "连接失败"))
         precondition(failed["answer"] as? String == "⚠️ 连接失败")
+        precondition(turn.completion(aborted:false)["target"] as? String == "task")
+        let stopped = turn.completion(aborted:true)
+        precondition((stopped["followups"] as? [String])?.isEmpty == true && stopped["statusText"] as? String == "已停止")
+        var restored = ReaderNativeAssistantTurn()
+        try restored.restore(["content":"[语气:认真]恢复正文[[FOLLOWUP]]下一步[[/FOLLOWUP]]","ts":123,"trace":[["model":"test"]]])
+        let final = restored.completion(aborted:false)
+        precondition(final["displayText"] as? String == "恢复正文" && final["recoveredAt"] as? Double == 123)
+        precondition(final["followups"] as? [String] == ["下一步"] && final["target"] as? String == "answer")
+        do { try restored.restore(["content":"别的轮次"]); preconditionFailure("overwrote a live/recovered answer") }
+        catch is ReaderNativeAssistantStream.Failure {}
         let textOnly = [try event("answer", "文字增量"), try event("tool2", ["name": "lookup"]), try event("done", [:])]
         let fastBatch = try ReaderNativeAssistantEventBatch(textOnly)
         precondition(fastBatch.actions.isEmpty, "non-mutation events crossed the document commit adapter")

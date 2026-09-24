@@ -34,7 +34,15 @@ struct ReaderNativeConversationPart: Identifiable {
         text = value["text"] as? String ?? ""
         status = value["status"] as? String ?? "unknown"
         var input = value["data"] as? [String:Any] ?? [:]
-        if let owner = value["actionId"] as? String, !owner.isEmpty { input["nativeActionOwner"] = owner }
+        let nativeActions = input["nativeActionKey"] as? String == id
+        let owner = nativeActions ? "native-original:" + id : value["actionId"] as? String
+        if let owner, !owner.isEmpty { input["nativeActionOwner"] = owner }
+        if nativeActions, let owner {
+            if !["tool","process"].contains(kind) { input["selectId"] = "native-text:" + owner }
+            if ["anki","weather","news","fact","general","images","videos"].contains(kind) {
+                input["dragId"] = "native-place:" + owner
+            }
+        }
         data = ReaderNativeMediaArtifact.project(ReaderNativeCardPresentation.project(input))
         if let owner = input["nativeActionOwner"] as? String {
             let detail = input["nativeDetail"] as? [String:Any], original = detail?["content"] as? [String:Any]
@@ -46,7 +54,7 @@ struct ReaderNativeConversationPart: Identifiable {
                 data["nativePinContextID"] = "card:" + identity
             }
         }
-        actionId = (value["actionId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        actionId = owner.flatMap { $0.isEmpty ? nil : $0 }
         actionLabel = value["actionLabel"] as? String
     }
 }

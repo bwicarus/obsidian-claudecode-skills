@@ -400,7 +400,7 @@ body.fs-mode .rc-topbar-pill{display:none!important}
     } catch (e) {}
     var card = document.createElement('div'); card.className = 'ep-card rc-ui-tool-result';
     card.innerHTML = '<div class="h">' + (RC.esc ? RC.esc(opts.label || '工具结果') : String(opts.label || '工具结果')) + '</div><div class="c">' + (opts.loadingHtml || '<span class="ep-spin"></span>') + '</div>';
-    host.appendChild(card); return card.querySelector('.c');
+    host.appendChild(card); window.__bwNativeMessages?.publish(card,host); return card.querySelector('.c');
   }
 
   // 5V：选区“对话”不再另开结果窗口，而是把选中文字钉成助手上下文，进入同一条

@@ -247,4 +247,29 @@ check((try? host.handle(["store": "bw-reader-native-v1-global", "action": "info"
 host.closeAll()
 try? FileManager.default.removeItem(at: hostRoot)
 
+// Nested native domains compose through savepoints without committing the
+// surrounding operation. A caught inner error does not poison later writes.
+let nested = try ReaderNativeDataStore(path: ":memory:")
+try nested.execute("CREATE TABLE nested_probe (id INTEGER PRIMARY KEY)")
+try nested.inTransaction {
+    try nested.execute("INSERT INTO nested_probe VALUES (1)")
+    do {
+        try nested.inTransaction {
+            try nested.execute("INSERT INTO nested_probe VALUES (2)")
+            try nested.execute("INSERT INTO nested_probe VALUES (1)")
+        }
+        fatalError("nested failure ignored")
+    } catch ReaderNativeDataStore.StoreError.sql {}
+    try nested.execute("INSERT INTO nested_probe VALUES (2)")
+}
+do {
+    try nested.inTransaction {
+        try nested.inTransaction { try nested.execute("INSERT INTO nested_probe VALUES (3)") }
+        try nested.execute("INSERT INTO nested_probe VALUES (1)")
+    }
+    fatalError("outer failure ignored")
+} catch ReaderNativeDataStore.StoreError.sql {}
+try nested.execute("INSERT INTO nested_probe VALUES (3)")
+nested.close()
+
 print("ReaderNativeDataStore: 全部用例通过")

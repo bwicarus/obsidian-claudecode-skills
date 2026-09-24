@@ -49,6 +49,21 @@ actor Network {
         let review = try H.route("/api/assistant/history?assistant_mode=review", operation:"read",mode:"review")
         let clear = try H.route("/api/assistant/clear", operation:"clear",mode:"normal")
         let reviewClear = try H.route("/api/assistant/clear", operation:"clear",mode:"review")
+        let recovered = H { _,_,_ in .init(status:200,body:Data(#"{"ok":true,"messages":[{"role":"assistant","rid":"r1","turn_id":"t1","content":"原回答"}]}"#.utf8)) }
+        let matching = try await recovered.recover(normal,rid:"r1",turnID:"t1",wait:{})
+        precondition(matching?["content"] as? String == "原回答")
+        let different = try await recovered.recover(normal,rid:"r2",turnID:"t2",wait:{})
+        precondition(different == nil, "another turn was used as recovery")
+        let stillWorking = Network()
+        let retrying = H { path,method,body in try await stillWorking.fetch(path,method,body) }
+        let empty = try await retrying.recover(normal,rid:"r",turnID:"t",wait:{})
+        let recoveryCalls = await stillWorking.calls
+        precondition(empty == nil && recoveryCalls.count == 3 && recoveryCalls.allSatisfy { $0.hasPrefix("GET ") }, "recovery resubmitted a task")
+        let cancelled = H { _,_,_ in good }
+        do {
+            _ = try await cancelled.recover(normal,rid:"r",turnID:"t",wait:{ _ = try await cancelled.clear(clear) })
+            preconditionFailure("clear during recovery allowed another read")
+        } catch is CancellationError {}
         precondition(review.family != normal.family && reviewClear.family == review.family)
         precondition(String(decoding:reviewClear.body,as:UTF8.self) == #"{"assistant_mode":"review"}"#)
         for path in ["https://example.org/api/assistant/history", "//example.org/api/assistant/history",

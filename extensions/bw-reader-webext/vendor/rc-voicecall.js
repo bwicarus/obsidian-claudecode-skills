@@ -979,7 +979,7 @@ if (window.__bwPwaProviderOnly) return;
   function threadMsg(cls, text) {
     var th = document.getElementById('asst-thread'); if (!th) return null;
     var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.textContent = text;
-    th.appendChild(d); th.scrollTop = th.scrollHeight; return d;
+    th.appendChild(d); window.__bwNativeMessages?.publish(d,th); th.scrollTop = th.scrollHeight; return d;
   }
 
   // ── 工具调用状态按钮(v3-⑤,用户设计):执行通知**不进侧栏对话流**,收敛到固定小按钮——
@@ -1464,7 +1464,7 @@ if (window.__bwPwaProviderOnly) return;
       body.style.display = open ? 'block' : 'none';
       d.querySelector('.vc-tc-x').textContent = open ? '▾' : '▸';
     });
-    th.appendChild(d); th.scrollTop = th.scrollHeight;
+    th.appendChild(d); window.__bwNativeMessages?.publish(d,th); th.scrollTop = th.scrollHeight;
   }
   // 字幕改**累积对话流**(iMessage 风,右蓝=你/左灰=AI):旧版只有"最后一句"两行,用户反馈看不到对话内容。
   // AI 一轮 = 一个气泡(550 增量更新同一元素;450 用户开口 = 上一轮定稿,curAEl 置空)。
@@ -4445,7 +4445,7 @@ if (window.__bwPwaProviderOnly) return;
         _tcOk = !!(_tcPart && _tcPart.isConnected);
       }
     } catch (e) {}
-    if (th && !_tcOk) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; if (d.isConnected) _hosts.push(d); }
+    if (th && !_tcOk) { var d = _infoCardEl(card); th.appendChild(d); window.__bwNativeMessages?.publish(d,th); th.scrollTop = th.scrollHeight; if (d.isConnected) _hosts.push(d); }
     if (!_sideOpen()) {
       // ⚠ 浮层镜像**不要再套一层 vc-if-hd**:_cardPush 自己就有卡头(标题+按钮)——套了就是两条标题栏(用户实测)
       // 132(用户):结果卡(天气/图/视频/新闻)也要有**同一套三态** —— 标记 / 长条 / 方块,单击循环。
@@ -6863,7 +6863,7 @@ if (window.__bwPwaProviderOnly) return;
     ['pointerdown', 'pointerup', 'click', 'touchstart', 'touchend', 'dblclick'].forEach(function (evn) {
       el.addEventListener(evn, function (ev) { ev.stopPropagation(); });
     });
-    if (host) host.appendChild(el);
+    if (host) { host.appendChild(el); window.__bwNativeMessages?.publish(el,host); }
     return { el: el, bd: d.bd };
   }
   function _cardPush(text, kindLabel, isHtml, force, cid, opts) {
@@ -10930,6 +10930,22 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   // ── 入口按钮：电脑客户端占原麦克风位置；普通电话保留在它右侧。──
+  function requestCall(kind) {
+    if (_reviewVoiceGate(true)) throw new Error('复习模式暂不支持此语音操作');
+    if (kind === 'computer') {
+      if (!_nativeComputerVoiceAppAvailable()) throw new Error('请安装或更新 BWReader App 后使用电脑客户端语音');
+      if (ws || _rtc.on || _connecting || _reconnT || _reconnPend) teardown(false, true);
+      if (!_toggleNativeComputerVoiceApp()) {
+        computerBtnConnecting(false);
+        throw new Error('无法联系 BWReader App 原生语音');
+      }
+    } else if (kind === 'realtime') {
+      if (ws || _reconnT || _reconnPend) { teardown(true); taPlaceholder(null); }
+      else if (window._voiceCallS2S) window._voiceCallS2S();
+      else toggle({mode:'s2s'});
+    } else throw new Error('语音入口无效');
+    return {accepted:true};
+  }
   function injectBtn() {
     var input = document.getElementById('asst-input');
     if (!input) return false;
@@ -10966,31 +10982,14 @@ if (window.__bwPwaProviderOnly) return;
     _ownComputerVoiceButton(c);
     _configureNativeComputerVoiceButton(c);
     c.addEventListener('click', function () {
-      if (_reviewVoiceGate(true)) return;
-      if (!_nativeComputerVoiceAppAvailable()) {
-        setSt('请安装或更新 BWReader App 后使用电脑客户端语音');
-        try { RC.toast('请安装或更新 BWReader App 后使用电脑客户端语音'); } catch (e) {}
-        return;
-      }
-      if (ws || _rtc.on || _connecting || _reconnT || _reconnPend) {
-        teardown(false, true);
-      }
       try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
-      if (!_toggleNativeComputerVoiceApp()) {
-        computerBtnConnecting(false);
-        setSt('无法联系 BWReader App 原生语音');
-        try { RC.toast('无法联系 BWReader App 原生语音'); } catch (e) {}
-      }
+      try { requestCall('computer'); }
+      catch (error) { setSt(error.message); try { RC.toast(error.message); } catch (_) {} }
     });
     b.addEventListener('click', function () {
-      if (_reviewVoiceGate(true)) return;
-      if (ws || _reconnT || _reconnPend) {   // 通话中/重连排队中 → 挂断(开关 off)
-        teardown(true);
-        taPlaceholder(null);
-        return;
-      }
       try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
-      if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' });
+      try { requestCall('realtime'); }
+      catch (error) { setSt(error.message); try { RC.toast(error.message); } catch (_) {} }
     });
     // 工具进行中按钮(v3-⑯b):调用开始出现转圈,点击=中止,结束自动消失
     var tb = document.createElement('button');
@@ -11363,6 +11362,7 @@ if (window.__bwPwaProviderOnly) return;
     return { accepted: true };
   }
   RC.voicecall = { toggle: toggle,
+    requestCall: requestCall,
     canStartNewTopic: canStartNewTopic,
     startNewTopic: startNewTopic,
     setRecallCutoff: function (seconds) {

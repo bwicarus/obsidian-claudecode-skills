@@ -2,9 +2,8 @@ import Foundation
 import UIKit
 import WebKit
 
-/// Transitional command adapter. URLSession, framing and reconnect cursors
-/// are native-owned. The existing event reducer still receives structured
-/// events until conversation actions/history are fully migrated.
+/// Native request, stream, recovery and completion owner. Compatibility
+/// producers receive committed events and display projections only.
 @MainActor
 final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerWithReply {
     static let messageName = "bwNativeAssistantStream"
@@ -28,6 +27,8 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     var afterHistoryClear: ((String,UUID,Bool) -> Void)?
     var commitPDFEvents: ((ReaderNativeAssistantDocumentSession, [[String:Any]], Int) throws -> [String:Any])?
     var preparePDFBody: (([String:Any]) async throws -> [String:Any])?
+    var prepareReaderPCContext: (([String:Any]) async throws -> [String:Any])?
+    private var contextTask: Task<Void,Never>?
     var replyReference: ((String,String,Bool) throws -> [String:Any])?
 
     init(webView: WKWebView, trustedBaseURL: URL, gateway: ReaderNativeServerGateway) {
@@ -40,6 +41,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     }
 
     deinit {
+        contextTask?.cancel()
         if let observer { NotificationCenter.default.removeObserver(observer) }
         tasks.values.forEach { $0.cancel() }
         watchers.values.forEach { $0.cancel() }
@@ -47,6 +49,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     }
 
     func invalidate() {
+        contextTask?.cancel(); contextTask = nil
         documents.values.forEach { $0.close() }; documents.removeAll()
         let previousHistory = history
         history = nil; historyContext = nil
@@ -98,6 +101,21 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             performHistory(command, surface: requestedSurface, replyHandler: replyHandler)
             return
         }
+        if command["action"] as? String == "pageContext" {
+            guard requestedSurface == .pdf, let current = command["current"] as? [String:Any], let prepareReaderPCContext else {
+                replyHandler(nil,"原生阅读状态尚未就绪"); return
+            }
+            let lease = epoch, context = gateway.contextRevision
+            contextTask?.cancel()
+            contextTask = Task { @MainActor [weak self] in
+                do {
+                    let value = try await prepareReaderPCContext(current)
+                    guard let self, !Task.isCancelled, self.epoch == lease, self.gateway.contextRevision == context else { throw CancellationError() }
+                    replyHandler(["ok":true,"context":value],nil)
+                } catch { replyHandler(nil,error.localizedDescription) }
+            }
+            return
+        }
         if command["action"] as? String == "prepare" {
             do {
                 guard tasks.isEmpty, let input = command["body"] as? [String: Any] else {
@@ -132,14 +150,27 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                     try await self.deliver(events, id: id, lease: lease, gatewayContext: gatewayContext)
                 })
                 let result = try await stream.run()
+                if result != .done, self.turns[id]?.answer.isEmpty == true {
+                    let mode = body["assistant_mode"] as? String ?? "normal"
+                    let route = try ReaderNativeAssistantHistory.route("/api/assistant/history" + (mode == "review" ? "?assistant_mode=review" : ""), operation:"read", mode:mode)
+                    let service = self.historyService(surface:requestedSurface,lease:lease,context:gatewayContext)
+                    if let recovered = try await service.recover(route,rid:body["rid"] as? String ?? "",turnID:body["turn_id"] as? String ?? "") {
+                        guard self.epoch == lease, self.gateway.contextRevision == gatewayContext else { throw CancellationError() }
+                        try self.turns[id]?.restore(recovered)
+                    }
+                }
                 await self.endDocumentSession(id: id)
                 try Task.checkCancellation()
                 guard self.epoch == lease else { throw CancellationError() }
+                try await self.finish(id:id,lease:lease,context:gatewayContext,aborted:false)
                 replyHandler(["ok": true, "status": result.rawValue], nil)
             } catch {
                 await self.endDocumentSession(id: id)
-                if Task.isCancelled || self.epoch != lease { replyHandler(["ok": true, "status": "aborted"], nil) }
-                else { replyHandler(nil, error.localizedDescription) }
+                let aborted = Task.isCancelled || self.epoch != lease
+                do {
+                    try await self.finish(id:id,lease:lease,context:gatewayContext,aborted:aborted,error:aborted ? nil : error.localizedDescription)
+                    replyHandler(["ok":true,"status":aborted ? "aborted" : "failed"],nil)
+                } catch { replyHandler(nil,error.localizedDescription) }
             }
         }
     }
@@ -230,16 +261,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             }
             let route = try ReaderNativeAssistantHistory.route(path, operation: operation, mode: mode)
             let lease = epoch, context = gateway.contextRevision
-            if history == nil || historyContext != context {
-                let previous = history
-                Task { await previous?.invalidate() }
-                historyContext = context
-                history = ReaderNativeAssistantHistory { [weak self] path, method, body in
-                    guard let self else { throw CancellationError() }
-                    return try await self.fetchHistory(path: path, method: method, body: body, surface: surface, lease: lease, context: context)
-                }
-            }
-            let history = history!
+            let history = historyService(surface:surface,lease:lease,context:context)
             Task { @MainActor [weak self] in
                 var clearToken: UUID?, cleared = false
                 defer { if let clearToken { self?.afterHistoryClear?(mode,clearToken,cleared) } }
@@ -259,6 +281,32 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                 } catch { replyHandler(nil, error.localizedDescription) }
             }
         } catch { replyHandler(nil, error.localizedDescription) }
+    }
+
+    private func historyService(surface:ReaderNativeInterfaceSurface,lease:UUID,context:UInt64) -> ReaderNativeAssistantHistory {
+        if history == nil || historyContext != context {
+            let previous = history
+            Task { await previous?.invalidate() }
+            historyContext = context
+            history = ReaderNativeAssistantHistory { [weak self] path,method,body in
+                guard let self else { throw CancellationError() }
+                return try await self.fetchHistory(path:path,method:method,body:body,surface:surface,lease:lease,context:context)
+            }
+        }
+        return history!
+    }
+
+    private func finish(id:String,lease:UUID,context:UInt64,aborted:Bool,error:String? = nil) async throws {
+        guard epoch == lease, gateway.contextRevision == context, let webView, let turn = turns[id] else { throw CancellationError() }
+        var result = turn.completion(aborted:aborted,error:error)
+        if let replyReference {
+            result["replyRef"] = try replyReference(id,result["finalDisplayText"] as? String ?? "",true)
+        }
+        let ack = try await webView.callAsyncJavaScript("return window.__bwNativeAssistantStream?.acceptCompletion(id,result);",
+            arguments:["id":id,"result":result],in:nil,contentWorld:.page) as? [String:Any]
+        guard epoch == lease, gateway.contextRevision == context, ack?["ok"] as? Bool == true else {
+            throw ReaderNativeAssistantStream.Failure("对话收尾状态已变化，未重复提交任务")
+        }
     }
 
     private func fetchHistory(path: String, method: String, body: Data, surface: ReaderNativeInterfaceSurface,
@@ -415,6 +463,12 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
       };
       function abortError() { const e = new Error('对话已停止'); e.name = 'AbortError'; return e; }
       window.__bwNativeAssistantStream = {
+        async pageContext(current) {
+          current = {...current,page:Number(current.page)};
+          const result = await handler.postMessage({version:1, action:'pageContext', id:crypto.randomUUID(), current});
+          if (!result?.ok || result.context?.kind !== 'pdf' || result.context.file !== current.file || result.context.page !== current.page) throw new Error('原生阅读状态已改变');
+          return result.context;
+        },
         watchTask(kind, taskID, consume) {
           const key = kind + ':' + taskID;
           if (watchKeys.has(key)) return watchKeys.get(key);
@@ -473,6 +527,14 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             entry.consume(event.name, value, event.state);
           }
           return {ok: true, sequence: entry.sequence};
+        },
+        acceptCompletion(id, result) {
+          const entry = active.get(id);
+          if (!entry || !result || typeof result.answer !== 'string') return {ok:false};
+          if (entry.completed) return {ok:true};
+          entry.completed = true;
+          entry.consume('native-completion', null, result);
+          return {ok:true};
         }
       };
     })();

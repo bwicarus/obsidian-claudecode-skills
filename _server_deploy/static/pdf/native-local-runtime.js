@@ -1719,6 +1719,13 @@
   // 单批原子提交（要么全成要么全无），mutationId 固定所以重试即重放；
   // legacy 整册记录刻意保留不清（迁移一半崩了重启续跑，数据不丢）。
   function migrateHighlightSplitOnBoot() {
+    if (nativeStoreEnabled()) {
+      return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
+        action: 'prepareReadingStore', phase: 'highlights', bookID: bookId, deviceID: deviceId
+      }).then(function (result) {
+        if (!result || result.ok !== true) throw new RuntimeError('原生划线启动未完成', 'BW_NATIVE_STORE_BOOT');
+      });
+    }
     return Object.keys(HIGHLIGHT_SPLIT_KINDS).reduce(function (chain, kind) {
       return chain.then(function () {
         return storedStateRecord(
@@ -3926,6 +3933,22 @@
   // identity validation and the durable sequence number.
   function publishLocalPageContext(value) {
     requireContextSyncEnabled();
+    if (nativeStoreEnabled()) {
+      // Keep the same producer lane as focus/drawing; Swift owns the record,
+      // sequence allocation and durable commit. A failed commit never falls
+      // through to the legacy writer or claims that the context was sent.
+      return serializeOutgoingMutation(function () {
+        return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
+          action: 'publishReadingContext', bookID: bookId, deviceID: deviceId, context: value
+        }).then(function (result) {
+          if (!result || result.ok !== true || result.contract !== OUTGOING_CONTEXT_CONTRACT ||
+              !Number.isSafeInteger(result.seq) || result.seq < 1 || !/^[0-9a-f]{16}$/.test(result.eventId)) {
+            throw new RuntimeError('原生阅读上下文未保存', 'BW_LOCAL_OUTGOING_PAGE_CONTEXT');
+          }
+          return result;
+        });
+      });
+    }
     var code = 'BW_LOCAL_OUTGOING_PAGE_CONTEXT';
     assertObjectFields(value, [
       'kind', 'file', 'page', 'title', 'text', 'textAvailable',
@@ -7881,6 +7904,17 @@
   }
   function repairNoteBindPageDrift() {
     if (nativeInterfaceSurface !== 'pdf') return Promise.resolve(null);
+    if (nativeStoreEnabled()) {
+      return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
+        action: 'prepareReadingStore', phase: 'notes', bookID: bookId, deviceID: deviceId
+      }).then(function (result) {
+        if (!result || result.ok !== true) throw new RuntimeError('原生词锚修复未完成', 'BW_NATIVE_STORE_BOOT');
+      }).catch(function (error) {
+        try { enqueueReplicationCommand('/replication/diagnostic', 'POST', {
+          kind: 'note-bind-repair-error', error: String(error && error.message || error).slice(0, 2000), at: nowSeconds()
+        }); } catch (_) {}
+      });
+    }
     return readState('document-notes-legacy', []).then(function (probe) {
       if (!Array.isArray(probe) || !probe.some(noteBindPageDrifted)) {
         return null;
@@ -8094,6 +8128,7 @@
   }
 
   function nativePDFMutationSnapshot(plan) {
+    if (nativeStoreEnabled()) return Promise.resolve({ native: true, plan: clone(plan) });
     var fallbackByKind = {
       'reading-position': null,
       'document-highlights': [],
@@ -8217,6 +8252,10 @@
   }
 
   function nativePDFMutationJournalRecord() {
+    if (nativeStoreEnabled()) return nativePDFPageState('read').then(function (result) {
+      return result.transaction ? { native: true, payload: result.transaction.journal,
+        rev: result.transaction.journalRev, transaction: result.transaction } : null;
+    });
     var id = stateId(NATIVE_PDF_MUTATION_JOURNAL_KIND);
     return stores.document.get(
       'native-' + NATIVE_PDF_MUTATION_JOURNAL_KIND, id
@@ -8233,6 +8272,9 @@
   }
 
   function persistNativePDFMutationJournal(transaction, prepared) {
+    if (nativeStoreEnabled()) return nativePDFPageState('prepare', {
+      plan: transaction.plan, prepared: prepared
+    }).then(function (result) { return result.transaction; });
     transaction.journal = nativePDFMutationJournalPayload(
       transaction, prepared, 'prepared'
     );
@@ -8278,6 +8320,9 @@
   }
 
   function setNativePDFMutationJournalPhase(transaction, phase) {
+    if (nativeStoreEnabled()) return nativePDFPageState('phase', {
+      ticket: transaction.journal.ticket, phase: phase
+    }).then(function (result) { Object.assign(transaction, result.transaction); return transaction; });
     return nativePDFMutationJournalRecord().then(function (record) {
       if (!record || record.payload.ticket !== transaction.journal.ticket) {
         throw new RuntimeError(
@@ -8303,6 +8348,7 @@
   }
 
   function removeNativePDFMutationJournal(transaction) {
+    if (nativeStoreEnabled()) return nativePDFPageState('remove', { ticket: transaction.journal.ticket });
     return nativePDFMutationJournalRecord().then(function (record) {
       if (!record) return;
       if (!transaction || record.payload.ticket !== transaction.journal.ticket) {
@@ -8323,6 +8369,7 @@
   }
 
   function nativePDFMutationTransactionFromJournal(record) {
+    if (record.native) return record.transaction;
     var value = record.payload;
     return {
       before: clone(value.before),
@@ -8432,6 +8479,9 @@
   }
 
   function reconcileNativePDFMutationSnapshot(transaction, desired) {
+    if (nativeStoreEnabled()) return nativePDFPageState('reconcile', {
+      ticket: transaction.journal.ticket, desired: desired
+    }).then(function (result) { Object.assign(transaction, result.transaction); return transaction; });
     var documentPhase = desired === 'after'
       ? 'document-applied' : 'prepared';
     return reconcileNativePDFMutationDocuments(
@@ -8454,6 +8504,18 @@
   function rollbackNativePDFMutationSnapshot(transaction) {
     if (!transaction || !transaction.journal) return Promise.resolve();
     return reconcileNativePDFMutationSnapshot(transaction, 'before');
+  }
+
+  function nativePDFPageState(operation, fields) {
+    return root.webkit.messageHandlers.bwNativeDataStore.postMessage(Object.assign({
+      action: 'pdfPageState', operation: operation, bookID: bookId, deviceID: deviceId
+    }, fields || {})).then(function (result) {
+      if (!result || result.ok !== true || (operation !== 'remove' && result.transaction &&
+          (!result.transaction.native || !/^npmt_[a-f0-9]{32}$/.test(result.transaction.journal && result.transaction.journal.ticket)))) {
+        throw new RuntimeError('原生页锚事务回执无效', 'BW_NATIVE_PDF_MUTATION_JOURNAL');
+      }
+      return result;
+    });
   }
 
   function nativePDFMutationErrorText(error) {
@@ -8501,6 +8563,11 @@
 
   function recoverNativePDFMutationOnBoot() {
     if (nativeInterfaceSurface !== 'pdf') return Promise.resolve();
+    if (nativeStoreEnabled()) return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
+      action: 'pdfPageJob', operation: 'recover', bookID: bookId, deviceID: deviceId
+    }).then(function (reply) {
+      if (!reply || reply.ok !== true) throw new RuntimeError('原生改页恢复未完成', 'BW_NATIVE_PDF_MUTATION_JOURNAL');
+    });
     return nativePDFMutationJournalRecord().then(function (record) {
       if (!nativePDFMutationHandler()) {
         if (record) {
@@ -8533,6 +8600,30 @@
   }
 
   function runNativePDFMutationJob(jobId, plan) {
+    if (nativeStoreEnabled()) {
+      let barrier;
+      return beginNativePDFWriterBarrier().then(function (value) {
+        barrier = value;
+        updateNativePDFMutationJob(jobId, { step: '原生保存 PDF 与页锚' });
+        return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
+          action: 'pdfPageJob', operation: 'run', bookID: bookId, deviceID: deviceId, plan: clone(plan)
+        });
+      }).then(function (reply) {
+        if (!reply || reply.ok !== true || reply.result?.ok !== true) throw new RuntimeError('原生改页未获确认', 'BW_NATIVE_PDF_MUTATION_COMMIT');
+        updateNativePDFMutationJob(jobId, { status: 'done', step: '完成', result: reply.result });
+        embeddedPageText = Object.create(null); nativePageTextCache = Object.create(null); nativePageTextPending = Object.create(null);
+        nativeSearchGeneration += 1; nativeSearchCache.clear(); nativeSearchPending.clear();
+      }).catch(function (error) {
+        const message = nativePDFMutationErrorText(error);
+        updateNativePDFMutationJob(jobId, { status: 'error', step: '失败', error: message });
+        try { enqueueReplicationCommand('/replication/diagnostic', 'POST', {
+          kind: 'pdf-mutation-error', operation: plan.operation, error: message, at: nowSeconds()
+        }); } catch (_) {}
+      }).finally(function () {
+        endNativePDFWriterBarrier(barrier);
+        if (activeNativePDFMutationJob === jobId) activeNativePDFMutationJob = null;
+      });
+    }
     var ticket = null;
     var transaction = null;
     var warnings = [];
@@ -8642,6 +8733,26 @@
       pruneNativePDFMutationJobs();
     });
   }
+
+  // Swift toolbar mutations share the same producer drain as compatibility
+  // commands. Only the barrier and obsolete JS caches remain in this adapter.
+  let nativeToolbarBarrier = null;
+  runtimeRoot.nativePDFToolbarBarrier = {
+    async begin(token) {
+      if (!nativeBookServiceEnabled() || nativeToolbarBarrier) throw new Error('PDF 写入仍在进行');
+      nativeToolbarBarrier = { token, barrier: null };
+      try { nativeToolbarBarrier.barrier = await beginNativePDFWriterBarrier(); }
+      catch (error) { nativeToolbarBarrier = null; throw error; }
+      return true;
+    },
+    end(token) {
+      if (!nativeToolbarBarrier || nativeToolbarBarrier.token !== token) return false;
+      endNativePDFWriterBarrier(nativeToolbarBarrier.barrier); nativeToolbarBarrier = null;
+      embeddedPageText = Object.create(null); nativePageTextCache = Object.create(null); nativePageTextPending = Object.create(null);
+      nativeSearchGeneration += 1; nativeSearchCache.clear(); nativeSearchPending.clear();
+      return true;
+    }
+  };
 
   function beginNativePDFMutationJob(plan) {
     if (activeNativePDFMutationJob) {

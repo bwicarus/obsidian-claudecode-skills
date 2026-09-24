@@ -85,6 +85,20 @@ test('native stream consumes structured events once and waits for native complet
   assert.equal(api.accept({...batch,sequence:2}).ok,false);
 });
 
+test('native completion is observed once, including a locally stopped answer',async()=>{
+  const {api,requests,resolve}=setup(), events=[], cancel=new AbortController();
+  const result=api.run('/api/assistant/chat',{message:'test'},(...args)=>events.push(args),cancel.signal);
+  const id=requests[0].id;
+  cancel.abort();
+  assert.equal(api.accept({id,sequence:1,events:[]}).ok,false);
+  const completion={answer:'partial',aborted:true,target:'answer'};
+  assert.equal(api.acceptCompletion(id,completion).ok,true);
+  assert.equal(api.acceptCompletion(id,completion).ok,true);
+  assert.equal(events.length,1);assert.equal(events[0][0],'native-completion');assert.equal(events[0][2],completion);
+  resolve({ok:true,status:'aborted'});await assert.rejects(result,{name:'AbortError'});
+  assert.equal(api.acceptCompletion(id,completion).ok,false);
+});
+
 test('native task watch joins duplicate requests, consumes in order and retires its callback', async()=>{
   const {api,requests,resolve}=setup(), snapshots=[];
   const pending=api.watchTask('cli','task-1',value=>snapshots.push(value));

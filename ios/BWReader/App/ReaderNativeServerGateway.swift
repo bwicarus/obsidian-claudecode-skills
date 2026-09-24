@@ -53,6 +53,13 @@ final class ReaderNativeServerGateway: NSObject, WKScriptMessageHandlerWithReply
     private let interfaceManifestError: String?
     private var currentRemoteBookBinding: ReaderNativeRemoteBookBinding?
     private var catalogRemoteBookBindings: [ReaderNativeRemoteBookBinding] = []
+
+    func matchesBookFile(_ file: String, localBookID: String) -> Bool {
+        if file == "localbook:" + localBookID { return true }
+        return catalogRemoteBookBindings.contains {
+            $0.localBookID == localBookID && [$0.remoteBookID, $0.remoteRelativePath].contains(file)
+        }
+    }
     private var scopeEpoch: UInt64 = 0
     var contextRevision: UInt64 { scopeEpoch }
     private var continuations: [String: RemoteContinuation] = [:]

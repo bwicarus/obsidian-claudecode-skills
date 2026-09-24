@@ -422,18 +422,26 @@ final class NativeVoiceBridge: ObservableObject {
     /// 用户 2026-09-23：「我希望不语音对话时也能够打字到最新对应的后台ai那里」。
     /// 桥那侧 codex-type 本来就不要求在通话（只要鉴权），缺的只是 App 这头没有连接。
     /// 通话中直接复用那条连接。返回 false = 语音核心没接住，调用方退回文字助手。
+    enum BackendSubmission: Equatable { case accepted, unavailable, unconfirmed }
+
     func sendTypedToBackend(_ text: String, attachmentIDs: [String] = [], submissionID: String? = nil) async -> Bool {
+        await submitTypedToBackend(text,attachmentIDs:attachmentIDs,submissionID:submissionID) == .accepted
+    }
+
+    func submitTypedToBackend(_ text: String, attachmentIDs: [String] = [], submissionID: String? = nil) async -> BackendSubmission {
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else { return false }
-        if socket != nil { return await sendTyped(body, attachmentIDs: attachmentIDs, submissionID: submissionID) }
+        guard !body.isEmpty else { return .unavailable }
+        if socket != nil { return await sendTyped(body, attachmentIDs: attachmentIDs, submissionID: submissionID) ? .accepted : .unconfirmed }
         let transient = DirectVoiceSocket(configuration: .production) { _ in }
         defer { Task { await transient.disconnect() } }
+        var submitting = false
         do {
             try await transient.connect()
-            return try await transient.codexType(text: body, attachmentIDs: attachmentIDs, submissionID: submissionID)
+            submitting = true
+            return try await transient.codexType(text: body, attachmentIDs: attachmentIDs, submissionID: submissionID) ? .accepted : .unconfirmed
         } catch {
             recordDiagnostic(category: "protocol", message: "打字交后台失败：\(error.localizedDescription)")
-            return false
+            return submitting ? .unconfirmed : .unavailable
         }
     }
 

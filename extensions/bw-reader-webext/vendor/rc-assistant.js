@@ -1951,7 +1951,7 @@ if (window.__bwPwaProviderOnly) return;
   function addMsg(cls, html) {
     var target = _historyRenderTarget || thread;
     var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html;
-    target.appendChild(d); scrollDown(target); return d;
+    target.appendChild(d); window.__bwNativeMessages?.publish(d,target); scrollDown(target); return d;
   }
 
   // 视口焦点:当前与 #main 视口相交的页的字符层文字(镜像 EPUB _visibleText)。让 AI 回答/找视频/配图/拟搜索词
@@ -2277,7 +2277,7 @@ if (window.__bwPwaProviderOnly) return;
         row.appendChild(sw); row.appendChild(tx); row.appendChild(jb); row.appendChild(db2);
         box.appendChild(row);
       });
-      thread.appendChild(box); scrollDown();
+      thread.appendChild(box); window.__bwNativeMessages?.publish(box,thread); scrollDown();
     } catch (_) {}
   };
   // agent 画完高亮后:重新拉高亮 + 重渲所有可见页(复用 17-highlight 的模块函数,本模块同作用域可调)
@@ -2382,7 +2382,7 @@ if (window.__bwPwaProviderOnly) return;
     });
     card.appendChild(btn);
     // 与既有 _assistPageCard 同一处挂载：会话线程里，然后滚到底。
-    try { thread.appendChild(card); scrollDown(); } catch (_) {}
+    try { thread.appendChild(card); window.__bwNativeMessages?.publish(card,thread); scrollDown(); } catch (_) {}
 
     return apply().then(function (r) {
       if (!r || r.ok !== true) {
@@ -2506,7 +2506,7 @@ if (window.__bwPwaProviderOnly) return;
       var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
       btn.setAttribute('data-eid', eid); btn.textContent = '↩ 撤销';
       card.appendChild(btn);
-      thread.appendChild(card); scrollDown();
+      thread.appendChild(card); window.__bwNativeMessages?.publish(card,thread); scrollDown();
     } catch (_) {}
   };
 
@@ -2555,7 +2555,7 @@ if (window.__bwPwaProviderOnly) return;
       }
       var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
       btn.setAttribute('data-eid', eid); btn.setAttribute('data-pcard-operation', operationId); btn.textContent = '↩ 撤销';
-      card.appendChild(btn); thread.appendChild(card); scrollDown();
+      card.appendChild(btn); thread.appendChild(card); window.__bwNativeMessages?.publish(card,thread); scrollDown();
       try { _showPageCardSnack(eid, _assistEdits[eid]); } catch (_) {}
     } catch (_) {}
   }
@@ -2659,7 +2659,7 @@ if (window.__bwPwaProviderOnly) return;
       var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
       btn.setAttribute('data-eid', eid); btn.textContent = '↩ 撤销';
       card.appendChild(btn);
-      thread.appendChild(card); scrollDown();
+      thread.appendChild(card); window.__bwNativeMessages?.publish(card,thread); scrollDown();
     } catch (_) {}
   }
   // 便签卡的撤销⇄重做执行(点 .asst-edit-undo 且 st.ntype==='note' 时走这;完成后重挂页面便签)
@@ -2872,6 +2872,14 @@ if (window.__bwPwaProviderOnly) return;
     function _handleEv(ev, parsed, nativeState) {
       if (turnEpoch !== _modeEpoch) return;
       if (ev === 'meta') return;                       // rid 确认,不计数
+      if (ev === 'native-completion') {
+        nativeTurnState = nativeState; answer = nativeState.answer;
+        sawTool = nativeState.sawTool; sawCliCard = nativeState.sawCliCard;
+        traceData = nativeState.trace; _recTs = nativeState.recoveredAt;
+        aborted = nativeState.aborted; done = true;
+        if (nativeState.replyRef) { aMsg.__bwNativeTurnRef = nativeState.replyRef; aMsg.__bwNativeTurnText = nativeState.finalDisplayText; }
+        return;
+      }
       if (nativeState) {
         nativeTurnState = Object.assign(nativeTurnState || {}, nativeState);
         if (nativeState.replyRef) {
@@ -2910,7 +2918,7 @@ if (window.__bwPwaProviderOnly) return;
       else if (ev === 'gemini-paid') {   // ② 免费 Gemini 受限→本次已用付费:提示条 + 一键「以后直接用付费」(渲染器在 rc-assistant,legacy 模式退纯文字)
         try {
           var _pn = (window.RC && RC.assistant && RC.assistant.paidNotice) ? RC.assistant.paidNotice(parsed) : null;
-          if (_pn) { thread.appendChild(_pn); scrollDown(); }
+          if (_pn) { thread.appendChild(_pn); window.__bwNativeMessages?.publish(_pn,thread); scrollDown(); }
           else if (!window.__paidNoted) { window.__paidNoted = true; addMsg('asst-note', esc((parsed && parsed.text) || '免费 Gemini 额度受限,本次已使用付费档。')); scrollDown(); }
         } catch (_) {}
       }
@@ -3007,12 +3015,12 @@ if (window.__bwPwaProviderOnly) return;
       await new Promise(function (rs) { setTimeout(rs, Math.min(400 * tries, 2000)); });
     }
     // 任务过期 / 兜底没续上 → 从服务端历史恢复(worker 跑完已落库,绝不丢)
-    if ((done === 'gone' || (!done && !aborted)) && !answer) {
+    if (!window.__bwNativeAssistantStream && (done === 'gone' || (!done && !aborted)) && !answer) {
       try { aMsg.innerHTML = '<span class="asst-tool">正在恢复…</span>'; } catch (_) {}
       var rec = await _recoverFromHistory(0, turnMode, turnEpoch);
       if (rec && rec.content) { answer = rec.content; nativeTurnState = null; traceData = rec.trace || traceData; _recTs = rec.ts || 0; }
     }
-    if (turnEpoch !== _modeEpoch) { _stopReveal(); try { aMsg.remove(); } catch (_) {} return; }
+    if (turnEpoch !== _modeEpoch) { _stopReveal(); try { window.__bwNativeMessages?.remove(aMsg); aMsg.remove(); } catch (_) {} return; }
     // 收尾:剥 FOLLOWUP → 完整渲染(MathJax 这一次)→ 追问 chip
     _stopReveal();                            // stream-fx:停揭示循环(下面 renderMd 重渲成干净 markdown,无 span/光标)
     aMsg.classList.remove('mfx-streaming');   // 停止提亮
@@ -3020,10 +3028,10 @@ if (window.__bwPwaProviderOnly) return;
       ? {text: nativeTurnState.finalDisplayText, followups: nativeTurnState.followups}
       : _splitFollowups(answer);
     try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(nativeTurnState?.voiceText ?? _stripTornFU(pf.text || ''), true); } catch (_) {}   // 语音对话:回答完,尾句也念(原文含标签,tap 自己解析;撕裂 FOLLOWUP 残段截掉)
-    if (sawCliCard) {
+    if (nativeTurnState?.target ? nativeTurnState.target === 'task' : sawCliCard) {
       // #2 委托 CLI:CLI 卡即回答,撤掉这个多余的编排答案气泡(连带追问建议按钮),跟语音模式一致。
-      try { aMsg.remove(); } catch (_) {}
-    } else if (sawTool && window.RC && RC.turnCard && RC.turnCard.has(_vTid)) {
+      try { window.__bwNativeMessages?.remove(aMsg); aMsg.remove(); } catch (_) {}
+    } else if ((nativeTurnState?.target ? nativeTurnState.target === 'turn' : sawTool) && window.RC && RC.turnCard && RC.turnCard.has(_vTid)) {
       // ★用户设计:**有工具调用的轮 = 回答写进工具方块**(turn 卡 body,与语音/CLI 同一形态),气泡撤掉。
       //   感叹号信息并入卡:编排模型/耗时/tok/时刻 → meta part(流程面板顶部,⚙ 直达编排设置)。
       try {
@@ -3043,7 +3051,7 @@ if (window.__bwPwaProviderOnly) return;
           if (pf.followups && pf.followups.length) { try { _renderFollowups(_tc0.bd, pf.followups); } catch (_) {} }
           if (pf.text) { try { _attachClipBtn(_tc0.bd, { content: answer, ts: _recTs || 0 }, turnMode); } catch (_) {} }
         }
-        aMsg.remove();
+        window.__bwNativeMessages?.remove(aMsg); aMsg.remove();
       } catch (_) {}
     } else {
       var _pft = nativeTurnState ? pf.text : ((RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text);
@@ -3111,8 +3119,8 @@ if (window.__bwPwaProviderOnly) return;
         //   开新轮 append(绝不 insertBefore 到旧轮之上);只有当前轮答案还在流(未 answered=真·迟到 whisper)
         //   才按真实时序插进行中气泡前(GPT whisper 迟到,不断 AI 轮——这是 insertBefore 的原始意图)
         if (_vAnswered) { _vTurnEl = null; _vSlot = null; _vTid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); _vAnswered = false; }
-        if (_vTurnEl && _vTurnEl.parentNode === thread) thread.insertBefore(d, _vTurnEl);
-        else { thread.appendChild(d); _vTurnEl = null; }
+        if (_vTurnEl && _vTurnEl.parentNode === thread) { thread.insertBefore(d, _vTurnEl); window.__bwNativeMessages?.publish(d,thread,_vTurnEl); }
+        else { thread.appendChild(d); window.__bwNativeMessages?.publish(d,thread); _vTurnEl = null; }
         scrollDown(); return !!(d.isConnected && d.parentNode === thread);
       }
       // 141:AI 文字一律写进**轮次容器**的草稿段落(md 渲染在唯一渲染器里做)。
@@ -3601,7 +3609,7 @@ if (window.__bwPwaProviderOnly) return;
     try { micStop(); } catch (_) {}
     _setSendMode(false);
     _setClearingUi(true);
-    thread.innerHTML = '';
+    window.__bwNativeMessages?.clear(thread); thread.innerHTML = '';
 
     var clearOpts = { method: 'POST' };
     if (clearMode === 'review') {
@@ -3632,7 +3640,7 @@ if (window.__bwPwaProviderOnly) return;
       // 请求失败时不能把空 DOM 当成成功。重新读取刚才那个物理会话域；
       // 若 history 也暂时不可用，loadHistory 会显示明确错误而不是成功问候语。
       if (clearEpoch === _modeEpoch && clearMode === _assistantMode) {
-        thread.innerHTML = '';
+        window.__bwNativeMessages?.clear(thread); thread.innerHTML = '';
         await loadHistory(clearMode, { greetOnError: false });
         if (typeof _toast === 'function') _toast('清空失败，已恢复原对话');
       }
@@ -3996,7 +4004,7 @@ if (window.__bwPwaProviderOnly) return;
         : '只清空普通助手对话（复习记录保留）';
       clearButton.setAttribute('aria-label', clearButton.title);
     }
-    thread.innerHTML = '';
+    window.__bwNativeMessages?.clear(thread); thread.innerHTML = '';
     try { RC.toolChip && RC.toolChip.clearAll(); } catch (_) {}
     reloadHistory({ mode: mode, reason: 'mode-change', immediate: true, allowHidden: true });
     try {
@@ -4257,7 +4265,7 @@ if (window.__bwPwaProviderOnly) return;
       }
       var ce = window.__vcInfoCardEl(legacyCard);
       if (!ce) throw new Error('legacy card replay failed');
-      target.appendChild(ce);
+      target.appendChild(ce); window.__bwNativeMessages?.publish(ce,target);
       return;
     }
     var _pf = nativeHistory?.kind === 'answer' ? {text:nativeHistory.text,followups:nativeHistory.followups} : _splitFollowups(m.content || '');
@@ -4283,7 +4291,7 @@ if (window.__bwPwaProviderOnly) return;
       addMsg('asst-a', '<span class="rc-i rc-i-check"></span> ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
     });
     if (Array.isArray(m.actions) && HOST.showAction) m.actions.forEach(function (a) {   // EPUB 动作卡必须保持在原消息位置；commit 后让宿主创建，再移回占位点
-      var marker = document.createElement('span'); marker.hidden = true; target.appendChild(marker);
+      var marker = document.createElement('span'); marker.hidden = true; target.appendChild(marker); window.__bwNativeMessages?.publish(marker,target);
       deferredActions.push({ marker: marker, action: a });
     });
   }
@@ -4316,11 +4324,12 @@ if (window.__bwPwaProviderOnly) return;
       thread.appendChild(previous);
       throw error;
     }
+    window.__bwNativeMessages?.commit(stage);
     deferredActions.forEach(function (item) {
       try {
         var card = HOST.showAction(item.action);
-        if (card) item.marker.replaceWith(card); else item.marker.remove();
-      } catch (_) { try { item.marker.remove(); } catch (_) {} }
+        if (card) { window.__bwNativeMessages?.replace(card,item.marker,thread); item.marker.replaceWith(card); } else { window.__bwNativeMessages?.remove(item.marker); item.marker.remove(); }
+      } catch (_) { try { window.__bwNativeMessages?.remove(item.marker); item.marker.remove(); } catch (_) {} }
     });
     try { RC.turnCard && RC.turnCard.prune && RC.turnCard.prune(); } catch (_) {}
     try { RC.turnCard && RC.turnCard.opsChanged && RC.turnCard.opsChanged(); } catch (_) {}
@@ -4357,6 +4366,7 @@ if (window.__bwPwaProviderOnly) return;
       if (!d || d.ok !== true || !Array.isArray(d.messages)) throw new Error('invalid history response');
 
       var stage = document.createElement('div');
+      window.__bwNativeMessages?.stage(stage);
       stage.hidden = true; stage.setAttribute('aria-hidden', 'true'); pane.appendChild(stage);
       var state = { lastQ: '' }, deferredActions = [], skipped = 0, seenTurnIds = [];
       _historyRenderTarget = stage;
@@ -4372,7 +4382,7 @@ if (window.__bwPwaProviderOnly) return;
             } catch (_) {
               skipped++;
               deferredActions.length = deferredAt;
-              while (marker.nextSibling) stage.removeChild(marker.nextSibling);
+              while (marker.nextSibling) { window.__bwNativeMessages?.remove(marker.nextSibling); stage.removeChild(marker.nextSibling); }
               addMsg('asst-note', '有 1 条旧对话暂时无法显示，其余记录已恢复。');
             } finally {
               try { marker.remove(); } catch (_) { if (marker.parentNode) marker.parentNode.removeChild(marker); }
@@ -4381,7 +4391,7 @@ if (window.__bwPwaProviderOnly) return;
         } else greet();
         _historyRenderTarget = null;
         if (histToken !== _historyEpoch || modeEpoch !== _modeEpoch || mode !== _assistantMode) {
-          stage.remove();
+          window.__bwNativeMessages?.clear(stage); stage.remove();
           try { RC.turnCard && RC.turnCard.prune && RC.turnCard.prune(); } catch (_) {}
           return { ok: false, stale: true };
         }
@@ -4390,7 +4400,7 @@ if (window.__bwPwaProviderOnly) return;
         // 别的轮次落库时，下一句用户话可能仍在识别。整页原子替换后恢复
         // 未出现在本次权威快照里的字幕；已落库的同 ID 则只留正式记录。
         if (typeof _restoreUserDrafts === 'function') _restoreUserDrafts(seenTurnIds);
-        stage.remove();
+        window.__bwNativeMessages?.clear(stage); stage.remove();
         if (_historyKeepScrollTop < 0) {
           requestAnimationFrame(scrollDown);
           setTimeout(scrollDown, 250);   // 图/MathJax 异步撑高后再校一次
@@ -4401,7 +4411,7 @@ if (window.__bwPwaProviderOnly) return;
         return { ok: true, count: d.messages.length, skipped: skipped, turnIds: seenTurnIds };
       } catch (renderError) {
         _historyRenderTarget = null;
-        try { stage.remove(); } catch (_) {}
+        try { window.__bwNativeMessages?.clear(stage); stage.remove(); } catch (_) {}
         try { RC.turnCard && RC.turnCard.prune && RC.turnCard.prune(); } catch (_) {}
         throw renderError;
       }
