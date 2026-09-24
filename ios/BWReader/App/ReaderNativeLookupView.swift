@@ -111,7 +111,8 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
         defer { marking = false }
         let receipt = await request([
             "action": "nativeVocabMark",
-            "value": ["word": lemma.isEmpty ? headword : lemma,
+            "value": ["word": isPhrase ? text : (lemma.isEmpty ? headword : lemma),
+                      "kind": isPhrase ? "phrase" : "word",
                       "jp": isJapanese, "mastered": !mastered],
         ])
         guard receipt["ok"] as? Bool == true else {
@@ -175,7 +176,7 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
         defer { favoriting = false }
         let receipt = await request([
             "action": "nativePhraseFav",
-            "value": ["text": headword, "enabled": !favorited],
+            "value": ["text": text, "enabled": !favorited],
         ])
         guard receipt["ok"] as? Bool == true else {
             error = receipt["error"] as? String ?? "收藏失败，请重试。"
@@ -415,7 +416,7 @@ struct ReaderNativeLookupContent: View {
             .overlay(alignment: .top) { divider }
             if model.isPhrase {
                 actionBar {
-                    barButton(model.favorited ? "已收藏" : "收藏为词组",
+                    barButton(model.favorited ? "已保存词组" : "保存词组",
                               icon: model.favorited ? "star.fill" : "star", on: model.favorited,
                               busy: model.favoriting) { Task { await model.toggleFavorite() } }
                         .accessibilityHint("收藏后这几个字之后会当作一个词来分词")
@@ -430,6 +431,14 @@ struct ReaderNativeLookupContent: View {
     private var dictionary: some View {
         VStack(alignment: .leading, spacing: 0) {
             head
+            if model.isPhrase {
+                actionBar {
+                    barButton(model.favorited ? "已保存词组" : "保存词组",
+                              icon: model.favorited ? "star.fill" : "star",
+                              on: model.favorited, busy: model.favoriting) { Task { await model.toggleFavorite() } }
+                    masterButton
+                }
+            }
             if !model.inflection.isEmpty {
                 infoLine(model.inflection, icon: "arrow.triangle.2.circlepath", color: WordPopStyle.inflect)
             } else if !model.lemma.isEmpty, model.lemma != model.headword {
@@ -446,11 +455,7 @@ struct ReaderNativeLookupContent: View {
                     .padding(.horizontal, 14).padding(.bottom, 8)
             }
             actionBar {
-                masterButton
-                if model.isPhrase {
-                    barButton(model.favorited ? "已收藏" : "词组", icon: model.favorited ? "star.fill" : "star",
-                              on: model.favorited, busy: model.favoriting) { Task { await model.toggleFavorite() } }
-                }
+                if !model.isPhrase { masterButton }
                 barButton(model.ankiState.map { "Anki " + $0 } ?? "Anki", icon: "rectangle.stack.badge.plus",
                           on: model.ankiState == "已加入" || model.ankiState == "已更新", busy: model.ankiBusy) {
                     Task { await model.addToAnki() }
@@ -465,7 +470,7 @@ struct ReaderNativeLookupContent: View {
     /// 词头行（原版 .wp-head）：词 · 音调线（日）/ 音标（英）· 发音圆钮 · BNC#。
     private var head: some View {
         HStack(alignment: .center, spacing: 8) {
-            Text(model.headword).font(.system(size: 19, weight: .semibold)).foregroundStyle(.white)
+            Text(model.isPhrase ? model.text : model.headword).font(.system(size: 19, weight: .semibold)).foregroundStyle(.white)
                 .textSelection(.enabled)
             if model.isJapanese, !model.reading.isEmpty {
                 if let accent = model.accent {

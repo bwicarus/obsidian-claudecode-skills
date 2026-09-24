@@ -1503,7 +1503,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return (rect.origin, size, scale)
     }
 
-    func placeNativeConversationCard(actionID: String, scope: String, windowPoint: CGPoint) async {
+    func placeNativeConversationCard(actionID: String, scope: String, windowPoint: CGPoint, nativeTarget: [String: Any]? = nil) async {
         // ⚠ 以前这里条件不满足就一声不吭地 return —— 侧栏卡拖过去、什么都没发生
         //   （2026-09-23 用户："侧边栏中的卡片无法和以前一样拖动到页面上"）。每一步都说出来。
         postClientLog("[card-drop] place x=\(Int(windowPoint.x)) y=\(Int(windowPoint.y)) scopeOK=\(scope == nativeConversation.scope) native=\(nativePDFDocument != nil)")
@@ -1526,7 +1526,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // ⚠ 原生接管正文后上面那组视口坐标**解不出锚点** —— 网页视口里没有那一页。
         //   跟 nativeDropTarget 一样先用 PDFKit 定页，把页内坐标一并交过去；
         //   网页那侧拿到就跳过自己的解析。拿不到（EPUB / 网页渲染）就照旧。
-        if let document = nativePDFDocument,
+        if let nativeTarget {
+            parameters["value"] = nativeTarget
+            parameters["x"] = 0; parameters["y"] = 0
+        } else if let document = nativePDFDocument,
            let placed = document.canonicalPoint(document.view.convert(windowPoint, from: nil), from: document.view) {
             parameters["value"] = ["page": placed.page, "x": placed.point.x, "y": placed.point.y]
         } else if nativePDFDocument != nil {
@@ -1836,6 +1839,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 && self.currentLocalBook?.id == bookID && self.currentLocalBookContentSHA256 == digest
         }
         activeNativePDFDocument = document
+        document.view.cardDropReceiver = { [weak self, weak document] point in
+            guard let self, let document, self.nativePDFDocument === document,
+                  let location = document.canonicalPoint(point, from: document.view) else { return nil }
+            let target: [String: Any] = ["page": location.page, "x": location.point.x, "y": location.point.y]
+            let pointInWindow = document.view.convert(point, to: nil)
+            return { [weak self, weak document] payload in
+                Task { @MainActor in
+                    guard let self, let document, self.nativePDFDocument === document else { return }
+                    await self.placeNativeConversationCard(actionID: payload.actionID, scope: payload.scope,
+                        windowPoint: pointInWindow, nativeTarget: target)
+                }
+            }
+        }
+        document.view.onCardDropError = { [weak self] message in self?.showTransientNotice(message) }
         document.onDismissTransient = { [weak self] in
             Task { @MainActor [weak self] in
                 // 滚动 / 点空白：小框收起；还在查的词回来后不再自动弹（原版 _wordPopCancelSeq）。
@@ -2478,14 +2495,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             let languages = try ReaderNativeBookProjection(store: documentStore).state("book-languages", bookID: book.id).payload as? [String] ?? []
             let japanese = input["jp"] as? Bool ?? ReaderNativeLookupRequest.isJapanese(word, languages: languages)
             let mastered = input["mastered"] as? Bool != false
-            let vocabularyInput: [String: Any] = ["kind": "word", "language": japanese ? "ja" : "en", "lemma": word, "word": word]
+            let kind = input["kind"] as? String ?? "word"
+            guard ["word", "phrase"].contains(kind) else { throw ReaderNativeVocabularyState.Failure(message: "词汇类型无效") }
+            let phrase = kind == "phrase"
+            let vocabularyInput: [String: Any] = ["kind": kind, "language": japanese ? "ja" : "en", "lemma": word, "text": word, "word": word]
             _ = try ReaderNativeVocabularyState.normalized(vocabularyInput, property: "mastered", enabled: mastered)
             let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
             guard try store.meta("legacyImport") == "done" else { throw ReaderNativeVocabularyState.Failure(message: "词汇库尚未就绪") }
             // Keep the compatibility lexicon's confirmation semantics. Unknown
             // transport results are reported; no second request is attempted.
-            let response = try await gateway.fetchData(path: japanese ? "/pdf/api/jp-vocab-mark" : "/pdf/api/vocab-mark",
-                method: "POST", body: JSONSerialization.data(withJSONObject: ["word": word, "mark": mastered ? "known" : "unknown"]),
+            let path = phrase ? "/pdf/api/phrase-mark" : (japanese ? "/pdf/api/jp-vocab-mark" : "/pdf/api/vocab-mark")
+            let markBody = phrase ? ["text": word, "mark": mastered ? "mastered" : ""]
+                : ["word": word, "mark": mastered ? "known" : "unknown"]
+            let response = try await gateway.fetchData(path: path,
+                method: "POST", body: JSONSerialization.data(withJSONObject: markBody),
                 surface: book.format == .pdf ? .pdf : .epub)
             guard (200..<300).contains(response.status),
                   let reply = try JSONSerialization.jsonObject(with: response.data) as? [String: Any],
@@ -2502,8 +2525,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // Notify remaining presentation observers and their legacy display
             // mirrors. They do not re-run the canonical mastery transaction,
             // and the observation does not delay the native receipt.
-            webView.callAsyncJavaScript("window.BWReaderRuntime?.vocabularyState?.importRecord(record,{source:'native'}); window.applyVocabLocalOverride?.(word,mastered,{word,surface:word,forms:[],jp});",
-                arguments: ["record": record, "word": word, "mastered": mastered, "jp": japanese], in: nil, in: .page,
+            if phrase {
+                do { _ = try await prepareNativePhraseService().read() }
+                catch { showTransientNotice("掌握状态已保存，词组分词刷新待重试：" + error.localizedDescription) }
+                nativePDFDocument?.invalidateTokenization()
+            }
+            webView.callAsyncJavaScript("window.BWReaderRuntime?.vocabularyState?.importRecord(record,{source:'native'}); if (!phrase) window.applyVocabLocalOverride?.(word,mastered,{word,surface:word,forms:[],jp});",
+                arguments: ["record": record, "word": word, "mastered": mastered, "jp": japanese, "phrase": phrase], in: nil, in: .page,
                 completionHandler: { _ in })
             return ["ok": true, "value": ["ok": true, "mastered": mastered, "jp": japanese]]
         } catch { return ["ok": false, "error": error.localizedDescription] }

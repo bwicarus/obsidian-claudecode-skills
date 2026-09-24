@@ -456,6 +456,17 @@ Navigation/recovery discard the selection lease, and delayed acknowledgements ca
 newer pending selections. Native/browser graph and expiry parity is checked by the Apple workflow;
 this is not yet removal of the entire conversation compatibility runtime.
 
+The context graph and full App compilation passed Apple run `35957118578` (`fe76d7c9`).
+User-reported native card regressions are being addressed before packaging: favorites now
+render original HTML/Markdown and Anki front-face previews instead of literal markup; card
+body fonts use Dynamic Type body/headline sizes. Phrase queries expose an explicit save action
+above definitions, keep the entire selected phrase for favorite/mastery writes, and consume
+the old selection highlight without cancelling the query. Mastered phrases remain part of
+native tokenization without becoming favorites. PDFView owns the Reader drop receiver and
+freezes page coordinates at release; native information-card drops can use full original data
+without a hidden web card body. Focused drop tests cover Anki identity, long originals and
+failed saves. These changes still need Apple compilation and on-device gesture/visual acceptance.
+
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 
 The App now sends preference intent (including first legacy-mirror migration) to Swift. `ReaderNativePreferences` owns envelope construction, tombstones, causal parents for global settings, expected-revision checks, durable replay receipts and journal writes in one SQLite transaction. The existing 55-key DataRegistry allowlist generates the packaged native catalog; no second settings namespace or database is introduced. Browser/extension PreferenceStore behavior is retained. Native failures leave dirty compatibility intent and never invoke the old writer as a fallback.

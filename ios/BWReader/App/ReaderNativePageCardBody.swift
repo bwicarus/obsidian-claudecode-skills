@@ -43,7 +43,7 @@ struct ReaderNativePageCardBody: View {
             ReaderNativeRichDocument(content: part.string("text").isEmpty ? part.text : part.string("text"),
                                  format: format.isEmpty ? "markdown" : format, onSelection: selection(part),
                                  imageModel: model,
-                                 font: .systemFont(ofSize: 13), color: ReaderNativeCardInk.text)
+                                 font: .preferredFont(forTextStyle: .body), color: ReaderNativeCardInk.text)
         } else {
             // 学习卡 / 天气 / 新闻 / 图片：交给已有的原生实现，但**不要它那层外壳**。
             ReaderNativeConversationArtifacts(parts: [part], model: model, bare: true)
@@ -89,14 +89,14 @@ private struct ReaderNativePageCardFact: View {
     var imageModel: ReaderNativeConversationModel? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 10) {
             if !answer.isEmpty {
                 ReaderNativeRichDocument(content: answer, format: answerFormat, onSelection: onSelection, inlineImages:inlineImages,imageModel:imageModel,
-                                     font: .systemFont(ofSize: 15, weight: .semibold), color: ReaderNativeCardInk.text)
+                                     font: .preferredFont(forTextStyle: .headline), color: ReaderNativeCardInk.text)
             }
             if !detail.isEmpty, detail != answer {
                 ReaderNativeRichDocument(content: detail, format: detailFormat, onSelection: onSelection, inlineImages:inlineImages,imageModel:imageModel,
-                                     font: .systemFont(ofSize: 12), color: ReaderNativeCardInk.detail)
+                                     font: .preferredFont(forTextStyle: .body), color: ReaderNativeCardInk.detail)
             }
         }
     }
@@ -113,7 +113,7 @@ private struct ReaderNativeCardHTML: View {
     var body: some View {
         let blocks = ReaderNativeCardHTMLParser.blocks(html)
         let images = inlineImages.merging(imageModel?.inlineImages(content: html, format: "html") ?? [:]) { _, native in native }
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .fact(let answer, let detail):
@@ -121,12 +121,12 @@ private struct ReaderNativeCardHTML: View {
                                              detailFormat: "html", onSelection: onSelection,inlineImages:images,imageModel:imageModel)
                 case .general(let html):
                     ReaderNativeRichDocument(content: html, format: "html", onSelection: onSelection,inlineImages:images,imageModel:imageModel,
-                                         font: .systemFont(ofSize: 13), color: ReaderNativeCardInk.text)
+                                         font: .preferredFont(forTextStyle: .body), color: ReaderNativeCardInk.text)
                 case .rich(let html):
                     // .vc-card{font-size:14px;line-height:1.55}
                     ReaderNativeRichDocument(content: html, format: "html", onSelection: onSelection,
                                              inlineImages:images,imageModel:imageModel,
-                                             font: .systemFont(ofSize: 14), color: ReaderNativeCardInk.text)
+                                             font: .preferredFont(forTextStyle: .body), color: ReaderNativeCardInk.text)
                 case .dictionary(let entry):
                     ReaderNativeCardDictionary(entry: entry)
                 }
@@ -238,25 +238,25 @@ private struct ReaderNativeCardDictionary: View {
             HStack(alignment: .bottom, spacing: 8) {
                 if !entry.word.isEmpty {
                     // .rnd-word{font-size:16px;font-weight:600;color:#fff}
-                    Text(entry.word).font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                    Text(entry.word).font(.title3.weight(.semibold)).foregroundStyle(.white)
                 }
                 if !entry.morae.isEmpty { pitch }
             }
             .padding(.bottom, 4)
             ForEach(Array(entry.notes.enumerated()), id: \.offset) { _, line in
                 // 「当前形 / 原形」那行：原版内联样式 font-size:11px;opacity:.75
-                Text(line).font(.system(size: 11)).opacity(0.75).padding(.vertical, 2)
+                Text(line).font(.subheadline).opacity(0.85).padding(.vertical, 3)
             }
             if !entry.definition.isEmpty {
                 // .rnd-def{margin:2px 0 6px;white-space:pre-wrap}
-                Text(entry.definition).font(.system(size: 13)).padding(.top, 2).padding(.bottom, 6)
+                Text(entry.definition).font(.body).lineSpacing(4).padding(.top, 4).padding(.bottom, 8)
             }
             ForEach(Array(entry.examples.enumerated()), id: \.offset) { _, example in
                 // .rnd-ex{margin-top:4px;padding-top:4px;border-top:1px solid rgba(160,160,180,.15)}
                 VStack(alignment: .leading, spacing: 1) {
-                    if !example.source.isEmpty { Text(example.source).font(.system(size: 13)) }
+                    if !example.source.isEmpty { Text(example.source).font(.body) }
                     if !example.gloss.isEmpty {
-                        Text(example.gloss).font(.system(size: 12)).foregroundStyle(ReaderNativeCardInk.exampleGloss)
+                        Text(example.gloss).font(.subheadline).foregroundStyle(ReaderNativeCardInk.exampleGloss)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

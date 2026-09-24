@@ -652,8 +652,13 @@ struct ReaderNativeControl: Identifiable {
 struct ReaderNativeCardTransfer: Codable, Transferable {
     let scope: String
     let actionID: String
+    static let contentType = UTType(exportedAs: "space.bwicarus.reader-card-handle", conformingTo: .data)
 
     static var transferRepresentation: some TransferRepresentation {
-        CodableRepresentation(contentType: UTType(exportedAs: "space.bwicarus.reader-card-handle"))
+        DataRepresentation(contentType: contentType) { value in
+            try JSONEncoder().encode(value)
+        } importing: { data in
+            try JSONDecoder().decode(Self.self, from: data)
+        }
     }
 }

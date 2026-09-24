@@ -15,6 +15,7 @@ final class ReaderNativePhraseService {
     private var projectionTask: Task<Void, Error>?
     private var projectionID = UUID()
     private var projectedRevision: Int64?
+    private var projectedTokens: [String]?
 
     init(store: ReaderNativeDataStore, global: ReaderNativeDataStore, deviceID: String,
          seedSource: @escaping () async throws -> [String],
@@ -96,8 +97,10 @@ final class ReaderNativePhraseService {
             records.append(try vocabulary.set(["kind": "phrase", "language": japanese ? "ja" : "en",
                 "text": text, "lemma": text], property: "favorite", enabled: enabled, mutation: mutation))
         }
-        if projectedRevision == nil || snapshot.revision > projectedRevision! {
-            _ = try await NativeBookOCRManager.shared.setPhrases(snapshot.phrases)
+        let tokens = try vocabulary.tokenizationPhrases(favorites: snapshot.phrases)
+        if projectedRevision == nil || snapshot.revision > projectedRevision! || tokens != projectedTokens {
+            _ = try await NativeBookOCRManager.shared.setPhrases(tokens)
+            projectedTokens = tokens
             projectedRevision = snapshot.revision
             changed(snapshot.phrases, records)
         } else if !records.isEmpty { changed(snapshot.phrases, records) }

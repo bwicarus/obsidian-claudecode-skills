@@ -447,10 +447,10 @@ struct ReaderNativePlacedCard: View {
             // ⚠ 以前手势挂在整条卡头上，点「…」先被当成点卡头，卡直接收起、菜单用不了
             //   （2026-09-23 用户实报）。
             Text(item.title)
-                .font(.system(size: 12)).lineLimit(1)
+                .font(.headline).lineLimit(2)
                 .foregroundStyle(finish.tone)
-                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                .padding(.leading, 13)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .padding(.leading, 16)
                 .contentShape(Rectangle())
                 .gesture(pressGesture(onTap: tapHeader))
                 .accessibilityAddTraits(.isButton)
@@ -503,7 +503,7 @@ struct ReaderNativePlacedCard: View {
                     .padding(.horizontal, 10)
                 ScrollView {
                     ReaderNativePageCardBody(parts: item.parts, model: model)
-                        .padding(.horizontal, 13).padding(.top, 9).padding(.bottom, 12)
+                        .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 16)
                 }
                 // 长按＝带入/移出对话，**只在卡身**（原版 pinBind 的长按目标是 .vc-card-bd，
                 // 上面那条标题栏是拖动把手）。阈值取原版 LP_MS = 600ms；

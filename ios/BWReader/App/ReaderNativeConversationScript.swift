@@ -362,7 +362,9 @@ enum ReaderNativeConversationScript {
           // Inline images retain the same local asset/proxy route as image
           // cards. Swift receives opaque IDs; it cannot request arbitrary URLs.
           part.data.inlineImages = inlineImageActions(part, node, target);
-          if ((group || body) && rc().stickynote) {
+          const originalCard = target.inspect?.().content;
+          const semanticCard = originalCard?.kind && originalCard?.cid && rc().voiceCard?.placementSnapshot;
+          if ((group || body || semanticCard) && rc().stickynote) {
             part.data.dragId = registerAction(part.id + '-place', node, async command => {
               if (![command.x, command.y].every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('落点无效');
               const x = command.x * innerWidth, y = command.y * innerHeight;
@@ -382,6 +384,11 @@ enum ReaderNativeConversationScript {
               if (group && rc().flashcard?.snapshot && rc().stickynote.placeCardAt) {
                 const cards = rc().flashcard.snapshot(group);
                 accepted = await rc().stickynote.placeCardAt(x, y, cards, group.__fc.gid, anchor);
+              } else if (semanticCard && rc().stickynote.placeHtmlAt) {
+                // Native cards have no web card body. Use the complete current
+                // original, never a truncated display preview or empty innerHTML.
+                const snapshot = rc().voiceCard.placementSnapshot(target.inspect().content);
+                accepted = await rc().stickynote.placeHtmlAt(x, y, snapshot, anchor);
               } else if (body && rc().stickynote.placeHtmlAt) {
                 accepted = await rc().stickynote.placeHtmlAt(x, y, {
                   content: body.innerHTML, contextText: body.textContent || '', isHtml: true,

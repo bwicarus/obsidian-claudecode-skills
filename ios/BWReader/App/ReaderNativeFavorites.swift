@@ -6,6 +6,8 @@ struct ReaderNativeFavorite: Identifiable, Equatable {
     let label: String
     let isCards: Bool
     let text: String
+    let preview: String
+    let previewFormat: String
     let page: String
     let file: String
     let ts: Double
@@ -18,11 +20,21 @@ struct ReaderNativeFavorite: Identifiable, Equatable {
         label = value["label"] as? String ?? "收藏卡片"
         isCards = value["kind"] as? String == "cards"
         var brief = value["text"] as? String ?? ""
+        var rendered = value["content"] as? String ?? ""
+        var format = value["isHtml"] as? Bool == true ? "html" : "markdown"
+        if isCards, let card = (value["cards"] as? [[String: Any]])?.first,
+           let presentation = ReaderNativeCardPresentation.interaction(["card": card, "cardIndex": 0]),
+           let front = ((presentation["presentation"] as? [String: Any])?["faces"] as? [[String: Any]])?.first {
+            rendered = front["content"] as? String ?? ""
+            format = front["format"] as? String ?? "markdown"
+        }
         if brief.isEmpty {
             let cards = value["cards"] as? [[String: Any]] ?? []
             brief = cards.compactMap { $0["front"] as? String ?? $0["question"] as? String }.joined(separator: " / ")
         }
         text = brief.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        preview = rendered.isEmpty ? brief : rendered
+        previewFormat = format
         page = value["page"] as? String ?? ""
         file = value["file"] as? String ?? ""
         ts = (value["ts"] as? NSNumber)?.doubleValue ?? 0
@@ -281,7 +293,6 @@ struct ReaderNativeFavoritesPanelLayer: View {
 
     private func cell(_ item: ReaderNativeFavorite, level: Int, width screenWidth: CGFloat) -> some View {
         let width: CGFloat = level == 0 ? min(screenWidth * 0.76, 330) : level == 1 ? 180 : 112
-        let lines = level == 0 ? 9 : level == 1 ? 3 : 1
         let meta = [item.file, item.page.isEmpty ? "" : "p" + item.page].filter { !$0.isEmpty }.joined(separator: " · ")
         let isMarked = marked.contains(item.id)
         return VStack(spacing: 0) {
@@ -290,21 +301,27 @@ struct ReaderNativeFavoritesPanelLayer: View {
             Rectangle().fill(DockStyle.pick.opacity(0.45)).frame(width: 1, height: 8)
                 .padding(.top, 3).padding(.bottom, 4)
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.label).font(.system(size: 12, weight: .semibold)).foregroundStyle(DockStyle.label)
+                Text(item.label).font(.subheadline.weight(.semibold)).foregroundStyle(DockStyle.label)
                     .lineLimit(1)
                 if item.pendingConfirmation {
                     Text("服务器保存未确认").font(.system(size: 10)).foregroundStyle(.orange)
                 }
-                if !item.text.isEmpty {
-                    Text(item.text).font(.system(size: level == 0 ? 12 : 11)).foregroundStyle(DockStyle.body)
-                        .lineSpacing(2).lineLimit(lines)
+                if !item.preview.isEmpty {
+                    ReaderNativeRichDocument(content: item.preview, format: item.previewFormat,
+                        imageModel: reader.nativeConversation,
+                        font: .preferredFont(forTextStyle: level == 0 ? .body : .subheadline),
+                        color: ReaderNativeCardInk.text)
+                        .frame(maxHeight: level == 0 ? 230 : level == 1 ? 70 : 24, alignment: .top)
+                        .clipped()
+                        // This is a drag/tap preview; text selection must not steal the dock gesture.
+                        .allowsHitTesting(false)
                 }
                 if !meta.isEmpty, level < 2 {
                     Text(meta).font(.system(size: 10)).foregroundStyle(DockStyle.meta).lineLimit(1).padding(.top, 1)
                 }
             }
             .foregroundStyle(DockStyle.cardText)
-            .padding(.horizontal, 10).padding(.vertical, 8)
+            .padding(.horizontal, 14).padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 0.5))
@@ -380,8 +397,10 @@ struct ReaderNativeFavoritesPanelLayer: View {
     private func ghostCard(_ item: ReaderNativeFavorite) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(item.label).font(.system(size: 12, weight: .semibold)).foregroundStyle(DockStyle.label)
-            if !item.text.isEmpty {
-                Text(item.text).font(.system(size: 11)).foregroundStyle(DockStyle.body).lineLimit(3)
+            if !item.preview.isEmpty {
+                ReaderNativeRichText(content: item.preview, format: item.previewFormat,
+                    font: .preferredFont(forTextStyle: .subheadline), color: ReaderNativeCardInk.text)
+                    .frame(maxHeight: 64, alignment: .top).clipped().allowsHitTesting(false)
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 10)

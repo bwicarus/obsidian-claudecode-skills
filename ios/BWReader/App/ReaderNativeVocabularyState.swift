@@ -14,6 +14,20 @@ struct ReaderNativeVocabularyState {
     let deviceID: String
     var now: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
 
+    /// Favorites and mastered phrases both remain atomic during selection.
+    /// Do not add mastered phrases to the favorites collection itself.
+    func tokenizationPhrases(favorites: [String]) throws -> [String] {
+        var result = Set(favorites)
+        for record in try store.records(collection: Self.collection, idPrefix: "vstate-v1.mastered.phrase.") where !record.deleted {
+            let envelope = try R.object(JSONSerialization.jsonObject(with: Data(record.json.utf8)), "vocabulary envelope")
+            let value = try Self.normalized(R.object(envelope["value"], "vocabulary value"))
+            guard value["enabled"] as? Bool == true, let key = value["key"] as? String else { continue }
+            result.insert(key)
+            result.formUnion(value["aliases"] as? [String] ?? [])
+        }
+        return result.sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) }
+    }
+
     // ECMAScript whitespace, including BOM and excluding ICU-only NEL.
     private static let whitespace = "[\\u0009-\\u000d\\u0020\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+"
     static func normalizeKey(_ value: Any?) throws -> String {

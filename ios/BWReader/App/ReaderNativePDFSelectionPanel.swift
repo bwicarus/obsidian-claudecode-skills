@@ -21,7 +21,7 @@ struct ReaderNativePDFSelectionPanelLayer: View {
                 ReaderNativeSelectionPanelPlacement(anchor: anchor.offsetBy(dx: -frame.minX, dy: -frame.minY)) {
                     ReaderNativePDFSelectionPanel(panel: panel) { key in
                         document.performSelectionAction(key)
-                        // 划线会自己清掉选区（窗口随之收起）；其余动作只收窗口，选区留着。
+                        // 查询和划线在保存目标后消费选区；复制/带入对话仅关闭操作条。
                         if !key.hasPrefix("highlight:") { document.dismissSelectionPanel() }
                     }
                     .id(panel.id)

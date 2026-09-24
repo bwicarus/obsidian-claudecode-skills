@@ -217,10 +217,15 @@ private struct ReaderNativeConversationArtifactCard: View {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: icon)
                     .foregroundStyle(ReaderNativeTheme.accent)
-                Text(heading).font(.subheadline.weight(.semibold))
+                Text(heading).font(.headline)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if isDraft { Text("待确认").font(.caption2).foregroundStyle(ReaderNativeTheme.muted) }
+                if !part.string("dragId").isEmpty {
+                    Image(systemName: "hand.draw").foregroundStyle(ReaderNativeTheme.muted)
+                        .accessibilityHidden(true)
+                }
             }
+            .frame(minHeight: 44)
             // 整条标题都能按住拖（不只是图标和字本身）。
             .contentShape(Rectangle())
             // 拖出去时给一个像"卡片副本"的影子 —— 网页那版拖的就是卡的克隆
@@ -347,7 +352,8 @@ private struct ReaderNativeConversationArtifactCard: View {
             let id = part.string("selectId")
             guard !id.isEmpty else { return }
             model.updateTextSelection(id: id, text: selection)
-        }, inlineImages: part.data["inlineImages"] as? [String: String] ?? [:], imageModel: model)
+        }, inlineImages: part.data["inlineImages"] as? [String: String] ?? [:], imageModel: model,
+           font: .preferredFont(forTextStyle: .body))
         if resolved == "html", text.range(of: "<(script|iframe|button|input|canvas|svg|video|audio)\\b", options: [.regularExpression, .caseInsensitive]) != nil {
             Text("内嵌媒体或交互部分尚未迁移，原件已保留。")
                 .font(.caption).foregroundStyle(ReaderNativeTheme.muted)

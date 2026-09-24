@@ -5637,6 +5637,12 @@ if (window.__bwPwaProviderOnly) return;
         }, anchor));
       }
     },
+    // Serialize on an explicit drop, without mounting another card or hidden renderer.
+    placementSnapshot: function (card) {
+      if (!card || !card.kind || !card.cid) throw new Error('卡片原件尚未就绪');
+      return { content: _infoHtml(card), contextText: _infoText(card), isHtml: true,
+        cid: card.cid, label: card.title || '卡片' };
+    },
     push: function (text, label, isHtml, force, cid, opts) { try { return _cardPush(text, label, isHtml, force, cid, opts); } catch (e) { return null; } },
     close: function (c) { try { _cardClose(c); } catch (e) {} },
     nativeFloatingState: function () {

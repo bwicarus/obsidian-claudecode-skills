@@ -1418,6 +1418,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             self?.lastLookupAnchor = overlay?.selectionWindowRect()
             self?.lastLookupPage = number
             self?.lastLookupRects = value.rects
+            // Freeze the query and anchor before consuming the selection. Calling the
+            // document-wide clearSelection here would cancel the new lookup itself.
+            overlay?.clearSelection()
             self?.onLookup?(number, value.text, value.sentence, mode)
         }
         // 有字符数据的页一律由原生文字层接选区（我们自己的选区菜单）；PDFKit 自带的选择
@@ -1922,26 +1925,53 @@ private final class ReaderNativePDFSelectionHandle: UIView {
 }
 
 @MainActor
-final class ReaderNativePDFView: PDFView {
+final class ReaderNativePDFView: PDFView, UIDropInteractionDelegate {
     var onLayout: (() -> Void)?
+    /// Resolve the page at release, before asynchronous item-provider decoding.
+    var cardDropReceiver: ((CGPoint) -> ((ReaderNativeCardTransfer) -> Void)?)?
+    var onCardDropError: ((String) -> Void)?
+    private lazy var cardDropInteraction = UIDropInteraction(delegate: self)
     private var dropStrippedAt = Date.distantPast
     override func layoutSubviews() {
         super.layoutSubviews()
+        if cardDropInteraction.view == nil { addInteraction(cardDropInteraction) }
         stripDropInteractions()
         onLayout?()
     }
 
-    /// 拆掉 PDFKit 自带的放置（drop）处理。
-    /// ⚠ 侧栏卡拖到书页靠的是外层阅读区的 dropDestination；PDFKit 在自己的内部视图上装了
-    ///   drop 交互，放下的卡片先被它接住又拒掉，根本到不了外层 —— 网页渲页时没有这一层，
-    ///   所以"以前能拖"（2026-09-23 用户："侧边栏中的卡片无法和以前一样拖动到页面上"）。
-    ///   我们不用 PDFKit 的放置功能。页面视图随滚动增减，布局时顺手清（至多每秒一次）。
+    func dropInteraction(_ interaction: UIDropInteraction, canHandle session: UIDropSession) -> Bool {
+        session.localDragSession != nil && session.items.count == 1 &&
+            session.hasItemsConforming(toTypeIdentifiers: [ReaderNativeCardTransfer.contentType.identifier])
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: UIDropSession) -> UIDropProposal {
+        UIDropProposal(operation: cardDropReceiver?(session.location(in: self)) == nil ? .forbidden : .copy)
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, performDrop session: UIDropSession) {
+        guard let receive = cardDropReceiver?(session.location(in: self)), let item = session.items.first else { return }
+        item.itemProvider.loadDataRepresentation(forTypeIdentifier: ReaderNativeCardTransfer.contentType.identifier) { [weak self] data, error in
+            Task { @MainActor in
+                guard let self else { return }
+                guard let data, data.count <= 16_384,
+                      let payload = try? JSONDecoder().decode(ReaderNativeCardTransfer.self, from: data),
+                      !payload.actionID.isEmpty else {
+                    self.onCardDropError?(error?.localizedDescription ?? "这张卡片的拖放数据不可用，请重试。")
+                    return
+                }
+                receive(payload)
+            }
+        }
+    }
+
+    /// PDFKit's internal receivers do not understand Reader card handles.
+    /// Keep our receiver on PDFView; the outer SwiftUI receiver serves EPUB.
     private func stripDropInteractions() {
         let now = Date()
         guard now.timeIntervalSince(dropStrippedAt) > 1 else { return }
         dropStrippedAt = now
         func strip(_ view: UIView, depth: Int) {
-            for interaction in view.interactions where interaction is UIDropInteraction {
+            for interaction in view.interactions where interaction is UIDropInteraction && interaction !== cardDropInteraction {
                 view.removeInteraction(interaction)
             }
             guard depth < 6 else { return }
