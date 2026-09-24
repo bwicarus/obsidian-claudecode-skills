@@ -68,6 +68,9 @@
     return {
       kind: 'native-bridge',
       store: storeName,
+      preferenceCall: ['bw-reader-native-v1-global', 'bw-reader-native-v1-device'].indexOf(storeName) >= 0 ? function (input, deviceId) {
+        return call('preference', { request: Object.assign({}, input, { deviceID: deviceId }) });
+      } : undefined,
       cardRepositoryCall: storeName === 'bw-reader-native-v1-global' ? function (operation, args, deviceId) {
         var optionIndex = operation === 'patchState' ? 3 : operation === 'recordAnkiReceipt' ? 4 :
           ['registerDraft', 'saveConfirmedCard', 'tombstone', 'importLegacyBatch', 'commitReview'].indexOf(operation) >= 0 ? 1 : 2;

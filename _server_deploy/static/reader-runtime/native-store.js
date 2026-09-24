@@ -632,6 +632,14 @@
           return reply.result;
         });
       } : undefined,
+      preferenceCall: typeof port.preferenceCall === 'function' ? function (input) {
+        try { assertOpen(); } catch (error) { return Promise.reject(error); }
+        return Promise.resolve(port.preferenceCall(input, deviceId)).then(function (reply) {
+          assertOpen();
+          notify(reply.changes || []);
+          return reply.result;
+        });
+      } : undefined,
       get: get,
       getMany: getMany,
       list: list,

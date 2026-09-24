@@ -981,19 +981,34 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         guard try global.meta("legacyImport") == "done", try local.meta("legacyImport") == "done" else {
             throw ReaderNativeVocabularyState.Failure(message: "本地状态尚未就绪")
         }
-        // These small presentation inputs remain observed until preferences and
-        // search command ownership are migrated. No page fetch, char scan, word
-        // filtering, rectangle calculation or hidden rendering runs in the web.
+        // Persistent flags come directly from their canonical native records.
+        // Only transient translation/search/optimistic vocabulary state still
+        // comes from the compatibility command owner.
+        let catalog = try ReaderNativePreferences.Catalog.packaged.get()
+        let preferences = ReaderNativePreferences(store: global, deviceID: deviceID)
+        let device = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-device").store
+        guard try device.meta("legacyImport") == "done" else { throw ReaderBookUserStateWebAdapterError.unavailable }
+        let devicePreferences = ReaderNativePreferences(store: device, deviceID: deviceID)
+        let vocabularyRaw = try preferences.raw(catalog.entry("pdf-vocab-underline"))
+        let vocabulary = vocabularyRaw == nil || vocabularyRaw == "1"
+        let ruby = try devicePreferences.raw(catalog.entry("pdf-ruby")) == "1"
+        let settingsGeneration = global.generation(collection: "user-settings")
+        let deviceSettingsGeneration = device.generation(collection: "device-preferences")
         let raw = try await webView.callAsyncJavaScript("""
-            return {vocabulary:typeof _vocabUnderlineEnabled==='function'?_vocabUnderlineEnabled():true,
-                    ruby:typeof _rubyEnabled==='function'?_rubyEnabled():false,
-                    translation:window.__bwReaderPageTranslateOn?.()===true,
+            return {translation:window.__bwReaderPageTranslateOn?.()===true,
                     overrides:Object.fromEntries(window.__vocabOverride||[]),
                     mastered:Array.from(window.__masteredLocal||[]),
                     searchQuery:typeof _takePendingSearchQuery==='function'?_takePendingSearchQuery(page):''};
             """, arguments: ["page": page], in: nil, contentWorld: .page)
         guard nativePDFDocument === document, nativeOverlayGeneration == generation, nativeOverlayTickets[page] == ticket, !Task.isCancelled,
-              let flags = raw as? [String: Any] else { throw ReaderBookUserStateWebAdapterError.contextChanged }
+              var flags = raw as? [String: Any] else { throw ReaderBookUserStateWebAdapterError.contextChanged }
+        guard global.generation(collection: "user-settings") == settingsGeneration,
+              device.generation(collection: "device-preferences") == deviceSettingsGeneration else {
+            refreshNativePageOverlays(force: true)
+            throw ReaderBookUserStateWebAdapterError.contextChanged
+        }
+        flags["vocabulary"] = vocabulary
+        flags["ruby"] = ruby
         let vocabularyGeneration = global.generation(collection: ReaderNativeVocabularyState.collection)
         let index = try nativeVocabularyOverlayStore.vocabulary(global)
         let calculation = Task.detached(priority: .userInitiated) { ReaderNativeVocabularyOverlay.localMarks(chars, state: index) }
@@ -6996,6 +7011,37 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 }
                 return
             }
+            if body["action"] as? String == "preference" {
+                do {
+                    guard let request = body["request"] as? [String: Any],
+                          let key = request["legacyKey"] as? String,
+                          let deviceID = request["deviceID"] as? String,
+                          let mutation = request["mutationId"] as? String else {
+                        throw ReaderNativePreferences.Failure(message: "设置请求缺少身份")
+                    }
+                    let entry = try ReaderNativePreferences.Catalog.packaged.get().entry(key)
+                    guard body["store"] as? String == entry.storeName,
+                          request["collection"] as? String == entry.collection else {
+                        throw ReaderNativePreferences.Failure(message: "设置存储范围不匹配")
+                    }
+                    let store = try nativeDataStoreHost.bridge(for: entry.storeName).store
+                    guard try store.meta("legacyImport") == "done" else { throw ReaderBookUserStateWebAdapterError.unavailable }
+                    let remove = try ReaderNativeCardRules.bool(request["remove"], "remove")
+                    let raw = remove ? nil : try ReaderNativePreferences.rawValue(request["rawValue"])
+                    let expected = ReaderNativeCardRules.has(request["ifRev"])
+                        ? try ReaderNativeCardRules.integer(request["ifRev"], "ifRev") : nil
+                    let receipt = try ReaderNativePreferences(store: store, deviceID: deviceID)
+                        .commit(entry, raw: raw, mutation: mutation, expectedRevision: expected)
+                    if !(receipt["changes"] as? [Any] ?? []).isEmpty {
+                        markCloudSyncDirty()
+                        if ["pdf-vocab-underline", "pdf-ruby"].contains(key) { refreshNativePageOverlays(force: true) }
+                    }
+                    replyHandler(receipt, nil)
+                } catch ReaderNativeDataStore.StoreError.revisionConflict {
+                    replyHandler(["ok": false, "code": "BW_DATA_CONFLICT"], nil)
+                } catch { replyHandler(["ok": false, "code": "BW_NATIVE_PREFERENCE_FAILED", "error": error.localizedDescription], nil) }
+                return
+            }
             if body["action"] as? String == "cardRepository" {
                 guard body["store"] as? String == "bw-reader-native-v1-global",
                       let request = body["request"] as? [String: Any],
@@ -7062,7 +7108,16 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 return
             }
             do {
-                replyHandler(try nativeDataStoreHost.handle(body), nil)
+                let settingScope = body["store"] as? String == "bw-reader-native-v1-global" ? "user-settings"
+                    : body["store"] as? String == "bw-reader-native-v1-device" ? "device-preferences" : nil
+                let settingsStore = body["action"] as? String == "commit" && settingScope != nil
+                    ? try nativeDataStoreHost.bridge(for: body["store"] as! String).store : nil
+                let settingsBefore = settingsStore.map { $0.generation(collection: settingScope!) }
+                let receipt = try nativeDataStoreHost.handle(body)
+                if let settingsStore, let settingScope, settingsBefore != settingsStore.generation(collection: settingScope) {
+                    refreshNativePageOverlays(force: true)
+                }
+                replyHandler(receipt, nil)
             } catch {
                 // 冲突是**正常分支**（乐观并发），要让 JS 那侧认得出来去重试，
                 // 而不是当成一次失败往上抛。

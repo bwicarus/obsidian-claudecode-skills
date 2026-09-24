@@ -180,6 +180,8 @@ NATIVE_INTERFACE_CONTRACT = "reader-native-interface-manifest/2"
 NATIVE_INTERFACE_SOURCE = HERE / "native_reader_interface_manifest.json"
 NATIVE_FORMULA_RECOGNITION_SOURCE = HERE / "App" / "NativeFormulaRecognition.swift"
 NATIVE_INTERFACE_NAME = "native_reader_interface_manifest.json"
+NATIVE_PREFERENCE_NAME = "native_reader_preference_manifest.json"
+NATIVE_PREFERENCE_SOURCE = STATIC / "reader-runtime" / "data-registry.js"
 NATIVE_INTERFACE_GLOBAL = "__BW_NATIVE_INTERFACE_MANIFEST__"
 NATIVE_INTERFACE_OWNERS = {"local", "pi", "native"}
 NATIVE_INTERFACE_MATCHES = {"exact", "segment"}
@@ -1839,6 +1841,30 @@ def validate_manifest(root: Path) -> dict[str, object]:
     return manifest
 
 
+def native_preference_manifest() -> dict[str, object]:
+    """Generate the native allowlist from the existing registry, never a second catalog."""
+    text = NATIVE_PREFERENCE_SOURCE.read_text(encoding="utf-8")
+    match = re.search(r"var SETTING_MIGRATIONS\s*=\s*\[(.*?)\];", text, re.S)
+    if not match:
+        raise SystemExit("DataRegistry preference catalog is missing")
+    body = re.sub(r"/\*.*?\*/", "", match.group(1), flags=re.S)
+    pattern = re.compile(
+        r"\{\s*legacyKey:\s*'([^']+)',\s*collection:\s*'([^']+)',\s*"
+        r"semanticKey:\s*'([^']+)',\s*codec:\s*'([^']+)'\s*\}"
+    )
+    entries = [dict(zip(("legacyKey", "collection", "semanticKey", "codec"), item))
+               for item in pattern.findall(body)]
+    if pattern.sub("", body).replace(",", "").strip() or not entries:
+        raise SystemExit("Unparsed DataRegistry preference declaration")
+    if len({item["legacyKey"] for item in entries}) != len(entries) or len({
+        (item["collection"], item["semanticKey"]) for item in entries
+    }) != len(entries):
+        raise SystemExit("Duplicate DataRegistry preference declaration")
+    if any(item["collection"] not in {"user-settings", "device-preferences"} for item in entries):
+        raise SystemExit("Unexpected preference scope")
+    return {"contract": "reader-native-preferences/1", "entries": entries}
+
+
 def validate_bundle(root: Path, *, require_manifest: bool = True) -> dict[str, object]:
     if not root.is_dir():
         raise SystemExit(f"ReaderBundle is missing: {root}")
@@ -1853,6 +1879,8 @@ def validate_bundle(root: Path, *, require_manifest: bool = True) -> dict[str, o
         raise SystemExit("ReaderBundle must not contain a web manifest or service worker")
 
     interface_manifest = load_native_interface_manifest(root / NATIVE_INTERFACE_NAME)
+    if json.loads((root / NATIVE_PREFERENCE_NAME).read_text(encoding="utf-8")) != native_preference_manifest():
+        raise SystemExit("ReaderBundle preference catalog differs from DataRegistry")
     validate_shell(root, PDF_SHELL, PDF_PLACEHOLDERS, epub=False)
     validate_shell(root, EPUB_SHELL, EPUB_PLACEHOLDERS, epub=True)
     validate_native_interface_coverage(root, interface_manifest)
@@ -1913,6 +1941,7 @@ def source_input_manifest() -> dict[str, str]:
         "_server_deploy/templates/pdf_reader.html": sha256_file(TEMPLATES / "pdf_reader.html"),
         "_server_deploy/templates/epub_html_reader.html": sha256_file(TEMPLATES / "epub_html_reader.html"),
         "ios/BWReader/native_reader_interface_manifest.json": sha256_file(NATIVE_INTERFACE_SOURCE),
+        "_server_deploy/static/reader-runtime/data-registry.js": sha256_file(NATIVE_PREFERENCE_SOURCE),
         "ios/BWReader/App/NativeFormulaRecognition.swift": sha256_file(
             NATIVE_FORMULA_RECOGNITION_SOURCE
         ),
@@ -1999,6 +2028,8 @@ def build(output: Path, cache_dir: Path, *, offline: bool) -> dict[str, object]:
         shutil.copyfile(
             NATIVE_INTERFACE_SOURCE, staging / NATIVE_INTERFACE_NAME
         )
+        write_bytes(staging, NATIVE_PREFERENCE_NAME,
+                    (json.dumps(native_preference_manifest(), ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
         write_bytes(
             staging,
             PDF_SHELL,

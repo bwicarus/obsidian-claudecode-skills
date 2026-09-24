@@ -602,6 +602,26 @@ test("空输入不过桥", async () => {
   assert.equal(port.commits + port.reads, before);
 });
 
+test("native preference receipts notify subscribers without writing twice", async () => {
+  const port = makePort(), changes = [];
+  const record = { collection: 'user-settings', id: 'setting:example', rev: 2, value: {rawValue:'1'} };
+  port.preferenceCall = async (input, deviceId) => {
+    assert.equal(input.legacyKey, 'example');
+    assert.ok(deviceId);
+    return { result: record, changes: [{collection:'user-settings',record}] };
+  };
+  const db = store(port);
+  db.subscribe({collection:'user-settings'}, change => changes.push(change));
+  assert.deepEqual(await db.preferenceCall({legacyKey:'example'}), record);
+  assert.equal(port.commits, 0);
+  assert.equal(changes.length, 1);
+  port.preferenceCall = async () => { throw new Error('failed native settings'); };
+  await assert.rejects(db.preferenceCall({legacyKey:'example'}), /failed native/);
+  assert.equal(port.commits, 0);
+  db.close();
+  await assert.rejects(db.preferenceCall({legacyKey:'example'}), error => error.code === 'BW_DATA_CLOSED');
+});
+
 test("close 之后不接受入站写入", async () => {
   const port = makePort();
   const db = store(port);

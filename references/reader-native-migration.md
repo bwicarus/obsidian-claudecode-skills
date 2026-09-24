@@ -359,3 +359,8 @@ Swift 串行执行原服务器集合的读取、保存、删除与恢复，学�
 拖到 PDF 的自由卡直接调用原生 notes 事务，不为创建卡片挂载隐藏页；旧网页暂观察快照
 以维持尚未迁移的共享选区注册表，收藏按钮和轮播不再生成隐藏 DOM。新增失败/版本/回收站
 检查及 Apple 编译待本批验证；未发布或声称全部原生迁移完成。
+# Native preference transaction ownership (2026-09-24)
+
+The App now sends preference intent (including first legacy-mirror migration) to Swift. `ReaderNativePreferences` owns envelope construction, tombstones, causal parents for global settings, expected-revision checks, durable replay receipts and journal writes in one SQLite transaction. The existing 55-key DataRegistry allowlist generates the packaged native catalog; no second settings namespace or database is introduced. Browser/extension PreferenceStore behavior is retained. Native failures leave dirty compatibility intent and never invoke the old writer as a fallback.
+
+PDF vocabulary/ruby flags read canonical settings directly. Transient translation/search state and the remaining settings UI commands still use compatibility adapters; this stage does not claim those modules or the full migration complete. Local verification: 234 focused checks, catalog parity against DataRegistry, deterministic ReaderBundle packaging. Apple workflow additionally compares 220 native/browser write envelopes and checks CAS, retries, transaction rollback and corrupt-record handling. Full App compilation is required before this candidate is considered validated.

@@ -79,6 +79,7 @@ function createPreferences(storage, context, options = {}) {
     storage,
     lease: context.lease(),
     messageBridge: false,
+    nativeCommit: options.nativeCommit,
   });
 }
 
@@ -86,6 +87,38 @@ function readMirror(storage, namespace) {
   const raw = storage.getItem(`${PreferenceStore.MIRROR_PREFIX}${namespace}`);
   return raw ? JSON.parse(raw) : null;
 }
+
+test("App native preferences own boot migration and serialized writes without fallback", async () => {
+  const storage = new MemoryStorage({ "pdf-ruby": "1" });
+  const context = contextFor(ACCOUNT_A), backing = makeRouter("native-prefs");
+  const calls = [];
+  let fail = false;
+  const preferences = createPreferences(storage, context, { nativeCommit: async input => {
+    calls.push(input);
+    if (fail) throw new Error("lost native reply");
+    const entry = DataRegistry.settingMigrations().find(e => e.legacyKey === input.legacyKey);
+    const id = 'setting:' + entry.semanticKey;
+    const opts = { mutationId: input.mutationId, id, ifRev: input.ifRev };
+    return input.remove ? backing.remove(entry.collection, id, opts) : backing.put(entry.collection,
+      { id, legacyKey: entry.legacyKey, semanticKey: entry.semanticKey, codec: entry.codec,
+        rawValue: input.rawValue, migration: 'preference-store-v1' }, opts);
+  }});
+  const router = { ...backing, put() { throw new Error('legacy writer used'); }, remove() { throw new Error('legacy remover used'); } };
+  await preferences.attach(router, context.lease());
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].legacyKey, 'pdf-ruby');
+  assert.equal(calls[0].ifRev, 0);
+  await Promise.all([preferences.setRaw('pdf-ruby', '0'), preferences.setRaw('pdf-ruby', '1')]);
+  assert.deepEqual(calls.slice(1).map(i => i.rawValue), ['0', '1']);
+  assert.equal(preferences.getRaw('pdf-ruby'), '1');
+  await preferences.removeRaw('pdf-ruby');
+  assert.equal(preferences.getRaw('pdf-ruby'), null);
+  fail = true;
+  await assert.rejects(preferences.setRaw('pdf-ruby', '1'), /lost native reply/);
+  assert.equal(calls.length, 5, 'native failure retried or wrote via fallback');
+  assert.equal(readMirror(storage, ACCOUNT_A).states['pdf-ruby'].status, 'dirty');
+  preferences.destroy();
+});
 
 test("A/B 切换先保全旧 owner，再只加载当前账户镜像", async () => {
   const storage = new MemoryStorage({

@@ -649,23 +649,25 @@
         migration: AUTHORITY_MARKER
       };
     }
+    function commitEntry(entry, raw, remove, mutationId, ifRev) {
+      // App writes are a native transaction. Do not retry via the old writer
+      // after an ambiguous native reply; the same mutation ID remains durable.
+      if (typeof options.nativeCommit === 'function') {
+        var input = { legacyKey: entry.legacyKey, collection: entry.collection,
+          rawValue: remove ? null : validateRawValue(raw), remove: !!remove,
+          mutationId: mutationId };
+        if (ifRev != null) input.ifRev = ifRev;
+        return options.nativeCommit(input);
+      }
+      var opts = { mutationId: mutationId };
+      if (ifRev != null) opts.ifRev = ifRev;
+      if (remove) return router.remove(entry.collection, entry.id, opts);
+      opts.id = entry.id;
+      return router.put(entry.collection, makePutValue(entry, raw), opts);
+    }
     function executeOperation(operation) {
       assertFence(operation.lease);
-      var action;
-      if (operation.remove) {
-        action = router.remove(operation.entry.collection, operation.entry.id, {
-          mutationId: operation.mutationId
-        });
-      } else {
-        action = router.put(
-          operation.entry.collection,
-          makePutValue(operation.entry, operation.rawValue),
-          {
-            id: operation.entry.id,
-            mutationId: operation.mutationId
-          }
-        );
-      }
+      var action = commitEntry(operation.entry, operation.rawValue, operation.remove, operation.mutationId);
       return Promise.resolve(action).then(function (record) {
         assertFence(operation.lease);
         if (pendingLatest[operation.entry.legacyKey] === operation) {
@@ -893,23 +895,8 @@
           source: oldShadow ? 'old-shadow-upgrade' : 'legacy-upgrade'
         });
         saveMirror(ops, mirror);
-        var operation;
-        if (hasMirror) {
-          operation = router.put(
-            entry.collection,
-            makePutValue(entry, mirror.values[entry.legacyKey]),
-            {
-              id: entry.id,
-              mutationId: mutationId,
-              ifRev: Number(record && record.rev || 0)
-            }
-          );
-        } else {
-          operation = router.remove(entry.collection, entry.id, {
-            mutationId: mutationId,
-            ifRev: Number(record && record.rev || 0)
-          });
-        }
+        var operation = commitEntry(entry, hasMirror ? mirror.values[entry.legacyKey] : null,
+          !hasMirror, mutationId, Number(record && record.rev || 0));
         return Promise.resolve(operation).then(function (result) {
           assertFence(lease);
           applySyncedRecord(entry, result, oldShadow

@@ -1007,7 +1007,18 @@
       lease: preferenceLease,
       eventTarget: root.document || null,
       trustedWindow: false,
-      messageBridge: false
+      messageBridge: false,
+      nativeCommit: nativeStoreEnabled() ? function (input) {
+        preferenceContext.assertCurrent(preferenceLease);
+        var store = input.collection === 'user-settings' ? stores.global : stores.device;
+        if (!store || typeof store.preferenceCall !== 'function') {
+          throw dataError('原生设置入口不可用，未切换旧写入路径', 'BW_NATIVE_PREFERENCE_UNAVAILABLE');
+        }
+        return store.preferenceCall(input).then(function (record) {
+          preferenceContext.assertCurrent(preferenceLease);
+          return record;
+        });
+      } : undefined
     });
     if (!preferences || typeof preferences.attach !== 'function') {
       throw new RuntimeError(

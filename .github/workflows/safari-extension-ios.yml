@@ -377,6 +377,12 @@ jobs:
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeFavoritesService.swift ios/BWReader/Tests/NativeFavorites/main.swift -o "$RUNNER_TEMP/native-favorites-test"
           "$RUNNER_TEMP/native-favorites-test"
 
+      - name: Verify native preferences parity and transactions
+        run: |
+          node ios/BWReader/Tests/NativePreferences/fixtures.cjs "$RUNNER_TEMP/native-preferences-fixtures.json"
+          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativePreferences.swift ios/BWReader/Tests/NativePreferences/main.swift -o "$RUNNER_TEMP/native-preferences-test"
+          "$RUNNER_TEMP/native-preferences-test" "$RUNNER_TEMP/native-preferences-fixtures.json"
+
       - name: Verify native Japanese dictionary parity
         run: |
           node ios/BWReader/Tests/NativeJapaneseDictionary/fixtures.mjs "$RUNNER_TEMP/native-dictionary-fixtures.json"
