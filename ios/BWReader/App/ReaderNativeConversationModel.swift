@@ -262,6 +262,15 @@ final class ReaderNativeConversationModel: ObservableObject {
     var commandHandler: (([String: Any]) async -> String?)?
     var inspectionHandler: (([String: Any]) async -> [String: Any])?
     var imageHandler: ((String, String) async throws -> Data)?
+    var videoRequestHandler: ((String, String, String, String) async throws -> [String: Any])?
+
+    func videoRequest(path: String, method: String, body: String) async throws -> [String: Any] {
+        guard let videoRequestHandler else { throw URLError(.resourceUnavailable) }
+        let ticket = generation
+        let result = try await videoRequestHandler(scope, path, method, body)
+        guard ticket == generation, !Task.isCancelled else { throw CancellationError() }
+        return result
+    }
 
     private let inlineMedia = ReaderNativeInlineMedia()
     private func containsMediaDocument(_ content: String) -> Bool {

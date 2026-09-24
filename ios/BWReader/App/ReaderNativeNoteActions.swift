@@ -8,6 +8,7 @@ enum ReaderNativeNoteActions {
     static func slot(_ note: [String:Any]) -> String? {
         if note["card"] is [String:Any] { return "card" }
         if note["html"] is [String:Any] { return "html" }
+        if note["video"] is [String:Any] { return "video" }
         return nil
     }
     static func binding(_ note: [String:Any]) -> [String:Any]? {
@@ -23,6 +24,23 @@ enum ReaderNativeNoteActions {
               let action = input["action"] as? String else { throw ReaderNativeNoteRules.NoteError.invalid("卡片身份") }
         var body: [String:Any] = ["file":file,"id":id]
         if action == "remove" { return Request(method:"DELETE",body:body) }
+        if action == "video" {
+            guard var video = note["video"] as? [String:Any], let patch = input["changes"] as? [String:Any],
+                  let id = video["id"] as? String, patch["id"] as? String == id,
+                  Set(patch.keys).isSubset(of: ["id","start","end","rate","loop","cc"]) else {
+                throw ReaderNativeNoteRules.NoteError.invalid("视频已改变")
+            }
+            for (key,value) in patch {
+                if ["start","end","rate"].contains(key) {
+                    guard let n = ReaderNativeStrokeRules.numeric(value), n >= 0, n <= 100_000 else { throw ReaderNativeNoteRules.NoteError.invalid("视频时间或速度") }
+                } else if ["loop","cc"].contains(key) {
+                    guard let flag = value as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else { throw ReaderNativeNoteRules.NoteError.invalid("视频开关") }
+                }
+                video[key] = value
+            }
+            body["video"] = video
+            return Request(method:"PATCH",body:body)
+        }
         if action == "ink" {
             guard slot(note) != nil, let raw = input["geometry"] as? String,
                   let data = raw.data(using:.utf8), let supplied = try? JSONSerialization.jsonObject(with:data),

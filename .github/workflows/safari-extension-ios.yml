@@ -411,7 +411,7 @@ jobs:
       - name: Verify native preferences parity and transactions
         run: |
           node ios/BWReader/Tests/NativePreferences/fixtures.cjs "$RUNNER_TEMP/native-preferences-fixtures.json"
-          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativePreferences.swift ios/BWReader/Tests/NativePreferences/main.swift -o "$RUNNER_TEMP/native-preferences-test"
+          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativePreferences.swift ios/BWReader/App/ReaderNativeVideoPreferences.swift ios/BWReader/Tests/NativePreferences/main.swift -o "$RUNNER_TEMP/native-preferences-test"
           "$RUNNER_TEMP/native-preferences-test" "$RUNNER_TEMP/native-preferences-fixtures.json"
 
       - name: Verify native Japanese dictionary parity

@@ -43,3 +43,25 @@ try global.execute("UPDATE records SET json='{}' WHERE collection='user-settings
 do { _ = try p.raw(entry); preconditionFailure("corrupt record treated as default") }
 catch {}
 print("Native preferences: 55 keys, browser envelope parity, scope isolation, CAS, replay, rollback and corruption checks passed")
+
+let videoStore = try ReaderNativeDataStore(path: ":memory:")
+let video = ReaderNativeVideoPreferences(store: videoStore, deviceID: "video-test")
+_ = try video.request(method: "POST", body: #"{"patch":{"w":520,"showEn":true}}"#)
+let secondVideo = try video.request(method: "POST", body: #"{"patch":{"subOut":true}}"#)
+let videoPrefs = secondVideo["prefs"] as! [String:Any]
+precondition(videoPrefs["w"] as? Int == 520 && videoPrefs["showEn"] as? Bool == true && videoPrefs["subOut"] as? Bool == true)
+let videoRow = try videoStore.record(collection: "native-video-player-prefs", id: "video-test:video-player-prefs")!
+let videoEnvelope = try JSONSerialization.jsonObject(with: Data(videoRow.json.utf8)) as! [String:Any]
+let videoValue = videoEnvelope["value"] as! [String:Any]
+precondition(videoValue["deviceId"] as? String == "video-test" && R.same(videoValue["payload"]!, videoPrefs))
+try videoStore.execute("CREATE TRIGGER fail_video BEFORE INSERT ON journal BEGIN SELECT RAISE(ABORT, 'journal failed'); END")
+do { _ = try video.request(method: "POST", body: #"{"patch":{"w":900}}"#); preconditionFailure("video partial write") }
+catch is ReaderNativeDataStore.StoreError {}
+let unchangedVideo = try video.request(method: "GET", body: "")
+precondition(R.same(unchangedVideo, secondVideo))
+try videoStore.execute("DROP TRIGGER fail_video")
+do { _ = try video.request(method: "POST", body: #"{"patch":{"showEn":1}}"#); preconditionFailure("video switch accepted number") }
+catch {}
+let otherVideo = try ReaderNativeVideoPreferences(store: videoStore, deviceID: "other").request(method: "GET", body: "")
+precondition((otherVideo["prefs"] as! [String:Any]).isEmpty)
+print("Native video preferences: compatibility, merge, rollback and device isolation passed")

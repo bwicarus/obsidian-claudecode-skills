@@ -45,6 +45,11 @@ if (window.__bwPwaProviderOnly) return;
   var _saveT = null;
   function _savePrefs(patch) {
     for (var k in patch) _prefs[k] = patch[k];
+    if (window.__BW_NATIVE_VIDEO_ISLAND__) {
+      fetch(PREFS_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ patch: patch }) })
+        .catch(function (error) { alert('播放器设置保存失败：' + error); });
+      return;
+    }
     clearTimeout(_saveT);
     _saveT = setTimeout(function () {
       try { fetch(PREFS_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ patch: patch }), keepalive: true }).catch(function () {}); } catch (e) {}
@@ -59,7 +64,7 @@ if (window.__bwPwaProviderOnly) return;
   //   仅 start(t=秒)B 站 URL 支持,end/loop 不支持。
   function vEmbedSrc(v) {
     if (_isBili(v)) {
-      var bp = ['bvid=' + encodeURIComponent(v.id), 'autoplay=1', 'danmaku=0', 'high_quality=1', 'p=1'];
+      var bp = [/^av[0-9]+$/.test(v.id) ? 'aid=' + v.id.slice(2) : 'bvid=' + encodeURIComponent(v.id), 'autoplay=1', 'danmaku=0', 'high_quality=1', 'p=1'];
       if (v.start) bp.push('t=' + Math.max(0, v.start | 0));
       // player.bilibili.com 会把 iPad/WebKit Mobile 重定向到这个官方移动播放器。
       // App 直接使用实际目的地，避免在 iframe 内多一次可被 CSP/导航策略截断的跳转。
@@ -351,7 +356,11 @@ if (window.__bwPwaProviderOnly) return;
     box.querySelector('.rcvp-hq').addEventListener('click', function () { _toggleSub('hq', false); });
     box.querySelector('.rcvp-en-tg').addEventListener('click', function () { _showEn = !_showEn; _applySubUI(); _savePrefs({ showEn: _showEn }); });
     box.querySelector('.rcvp-pos-tg').addEventListener('click', function () { _subOutside = !_subOutside; _applySubUI(); _savePrefs({ subOut: _subOutside }); });
-    box.querySelector('.rcvp-rm').addEventListener('click', function () { try { cur && cur.onRemove && cur.onRemove(); } catch (e) {} close(); });
+    box.querySelector('.rcvp-rm').addEventListener('click', function () {
+      var target = cur;
+      Promise.resolve().then(function () { return target && target.onRemove && target.onRemove(); })
+        .then(function () { if (cur === target) close(); }).catch(function (error) { alert('移除视频失败：' + error); });
+    });
     box.querySelector('.rcvp-x').addEventListener('click', close);
   }
 
@@ -506,7 +515,7 @@ if (window.__bwPwaProviderOnly) return;
     var _bili = _isBili({ src: opts.src, id: opts.id });
     cur = {
       v: { id: opts.id, start: opts.start | 0, end: opts.end | 0, loop: !!opts.loop, rate: parseFloat(opts.rate) || 1, cc: opts.cc, src: (_bili ? 'bili' : 'yt') },
-      noteId: opts.noteId || null, onChange: opts.onChange || null, onRemove: opts.onRemove || null,
+      noteId: opts.noteId || null, onChange: opts.onChange || null, onRemove: opts.onRemove || null, onClose: opts.onClose || null,
     };
     box.classList.toggle('rcvp-bili', _bili);   // B 站:CSS 隐掉 YT 专属控件(字幕/倍速/起止钉/循环/字幕列表)
     // 换视频重置字幕/进度/字幕列表
@@ -534,11 +543,14 @@ if (window.__bwPwaProviderOnly) return;
     _loadPrefs(function () { _place(); if (!_bili) _applySubUI(); });   // 服务器 prefs 到手 → 再应用一次(首次开浮层生效);B站不碰字幕 UI
   }
   function close() {
+    var onClose = cur && cur.onClose;
+    _subPoll += 1;
     _subStop(); _sub = null;
     clearTimeout(_readyTimer); _readyTimer = null;
     if (iframe) iframe.src = 'about:blank';   // 停播(不 reparent)
     if (box) box.style.display = 'none';
     cur = null;
+    if (onClose) onClose();
   }
 
   RC.videoPlayer = { open: open, close: close, isOpen: function () { return !!(box && box.style.display !== 'none' && cur); } };

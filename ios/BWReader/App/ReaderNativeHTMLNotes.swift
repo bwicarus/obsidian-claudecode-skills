@@ -10,9 +10,11 @@ enum ReaderNativeHTMLNotes {
     static func project(_ notes:[[String:Any]],bookID:String,page:Int,pinned:Set<String>) throws -> Snapshot {
         var result = Snapshot()
         for note in notes {
-            guard ReaderNativeNoteActions.slot(note) == "html", let html = note["html"] as? [String:Any],
+            guard ["html","video"].contains(ReaderNativeNoteActions.slot(note) ?? ""),
                   let id = note["id"] as? String, let anchor = note["anchor"] as? [String:Any],
                   anchor["kind"] as? String == "pdf" else { continue }
+            let video = note["video"] as? [String:Any]
+            let html = note["html"] as? [String:Any] ?? ["label":video?["title"] ?? "视频","form":video?["form"] ?? "full"]
             let bind = ReaderNativeNoteActions.binding(note)
             let anchorPage = (anchor["page"] as? NSNumber)?.intValue ?? 0
             let bindPage = (bind?["page"] as? NSNumber)?.intValue ?? 0
@@ -36,9 +38,15 @@ enum ReaderNativeHTMLNotes {
                     if let route = mediaRoute(source) { images[source] = action("image-" + String(index),resource:route) }
                 }
             }
-            let part: [String:Any] = ["id":uid + "-html","kind":"general","title":label,"status":"saved","actionId":action("inspect"),
+            var part: [String:Any] = ["id":uid + "-html","kind":"general","title":label,"status":"saved","actionId":action("inspect"),
                 "data":["text":content,"format":html["isHtml"] as? Bool == true ? "html":"text",
                     "selectId":action("select"),"pinId":action("pin"),"dragId":controls["move"]!,"pinned":pinned.contains(cid),"inlineImages":images]]
+            if var video {
+                video["title"] = label; video["noteId"] = id; video["changeID"] = action("video"); video["removeID"] = controls["remove"]
+                part["kind"] = "videos"
+                part["data"] = ["items":[["mediaID":uid + "-video", "title":label,"video":video]]]
+                controls.removeValue(forKey:"favorite"); controls.removeValue(forKey:"anchor")
+            }
             let form = html["form"] as? String ?? (note["collapsed"] as? Bool == true ? "dot":"full")
             let geometry = String(decoding:try JSONSerialization.data(withJSONObject:ReaderNativeNoteActions.geometry(note),options:[.sortedKeys,.withoutEscapingSlashes]),as:UTF8.self)
             result.placements.append(["id":uid,"noteId":id,"source":"note","title":label,"bound":bind != nil,"pinned":bind != nil,

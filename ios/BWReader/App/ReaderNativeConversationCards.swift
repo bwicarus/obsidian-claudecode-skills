@@ -302,7 +302,7 @@ private struct ReaderNativeConversationArtifactCard: View {
                 weatherContent
             } else if part.kind == "news" {
                 newsContent
-            } else if part.kind == "images" {
+            } else if part.kind == "images" || part.kind == "videos" {
                 let items = (part.data["items"] as? [[String: Any]] ?? []).compactMap(ReaderNativeImageItem.init)
                 ForEach(items) { item in ReaderNativeImageCard(item: item, model: model) }
                 if items.isEmpty { Text("此卡片的图片已移除。").font(.caption).foregroundStyle(.secondary) }

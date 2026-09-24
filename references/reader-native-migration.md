@@ -523,7 +523,19 @@ Review-card navigation now commits its recovery position through the native queu
 changing the visible question. Duplicate navigation joins the same operation; failed saves,
 changed cards and expired queue leases retain the previous question. Earlier staged ratings
 and queued cache writes settle before selecting a new card. The 100 focused review checks
-passed; Swift navigation cases and App compilation are pending for this stage.
+passed; Swift navigation cases and App compilation passed Apple run `35963783020`
+(`918408ca`).
+
+User clarified that video playback keeps localized WebKit, like the existing EPUB
+body exception. Video cards now expose native thumbnail/play/selection/remove controls;
+opening playback creates a separate WebKit island with only the packaged player module.
+Closing or backgrounding releases it, its network work and subtitle timers. The player
+retains subtitles, transcript, start/end, speed and loop behavior; its narrow native bridge
+reads/writes the existing device preference record and requests subtitles through the
+registered gateway. Video note edits retain the original ID and other playback fields.
+YouTube embed identity uses the installed app's bundle ID, per the official WebView
+guidance (https://developers.google.com/youtube/terms/required-minimum-functionality).
+This stage is awaiting Apple compilation and physical-device playback validation.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

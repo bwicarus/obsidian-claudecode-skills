@@ -395,3 +395,12 @@ do { _ = try settingsWriter.perform(invalidCrop); fatalError("empty crop accepte
 let otherSettings = ReaderNativeBookProjection(store: settingsStore)
 check(try otherSettings.state("book-crop", bookID: "different-book").payload == nil, "book settings leaked")
 print("Native book settings: language order, fractional crop, revision conflict, replay and rollback passed")
+
+let originalVideo: [String:Any] = ["id":"video-note", "anchor":["kind":"pdf","page":1,"x":20,"y":30],
+    "video":["id":"dQw4w9WgXcQ","src":"yt","title":"original","start":2,"end":19,"cc":true],"strokes":[]]
+let videoChange = try ReaderNativeNoteActions.request(["id":"video-note","action":"video",
+    "changes":["id":"dQw4w9WgXcQ","start":8,"loop":true]],note:originalVideo,file:book,now:900)
+let changedVideo = videoChange.body["video"] as! [String:Any]
+check(changedVideo["start"] as? Int == 8 && changedVideo["end"] as? Int == 19 && changedVideo["src"] as? String == "yt", "video patch destroyed prior playback fields")
+do { _ = try ReaderNativeNoteActions.request(["id":"video-note","action":"video","changes":["id":"different"]],note:originalVideo,file:book,now:900); fatalError("stale video replaced") }
+catch ReaderNativeNoteRules.NoteError.invalid {}

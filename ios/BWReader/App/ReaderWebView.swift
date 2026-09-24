@@ -1319,7 +1319,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                   let digest = currentLocalBookContentSHA256 else { throw ReaderNativeBookStore.MutationError.unavailable }
             let store = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
             let notes = try ReaderNativeBookProjection(store:store).state("document-notes-legacy",bookID:book.id).payload as? [[String:Any]] ?? []
-            guard let note = notes.first(where: { $0["id"] as? String == action.noteID }), let html = note["html"] as? [String:Any] else {
+            guard let note = notes.first(where: { $0["id"] as? String == action.noteID }),
+                  let html = note["html"] as? [String:Any] ?? note["video"] as? [String:Any] else {
                 throw ReaderNativeNoteRules.NoteError.missing
             }
             let outer = command["action"] as? String
@@ -1380,6 +1381,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             case "resize": input["changes"] = value
             case "remove", "trash": input["action"] = "remove"
             case "ink": input = value; input["action"] = "ink"; input["id"] = action.noteID
+            case "video": input["action"] = "video"; input["changes"] = value
             case "inspect": return ["ok":true]
             default: throw ReaderNativeNoteRules.NoteError.invalid("卡片动作")
             }
@@ -3096,6 +3098,22 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeConversation.inspectionHandler = { [weak self] command in
             guard let self else { return ["ok": false, "error": "阅读页已关闭"] }
             return await self.requestNativeConversationCommand(command)
+        }
+        nativeConversation.videoRequestHandler = { [weak self] scope, path, method, body in
+            guard let self, scope == self.nativeConversation.scope, self.isTrustedReaderURL(self.webView.url),
+                  ReaderNativeVideoPlayer.Coordinator.allowed(path: path, method: method) else { throw CancellationError() }
+            if path == "/pdf/api/video-player-prefs" {
+                guard let deviceID = self.nativeReadingStoreDeviceID else { throw URLError(.resourceUnavailable) }
+                let store = try self.nativeDataStoreHost.bridge(for: "bw-reader-native-v1-device").store
+                guard try store.meta("legacyImport") == "done" else { throw URLError(.resourceUnavailable) }
+                let result = try ReaderNativeVideoPreferences(store: store, deviceID: deviceID).request(method: method, body: body)
+                return ["status": 200, "body": String(decoding: try JSONSerialization.data(withJSONObject: result), as: UTF8.self)]
+            }
+            guard let gateway = self.nativeServerGateway else { throw URLError(.resourceUnavailable) }
+            let surface: ReaderNativeInterfaceSurface = self.currentLocalBook?.format == .epub ? .epub : .pdf
+            let response = try await gateway.fetchData(path: path, method: method, surface: surface)
+            guard scope == self.nativeConversation.scope, response.data.count <= 8 * 1_024 * 1_024 else { throw CancellationError() }
+            return ["status": response.status, "body": String(decoding: response.data, as: UTF8.self)]
         }
         nativeConversation.imageHandler = { [weak self] scope, id in
             guard let self, let base = self.localRuntimeServer?.baseURL,

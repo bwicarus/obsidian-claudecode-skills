@@ -129,6 +129,8 @@ private struct ReaderNativeCardHTML: View {
                                              font: .preferredFont(forTextStyle: .body), color: ReaderNativeCardInk.text)
                 case .dictionary(let entry):
                     ReaderNativeCardDictionary(entry: entry)
+                case .video(let video):
+                    if let imageModel { ReaderNativeVideoButton(video: video, model: imageModel) }
                 }
             }
         }
@@ -151,6 +153,7 @@ private enum ReaderNativeCardHTMLBlock {
     case general(String)
     case rich(String)
     case dictionary(ReaderNativeCardDictionaryEntry)
+    case video(ReaderNativeVideo)
 }
 
 @MainActor
@@ -179,7 +182,16 @@ private enum ReaderNativeCardHTMLParser {
                 pending += (try? node.outerHtml()) ?? ""
                 continue
             }
-            if element.hasClass("vc-dict-sec") || element.hasClass("rc-note-dict") {
+            let videoButtons = (try? element.select(".vc-vg-play[data-video-id]").array()) ?? []
+            if !videoButtons.isEmpty {
+                flush()
+                for button in videoButtons {
+                    if let video = ReaderNativeVideo(["id":(try? button.attr("data-video-id")) ?? "",
+                        "src":(try? button.attr("data-video-src")) ?? "yt", "title":(try? button.attr("data-video-title")) ?? "视频"]) {
+                        result.append(.video(video))
+                    }
+                }
+            } else if element.hasClass("vc-dict-sec") || element.hasClass("rc-note-dict") {
                 flush(); result.append(.dictionary(dictionary(element)))
             } else if element.hasClass("vc-if-f") {
                 flush()

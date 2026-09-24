@@ -12,6 +12,7 @@ struct ReaderNativeImageItem: Identifiable {
     let map: ReaderNativeMapData?
     let selectID: String
     let removeID: String
+    let video: ReaderNativeVideo?
 
     init?(_ value: [String: Any]) {
         guard let id = value["mediaID"] as? String else { return nil }
@@ -25,6 +26,7 @@ struct ReaderNativeImageItem: Identifiable {
         map = (value["map"] as? [String: Any]).flatMap(ReaderNativeMapData.init)
         selectID = value["selectID"] as? String ?? ""
         removeID = value["removeID"] as? String ?? ""
+        video = (value["video"] as? [String: Any]).flatMap(ReaderNativeVideo.init)
     }
 }
 
@@ -39,7 +41,15 @@ struct ReaderNativeImageCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let map = item.map {
+            if item.video != nil {
+                Button { viewing = true } label: {
+                    ZStack {
+                        if let image { Image(uiImage: image).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: 230) }
+                        else { Color.black.frame(height: 160) }
+                        Image(systemName: "play.circle.fill").font(.system(size: 48)).foregroundStyle(.white)
+                    }.clipShape(RoundedRectangle(cornerRadius: 10))
+                }.buttonStyle(.plain).accessibilityLabel("播放视频：\(item.title)")
+            } else if let map = item.map {
                 Button { viewing = true } label: {
                     ReaderNativeMap(data: map, interactive: false).frame(height: 180)
                         .clipShape(RoundedRectangle(cornerRadius: 10)).allowsHitTesting(false)
@@ -99,7 +109,8 @@ struct ReaderNativeImageCard: View {
         }
         .sheet(isPresented: $viewing) {
             NavigationStack {
-                if let map = item.map { ReaderNativeMap(data: map, interactive: true).ignoresSafeArea(edges: .bottom) }
+                if let video = item.video { ReaderNativeVideoPlayer(video: video, model: model, onClose: { viewing = false }) }
+                else if let map = item.map { ReaderNativeMap(data: map, interactive: true).ignoresSafeArea(edges: .bottom) }
                 else if let image { ReaderNativeZoomImage(image: image).background(Color.black) }
             }
             .overlay(alignment: .topTrailing) {

@@ -5699,6 +5699,7 @@ if (window.__bwPwaProviderOnly) return;
         var ref = card.kind === 'videos' ? _videoCardRef(item) : null;
         var id = 'card:' + (card.cid || '') + '/item:' + index;
         return { index: index, title: item.title || '', source: item.src || '',
+          video: ref ? { id: ref.id, src: ref.src, title: item.title || '' } : null,
           route: ref ? _videoCardThumb(item, ref) : _cardImageURL(item),
           sourceURL: _cardHttpsURL(item.page || item.source_url || (ref ? ref.url : item.url)),
           selected: !!(_ctxSelectionRegistry() && _ctxSelectionRegistry().isSelected(id)),

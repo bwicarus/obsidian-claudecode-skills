@@ -147,8 +147,8 @@ enum ReaderNativeConversationScript {
           const card = mounted?.cid && mounted.cid === part.card.cid ? mounted : part.card, data = card.data || {};
           const result = artifact(id, node, card.title || '生成物');
           actions.get(result.actionId).inspect = () => ({ kind: card.kind || 'artifact', title: result.title, content: card });
-          if (card.kind === 'images' && rc().voiceCard?.mediaPresentation) {
-            result.kind = 'images';
+          if (['images', 'videos'].includes(card.kind) && rc().voiceCard?.mediaPresentation) {
+            result.kind = card.kind;
             const root = node.matches('.vc-card') ? node : node.querySelector('.vc-card');
             result.data.items = rc().voiceCard.mediaPresentation(card).map(item => {
               const mediaID = registerAction(id + '-image-' + item.index, node, () => {});
@@ -158,7 +158,7 @@ enum ReaderNativeConversationScript {
                 return current.route;
               };
               return { index: item.index, title: text(item.title, 240), source: text(item.source, 120),
-                sourceURL: text(item.sourceURL, 4096), mediaID, selected: item.selected, isMap: item.isMap, map: item.map,
+                sourceURL: text(item.sourceURL, 4096), mediaID, video: item.video, selected: item.selected, isMap: item.isMap, map: item.map,
                 selectID: root ? registerAction(id + '-image-select-' + item.index, root, () => rc().voiceCard.mediaAction(root, card, item.index, 'toggle')) : '',
                 removeID: root ? registerAction(id + '-image-remove-' + item.index, root, () => rc().voiceCard.mediaAction(root, card, item.index, 'remove')) : '' };
             });
