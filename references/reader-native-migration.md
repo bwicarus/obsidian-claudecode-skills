@@ -494,6 +494,20 @@ is retained and used to generate native comparison fixtures. Tool action dispatc
 historical message assembly are still compatibility dependencies; this does not remove
 the complete old conversation runtime. Full Reader checks found one obsolete busy-state
 assertion; the assertion now includes the new request-preparation boundary.
+Native/browser answer-parsing comparison and full App compilation passed Apple run
+`35960572200` (`b9c60546`).
+
+History reads now prepare message classification, existing valid history/turn identity,
+plain response text and subtitle/follow-up behavior in the native history actor. The raw
+server response and card/attachment data remain unchanged; native display metadata is
+non-enumerable in the compatibility adapter and cannot leak into an upserted original.
+Malformed rows retain their positions for existing per-row recovery. Legacy records without
+a valid stable ID keep their previous fallback identity. Mode switches and clearing still
+fence late history responses. Effect controls and historical artifact materialization remain
+compatibility work; this is not a claim that the hidden conversation shell has been removed.
+Native composer commands also wait for local send acceptance after context preparation,
+without waiting for the streamed answer. Preparation failure retains the draft and reports
+the actual error; a successful local acceptance does not claim server delivery.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

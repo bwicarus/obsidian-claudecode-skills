@@ -50,6 +50,27 @@ test('changing conversation mode during preparation discards the stale turn and 
   assert.equal(await first,undefined);
   assert.equal(vm.runInContext('_preparingNativeContext',runtime),false);
 });
+
+test('native composer gets acceptance before completion and gets a rejection when preparation fails', async()=>{
+  const source=readFileSync(new URL('../../_server_deploy/static/pdf/rc-assistant.js',import.meta.url),'utf8');
+  const wrapper=source.slice(source.indexOf('  window.__asstSendAccepted ='),source.indexOf('  window.__asstBusy ='));
+  let finish;
+  const runtime={window:{},send:async(text,opts)=>{
+    opts.onAccepted({ok:true}); await new Promise(resolve=>{finish=resolve;});
+  }};
+  vm.runInNewContext(wrapper,runtime);
+  assert.equal((await runtime.window.__asstSendAccepted('hello')).ok,true);
+  finish();
+
+  const prefix=source.slice(source.indexOf('var _preparingNativeContext = false;'),source.indexOf('var _historyWasLoading = _historyLoadCount > 0;'));
+  const actual={window:{__bwNativeAssistantStream:{async prepare(){throw new Error('source expired');}}},
+    streaming:false,_clearing:false,_modeEpoch:0,_assistantMode:'normal',_chatUrl:()=>'/api/assistant/chat',ctx:()=>({selection:'語'}),
+    addMsg(){},esc:x=>x,ta:{value:''},autorow(){}};
+  vm.runInNewContext(prefix+'throw new Error("unexpected submission"); }'+wrapper,actual);
+  const rejected=await actual.window.__asstSendAccepted('请解释');
+  assert.equal(rejected.ok,false); assert.match(rejected.error,/source expired/);
+  assert.equal(actual.ta.value,'请解释');
+});
 test('native stream consumes structured events once and waits for native completion',async()=>{
   const {api,requests,resolve}=setup(), events=[];
   const result=api.run('/api/assistant/chat',{message:'test',omit:undefined},(...args)=>events.push(args));
@@ -111,4 +132,18 @@ test('native history adapter retains status and payload; failure does not retry 
   assert.deepEqual(JSON.parse(JSON.stringify(await response.json())),{ok:false});
   await assert.rejects(window.__bwNativeAssistantHistory.request('/api/assistant/clear','clear','normal'),/unknown clear/);
   assert.equal(calls.length,2);
+});
+
+test('native history projection is read-only metadata and never leaks into saved original messages', async()=>{
+  const message={role:'assistant',content:'[语气:认真]正文',card:{cid:'same',html:'<b>original</b>'}};
+  const plan={kind:'card',mode:'normal',turnID:'hist_normal_x'};
+  const window={webkit:{messageHandlers:{bwNativeAssistantStream:{async postMessage(){
+    return {ok:true,status:200,body:JSON.stringify({ok:true,messages:[message]}),presentation:JSON.stringify([plan])};
+  }}}}};window.top=window;
+  vm.runInNewContext(script,{window,crypto:{randomUUID}});
+  const response=await window.__bwNativeAssistantHistory.request('/api/assistant/history','read','normal');
+  const row=(await response.json()).messages[0];
+  assert.equal(row.__bwNativeHistory.turnID,plan.turnID);
+  assert.deepEqual(JSON.parse(JSON.stringify(row)),message);
+  assert.throws(()=>{row.__bwNativeHistory={kind:'user'};},TypeError);
 });

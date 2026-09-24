@@ -1042,10 +1042,9 @@ enum ReaderNativeConversationScript {
               // visible current call cannot accept its typed input.
               if (typeof window.__vcSendText !== 'function' || window.__vcSendText(command.text.trim()) !== true) return { ok: false, error: '当前语音未接收文字，请稍后重试' };
             } else {
-              // Existing send owns context/tools/history. Review intentionally
-              // remains its separate persistent text conversation, as before.
-              const pending = window.__asstSend(command.text.trim());
-              if (pending?.catch) pending.catch(schedule);
+              if (typeof window.__asstSendAccepted !== 'function') return {ok:false,error:'发送入口尚未准备好'};
+              const receipt = await window.__asstSendAccepted(command.text.trim());
+              if (receipt?.ok !== true) return {ok:false,error:receipt?.error || '消息未被接收'};
             }
           } else if (action === 'toggleAssistant') {
             if (!drawer()?.setTab) return { ok: false, error: '侧栏尚未准备好' };

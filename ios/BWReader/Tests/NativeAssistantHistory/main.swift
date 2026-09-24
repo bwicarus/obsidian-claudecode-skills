@@ -25,6 +25,26 @@ actor Network {
 
 @main struct Test {
     static func main() async throws {
+        let card: [String: Any] = ["gid": "stable-card", "cards": [["front": "Q", "back": "A"]]]
+        let rows: [Any] = [
+            ["role": "user", "history_id": "hu1", "content": "selected", "figures": [["id": "figure1"]]],
+            ["role": "assistant", "turn_id": "t1", "content": "[语气:认真]正文[[FOLLOWUP]]为什么？[[/FOLLOWUP]]", "via": "voice"],
+            ["role": "assistant", "history_id": "hp", "parts": [["kind": "card", "data": card]]],
+            ["role": "assistant", "history_id": "hc", "card": card],
+            NSNull(),
+            ["role": "assistant", "turn_id": "invalid/id", "id": "valid-but-not-chosen", "content": "legacy"]
+        ]
+        let original = try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])
+        let plans = try JSONSerialization.jsonObject(with: H.presentations(rows, mode: "normal")) as! [Any]
+        let user = plans[0] as! [String: Any], answer = plans[1] as! [String: Any]
+        precondition(user["turnID"] as? String == "hist_normal_hu1" && user["kind"] as? String == "user")
+        precondition(answer["text"] as? String == "正文" && answer["subtitle"] as? Bool == true)
+        precondition(answer["followups"] as? [String] == ["为什么？"])
+        precondition((plans[2] as? [String: Any])?["kind"] as? String == "parts")
+        precondition((plans[3] as? [String: Any])?["kind"] as? String == "card")
+        precondition(plans[4] is NSNull && (plans[5] as? [String: Any])?["turnID"] == nil)
+        let unchanged = try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])
+        precondition(original == unchanged, "history source or card identity changed")
         let normal = try H.route("/api/assistant/history", operation:"read",mode:"normal")
         let review = try H.route("/api/assistant/history?assistant_mode=review", operation:"read",mode:"review")
         let clear = try H.route("/api/assistant/clear", operation:"clear",mode:"normal")
@@ -44,6 +64,7 @@ actor Network {
         let results = try await (first, second)
         let count = await network.count()
         precondition(count == 1 && results.0.body == good.body && results.1.body == good.body)
+        precondition(results.0.presentation != nil && results.0.presentation == results.1.presentation)
 
         // Cancellation-insensitive transport simulates a late URLSession reply.
         let delayed = Network(held:normal.path)

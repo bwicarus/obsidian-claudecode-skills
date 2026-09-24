@@ -51,7 +51,7 @@ test("send, Enter, microphone and mode changes cannot cross clear boundary", () 
   const sendBody = functionBody("send", "_setClearingUi");
   const modeBody = functionBody("setAssistantMode", "loadHistory");
 
-  assert.match(sendBody, /if \(streaming \|\| _clearing\) return/);
+  assert.match(sendBody, /if \(streaming \|\| _clearing \|\| _preparingNativeContext\) \{ accept\(false/);
   assert.match(SOURCE, /window\.__asstBusy = function \(\) \{ return !!\(streaming \|\| _clearing \|\| _preparingNativeContext\); \}/);
   assert.match(
     SOURCE,

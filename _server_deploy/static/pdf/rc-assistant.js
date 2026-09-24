@@ -2731,8 +2731,8 @@
 
   var _preparingNativeContext = false;
   async function send(text, opts) {
-    if (streaming || _clearing) return;
-    if (_preparingNativeContext) return;
+    function accept(ok, error) { try { opts?.onAccepted?.({ok:ok, error:error || ''}); } catch (_) {} }
+    if (streaming || _clearing || _preparingNativeContext) { accept(false, '上一条消息仍在处理中'); return; }
     text = (text || '').trim();
     var turnMode = _assistantMode, turnEpoch = _modeEpoch, turnChatUrl = _chatUrl(turnMode);
     var selections = window.BWReaderRuntime && window.BWReaderRuntime.contextSelections;
@@ -2741,10 +2741,11 @@
       try { await selections.settle(); }
       catch (error) {
         addMsg('asst-note', esc('上下文未准备好，消息未发送：' + (error.message || error)));
+        accept(false, '上下文未准备好：' + (error.message || error));
         try { if (!ta.value) { ta.value = text; autorow(); } } catch (_) {}
         return;
       } finally { _preparingNativeContext = false; }
-      if (turnEpoch !== _modeEpoch || streaming || _clearing) return;
+      if (turnEpoch !== _modeEpoch || streaming || _clearing) { accept(false, '会话已切换或仍在处理中'); return; }
     }
     // 66:2.1(WebRTC)通话中打字直达实时模型(输入框紫光=在此状态);消费成功=不走文字助手管线
     // 复习模式必须进入独立的持久会话，不能被实时通话旁路写回普通助手历史。
@@ -2752,7 +2753,7 @@
       try {
         if (window.__vcSendText(text)) {
           try { var _ta0 = pane.querySelector('#asst-ta'); if (_ta0) { _ta0.value = ''; _ta0.style.height = 'auto'; } } catch (e) {}
-          return;
+          accept(true); return;
         }
       } catch (e) {}
     }
@@ -2777,10 +2778,11 @@
           force_effort: opts?.forceEffort || null, force_model: opts?.forceModel || null,
           voice: turnMode === 'normal' && window.__asstVoiceOn?.() ? 1 : 0
         });
-        if (turnEpoch !== _modeEpoch || streaming || _clearing) return;
+        if (turnEpoch !== _modeEpoch || streaming || _clearing) { accept(false, '会话已切换或仍在处理中'); return; }
         text = nativePrepared.message; sentCtx = nativePrepared.context;
       } catch (error) {
         addMsg('asst-note', esc('上下文未准备好，消息未发送：' + (error.message || error)));
+        accept(false, '上下文未准备好：' + (error.message || error));
         try { if (!ta.value) { ta.value = text; autorow(); } } catch (_) {}
         return;
       } finally { _preparingNativeContext = false; }
@@ -2808,7 +2810,7 @@
       else if (_hasNote) text = '讲讲这个便签';
       else if (_fs && _fs.text) text = (_fs.kind === 'formula') ? '讲讲这个公式' : '讲讲这段';
       else if (_hasSel) text = '讲讲这段';
-      else return;   // 真·空(无任何上下文)→ 不发
+      else { accept(false, '消息和选中内容均为空'); return; }
     }
     var _historyWasLoading = _historyLoadCount > 0;
     _historyEpoch++;   // pending online history may never replace a newly-started live turn
@@ -2819,6 +2821,7 @@
     try { (HOST.clearFigFocus ? HOST.clearFigFocus() : (window.__clearFigFocus && window.__clearFigFocus())); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带(经 HOST:EPUB=__clearFigAttached)
     try { window.__clearNoteAttached && HOST.clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
+    accept(true);  // accepted locally, not a claim that the server answered
     var sawCliCard = false;   // #2:本轮委托给了 CLI(make_paper/do_task)→ CLI 卡就是回答,别再单独出编排答案气泡+建议按钮
     var sawTool = false;      // ★用户设计:本轮出现工具调用 → 「工具方块」模式(回答/流程/按钮全进 turn 卡)
     _vTid = nativePrepared ? nativePrepared.turn_id : 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);   // one identity for display, persistence and resume
@@ -3045,6 +3048,15 @@
 
   // 语音对话桥(rc-voicecall agent 模式):send/忙态都在本 IIFE 内,暴露出去 → ASR 终稿直接走完整聊天管线
   window.__asstSend = send;
+  window.__asstSendAccepted = function (text) {
+    return new Promise(function (resolve) {
+      // Resolve at local acceptance, not at end-of-answer. Any earlier failure
+      // leaves the native composer intact instead of reporting a false send.
+      Promise.resolve(send(text, {onAccepted:resolve})).then(function () {
+        resolve({ok:false,error:'消息未被接收'});
+      }, function (error) { resolve({ok:false,error:String(error?.message || error)}); });
+    });
+  };
   window.__asstBusy = function () { return !!(streaming || _clearing || _preparingNativeContext); };
 
   // ㉛ 通话对话进侧栏(用户设计):S2S/rtc 端到端通话的双方句子直接进 #asst-thread,与文字对话
@@ -4115,6 +4127,7 @@
 
   function _historyTurnId(message, mode, scope) {
     message = message || {};
+    if (message.__bwNativeHistory?.mode === _modeNorm(mode) && message.__bwNativeHistory.turnID) return message.__bwNativeHistory.turnID;
     var historyId = String(message.history_id || '');
     if (/^[A-Za-z0-9_.:-]{1,160}$/.test(historyId)) {
       return 'hist_' + _modeNorm(mode) + '_' + historyId;
@@ -4152,7 +4165,8 @@
   // 把 3 分钟内待认领的 hlcard 认过来：当场渲进容器，并 upsert 把 parts 追加落库 —— 刷新回放仍可撤销。
   function _historyReplayOne(m, mode, state, target, scope, deferredActions) {
     if (!m || (m.role !== 'user' && m.role !== 'assistant')) throw new Error('invalid history record');
-    if (m.role === 'user') {
+    var nativeHistory = m.__bwNativeHistory?.mode === _modeNorm(mode) ? m.__bwNativeHistory : null;
+    if (nativeHistory ? nativeHistory.kind === 'user' : m.role === 'user') {
       state.lastQ = m.content || '';
       if (m.turn_id && RC.turnCard && RC.turnCard.renderTurn) {
         var liveUser = RC.turnCard.renderTurn(_historyTurnId(m, mode, scope),
@@ -4165,7 +4179,7 @@
       try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel, section: m.section, selection_anchor: m.sel_anchor }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}   // section/sel_anchor=EPUB 历史字段(PDF 无此字段不受影响)
       return;
     }
-    if (Array.isArray(m.parts) && m.parts.length && window.RC && RC.turnCard) {
+    if ((nativeHistory ? nativeHistory.kind === 'parts' : Array.isArray(m.parts) && m.parts.length) && window.RC && RC.turnCard) {
       // ★ 141(轮次容器)回放仍走唯一 renderPart；target 只把整批先画进 staging，成功后一次换入。
       var _rtid = _historyTurnId(m, mode, scope);
       if (!RC.turnCard.renderTurn(
@@ -4173,7 +4187,7 @@
       )) throw new Error('turn replay failed');
       return;
     }
-    if (m.card && window.__vcInfoCardEl) {   // 87:旧数据(没有 parts)→ 回落到结构化卡回放,保持向后兼容
+    if ((nativeHistory ? nativeHistory.kind === 'card' : m.card) && window.__vcInfoCardEl) {   // 87:旧数据(没有 parts)→ 回落到结构化卡回放,保持向后兼容
       var legacyCard = m.card;
       if (!legacyCard.cid) {
         legacyCard = Object.assign({}, legacyCard, {
@@ -4185,8 +4199,8 @@
       target.appendChild(ce);
       return;
     }
-    var _pf = _splitFollowups(m.content || '');
-    var historyText = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text;
+    var _pf = nativeHistory?.kind === 'answer' ? {text:nativeHistory.text,followups:nativeHistory.followups} : _splitFollowups(m.content || '');
+    var historyText = nativeHistory?.kind === 'answer' ? nativeHistory.text : ((RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text);
     var el;
     if (m.turn_id && RC.turnCard && RC.turnCard.renderTurn) {
       el = RC.turnCard.renderTurn(_historyTurnId(m, mode, scope),
@@ -4194,7 +4208,7 @@
         { historyReplay: true, meta: { via: m.via || '', threadId: m.thread_id || '', turnId: m.turn_id } });
     } else { el = addMsg('asst-a', ''); renderMd(el, historyText); }
     // 字幕模式(via=voice,Windows 语音核心逐轮落库):这句话本来就是念出来的,▶(TTS 再念)与「!」(编排质量回报)都没意义,不挂(用户 2026-09-15)
-    var _isSubtitle = m.via === 'voice';
+    var _isSubtitle = nativeHistory?.kind === 'answer' ? nativeHistory.subtitle : m.via === 'voice';
     if (!_isSubtitle) { try { _attachClipBtn(el, m, mode); } catch (_) {} }   // 66:语音回放按钮(有录音=紫;无=灰,点了 TTS 念+保存)
     try { if (m.via === 'voice' && (m.content || '').length > 120) _bubDecor(el, 'AI 回答', (function (t0) { return function () { return t0; }; })(m.content || '')); } catch (_) {}   // 87:历史语音长文=同样可拖可长按
     try { _renderFollowups(el, _pf.followups); } catch (_) {}

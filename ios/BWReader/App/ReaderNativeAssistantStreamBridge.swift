@@ -149,8 +149,10 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                 do {
                     let response = try await (operation == "read" ? history.read(route) : history.clear(route))
                     guard let self, self.epoch == lease, self.gateway.contextRevision == context else { throw CancellationError() }
-                    replyHandler(["ok": (200..<300).contains(response.status), "status": response.status,
-                                  "body": String(decoding: response.body, as: UTF8.self)], nil)
+                    var reply: [String: Any] = ["ok": (200..<300).contains(response.status), "status": response.status,
+                                                "body": String(decoding: response.body, as: UTF8.self)]
+                    if let presentation = response.presentation { reply["presentation"] = String(decoding: presentation, as: UTF8.self) }
+                    replyHandler(reply, nil)
                 } catch { replyHandler(nil, error.localizedDescription) }
             }
         } catch { replyHandler(nil, error.localizedDescription) }
@@ -216,7 +218,17 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         async request(path, operation, mode) {
           const result = await handler.postMessage({version:1, action:'history', id:crypto.randomUUID(), path, operation, mode});
           if (!result || !Number.isInteger(result.status) || typeof result.body !== 'string') throw new Error('原生历史未获确认');
-          return {ok:result.ok === true, status:result.status, json:async () => JSON.parse(result.body)};
+          return {ok:result.ok === true, status:result.status, json:async () => {
+            const body = JSON.parse(result.body);
+            if (typeof result.presentation === 'string') {
+              const plans = JSON.parse(result.presentation);
+              if (!Array.isArray(body.messages) || !Array.isArray(plans) || plans.length !== body.messages.length) throw new Error('历史消息投影不完整');
+              body.messages.forEach((message, index) => {
+                if (message && typeof message === 'object' && !Array.isArray(message)) Object.defineProperty(message, '__bwNativeHistory', {value:plans[index], enumerable:false});
+              });
+            }
+            return body;
+          }};
         }
       };
       function abortError() { const e = new Error('对话已停止'); e.name = 'AbortError'; return e; }
