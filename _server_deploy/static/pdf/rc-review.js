@@ -2335,31 +2335,41 @@
     });
   }
 
+  function _submitReviewAnswer(payload) {
+    if (_nativeReviewUI()) {
+      return _nativeQueueCall('answer', payload).then(function (receipt) {
+        if (!receipt || receipt.ok !== true) {
+          var error = new Error(String(receipt && receipt.error || '原生评分缺少回执'));
+          error.__httpStatus = Number(receipt && receipt.status) || 0;
+          if (receipt && receipt.retryable === true && !error.__httpStatus) error.name = 'TypeError';
+          throw error;
+        }
+        return receipt.value || {};
+      });
+    }
+    // @interaction review.answer.submit
+    return fetch('/pdf/api/review-answer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok || !data || data.ok === false) {
+          var failure = new Error(String(data && data.error || ('HTTP ' + response.status)));
+          failure.__httpStatus = response.status | 0;
+          throw failure;
+        }
+        return data;
+      });
+    });
+  }
+
   function _projectLegacyLocalAnswer(card, ease, aid, local, reviewedAt) {
     var cardId = Number(card && card._legacyExternalCardId || 0);
     if (!Number.isSafeInteger(cardId) || cardId <= 0) return;
     var payload = { aid: aid, card_id: cardId, ease: ease };
     // This is a best-effort projection only. The repository write above is the
     // authoritative review result and is never reverted by a Pi/Anki failure.
-    // @interaction review.answer.submit
-    fetch('/pdf/api/review-answer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).then(function (response) {
-      return response.json().catch(function () { return {}; }).then(function (data) {
-        if (!response.ok || !data || data.ok === false) {
-          var failure = new Error(String(data && data.error || ('HTTP ' + response.status)));
-          // 状态码要带出去 —— 判断"能不能重投"靠的就是它，
-          // 塞进 message 字符串里等于让下游去解析人话。
-          failure.__httpStatus = response.status | 0;
-          throw failure;
-        }
-        // ★ 这里以前只判 ok/error，把 data.next **整个扔了** —— 服务端明明已经
-        //   用 cardsInfo 把 Anki 的真 FSRS 结果回读好了。于是本地存启发式间隔、
-        //   Anki 存 FSRS 间隔，同一张卡从第一次评分起就分叉。
-        _adoptExternalSchedule(local, data && data.next, reviewedAt, aid);
-      });
+    _submitReviewAnswer(payload).then(function (data) {
+      _adoptExternalSchedule(local, data && data.next, reviewedAt, aid);
     }).catch(function (error) {
       if (_isRetryableSyncError(error) && RC.outbox &&
           typeof RC.outbox.send === 'function') {
@@ -2754,23 +2764,7 @@
       ankiCardId: String(card.id || ''),
       queue: 'pi'
     });
-    // @interaction review.answer.submit
-    return fetch('/pdf/api/review-answer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).then(function (response) {
-      return response.json().catch(function () {
-        return {};
-      }).then(function (data) {
-        if (!response.ok || !data || data.ok === false) {
-          var error = new Error(
-            String(data && data.error || ('HTTP ' + response.status))
-          );
-          error.reviewRejected = true;
-          error.__httpStatus = response.status | 0;
-          throw error;
-        }
+    return _submitReviewAnswer(payload).then(function (data) {
         if (ease === 1) {
           _patchSharedCard(card, {
             _st: 'learn',
@@ -2816,7 +2810,6 @@
           }, 'review-accepted');
         }
         delete _ratingPending[pendingKey];
-      });
     }).catch(function (error) {
       if (
         _isRetryableSyncError(error) &&

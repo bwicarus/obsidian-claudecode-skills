@@ -404,7 +404,12 @@ loading/exiting and discards obsolete card replies. Actual Anki interval adoptio
 existing native card transaction, proves the matching local rating and preserves committed
 reps/lapses. A later score/content change rejects an obsolete scheduling response. Navigation
 and external score/outbox delivery still have JavaScript compatibility operations. This stage
-requires Apple validation; it is not an installable complete-native release.
+requires Apple validation; it is not an installable complete-native release. Apple run
+`35953136025` caught use of the repository's non-negative validator for Anki's signed
+learning interval; the schedule adapter now parses signed finite values explicitly.
+Immediate external score submission also moves to the native gateway, joins matching in-flight
+answer IDs and retains their result through view cancellation. The existing account-scoped
+offline outbox remains the durable retry owner; no second unscoped retry queue is introduced.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

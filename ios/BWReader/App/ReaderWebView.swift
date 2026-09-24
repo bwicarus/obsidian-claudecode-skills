@@ -2565,7 +2565,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             try check()
             guard let gateway else { throw ReaderNativeReviewQueue.Failure(message: "复习服务连接不可用") }
             let result = try await gateway.fetchData(path: path, method: method, body: body, surface: surface)
-            try check(); return .init(status: result.status, data: result.data)
+            // Queue loads have their own lease check. A score already sent
+            // keeps its actual receipt even after the visible book changes.
+            return .init(status: result.status, data: result.data)
         })
         nativeReviewQueue = service; nativeReviewQueueContext = generation; nativeReviewQueueGatewayContext = gatewayContext
         return service
@@ -7294,6 +7296,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                         case "load": replyHandler(["ok": true, "value": try await service.load(request)], nil)
                         case "peek": replyHandler(["ok": true, "value": try service.peek() as Any? ?? NSNull()], nil)
                         case "stageRating": replyHandler(["ok": true, "value": try service.stageRating(request)], nil)
+                        case "answer": replyHandler(["ok": true, "value": try await service.answer(request)], nil)
                         case "undoRating": replyHandler(["ok": true, "value": try service.undoRating(request)], nil)
                         case "takeRating":
                             replyHandler(["ok": true, "value": try service.takeRating(lease: request["lease"] as? String ?? "", stageID: request["stageId"] as? String ?? "")], nil)

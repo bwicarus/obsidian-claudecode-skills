@@ -2438,10 +2438,7 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
   const requests = [];
   let cached, original, staged, releaseStage, holdStage = false;
   const fixture = harness({ context: { file: 'localbook:book', page: 4 },
-    fetchImpl(url) {
-      assert.equal(url, '/pdf/api/review-answer', 'only the not-yet-migrated external score adapter may fetch');
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
-    },
+    fetchImpl() { assert.fail('App review must not call browser fetch'); },
     async nativeQueue({ action, request }) {
       assert.equal(action, 'reviewQueue'); requests.push(structuredClone(request));
       if (request.operation === 'load') return { ok: true, value: {
@@ -2468,6 +2465,10 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
         assert.equal(request.stageId, staged.nativeStageID);
         const taken = staged; staged = null;
         return { ok: true, value: taken };
+      }
+      if (request.operation === 'answer') {
+        assert.equal(request.card_id, 123); assert.equal(request.ease, 3); assert.ok(request.aid);
+        return { ok: true, value: { ok: true, value: { ok: true } } };
       }
       return { ok: true };
     }
@@ -2503,7 +2504,8 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
   const after = requests.slice(beforeReload).map(r => r.operation);
   assert.equal(after.filter(op => op === 'takeRating').length, 1);
   assert.ok(after.indexOf('takeRating') < after.indexOf('load'));
-  assert.equal(fixture.calls.filter(c => c[0] === '/pdf/api/review-answer').length, 1);
+  assert.equal(requests.filter(c => c.operation === 'answer').length, 1);
+  assert.deepEqual(fixture.calls, []);
   fixture.RC.review.setMode(false);
   await flushPromises();
   assert.ok(requests.some(request => request.operation === 'cancel'));

@@ -24,6 +24,9 @@ final class ReaderNativeReviewQueue {
     private var task: Task<Response, Error>?
     private var cancelled = false
     private var stagedRating: Object?
+    private var pendingAnswers: [String: (Data, Task<Object, Never>)] = [:]
+    private var answerReceipts: [String: (Data, Object)] = [:]
+    private var answerOrder: [String] = []
     static let cacheKey = "native-review-queue-v1"
 
     init(local: @escaping () throws -> Object, read: @escaping () throws -> String?,
@@ -80,6 +83,56 @@ final class ReaderNativeReviewQueue {
         return try Self.snapshot(value)
     }
     func peek() throws -> Object? { try cached() }
+
+    /// Same endpoint and answer ID as the existing scheduler adapter. Joining
+    /// an in-flight answer does not issue another write. Durable offline retry
+    /// remains in the account-scoped command outbox until its own migration.
+    func answer(_ input: Object) async throws -> Object {
+        guard let aid = input["aid"] as? String, !aid.isEmpty, aid.utf16.count <= 240,
+              !aid.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw Failure(message: "评分缺少操作编号")
+        }
+        let card = try ReaderNativeCardRules.integer(input["card_id"], "Anki card id")
+        let ease = try ReaderNativeCardRules.integer(input["ease"], "ease")
+        guard card > 0, (1...4).contains(ease) else { throw Failure(message: "评分参数无效") }
+        let body = try Self.bytes(["aid": aid, "card_id": card, "ease": ease])
+        if let saved = answerReceipts[aid] {
+            guard saved.0 == body else { throw Failure(message: "同一评分编号的内容发生变化") }
+            return saved.1
+        }
+        if let pending = pendingAnswers[aid] {
+            guard pending.0 == body else { throw Failure(message: "同一评分编号的内容发生变化") }
+            return await pending.1.value
+        }
+        guard pendingAnswers.count < 32 else { throw Failure(message: "仍有评分等待回执，请稍后重试") }
+        let work = Task<Object, Never> { [fetch] in
+            do {
+                let response = try await fetch("/pdf/api/review-answer", "POST", body)
+                guard response.data.count <= 8 * 1024 * 1024 else {
+                    return ["ok": false, "retryable": false, "status": response.status, "error": "评分回执过大，结果待确认"]
+                }
+                let value = (try? JSONSerialization.jsonObject(with: response.data)) as? Object ?? [:]
+                if (200..<300).contains(response.status), value["ok"] as? Bool != false {
+                    return ["ok": true, "value": value]
+                }
+                return ["ok": false, "status": response.status,
+                        "retryable": [408, 429, 502, 503, 504].contains(response.status),
+                        "error": value["error"] as? String ?? "HTTP \(response.status)"]
+            } catch {
+                let network = error as NSError
+                // A cancelled/context-invalid request is not a transport failure
+                // and must not be silently re-enqueued under a later book.
+                let retry = network.domain == NSURLErrorDomain && network.code != NSURLErrorCancelled
+                return ["ok": false, "status": 0, "retryable": retry, "error": error.localizedDescription]
+            }
+        }
+        pendingAnswers[aid] = (body, work)
+        let receipt = await work.value
+        pendingAnswers.removeValue(forKey: aid)
+        answerReceipts[aid] = (body, receipt); answerOrder.append(aid)
+        while answerOrder.count > 128 { answerReceipts.removeValue(forKey: answerOrder.removeFirst()) }
+        return receipt
+    }
 
     private static func sameCard(_ left: Object, _ right: Object) -> Bool {
         for field in ["id", "note_id"] {

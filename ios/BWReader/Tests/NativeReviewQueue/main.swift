@@ -9,6 +9,8 @@ typealias Q = ReaderNativeReviewQueue
     var calls: [(String, Q.Object)] = []
     var reply: Q.Object = ["ok": true, "cards": [["id": 7, "question": "問", "answer": "答"]], "due_total": 3]
     var stamp = 10_000_000.0
+    var status = 200
+    var transportError: Error?
     lazy var service = Q(local: { [self] in
         if failLocal { throw Q.Failure(message: "repository unavailable") }; return local
     }, read: { [self] in cache }, write: { [self] text in
@@ -18,7 +20,8 @@ typealias Q = ReaderNativeReviewQueue
         let value = reply
         if hold { hold = false; await withCheckedContinuation { held = $0 } }
         if method == "POST" ? failPost : failGet { throw Q.Failure(message: "offline") }
-        return .init(status: 200, data: try JSONSerialization.data(withJSONObject: value))
+        if let transportError { throw transportError }
+        return .init(status: status, data: try JSONSerialization.data(withJSONObject: value))
     }, now: { [self] in stamp })
     func input(scope: String = "current", page: Int = 4, force: Bool = true) -> Q.Object {
         ["request": UUID().uuidString, "contextKey": "ctx-book-\(page)", "context": ["file": "localbook:book", "page": page], "scope": scope, "force": force]
@@ -145,6 +148,32 @@ typealias Q = ReaderNativeReviewQueue
         do { _ = try localScore.service.stageRating(["lease": localLease, "stageId": localID,
             "snapshot": localSnapshot, "card": first, "cardKey": "same-entity:0", "ease": 1, "revealed": true])
             preconditionFailure("stale page rated") } catch {}
+        let sender = Fixture(); sender.reply = ["ok": true, "next": ["interval": -600]]; sender.hold = true
+        let payload: Q.Object = ["aid": "rating-1", "card_id": 123, "ease": 3]
+        let sending = Task { try await sender.service.answer(payload) }
+        while sender.held == nil { await Task.yield() }
+        let duplicate = Task { try await sender.service.answer(payload) }
+        await Task.yield()
+        sender.service.invalidate() // A view leaving must not invent a failed score.
+        sender.held?.resume(); sender.held = nil
+        let sent = try await sending.value, joined = try await duplicate.value
+        precondition(ReaderNativeCardRules.same(sent, joined) && sender.calls.count == 1)
+        _ = try await sender.service.answer(payload)
+        precondition(sender.calls.count == 1)
+        var changed = payload; changed["ease"] = 1
+        do { _ = try await sender.service.answer(changed); preconditionFailure("same answer ID changed") } catch {}
+        for code in [408, 429, 500, 502, 503, 504, 409] {
+            let failure = Fixture(); failure.status = code; failure.reply = ["ok": false, "error": "rejected"]
+            let receipt = try await failure.service.answer(payload)
+            precondition(receipt["ok"] as? Bool == false)
+            precondition(receipt["retryable"] as? Bool == [408, 429, 502, 503, 504].contains(code))
+        }
+        let offlineAnswer = Fixture(); offlineAnswer.transportError = URLError(.notConnectedToInternet)
+        let offlineReceipt = try await offlineAnswer.service.answer(payload)
+        precondition(offlineReceipt["retryable"] as? Bool == true)
+        let cancelledAnswer = Fixture(); cancelledAnswer.transportError = URLError(.cancelled)
+        let cancelledReceipt = try await cancelledAnswer.service.answer(payload)
+        precondition(cancelledReceipt["retryable"] as? Bool == false)
         print("Native review acquisition, reversible staging and failure recovery passed")
     }
 }

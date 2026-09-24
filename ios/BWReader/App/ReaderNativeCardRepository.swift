@@ -367,7 +367,10 @@ struct ReaderNativeCardRepository {
         let reviewedAt = try R.integer(input["reviewedAt"], "reviewedAt")
         let expected = try R.object(input["expectedReview"], "expectedReview")
         let next = try R.object(input["next"], "next")
-        let interval = try R.number(next["interval"], "Anki interval")
+        // Anki learning intervals are signed: negative values are seconds.
+        // Generic repository numbers are non-negative, so do not use R.number.
+        let signed = (next["interval"] as? NSNumber)?.doubleValue ?? Double(R.string(next["interval"]))
+        guard let interval = signed, interval.isFinite else { throw R.fail("INPUT", "Anki interval 无效") }
         guard interval != 0 else { return ["applied": false, "reason": "no-interval"] }
         guard let current = try load(id), let states = current["states"] as? [String: Any],
               let state = states[String(index)] as? [String: Any] else {
