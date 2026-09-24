@@ -81,6 +81,15 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             performHistory(command, surface: requestedSurface, replyHandler: replyHandler)
             return
         }
+        if command["action"] as? String == "prepare" {
+            do {
+                guard tasks.isEmpty, let input = command["body"] as? [String: Any] else {
+                    throw ReaderNativeAssistantRequest.Failure(message: "上一条对话仍在处理中")
+                }
+                replyHandler(["ok": true, "body": try ReaderNativeAssistantRequest(input).body], nil)
+            } catch { replyHandler(nil, error.localizedDescription) }
+            return
+        }
         guard command["action"] as? String == "start", tasks.isEmpty,
               let path = command["path"] as? String,
               path == "/api/assistant/chat" || (requestedSurface == .epub && path == "/pdf/api/epub-assistant"),
@@ -205,6 +214,11 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
       };
       function abortError() { const e = new Error('对话已停止'); e.name = 'AbortError'; return e; }
       window.__bwNativeAssistantStream = {
+        async prepare(body) {
+          const result = await handler.postMessage({version: 1, action: 'prepare', id: crypto.randomUUID(), body});
+          if (!result?.ok || !result.body?.rid || !result.body?.turn_id || !result.body?.context) throw new Error('对话上下文未准备好');
+          return result.body;
+        },
         async run(path, body, consume, signal) {
           if (signal?.aborted) throw abortError();
           const id = crypto.randomUUID(), entry = { consume, sequence: 0, cancelled: false };

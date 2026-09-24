@@ -37,7 +37,52 @@ actor Harness {
 }
 
 @main struct Test {
+    static func requestPolicy() throws {
+        func plan(_ context: [String: Any], message: String = "", mode: String = "normal", noBook: Bool = false) throws -> [String: Any] {
+            try ReaderNativeAssistantRequest(["message": message, "context": context, "assistant_mode": mode,
+                                               "no_book": noBook, "voice": 1], identity: { "fixed-turn" }).body
+        }
+        let book: [String: Any] = ["page": 12, "current_section_idx": 4, "section": "chapter", "selection_sentence": "ambient",
+                                   "selection_anchor": ["block": 5], "visible_text": "whole page", "selection": "selected phrase",
+                                   "figures": [["kind": "figure", "id": "fig1"]], "pinned_context": [["id": "card1"]]]
+        let withoutBook = try plan(book, message: "  explain  ", noBook: true)
+        let frozen = withoutBook["context"] as! [String: Any]
+        precondition(withoutBook["message"] as? String == "explain")
+        precondition(withoutBook["rid"] as? String == "cfixed-turn" && withoutBook["turn_id"] as? String == "tfixed-turn")
+        precondition(frozen["page"] as? Int == 0 && frozen["no_book"] as? Bool == true)
+        for field in ["current_section_idx", "section", "selection_sentence", "selection_anchor", "visible_text"] {
+            precondition(frozen[field] == nil, "implicit book context leaked: \(field)")
+        }
+        precondition(frozen["selection"] as? String == "selected phrase")
+        precondition((frozen["figures"] as? [Any])?.count == 1 && (frozen["pinned_context"] as? [Any])?.count == 1)
+        precondition(book["page"] as? Int == 12 && book["visible_text"] as? String == "whole page", "source context mutated")
+        let cases: [([String: Any], String)] = [
+            (["figures": [["kind": "note"]], "selection": "x"], "讲讲这个便签"),
+            (["figures": [["kind": "note"], ["kind": "figure"]]], "讲讲这张图"),
+            (["notes": [["id": "n"]]], "讲讲这个便签"),
+            (["focus_sel": ["kind": "formula", "text": "x=1"]], "讲讲这个公式"),
+            (["focus_sel": ["kind": "text", "text": "paragraph"]], "讲讲这段"),
+            (["selection": "phrase"], "讲讲这段")
+        ]
+        for (context, expected) in cases {
+            let result = try plan(context)
+            precondition(result["message"] as? String == expected)
+        }
+        let review = try plan([:], message: "考考我", mode: "review")
+        precondition(review["voice"] == nil && withoutBook["voice"] as? Int == 1)
+        let emptyContexts: [[String: Any]] = [[:], ["selection": "  \n"], ["visible_text": "only implicit book text"]]
+        for context in emptyContexts {
+            do { _ = try plan(context); preconditionFailure("empty explicit request accepted") }
+            catch is ReaderNativeAssistantRequest.Failure {}
+        }
+        do { _ = try plan([:], message: String(repeating: "a", count: 32001)); preconditionFailure("oversized message accepted") }
+        catch is ReaderNativeAssistantRequest.Failure {}
+        let first = try ReaderNativeAssistantRequest(["message": "same", "context": [:], "assistant_mode": "normal"])
+        let second = try ReaderNativeAssistantRequest(["message": "same", "context": [:], "assistant_mode": "normal"])
+        precondition(first.body["rid"] as? String != second.body["rid"] as? String, "distinct user turns share identity")
+    }
     static func main() async throws {
+        try requestPolicy()
         let wire = Data("\u{feff}: heartbeat\r\nevent: answer\r\ndata: \"日本😀\"\r\n\r\nevent: actions\rdata: {\rdata: \"id\":1}\r\revent: done\ndata: {}\n\n".utf8)
         let expected = [ReaderNativeAssistantEvent(name: "answer", data: "\"日本😀\""),
                         .init(name: "actions", data: "{\n\"id\":1}"), .init(name: "done", data: "{}")]

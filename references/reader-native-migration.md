@@ -472,7 +472,16 @@ missing device ID; that call is corrected. Phrase lookup now reads saved/mastere
 from the native stores on both PDF and EPUB, without inheriting a dictionary headword's
 mastery. EPUB lookup consumes the visual selection after capturing its text/context, and
 card body height follows the measured Dynamic Type header. Focused regression checks passed;
-the follow-up App compilation and on-device gesture/visual acceptance remain pending.
+the follow-up App compilation passed Apple run `35959337658` (`2c4c1961`).
+On-device gesture/visual acceptance remains pending; no full-migration package is published.
+
+Outgoing assistant turns now use a native request planner for default prompts, explicit
+selection versus implicit book-context policy, normal/review mode, and stable request/turn
+identity. Disabling book context preserves explicitly attached text/cards/images. Preparation
+is read-only, and a failure or mode switch cannot silently submit the old request. The existing
+native SSE transport reuses that frozen identity for continuation. The web event/action reducer
+is still a compatibility dependency and remains part of the migration work, not a completed
+native release. Card tables now inherit the same readable Dynamic Type font as card text.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

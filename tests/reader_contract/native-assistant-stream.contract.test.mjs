@@ -5,15 +5,51 @@ import {readFileSync} from 'node:fs';
 import {randomUUID} from 'node:crypto';
 const source = readFileSync(new URL('../../ios/BWReader/App/ReaderNativeAssistantStreamBridge.swift',import.meta.url),'utf8');
 const script = source.split('#"""')[1].split('"""#')[0];
-function setup() {
+function setup(prepareReply = {ok:true}) {
   const requests=[]; let resolve,reject;
   const pending = new Promise((a,b)=>{resolve=a;reject=b});
   const window={webkit:{messageHandlers:{bwNativeAssistantStream:{postMessage(command){
-    requests.push(command); return command.action === 'start' ? pending : Promise.resolve({ok:true});
+    requests.push(command); return command.action === 'start' ? pending : Promise.resolve(command.action === 'prepare' ? prepareReply : {ok:true});
   }}}}}; window.top=window;
   vm.runInNewContext(script,{window,crypto:{randomUUID}});
   return {api:window.__bwNativeAssistantStream,requests,resolve,reject};
 }
+
+test('native preparation returns the canonical message and identity without starting transport', async()=>{
+  const body={rid:'cfixed',turn_id:'tfixed',message:'讲讲这段',assistant_mode:'normal',context:{selection:'接種'}};
+  const {api,requests}=setup({ok:true,body});
+  const prepared=await api.prepare({message:'',assistant_mode:'normal',context:{selection:'接種'}});
+  assert.equal(prepared,body);
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].action,'prepare');
+  assert.equal(requests[0].body.message,'');
+});
+
+test('invalid preparation does not silently return the old request', async()=>{
+  for (const reply of [{ok:false},{ok:true,body:{}},{ok:true,body:{rid:'c',turn_id:'t'}}]) {
+    const {api,requests}=setup(reply);
+    await assert.rejects(api.prepare({message:'hello',context:{}}),/上下文未准备好/);
+    assert.deepEqual(requests.map(x=>x.action),['prepare']);
+  }
+});
+
+test('changing conversation mode during preparation discards the stale turn and prevents a concurrent send', async()=>{
+  const assistant=readFileSync(new URL('../../_server_deploy/static/pdf/rc-assistant.js',import.meta.url),'utf8');
+  const prefix=assistant.slice(assistant.indexOf('var _preparingNativeContext = false;'),assistant.indexOf('var _historyWasLoading = _historyLoadCount > 0;'));
+  let finish; const pending=new Promise(resolve=>{finish=resolve;}); let calls=0;
+  const runtime={window:{__bwNativeAssistantStream:{prepare(){calls++;return pending;}}},
+    streaming:false,_clearing:false,_modeEpoch:0,_assistantMode:'normal',
+    _chatUrl:()=>'/api/assistant/chat',ctx:()=>({selection:'接種'}),addMsg:()=>{},esc:x=>x,ta:{value:''},autorow(){}};
+  vm.createContext(runtime);
+  vm.runInContext(prefix+'return {text,sentCtx}; } globalThis.send = send;',runtime);
+  const first=runtime.send('explain');
+  assert.equal(await runtime.send('duplicate'),undefined);
+  assert.equal(calls,1);
+  runtime._modeEpoch++;
+  finish({message:'explain',context:{selection:'接種'},rid:'c1',turn_id:'t1'});
+  assert.equal(await first,undefined);
+  assert.equal(vm.runInContext('_preparingNativeContext',runtime),false);
+});
 test('native stream consumes structured events once and waits for native completion',async()=>{
   const {api,requests,resolve}=setup(), events=[];
   const result=api.run('/api/assistant/chat',{message:'test',omit:undefined},(...args)=>events.push(args));

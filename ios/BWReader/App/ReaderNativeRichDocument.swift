@@ -26,7 +26,8 @@ struct ReaderNativeRichDocument: View {
                     case .text(let html):
                         ReaderNativeRichText(content: html, format: "html", onSelection: onSelection, font: font, color: color)
                     case .table(let table):
-                        ReaderNativeTable(table: table, onSelection: onSelection, inlineImages: images, imageModel: imageModel)
+                        ReaderNativeTable(table: table, onSelection: onSelection, inlineImages: images,
+                                          imageModel: imageModel, font: font, color: color)
                     case .image(let source, let title):
                         if let id = images[source], let imageModel,
                            let item = ReaderNativeImageItem(["mediaID": id, "title": title]) {
@@ -213,6 +214,8 @@ private struct ReaderNativeTable: View {
     let onSelection: ((String) -> Void)?
     let inlineImages: [String: String]
     let imageModel: ReaderNativeConversationModel?
+    let font: UIFont?
+    let color: UIColor?
     @State private var availableWidth: CGFloat = 0
 
     var body: some View {
@@ -222,7 +225,8 @@ private struct ReaderNativeTable: View {
                 ReaderNativeTableLayout(columns: table.columns, rows: table.rows) {
                     ForEach(table.cells) { cell in
                         AnyView(ReaderNativeRichDocument(content: cell.html, format: "html", onSelection: onSelection,
-                                                       inlineImages: inlineImages, imageModel: imageModel))
+                                                       inlineImages: inlineImages, imageModel: imageModel,
+                                                       font: font, color: color))
                             .padding(8).frame(maxHeight: .infinity, alignment: .topLeading)
                             .background(cell.header ? ReaderNativeTheme.accent.opacity(0.09) : Color.clear)
                             .overlay(Rectangle().stroke(ReaderNativeTheme.muted.opacity(0.2), lineWidth: 0.5))

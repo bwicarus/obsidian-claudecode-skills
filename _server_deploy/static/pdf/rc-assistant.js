@@ -2766,8 +2766,27 @@
     //   **保留**用户显式选中/带入的 chip(选中文字/图/便签/焦点)——它们变成"独立片段/图"仍喂给 AI(用户诉求:
     //   关书页不该连我选中的都看不见)。后端 _ctx_block(no_book) 会把这些当独立内容拼进去。
     //   仅影响本次发送;历史里旧消息的 chip 是当时事实,不动。
+    var nativePrepared = null;
+    if (window.__bwNativeAssistantStream?.prepare) {
+      _preparingNativeContext = true;
+      try {
+        nativePrepared = await window.__bwNativeAssistantStream.prepare({
+          message: text, context: sentCtx, assistant_mode: turnMode,
+          no_book: !!(window.rcNoBook && window.rcNoBook()),
+          media_prefer: window.rcMediaPrefer ? window.rcMediaPrefer() : null,
+          force_effort: opts?.forceEffort || null, force_model: opts?.forceModel || null,
+          voice: turnMode === 'normal' && window.__asstVoiceOn?.() ? 1 : 0
+        });
+        if (turnEpoch !== _modeEpoch || streaming || _clearing) return;
+        text = nativePrepared.message; sentCtx = nativePrepared.context;
+      } catch (error) {
+        addMsg('asst-note', esc('上下文未准备好，消息未发送：' + (error.message || error)));
+        try { if (!ta.value) { ta.value = text; autorow(); } } catch (_) {}
+        return;
+      } finally { _preparingNativeContext = false; }
+    }
     try {
-      if (window.rcNoBook && window.rcNoBook()) {
+      if (!nativePrepared && window.rcNoBook && window.rcNoBook()) {
         sentCtx.no_book = true;
         delete sentCtx.current_section_idx; delete sentCtx.section;   // 书本定位:去
         delete sentCtx.selection_sentence; delete sentCtx.selection_anchor;   // 选中的书本周边句:去(让选中变独立)
@@ -2802,7 +2821,7 @@
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
     var sawCliCard = false;   // #2:本轮委托给了 CLI(make_paper/do_task)→ CLI 卡就是回答,别再单独出编排答案气泡+建议按钮
     var sawTool = false;      // ★用户设计:本轮出现工具调用 → 「工具方块」模式(回答/流程/按钮全进 turn 卡)
-    _vTid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);   // 每轮一个新方块(旧 bug:从不重置→多轮堆一卡);立即生成→随请求上送,后端落库带 turn_id,_syncParts 的 parts upsert 才能命中(审查 Q6)
+    _vTid = nativePrepared ? nativePrepared.turn_id : 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);   // one identity for display, persistence and resume
     _turnModes[_vTid] = turnMode;
     if (sentCtx.want_viewshot && window.RC && (RC.captureView || RC.captureEl)) {
       // adapter 声明 want_viewshot(服务端渲不了的内容:EPUB HTML 笔迹 / PDF 插入页覆盖层)→ 预拍一张
@@ -2839,7 +2858,7 @@
       if (streaming) _raf = requestAnimationFrame(_revealTick);
     }
     function _stopReveal() { if (_raf) { try { cancelAnimationFrame(_raf); } catch (_) {} _raf = null; } }
-    var rid = 'c' + Date.now() + '_' + (_ridCtr++);   // 本轮任务 id:断线用它重连续读(服务端 detached 跑,不绑请求)
+    var rid = nativePrepared ? nativePrepared.rid : 'c' + Date.now() + '_' + (_ridCtr++);   // retries resume this same task
     var evSeen = 0, done = false;                      // 已消费的缓冲事件数(重连用 from=evSeen 续传)
     function _handleEv(ev, parsed) {
       if (turnEpoch !== _modeEpoch) return;
@@ -2932,8 +2951,7 @@
       var nativeAbort = new AbortController();
       _abort = { native: true, abort: function () { nativeAbort.abort(); } };
       try {
-        try { if (sentCtx && window.rcNoBook && window.rcNoBook()) sentCtx.no_book = true; } catch (_) {}
-        var nativeStatus = await window.__bwNativeAssistantStream.run(turnChatUrl, {
+        var nativeStatus = await window.__bwNativeAssistantStream.run(turnChatUrl, nativePrepared || {
           message: text, context: sentCtx, rid: rid, turn_id: _vTid, assistant_mode: turnMode,
           media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined),
           force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined,
@@ -3018,7 +3036,7 @@
 
   // 语音对话桥(rc-voicecall agent 模式):send/忙态都在本 IIFE 内,暴露出去 → ASR 终稿直接走完整聊天管线
   window.__asstSend = send;
-  window.__asstBusy = function () { return !!(streaming || _clearing); };
+  window.__asstBusy = function () { return !!(streaming || _clearing || _preparingNativeContext); };
 
   // ㉛ 通话对话进侧栏(用户设计):S2S/rtc 端到端通话的双方句子直接进 #asst-thread,与文字对话
   //   同流同清(🗑 清空=显示+服务端记录+语音记忆一起清,rc-voicecall 旁听 fresh 重连);
