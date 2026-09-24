@@ -20,6 +20,21 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
         expiry?.cancel(); expiry = nil; session = nil; sequence = 0
         state = ReaderNativeContextSelection()
     }
+    func reviewPairs(cardKey: String, validate: () throws -> Void) async throws -> [[String: Any]] {
+        guard let session, let webView, let current = document(webView.url) else {
+            throw ReaderNativeContextSelection.Failure(message: "复习上下文尚未就绪")
+        }
+        let ready = try await webView.callAsyncJavaScript(
+            "if (!window.BWReaderRuntime?.contextSelections?.settle) return false; await window.BWReaderRuntime.contextSelections.settle(); return true;",
+            arguments: [:], in: nil, contentWorld: .page)
+        guard ready as? Bool == true, self.session == session, document(webView.url) == current else {
+            throw ReaderNativeContextSelection.Failure(message: "复习上下文已切换")
+        }
+        try validate()
+        state.expire(now: ProcessInfo.processInfo.systemUptime)
+        scheduleExpiry()
+        return state.reviewPairs(cardKey: cardKey)
+    }
     func selectReview(_ id: String, cardKey: String, on: Bool, validate: () throws -> Void) async throws -> [[String: Any]] {
         guard let session, let webView, let current = document(webView.url) else {
             throw ReaderNativeContextSelection.Failure(message: "复习上下文尚未就绪")

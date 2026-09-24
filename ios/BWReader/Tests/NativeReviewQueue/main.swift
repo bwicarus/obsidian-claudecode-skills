@@ -30,6 +30,11 @@ typealias Q = ReaderNativeReviewQueue
 
 @main struct Tests {
     @MainActor static func main() async throws {
+        let context = ReaderNativeReviewCards.context(["file_rel":"localbook:book", "page":4,
+            "selection":"接種", "visible_text":"原文\n\"quoted\"", "ignored":"not in queue context"])
+        let contextKey = try ReaderNativeReviewCards.contextKey(context)
+        precondition(contextKey == "ctx-3b75acae", "native context broke the existing UTF-16 ordered JSON cache key")
+        precondition(context["ignored"] == nil)
         let local = Fixture(); local.local = ["hasLocalCards": true, "entries": [], "dueTotal": 0]
         let empty = try await local.service.load(local.input())
         precondition(empty["kind"] as? String == "local" && local.calls.isEmpty)
@@ -203,6 +208,8 @@ typealias Q = ReaderNativeReviewQueue
         let localID = UUID().uuidString
         let localStage = try localScore.service.stageRating(["lease": localLease, "stageId": localID,
             "snapshot": localSnapshot, "card": first, "cardKey": "same-entity:0", "ease": 1, "revealed": true])
+        do { _ = try await localScore.service.load(localScore.input()); preconditionFailure("reload discarded an undoable rating") } catch {}
+        do { _ = try localScore.service.improvementInput(lease: localLease, cardID: "same-entity_i1"); preconditionFailure("draft ignored unsaved score") } catch {}
         let localRestored = try localScore.service.undoRating(["lease": localLease, "stageId": localID,
             "snapshot": localStage["snapshot"]!])["snapshot"] as! Q.Object
         precondition((localRestored["cards"] as! [Q.Object]).count == 2 && localRestored["due_total"] as? Int == 0)
@@ -260,6 +267,13 @@ typealias Q = ReaderNativeReviewQueue
         let cancelledAnswer = Fixture(); cancelledAnswer.transportError = URLError(.cancelled)
         let cancelledReceipt = try await cancelledAnswer.service.answer(payload)
         precondition(cancelledReceipt["retryable"] as? Bool == false)
+        let rejectedQueue = Fixture()
+        var rejectedInput = rejectedQueue.input(scope: "all")
+        rejectedInput["rejectedCards"] = [["card":["id":7,"question":"未保存评分的原题"], "original_index":0]]
+        let restoredQueue = try await rejectedQueue.service.load(rejectedInput)["snapshot"] as! Q.Object
+        let restoredCards = restoredQueue["cards"] as! [Q.Object]
+        precondition(restoredCards.count == 1 && restoredCards[0]["question"] as? String == "未保存评分的原题")
+        precondition(restoredQueue["index"] as? Int == 0)
 
         let editing = Fixture()
         var canonical: Q.Object = ["id": "card_abcd", "entityRev": 1, "stateRev": 1,
@@ -284,6 +298,14 @@ typealias Q = ReaderNativeReviewQueue
         let currentLease = reopening.service.presentation()["lease"] as! String
         let presented = try reopening.service.presentedCard(lease: currentLease, cardID: "card_two_i0")
         precondition(ReaderNativeCardRules.same(sourceCard, presented))
+        _ = try reopening.service.interact(["lease": currentLease, "key": "improveMode", "cardId": "card_two_i0", "value": "concise"])
+        let improvement = try reopening.service.improvementInput(lease: currentLease, cardID: "card_two_i0")
+        precondition(improvement["contextKey"] as? String == "ctx-book-4:current")
+        precondition(improvement["verbosity"] as? String == "concise")
+        precondition((improvement["card"] as! Q.Object)["answer"] as? String == "新答案")
+        precondition((improvement["card"] as! Q.Object)["entity_id"] as? String == "card_two")
+        do { _ = try reopening.service.improvementInput(lease: currentLease, cardID: "card_one_i0"); preconditionFailure("old card used for draft") } catch {}
+        do { _ = try reopening.service.improvementInput(lease: "stale", cardID: "card_two_i0"); preconditionFailure("old queue used for draft") } catch {}
         do { _ = try reopening.service.presentedCard(lease: "stale-lease", cardID: "card_two_i0"); preconditionFailure("old review lease admitted") } catch {}
         do { _ = try reopening.service.presentedCard(lease: currentLease, cardID: "card_one_i0"); preconditionFailure("old review card admitted") } catch {}
         precondition(sourceCard["entity_id"] as? String == "card_two")

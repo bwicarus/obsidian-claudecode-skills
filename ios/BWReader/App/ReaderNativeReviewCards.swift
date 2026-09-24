@@ -11,6 +11,35 @@ enum ReaderNativeReviewCards {
         for char in text.utf16 { value = (value ^ UInt32(char)) &* 16777619 }
         return String(value, radix: 16)
     }
+    static func context(_ raw: O) -> O {
+        var output: O = [:]
+        func clipped(_ value: Any?, _ limit: Int) -> String {
+            String(decoding: R.string(value).utf16.prefix(limit), as: UTF16.self)
+        }
+        for key in ["file", "url", "source_ref"] {
+            let value = clipped(key == "file" ? raw[key] ?? raw["file_rel"] : raw[key], 2000)
+            if !value.isEmpty { output[key] = value }
+        }
+        if R.has(raw["page"]) {
+            let page = (raw["page"] as? NSNumber)?.doubleValue ?? Double(R.string(raw["page"])) ?? 0
+            output["page"] = page.isFinite ? max(0, page) : 0
+        }
+        for (key, limit) in [("selection", 800), ("visible_text", 2400)] {
+            let value = clipped(raw[key], limit)
+            if !value.isEmpty { output[key] = value }
+        }
+        if let nodes = raw["kg_nodes"] as? [Any] { output["kg_nodes"] = Array(nodes.prefix(20)) }
+        return output
+    }
+    static func contextKey(_ context: O) throws -> String {
+        let file = ["file", "url", "source_ref"].map { R.string(context[$0]) }.first(where: { !$0.isEmpty }) ?? ""
+        let fields: [(String, Any)] = [("file", file), ("page", context["page"] ?? 0),
+            ("selection", context["selection"] ?? ""), ("visible_text", context["visible_text"] ?? "")]
+        let json = try fields.map { key, value in
+            "\"" + key + "\":" + String(decoding: try R.bytes(value), as: UTF8.self)
+        }.joined(separator: ",")
+        return "ctx-" + hash("{" + json + "}")
+    }
     static func identity(_ card: O) -> O {
         var result: O = [:]
         for (to, from) in [("card_id", "id"), ("note_id", "note_id"), ("local_id", "local_id"),

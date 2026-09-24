@@ -366,6 +366,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeFavoritesService: ReaderNativeFavoritesService?
     private var nativeFavoritesContext: UInt64?
     private var nativeReviewQueue: ReaderNativeReviewQueue?
+    private var nativeReviewLifecycleID: UUID?
     private var nativeReviewQueueContext: UInt64?
     private var nativeReviewQueueGatewayContext: UInt64?
     private var nativeReviewImprovements: ReaderNativeReviewImprovements?
@@ -3291,6 +3292,99 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
+    private func performNativeReviewLifecycle(_ command: [String: Any]) async -> [String: Any]? {
+        let action = command["action"] as? String
+        let value = command["value"] as? [String: Any] ?? [:]
+        let key = action == "openReview" ? "mode" : value["key"] as? String ?? ""
+        guard action == "openReview" || action == "reviewAction" && ["mode", "reload", "scope"].contains(key) else { return nil }
+        var preparedFence: [String: Any]?
+        do {
+            let scope = nativeConversation.scope, generation = bookUserStateContextGeneration
+            let gatewayContext = nativeServerGateway?.contextRevision
+            guard command["scope"] as? String == scope, let book = currentLocalBook,
+                  !isLoading, isTrustedReaderURL(webView.url) else { throw CancellationError() }
+            if action == "reviewAction", value["contextKey"] as? String != (nativeConversation.review["contextKey"] as? String ?? "") {
+                throw ReaderNativeReviewQueue.Failure(message: "复习模式已变化，请重试")
+            }
+            let enabled: Bool
+            if key != "mode" { enabled = true }
+            else if action == "openReview" { enabled = nativeConversation.review["active"] as? Bool != true }
+            else { enabled = try ReaderNativeCardRules.bool(value["enabled"], "review mode") }
+            let requestedScope = key == "scope" ? value["value"] as? String ?? ""
+                : value["queueScope"] as? String ?? nativeConversation.review["scope"] as? String ?? "current"
+            guard ["all", "current"].contains(requestedScope), key == "mode" || nativeConversation.review["active"] as? Bool == true else {
+                throw ReaderNativeReviewQueue.Failure(message: "请先进入复习模式并选择范围")
+            }
+            let queue = try prepareNativeReviewQueue(), operationID = UUID()
+            nativeReviewLifecycleID = operationID
+            func current() throws {
+                // A mode switch intentionally changes the conversation scope.
+                // Fence the book/account and this operation instead; the observer
+                // separately verifies the newly selected review mode and epoch.
+                guard !Task.isCancelled, !isLoading,
+                      bookUserStateContextGeneration == generation, currentLocalBook?.id == book.id,
+                      nativeServerGateway?.contextRevision == gatewayContext, nativeReviewQueue === queue,
+                      nativeReviewLifecycleID == operationID else { throw CancellationError() }
+            }
+            var raw: [String: Any] = [:]
+            if enabled {
+                if book.format == .pdf {
+                    guard let document = nativePDFDocument else { throw ReaderNativeReviewQueue.Failure(message: "PDF 尚未就绪") }
+                    let text = document.position.visiblePages.prefix(4).compactMap { document.pageText($0) }.joined(separator: "\n")
+                    raw = ["file": "localbook:" + book.id, "page": document.position.page,
+                           "selection": document.selectionPanel?.text ?? "", "visible_text": text]
+                } else {
+                    // EPUB retains its WebKit body/CFI renderer. Only read its
+                    // source context; queue selection and network stay native.
+                    raw = try await webView.callAsyncJavaScript(
+                        "const adapter = window.RC?.adapter?.(); return adapter?.getContext?.() || {};",
+                        arguments: [:], in: nil, contentWorld: .page) as? [String: Any] ?? [:]
+                    try current()
+                }
+            }
+            let context = ReaderNativeReviewCards.context(raw)
+            let contextKey = try ReaderNativeReviewCards.contextKey(context)
+            let prepared = try await webView.callAsyncJavaScript(
+                "return await window.RC?.review?.prepareNativeLifecycle?.(command);",
+                arguments: ["command": ["id": operationID.uuidString, "enabled": enabled,
+                    "scope": requestedScope, "contextKey": contextKey]], in: nil, contentWorld: .page)
+            guard let preparation = prepared as? [String: Any], preparation["ok"] as? Bool == true,
+                  let fence = preparation["fence"] as? [String: Any], fence["id"] as? String == operationID.uuidString,
+                  fence["enabled"] as? Bool == enabled, fence["scope"] as? String == requestedScope,
+                  !enabled || fence["contextKey"] as? String == contextKey else {
+                throw ReaderNativeReviewQueue.Failure(message: "复习模式准备未确认")
+            }
+            preparedFence = fence
+            try current()
+            nativeReviewImprovements?.invalidate()
+            var receipt: [String: Any] = ["fence": fence]
+            if enabled {
+                let rejected = preparation["rejectedCards"] as? [[String: Any]] ?? []
+                let result = try await queue.load(["request": operationID.uuidString, "contextKey": contextKey,
+                    "context": context, "scope": requestedScope, "force": key != "mode" || value["force"] as? Bool == true,
+                    "legacyCache": preparation["legacyCache"] ?? NSNull(), "rejectedCards": rejected,
+                    "rejectedIds": rejected.compactMap { ($0["card"] as? [String: Any])?["id"] }.map { ReaderNativeCardRules.string($0) }])
+                try current()
+                receipt["result"] = result; receipt["state"] = queue.presentation(); receipt["rejectedCards"] = rejected
+            } else {
+                queue.cancel(queue.presentation()["lease"] as? String ?? "")
+            }
+            let accepted = try await webView.callAsyncJavaScript(
+                "return window.RC?.review?.observeNativeLifecycle?.(receipt) === true;",
+                arguments: ["receipt": receipt], in: nil, contentWorld: .page)
+            try current()
+            guard accepted as? Bool == true else { throw ReaderNativeReviewQueue.Failure(message: "复习界面已变化，请重新打开；未再次取卡") }
+            return ["ok": true]
+        } catch {
+            if let fence = preparedFence {
+                _ = try? await webView.callAsyncJavaScript(
+                    "return window.RC?.review?.observeNativeLifecycle?.(receipt) === true;",
+                    arguments: ["receipt": ["fence": fence, "error": error.localizedDescription]], in: nil, contentWorld: .page)
+            }
+            return ["ok": false, "error": error.localizedDescription]
+        }
+    }
+
     private func performNativeReviewTransition(_ command: [String:Any]) async -> [String:Any]? {
         guard command["action"] as? String == "reviewAction", let value = command["value"] as? [String:Any],
               let key = value["key"] as? String, ["select","rate","undo","reveal"].contains(key) else { return nil }
@@ -3353,6 +3447,94 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             stageObserved = true
             return ["ok":true,"value":state]
         } catch { return ["ok":false,"error":error.localizedDescription] }
+    }
+
+    private func performNativeReviewImprovement(_ command: [String: Any]) async -> [String: Any]? {
+        guard command["action"] as? String == "reviewAction", let value = command["value"] as? [String: Any],
+              let key = value["key"] as? String, ["prepareDraft", "commitDraft"].contains(key) else { return nil }
+        var preparedFence: [String: Any]?
+        do {
+            let scope = nativeConversation.scope, generation = bookUserStateContextGeneration
+            let gatewayContext = nativeServerGateway?.contextRevision
+            guard command["scope"] as? String == scope, let queue = nativeReviewQueue,
+                  let lease = value["contextKey"] as? String, let cardID = value["cardId"] as? String,
+                  let target = value["target"] as? String,
+                  (key == "prepareDraft" ? ["anki", "note", "all"] : ["anki", "note"]).contains(target) else {
+                throw ReaderNativeReviewQueue.Failure(message: "复习草稿目标无效")
+            }
+            if key == "commitDraft", value["confirmed"] as? Bool != true {
+                throw ReaderNativeReviewQueue.Failure(message: "请先确认草稿和写入目标")
+            }
+            func current() throws {
+                guard !Task.isCancelled, !isLoading, isTrustedReaderURL(webView.url),
+                      nativeConversation.scope == scope, bookUserStateContextGeneration == generation,
+                      nativeServerGateway?.contextRevision == gatewayContext,
+                      nativeReviewQueueContext == generation, nativeReviewQueueGatewayContext == gatewayContext,
+                      nativeReviewQueue === queue, nativeConversation.review["active"] as? Bool == true,
+                      nativeConversation.review["loading"] as? Bool != true else { throw CancellationError() }
+                try queue.validateVisibleCard(lease: lease, cardID: cardID)
+            }
+            try current()
+            let operationID = UUID().uuidString
+            let prepared = try await webView.callAsyncJavaScript(
+                "return await window.RC?.review?.prepareNativeImprovement?.(command);",
+                arguments: ["command": ["id": operationID, "key": key, "lease": lease,
+                    "cardId": cardID, "target": target, "draftId": value["draftId"] ?? "",
+                    "confirmed": value["confirmed"] as? Bool == true]], in: nil, contentWorld: .page)
+            guard let fence = prepared as? [String: Any], fence["ok"] as? Bool == true,
+                  fence["id"] as? String == operationID, fence["key"] as? String == key,
+                  fence["lease"] as? String == lease, fence["cardId"] as? String == cardID,
+                  fence["target"] as? String == target, let draftLease = fence["draftLease"] as? String,
+                  UUID(uuidString: draftLease) != nil else {
+                throw ReaderNativeReviewQueue.Failure(message: "复习草稿入口尚未就绪")
+            }
+            preparedFence = fence
+            try current()
+            let service = try prepareNativeReviewImprovements()
+            var input = try queue.improvementInput(lease: lease, cardID: cardID)
+            if key == "prepareDraft" {
+                guard let selections = nativeContextSelections else {
+                    throw ReaderNativeReviewQueue.Failure(message: "复习回答尚未就绪")
+                }
+                let pairs = try await selections.reviewPairs(cardKey: cardID, validate: current)
+                try current()
+                // Re-read after draining pending selection registrations. A
+                // revision change must not mix old card faces with new answers.
+                input = try queue.improvementInput(lease: lease, cardID: cardID)
+                input["pairs"] = pairs
+            }
+            let expected = try ReaderNativeCardRules.bytes(queue.improvementInput(lease: lease, cardID: cardID))
+            input["lease"] = draftLease; input["target"] = target
+            input["draftId"] = value["draftId"] ?? ""; input["confirmed"] = value["confirmed"] as? Bool == true
+            let result: [String: Any]
+            if key == "prepareDraft" { result = try await service.prepare(input) }
+            else { result = try await service.commit(input) }
+            try current()
+            guard expected == (try ReaderNativeCardRules.bytes(queue.improvementInput(lease: lease, cardID: cardID))) else {
+                throw ReaderNativeReviewQueue.Failure(message: "复习卡内容已更新，旧草稿结果未覆盖新状态")
+            }
+            let accepted = try await webView.callAsyncJavaScript(
+                "return window.RC?.review?.observeNativeImprovement?.(receipt) === true;",
+                arguments: ["receipt": ["fence": fence, "result": result]], in: nil, contentWorld: .page)
+            try current()
+            guard accepted as? Bool == true else {
+                throw ReaderNativeReviewQueue.Failure(message: "草稿状态已改变，请核对当前预览；未重复发送")
+            }
+            var state = queue.presentation()
+            state["draft"] = result["draft"] ?? NSNull(); state["commits"] = result["commits"] ?? [:]
+            state["improveExpanded"] = true
+            nativeConversation.acceptReviewPresentation(state)
+            return ["ok": true, "value": result]
+        } catch {
+            if let fence = preparedFence {
+                // This only settles a still-current spinner. Durable unknown
+                // commit receipts are retained by the service, never replayed.
+                _ = try? await webView.callAsyncJavaScript(
+                    "return window.RC?.review?.observeNativeImprovement?.(receipt) === true;",
+                    arguments: ["receipt": ["fence": fence, "error": error.localizedDescription]], in: nil, contentWorld: .page)
+            }
+            return ["ok": false, "error": error.localizedDescription]
+        }
     }
 
     private func performNativeReviewPresentation(_ command: [String: Any]) async -> [String: Any]? {
@@ -3445,7 +3627,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         if let result = await performNativeArtifactCommand(command) { return result }
+        if let result = await performNativeReviewLifecycle(command) { return result }
         if let result = await performNativeReviewTransition(command) { return result }
+        if let result = await performNativeReviewImprovement(command) { return result }
         if let result = await performNativeReviewPresentation(command) { return result }
         if let result = await performNativeReviewSource(command) { return result }
         if command["action"] as? String == "settingsRead", command["section"] as? String == "computer" {
@@ -7974,6 +8158,18 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                             self.nativeReviewImprovements?.invalidate(request["lease"] as? String ?? "")
                             replyHandler(["ok": true], nil); return
                         }
+                        if operation == "control" {
+                            guard let key = request["key"] as? String, ["prepareDraft", "commitDraft"].contains(key) else {
+                                throw ReaderNativeReviewImprovements.Failure(message: "草稿操作无效")
+                            }
+                            let state = self.nativeConversation.review
+                            var values = request; values["contextKey"] = state["contextKey"] ?? ""
+                            values["cardId"] = (state["current"] as? [String: Any])?["id"] ?? ""
+                            let result = await self.performNativeReviewImprovement(["action":"reviewAction",
+                                "scope":self.nativeConversation.scope,"value":values])
+                            guard let result else { throw ReaderNativeReviewImprovements.Failure(message: "原生草稿入口不可用") }
+                            replyHandler(result, nil); return
+                        }
                         let service = try self.prepareNativeReviewImprovements()
                         let value: [String: Any]
                         switch operation {
@@ -7992,6 +8188,18 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                         guard let self, let request = body["request"] as? [String: Any],
                               let operation = request["operation"] as? String else {
                             throw ReaderNativeReviewQueue.Failure(message: "复习请求无效")
+                        }
+                        if operation == "control" {
+                            guard let enabled = request["enabled"] as? Bool, let requestedScope = request["scope"] as? String,
+                                  ["all", "current"].contains(requestedScope), let force = request["force"] as? Bool else {
+                                throw ReaderNativeReviewQueue.Failure(message: "复习模式参数无效")
+                            }
+                            let result = await self.performNativeReviewLifecycle(["action":"reviewAction", "scope":self.nativeConversation.scope,
+                                "value":["key":"mode", "enabled":enabled, "queueScope":requestedScope, "force":force,
+                                    "contextKey":self.nativeConversation.review["contextKey"] as? String ?? ""]])
+                            guard let result else { throw ReaderNativeReviewQueue.Failure(message: "原生复习入口不可用") }
+                            replyHandler(result["ok"] as? Bool == true ? ["ok":true,"value":result] : result, nil)
+                            return
                         }
                         let service = try self.prepareNativeReviewQueue()
                         let value: Any

@@ -36,9 +36,24 @@ iOS 使用原生能力实现原软件的全部功能，包括阅读区。允许�
 
 ## 实施状态
 
-分支：`codex/reader-fully-native-20260921`。
+当前候选分支：`codex/native-pdf-runtime-20260924`，独立检出，不覆盖共享主目录。
+最初迁移分支：`codex/reader-fully-native-20260921`。
 整版迁移前回退点：`reader-native-baseline-20260921-9078aecf`。
 1.1.85 的 DOM 投影、模拟网页按钮和原件界面入口是待替换实现，不是原生功能完成的依据。
+
+### 收尾清单（2026-09-25，固定范围）
+
+以下是尚未关闭的原有操作链，不增加新功能。后文记录是各批次的历史，不表示整个任务完成。
+发现同一链内的遗漏就在该项补齐；不能在一项完成后又将同一链描述成新的扩展任务。
+
+- [ ] 对话：`ReaderNativeConversationScript` 的轮次排序、操作标识登记与事件分发由 Swift 接管；保留原件、卡片/媒体移除通知、选中附件和重复事件规则。
+- [ ] 复习：模式/取卡和改进草稿按钮已接原生服务，统一编译待验证；剩余暂存评分的提交/重试与删除调度继续迁移，保留可撤销暂存、显式确认、未知结果不重发。
+- [ ] 账户投递：`ReaderNativeCommandOutbox` 已原生持久化，剩余命令生产与本地/远端发送分流仍需接通；不能把本地操作发到服务端。
+- [ ] 开书与阅读状态：旧数据启动导入、PDF 文件写者协调、ReaderPC 上下文发布去掉网页业务依赖；EPUB 正文及局部视频继续保留 WebKit。
+- [ ] 统一验证：上述代码完成后做一次完整 Apple 构建，修正实际编译/合同错误；检查原有词组、卡片排版、拖放、附件与输入法链路未回退。
+- [ ] 出包：签名归档、导出并上传授权的 TestFlight 候选，记录真实构建号和结果；实机滚动/Pencil/多设备及弱网效果另列未验证项，不凭编译宣称通过。
+
+当前没有全部迁移完成的可安装包。弱网语音协议更换仍是调研项，不混入此次出包。
 
 当前完成的基础改动：
 
@@ -761,3 +776,22 @@ for the final consolidated Apple build, not yet run. Remaining scope includes
 conversation command/event registration, review effect/mode coordination,
 PDF startup imports and ReaderPC context publication. EPUB body and localized
 video WebKit remain approved exceptions. No signed App or TestFlight upload.
+
+### Native review mode and improvement orchestration (candidate)
+
+Review mode entry/exit, scope/reload and improvement buttons now enter Swift
+directly. PDF context is read from its native document; EPUB source context
+still comes from the retained body renderer. Swift owns bounded context/cache
+keys, queue acquisition, rejected-score restoration and draft input from the
+canonical card plus the native answer-selection graph. Web compatibility code
+only drains existing score effects and observes results; App mode notifications
+cannot trigger another queue acquisition. Older/browser hosts retain their own
+path. A pending reversible score cannot be discarded by a queue reload.
+
+Frozen preview confirmation and durable unknown-write receipts are unchanged.
+Stale card/mode responses do not replace newer previews or queues. Focused and
+full Reader Node checks passed; vendor and offline resources regenerated. Added
+Swift context/queue cases remain queued for the final consolidated Apple build.
+Review score effects/deletion, conversation ownership, account dispatch and
+startup/context publishing remain on the fixed closeout list above. No signed
+App package, Apple compile or TestFlight upload was performed in this batch.

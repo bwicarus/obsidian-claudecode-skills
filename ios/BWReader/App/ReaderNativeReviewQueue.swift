@@ -119,6 +119,17 @@ final class ReaderNativeReviewQueue {
         }
     }
 
+    /// The improvement request uses the same canonical card and context as the
+    /// visible queue, not a second card snapshot assembled by the web adapter.
+    func improvementInput(lease expected: String, cardID: String) throws -> Object {
+        let card = try presentedCard(lease: expected, cardID: cardID)
+        guard stagedRating == nil, takenRatings.isEmpty else {
+            throw Failure(message: "请先保存上一张卡的评分")
+        }
+        return ["contextKey": contextKey + ":" + scope, "cardKey": cardID,
+                "card": ReaderNativeReviewCards.assistant(card), "verbosity": improveMode]
+    }
+
     func stageCurrentRating(lease expected: String, cardID: String, stageID: String, ease: Any) throws -> Object {
         let card = try presentedCard(lease:expected,cardID:cardID)
         return try stageRating(["lease":expected,"stageId":stageID,"card":card,
@@ -516,6 +527,26 @@ final class ReaderNativeReviewQueue {
             throw Failure(message: "复习请求缺少上下文或轮次")
         }
         guard try Self.bytes(context).count <= 32 * 1024 else { throw Failure(message: "复习上下文过大") }
+        guard stagedRating == nil, takenRatings.isEmpty else { throw Failure(message: "评分尚未保存，未替换复习队列") }
+        let rejectedCards = input["rejectedCards"] as? [Object] ?? []
+        guard rejectedCards.count <= 200, try Self.bytes(["cards": rejectedCards]).count <= 8 * 1024 * 1024 else {
+            throw Failure(message: "待恢复评分记录无效")
+        }
+        func restored(_ raw: Object) throws -> Object {
+            var value = raw, cards = raw["cards"] as? [Object] ?? []
+            var completed = raw["completed_ids"] as? [Any] ?? []
+            for rejected in rejectedCards {
+                guard let card = rejected["card"] as? Object else { throw Failure(message: "待恢复评分缺少原卡片") }
+                let cardID = ReaderNativeCardRules.string(card["id"])
+                completed.removeAll { ReaderNativeCardRules.string($0) == cardID }
+                cards.removeAll { ReaderNativeCardRules.string($0["id"]) == cardID }
+                let requested = (rejected["original_index"] as? NSNumber)?.intValue ?? 0
+                let index = max(0, min(requested, cards.count))
+                cards.insert(card, at: index); value["index"] = index
+            }
+            value["cards"] = cards; value["completed_ids"] = completed
+            return try Self.snapshot(value)
+        }
         task?.cancel(); task = nil; cancelled = false; lease = id; contextKey = key; scope = requestedScope; stagedRating = nil
         stagedSource = nil; activeSnapshot = nil
         showingAnswer = false
@@ -541,7 +572,7 @@ final class ReaderNativeReviewQueue {
                 let selected = ReaderNativeReviewCards.stableID(previousCards[previousIndex])
                 index = cards.firstIndex(where: { ReaderNativeReviewCards.stableID($0) == selected }) ?? 0
             }
-            let snapshot = try Self.snapshot(["ts": now(), "client_context_key": key,
+            let snapshot = try restored(["ts": now(), "client_context_key": key,
                 "cards": cards, "index": index,
                 "due_total": due, "related_total": 0, "completed_ids": []])
             try save(snapshot, request: id)
@@ -567,9 +598,9 @@ final class ReaderNativeReviewQueue {
             var cards = data["cards"] as? [Object] ?? []
             let related = try Self.count(data["related_total"])
             if trimRelated, data["related_total"] != nil, !(data["related_total"] is NSNull) { cards = Array(cards.prefix(related)) }
-            let snapshot: Object = ["ts": now(), "client_context_key": key, "cards": cards,
+            let snapshot = try restored(["ts": now(), "client_context_key": key, "cards": cards,
                 "index": data["index"] ?? 0, "due_total": try Self.count(data["due_total"]),
-                "related_total": related, "completed_ids": filtered]
+                "related_total": related, "completed_ids": filtered])
             try save(snapshot, request: id)
             return ["kind": kind, "snapshot": snapshot, "request": id, "notice": notice]
         }

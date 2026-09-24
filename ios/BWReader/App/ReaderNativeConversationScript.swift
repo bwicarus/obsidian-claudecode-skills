@@ -9,6 +9,7 @@ enum ReaderNativeConversationScript {
       if (window !== window.top || window.__bwNativeConversation) return;
       const handler = window.webkit?.messageHandlers?.bwNativeConversation;
       if (!handler || typeof handler.postMessage !== 'function') return;
+      window.__BW_NATIVE_REVIEW_CONTROL__ = true;
       let legacyVisible = false, nativeMode = false;
       // 原生侧栏的开合**由原生自己记**，不再借网页抽屉的开合来表示。
       // ⚠ 这是 2026-09-22 反复栽跟头之后的收口：只要还调 `drawer().open()`，

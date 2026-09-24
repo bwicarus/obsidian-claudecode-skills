@@ -57,6 +57,8 @@
   var _ratingCommitBusy = 0;
   var _presentationNotice = '';
   var _nativeQueueLease = '';
+  var _nativeLifecycleFence = null;
+  var _nativeControlEpoch = 0;
   var _nativeDraftLease = '';
   var _nativeStageWork = null;
   var _nativeNavigationWork = null;
@@ -1232,6 +1234,8 @@
     };
   }
 
+  var _nativeImprovementFence = null;
+
   function _cardRequestCurrent(epoch, cardKey, kind) {
     var expected = kind === 'commit'
       ? _commitRequestEpoch
@@ -1241,6 +1245,7 @@
   }
 
   function _invalidateCardRequests(clearPreview) {
+    _nativeImprovementFence = null;
     _draftRequestEpoch += 1;
     _commitRequestEpoch += 1;
     if (_nativeReviewUI() && _nativeDraftLease) {
@@ -1734,7 +1739,73 @@
     }
   }
 
+  async function _dispatchNativeControl(enabled, force) {
+    var epoch = ++_nativeControlEpoch;
+    try {
+      return await _nativeQueueCall('control', {enabled:enabled, scope:_scopeMode, force:!!force});
+    } catch (error) {
+      if (epoch === _nativeControlEpoch) _toast('复习操作未完成：' + String(error && error.message || error));
+      return false;
+    }
+  }
+
+  async function _prepareNativeLifecycle(command) {
+    if (!_nativeReviewUI() || !command || !command.id || typeof command.enabled !== 'boolean' ||
+        !['all', 'current'].includes(command.scope) || command.enabled && !command.contextKey) throw new Error('复习模式参数无效');
+    if (!_mounted && !mount()) throw new Error('复习界面尚未就绪');
+    var epoch = ++_queueRequestEpoch;
+    if (_nativeNavigationWork) await _nativeNavigationWork;
+    if (_nativeStageWork) await _nativeStageWork;
+    var staged = !!_stagedRating;
+    var committed = await _commitStagedRating(command.enabled ? 'load-queue' : 'mode-exit');
+    await Promise.all([_cacheWriteChain, _nativeReconcileWork]);
+    if (epoch !== _queueRequestEpoch || _ratingCommitBusy || staged && committed === false) throw new Error('评分尚未保存或复习模式已变化');
+    _rememberAndDeactivateSelections(); _invalidateCardRequests(true);
+    _mode = command.enabled; _scopeMode = command.scope;
+    _showingAnswer = false; _cardExpanded = true; _improveExpanded = false;
+    _presentationNotice = '';
+    if (_mode) {
+      if (_contextCacheKey !== command.contextKey) { _queue = []; _idx = 0; }
+      _contextCacheKey = command.contextKey; _nativeQueueLease = command.id;
+    }
+    _queueBusy = _mode;
+    _nativeLifecycleFence = {id:command.id, epoch:epoch, enabled:_mode, contextKey:_contextCacheKey, scope:_scopeMode};
+    render(); _notifyAssistant('mode-toggle');
+    var legacy = _mode ? await _legacyCacheGet() : null;
+    if (epoch !== _queueRequestEpoch) throw new Error('复习模式已变化');
+    _bindCardRepository(_cardRepository());
+    return {ok:true, fence:Object.assign({}, _nativeLifecycleFence), legacyCache:legacy,
+      rejectedCards:JSON.parse(JSON.stringify(_rejectedForContext(_contextCacheKey)))};
+  }
+
+  function _observeNativeLifecycle(receipt) {
+    var fence = receipt && receipt.fence, active = _nativeLifecycleFence;
+    if (!_nativeReviewUI() || !fence || !active || fence.id !== active.id || fence.epoch !== active.epoch ||
+        fence.contextKey !== active.contextKey || fence.scope !== active.scope || fence.enabled !== active.enabled ||
+        active.epoch !== _queueRequestEpoch || active.enabled !== _mode || active.contextKey !== _contextCacheKey ||
+        active.scope !== _scopeMode || active.enabled && active.id !== _nativeQueueLease) return false;
+    if (receipt.error) _presentationNotice = '读取复习卡失败：' + String(receipt.error);
+    else if (active.enabled) {
+      var result = receipt.result, state = receipt.state;
+      if (!result || result.request !== active.id || !result.snapshot || !state || state.lease !== active.id ||
+          !Array.isArray(result.snapshot.cards) || result.snapshot.client_context_key !== active.contextKey ||
+          JSON.stringify(state.queueIds) !== JSON.stringify(result.snapshot.cards.map(_stableCardId))) return false;
+      _applyQueueSnapshot(result.snapshot); _acceptNativeReviewState(state);
+      var consumed = receipt.rejectedCards || [];
+      _rejectedAnswers[active.contextKey] = _rejectedForContext(active.contextKey).filter(function (item) {
+        return !consumed.some(function (old) { return JSON.stringify(old) === JSON.stringify(item); });
+      });
+      _presentationNotice = String(result.notice || '');
+    }
+    _queueBusy = false; _nativeLifecycleFence = null;
+    render();
+    if (active.enabled && !receipt.error) _activateCurrentSelections();
+    _notifyAssistant(active.enabled ? 'queue-native' : 'mode-toggle');
+    return true;
+  }
+
   async function _loadNativeQueue(force) {
+    if (window.__BW_NATIVE_REVIEW_CONTROL__ === true) return _dispatchNativeControl(true, force);
     if (_nativeStageWork) await _nativeStageWork;
     var context = _currentContext(), contextKey = _clientContextKey(context);
     var epoch = ++_queueRequestEpoch;
@@ -3506,7 +3577,85 @@
     };
   }
 
+  // Compatibility effects/projection only: Swift reads the canonical card and
+  // selected answers and calls the improvement service directly. No request
+  // body or network mutation is constructed by these two observers.
+  async function _prepareNativeImprovement(command) {
+    if (!_nativeReviewUI() || !command || !command.id ||
+        !['prepareDraft', 'commitDraft'].includes(command.key)) throw new Error('草稿操作无效');
+    var epoch = _queueRequestEpoch, contextKey = _contextCacheKey;
+    function current() {
+      return _mode && !_queueBusy && command.lease === _nativeQueueLease && epoch === _queueRequestEpoch &&
+        contextKey === _contextCacheKey && command.cardId === (_current() ? _stableCardId(_current()) : '');
+    }
+    if (_nativeNavigationWork) await _nativeNavigationWork;
+    if (_nativeStageWork) await _nativeStageWork;
+    if (!current()) throw new Error('复习卡已变化');
+    if (_nativeImprovementFence || _draftState && _draftState.busy || _anyCommitBusy()) throw new Error('草稿操作正在进行');
+    var staged = !!_stagedRating;
+    var committed = await _commitStagedRating('native-improvement');
+    await Promise.all([_cacheWriteChain, _nativeReconcileWork]);
+    if (!current() || _ratingCommitBusy || staged && committed === false) throw new Error('评分尚未保存，未开始草稿操作');
+    // Another command may have entered while the effects above were draining.
+    if (_nativeImprovementFence || _draftState && _draftState.busy || _anyCommitBusy()) throw new Error('草稿操作正在进行');
+    var preparing = command.key === 'prepareDraft';
+    if (preparing) {
+      if (!['anki', 'note', 'all'].includes(command.target)) throw new Error('草稿目标无效');
+      _draftRequestEpoch += 1; _commitRequestEpoch += 1;
+      _nativeDraftLease = command.id;
+      _draftState = {ok:false, busy:true, error:'正在生成草稿…', _card_key:command.cardId};
+      _commitState = Object.create(null);
+    } else {
+      if (!['anki', 'note'].includes(command.target) || command.confirmed !== true || !_nativeDraftLease ||
+          !_draftState || !_draftState.ok || command.draftId !== String(_draftState.draft_id || '') ||
+          !Array.isArray(_draftState.targets) || !_draftState.targets.includes(command.target) ||
+          _commitState[command.target] && (_commitState[command.target].ok || _commitState[command.target].unknown)) {
+        throw new Error('请核对当前草稿的确认及写入状态，未重复提交');
+      }
+      _commitRequestEpoch += 1;
+      _commitState[command.target] = {busy:true, ok:false, message:'正在提交…'};
+    }
+    _nativeImprovementFence = {id:command.id, key:command.key, lease:command.lease, epoch:epoch,
+      contextKey:contextKey, cardId:command.cardId, target:command.target,
+      draftId:preparing ? '' : command.draftId, draftLease:_nativeDraftLease,
+      requestEpoch:preparing ? _draftRequestEpoch : _commitRequestEpoch};
+    _improveExpanded = true;
+    render(); _publishPresentation();
+    return Object.assign({ok:true}, _nativeImprovementFence);
+  }
+
+  function _observeNativeImprovement(receipt) {
+    var fence = receipt && receipt.fence, active = _nativeImprovementFence;
+    if (!active || !fence || fence.id !== active.id || fence.key !== active.key ||
+        fence.lease !== active.lease || fence.cardId !== active.cardId || fence.target !== active.target ||
+        fence.draftLease !== active.draftLease || fence.draftId !== active.draftId ||
+        fence.requestEpoch !== active.requestEpoch || fence.epoch !== active.epoch || fence.contextKey !== active.contextKey ||
+        !_nativeReviewUI() || !_mode || _queueBusy || active.lease !== _nativeQueueLease ||
+        active.epoch !== _queueRequestEpoch || active.contextKey !== _contextCacheKey ||
+        active.draftLease !== _nativeDraftLease ||
+        !_cardRequestCurrent(active.requestEpoch, active.cardId, active.key === 'commitDraft' ? 'commit' : 'draft')) return false;
+    var preparing = active.key === 'prepareDraft';
+    if (!preparing && (!_draftState || String(_draftState.draft_id || '') !== active.draftId)) return false;
+    if (receipt.error) {
+      if (preparing) _draftState = {ok:false, busy:false, error:String(receipt.error), _card_key:active.cardId};
+      else _commitState[active.target] = {ok:false, busy:false, message:String(receipt.error)};
+    } else {
+      var result = receipt.result;
+      if (!result || !result.draft || result.draft._card_key !== active.cardId ||
+          !result.commits || typeof result.commits !== 'object' || Array.isArray(result.commits) ||
+          !preparing && String(result.draft.draft_id || '') !== active.draftId) return false;
+      _draftState = result.draft; _commitState = result.commits;
+    }
+    _nativeImprovementFence = null;
+    render(); _publishPresentation();
+    return true;
+  }
+
   async function _prepareDraft(target) {
+    if (_nativeReviewUI() && window.__BW_NATIVE_REVIEW_CONTROL__ === true) {
+      try { return await _nativeImprovementCall('control', {key:'prepareDraft', target:target}); }
+      catch (error) { _toast(String(error && error.message || error)); return; }
+    }
     if ((_draftState && _draftState.busy) || _anyCommitBusy()) return;
     if (_nativeReviewUI() && _registry() && typeof _registry().settle === 'function') {
       var beforeCard = _cardKey(_current()), beforeContext = _contextCacheKey;
@@ -3581,6 +3730,14 @@
   }
 
   async function _commitDraft(target, confirmation) {
+    if (_nativeReviewUI() && window.__BW_NATIVE_REVIEW_CONTROL__ === true) {
+      if (!_draftState || !_draftState.ok || !_draftState.draft_id) return;
+      var confirmedDraft = String(_draftState.draft_id), confirmedCard = _cardKey(_current());
+      var confirmed = confirmation && confirmation.target === target && confirmation.draftId === confirmedDraft && confirmation.cardKey === confirmedCard;
+      if (!confirmed && !window.confirm('确认把当前预览写入' + (target === 'anki' ? 'Anki 新卡' : '原笔记') + '？')) return;
+      try { return await _nativeImprovementCall('control', {key:'commitDraft', target:target, draftId:confirmedDraft, confirmed:true}); }
+      catch (error) { _toast(String(error && error.message || error)); return; }
+    }
     if (!_draftState || !_draftState.ok || !_draftState.draft_id) return;
     if (_anyCommitBusy() ||
         (_commitState[target] && (_commitState[target].ok || _commitState[target].unknown))) return;
@@ -4014,6 +4171,13 @@
   function setMode(on) {
     if (_nativeStageWork) return _nativeStageWork.then(function () { return setMode(on); });
     on = on === true || on === 'review';
+    // The assistant echoes a completed mode switch. It must not start a
+    // second queue load while the native owner is already acquiring it.
+    if (_nativeLifecycleFence && on === _mode) return _mode ? 'review' : 'normal';
+    if (window.__BW_NATIVE_REVIEW_CONTROL__ === true && _nativeReviewUI()) {
+      if (_mode === on) return _mode ? 'review' : 'normal';
+      return _dispatchNativeControl(on, false);
+    }
     if (_nativeReviewUI() && !on && _mode && (_stagedRating || _nativeRatingCommitWork)) {
       return _commitStagedRating('mode-exit').then(function () { return setMode(false); });
     }
@@ -4024,7 +4188,7 @@
     if (_mode === on) {
       if (_mode) {
         _scheduleDecorate();
-        if (!_queue.length) loadQueue(false);
+        if (!_queue.length && !_nativeReviewUI()) loadQueue(false);
       }
       return _mode ? 'review' : 'normal';
     }
@@ -4394,6 +4558,10 @@
   }
 
   RC.review = {
+    prepareNativeLifecycle: _prepareNativeLifecycle,
+    observeNativeLifecycle: _observeNativeLifecycle,
+    prepareNativeImprovement: _prepareNativeImprovement,
+    observeNativeImprovement: _observeNativeImprovement,
     prepareNativeTransition: _prepareNativeTransition,
     observeNativeTransition: _observeNativeTransition,
     finishNativeTransition: _finishNativeTransition,
