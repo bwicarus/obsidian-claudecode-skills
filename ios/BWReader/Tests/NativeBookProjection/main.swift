@@ -595,8 +595,8 @@ func testNativeReadingBootAndContext() throws {
     check(try db.cursor() == repaired,"repair repeated on every open")
     let context:O = ["kind":"pdf","file":"localbook:boot","page":5,"title":"Original","text":"原文","textAvailable":true,"textSource":"app-local-visible-window","fallbackReason":NSNull(),"truncated":false]
     func publish(_ value:O) throws -> O { try ReaderNativeReadingPosition.publishContext(value,store:device,bookID:"boot",deviceID:"test") }
-    check(try publish(context)["seq"] as? Int == 1,"initial context sequence")
-    check(try publish(context)["seq"] as? Int == 2,"context sequence was reset")
+    check(try publish(context)["seq"] as? Int64 == 1,"initial context sequence")
+    check(try publish(context)["seq"] as? Int64 == 2,"context sequence was reset")
     let journal = try device.record(collection:"native-outgoing-journal",id:"test:outgoing-journal")!
     var changed = context; changed["file"] = "localbook:other"
     do { _ = try publish(changed); fatalError("wrong book context accepted") } catch ReaderNativeBookStore.MutationError.invalid {}
@@ -606,7 +606,7 @@ func testNativeReadingBootAndContext() throws {
     try device.execute("CREATE TRIGGER fail_context BEFORE INSERT ON records WHEN NEW.collection = 'native-outgoing-journal' BEGIN SELECT RAISE(ABORT, 'context failure'); END")
     do { _ = try publish(context); fatalError("failed context published") } catch is ReaderNativeDataStore.StoreError {}
     try device.execute("DROP TRIGGER fail_context")
-    check(try publish(context)["seq"] as? Int == 3,"failed transaction consumed sequence")
+    check(try publish(context)["seq"] as? Int64 == 3,"failed transaction consumed sequence")
 }
 try testNativeReadingBootAndContext()
 print("Native reading startup/context: atomic legacy import, binding repair, stable sequences and failed writes passed")

@@ -248,7 +248,7 @@ func testStandaloneRating() throws {
     let db = try ReaderNativeDataStore(path:":memory:")
     let repo = ReaderNativeCardRepository(store:db,deviceID:"test",now:{ 9000 })
     let gid = "card_cafeba12"
-    _ = try repo.perform(["operation":"registerDraft","arguments":[["gid":gid,"cards":[["front":"Q","back":"A"]],"source":["kind":"test","sourceId":"source"]]],"mutationId":"new"])
+    _ = try repo.perform(["operation":"registerDraft","arguments":[["gid":gid,"cards":[["type":"basic","front":"Q","back":"A"]],"source":["kind":"test","sourceId":"source"]]],"mutationId":"new"])
     _ = try repo.perform(["operation":"saveConfirmedCard","arguments":[["gid":gid,"cardIndex":0]],"mutationId":"confirm"])
     _ = try repo.perform(["operation":"patchState","arguments":[gid,0,["exactState":["_st":"learn","_showBack":true,"card_id":123,"_ratingUnavailable":false]]],"mutationId":"ready"])
     func input() throws -> [String:Any] {
@@ -264,7 +264,7 @@ func testStandaloneRating() throws {
     precondition(R.same(prior,rolled))
     try db.execute("DROP TRIGGER fail_sidebar_delivery")
     let started = try repo.beginStandaloneRating(input:input(),aid:"aid-one",ease:3,event:event)
-    precondition((started["body"] as? [String:Any])?["card_id"] as? Int == 123)
+    precondition((started["body"] as? [String:Any])?["card_id"] as? Int64 == 123)
     do { _ = try repo.beginStandaloneRating(input:input(),aid:"aid-two",ease:3,event:event); preconditionFailure("duplicate rating allowed") } catch is R.Failure {}
     let unknown = try repo.settleStandaloneRating(started,status:"unknown")
     precondition((((unknown["states"] as? [String:Any])?["0"] as? [String:Any])?["exactState"] as? [String:Any])?["_ratingPending"] as? Bool == true)

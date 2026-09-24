@@ -404,7 +404,7 @@ typealias Q = ReaderNativeReviewQueue
             cardID: "card_group_i0", kind: "reader-card", confirmed: true)
         let remainingSibling = ((localRemoved["snapshot"] as! Q.Object)["cards"] as! [Q.Object]).first!
         precondition(ReaderNativeReviewCards.stableID(remainingSibling) == "card_group_i1")
-        precondition((remainingSibling["_localReview"] as! Q.Object)["stateRev"] as? Int == 3, "sibling kept an obsolete group revision")
+        precondition((remainingSibling["_localReview"] as! Q.Object)["stateRev"] as? Int64 == 3, "sibling kept an obsolete group revision")
         precondition(localDelete.calls.isEmpty && localDelete.removedInputs.count == 1)
         let lateDelete = Fixture(); lateDelete.reply["cards"] = [["id": 100, "note_id": 10, "question": "late"]]
         let lateInput = lateDelete.input(scope: "all"), lateLease = lateInput["request"] as! String

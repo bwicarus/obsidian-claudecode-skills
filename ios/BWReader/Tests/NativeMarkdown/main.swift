@@ -130,10 +130,10 @@ try await MainActor.run {
     precondition(!imageHTML.contains("removed.png") && !imageHTML.contains("data-i=\"0\""))
     for value in ["data-i=\"1\"", "data-aid=\"im_abc123\"", "/pdf/api/asset/im_abc123?proxy=1", "data-map-url", "vc-ig-map", "原图&lt;script&gt;"] { precondition(imageHTML.contains(value), "media placement lost \(value)") }
     let video: [String: Any] = ["kind": "videos", "cid": "videos", "data": ["items": [
-        ["url": "https://youtu.be/abc_DEF-1234", "title": "视频", "channel": "来源"],
+        ["url": "https://youtu.be/abc_DEF-123", "title": "视频", "channel": "来源"],
         ["url": "https://www.bilibili.com/video/BV1xx411c7mD", "title": "B站视频"]]]]
     let videoRecord = try Placement.semanticRecord(video)!, videoHTML = videoRecord["raw"] as! String
-    for value in ["data-video-id=\"abc_DEF-1234\"", "data-video-src=\"yt\"", "data-video-src=\"bili\"", "vc-vg-play", "来源"] { precondition(videoHTML.contains(value), "video placement lost \(value)") }
+    for value in ["data-video-id=\"abc_DEF-123\"", "data-video-src=\"yt\"", "data-video-src=\"bili\"", "vc-vg-play", "来源"] { precondition(videoHTML.contains(value), "video placement lost \(value)") }
 }
 print("Native artifact placement: complete originals, Markdown, identity, sources, safe HTML and PDF coordinates passed")
 do {
@@ -162,8 +162,9 @@ do {
     let otherRows = Media.project(otherScope)["items"] as! [[String:Any]]
     precondition(nativeRows[0]["removeID"] as? String != otherRows[0]["removeID"] as? String,"media action crossed conversation scope")
     precondition(Media.https("https://user:pass@example.com/a") == nil && Media.https("javascript:evil()") == nil)
-    precondition(Media.video(["url": "https://youtube.com.evil.test/watch?v=abc_DEF-1234"])["id"] == "")
-    precondition(Media.video(["url": "https://www.youtube.com/shorts/abc_DEF-1234"])["id"] == "abc_DEF-1234")
+    precondition(Media.video(["url": "https://youtube.com.evil.test/watch?v=abc_DEF-123"])["id"] == "")
+    precondition(Media.video(["url": "https://www.youtube.com/shorts/abc_DEF-123"])["id"] == "abc_DEF-123")
+    precondition(Media.video(["url": "https://youtu.be/abc_DEF-1234"])["id"] == "", "invalid video id accepted")
     precondition(Media.video(["src": "b站", "id": "BV1xx411c7mD"])["src"] == "bili")
     precondition(Media.map("https://example.com/maps.googleapis.com/maps/api/staticmap?center=35,139") == nil)
     let yandex = Media.map("https://static-maps.yandex.ru/1.x/?ll=139.69,35.68&z=12&pt=139.69,35.68,pm2rdm")!
