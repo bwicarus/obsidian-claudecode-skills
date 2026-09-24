@@ -15280,6 +15280,23 @@
       return !!(raw && raw.ok === true);
     }).catch(function () { return false; });
   }
+  // Transitional data adapter. Collection ownership and network receipts are
+  // native; no DOM is needed and uncertain writes never fall back to fetch.
+  root.__bwNativeFavorites = {
+    request: function (operation, value) {
+      return bootPromise.then(function () {
+        return root.webkit.messageHandlers.bwNativeDataStore.postMessage({
+          action: 'favorites', operation: operation, value: value || {}
+        });
+      }).then(function (receipt) {
+        if (!receipt || receipt.ok !== true) throw new Error('收藏操作未获确认');
+        if (operation !== 'trash' && Array.isArray(receipt.cards)) {
+          root.__bwReaderAcceptNativeFavorites && root.__bwReaderAcceptNativeFavorites(receipt);
+        }
+        return receipt;
+      });
+    }
+  };
   function nativePhrasesFetch(input, init, url, route, method) {
     return bootPromise.then(function () {
       if (!nativePhrases) return legacyPhrasesFetch(input, init, url, route, method);

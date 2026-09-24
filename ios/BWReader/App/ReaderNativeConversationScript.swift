@@ -1214,7 +1214,7 @@ enum ReaderNativeConversationScript {
           } else if (action === 'favoritesDelete') {
             const favorite = rc().voiceCard?.favorite, value = command.value;
             if (!favorite?.remove || !value || !Array.isArray(value.ids) || !value.ids.length) return { ok: false, error: '参数无效' };
-            if (!favorite.remove(value.ids.map(String))) return { ok: false, error: '没能删除' };
+            if (!await favorite.remove(value.ids.map(String))) return { ok: false, error: '没能删除' };
           } else if (action === 'nativeEpubHighlight') {
             // EPUB 选区条的「划线」。落库、锚点解析、就地上色、记住上次用的颜色
             // 都在底座 saveHl 那条路上，这里只转交。
@@ -1544,7 +1544,7 @@ enum ReaderNativeConversationScript {
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
       ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:native-document-position', 'bw-native-computer-voice-state', 'bw-native-figure-projection'].forEach(name => window.addEventListener(name, schedule));
-      ['rc:assistant-mode-changed','rc:review-presentation-changed','rc:placement-changed','rc:favorites-changed','rc:flashcard-state-changed'].forEach(name => window.addEventListener(name,scheduleMessages));
+      ['rc:assistant-mode-changed','rc:review-presentation-changed','rc:placement-changed','rc:favorites-changed','bw:native-favorites-changed','rc:flashcard-state-changed'].forEach(name => window.addEventListener(name,scheduleMessages));
       window.addEventListener('scroll', schedule, { capture: true, passive: true });
       window.addEventListener('resize', schedule, { passive: true });
       window.addEventListener('pointerup', schedule, { capture: true, passive: true });

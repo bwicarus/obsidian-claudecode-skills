@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 卡片收藏夹里的一张（数据来自 rc-voicecall 的收藏夹，经 favoritesList / favoritesTrash 取来）。
+/// The native projection of an existing server favorite, with stable identity.
 struct ReaderNativeFavorite: Identifiable, Equatable {
     let id: String
     let label: String
@@ -10,6 +10,7 @@ struct ReaderNativeFavorite: Identifiable, Equatable {
     let file: String
     let ts: Double
     var pinned: Bool
+    let pendingConfirmation: Bool
 
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String, !id.isEmpty else { return nil }
@@ -26,9 +27,9 @@ struct ReaderNativeFavorite: Identifiable, Equatable {
         file = value["file"] as? String ?? ""
         ts = (value["ts"] as? NSNumber)?.doubleValue ?? 0
         pinned = value["pinned"] as? Bool ?? false
+        pendingConfirmation = value["pendingConfirmation"] as? Bool ?? false
     }
 
-    static func == (a: Self, b: Self) -> Bool { a.id == b.id && a.pinned == b.pinned }
 }
 
 /// 原版配色（rc-voicecall 的 #vc-dock-btn / #vc-dock-panel 那组 CSS）。
@@ -291,6 +292,9 @@ struct ReaderNativeFavoritesPanelLayer: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.label).font(.system(size: 12, weight: .semibold)).foregroundStyle(DockStyle.label)
                     .lineLimit(1)
+                if item.pendingConfirmation {
+                    Text("服务器保存未确认").font(.system(size: 10)).foregroundStyle(.orange)
+                }
                 if !item.text.isEmpty {
                     Text(item.text).font(.system(size: level == 0 ? 12 : 11)).foregroundStyle(DockStyle.body)
                         .lineSpacing(2).lineLimit(lines)

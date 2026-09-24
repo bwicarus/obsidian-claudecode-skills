@@ -5377,6 +5377,25 @@ if (window.__bwPwaProviderOnly) return;
   function _cardSecs() { var v = 20; try { v = parseInt(localStorage.getItem('rc-voice-card-secs') || '20', 10) || 20; } catch (e) {} return Math.max(5, Math.min(60, v)); }
   function _sideOpen() { var sd = document.getElementById('ep-side'); return !!(sd && sd.classList.contains('open')); }
   var _dock = { list: [], open: false, loaded: false };
+  var _nativeFavoriteSnapshot = { context: '', revision: -1 };
+  window.__bwReaderAcceptNativeFavorites = function (snapshot) {
+    if (!snapshot || !Array.isArray(snapshot.cards)) return false;
+    var context = String(snapshot.context || ''), revision = Number(snapshot.revision);
+    if (!Number.isSafeInteger(revision) || revision < 0) return false;
+    if (!/^\d+$/.test(context)) return false;
+    if (_nativeFavoriteSnapshot.context && BigInt(context) < BigInt(_nativeFavoriteSnapshot.context)) return false;
+    if (context === _nativeFavoriteSnapshot.context && revision < _nativeFavoriteSnapshot.revision) return false;
+    _nativeFavoriteSnapshot = { context: context, revision: revision };
+    _dock.list = snapshot.cards.slice(); _dock.loaded = true;
+    // Data observation only. The native panel owns display; do not mount the
+    // hidden carousel or run its card renderers when receiving a snapshot.
+    try { window.dispatchEvent(new Event('bw:native-favorites-changed')); } catch (_) {}
+    return true;
+  };
+  function _nativeFavoriteRequest(operation, value) {
+    return window.__bwNativeFavorites && window.__bwNativeFavorites.request
+      ? window.__bwNativeFavorites.request(operation, value) : null;
+  }
   var _FAV_CARDS_PAYLOAD_VERSION = 1;
   var _FAV_CARDS_MAX_COUNT = 64;
   var _FAV_CARDS_MAX_BYTES = 256 * 1024;
@@ -5459,6 +5478,10 @@ if (window.__bwPwaProviderOnly) return;
     }
   }
   function _dockLoad(cb) {   // 78:收藏夹服务端持久化(独立于会话,清空对话不清它)
+    if (window.__bwNativeFavorites) {
+      _nativeFavoriteRequest('read').then(function () { cb && cb(); }, function () { cb && cb(); });
+      return;
+    }
     if (_dock.loaded) { cb && cb(); return; }
     fetch('/api/assistant/voice-cards').then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok) { _dock.list = d.cards || []; _dock.loaded = true; }
@@ -5466,6 +5489,12 @@ if (window.__bwPwaProviderOnly) return;
     }).catch(function () { cb && cb(); });
   }
   function _favSave(rec) {
+    if (window.__bwNativeFavorites) {
+      return _nativeFavoriteRequest('save', { card: rec }).then(function (receipt) { return receipt.id; }).catch(function (error) {
+        try { if (typeof _toast === 'function') _toast(String(error && error.message || error)); } catch (_) {}
+        return '';
+      });
+    }
     rec.cid = rec.cid || rec.gid || _mkCid();   // 学习卡 cid=gid；收藏只增加宿主，不另发编号
     rec.id = rec.id || ((rec.kind === 'cards' || rec.gid) ? (rec.gid || rec.cid) :
       ('v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)));
@@ -5535,11 +5564,16 @@ if (window.__bwPwaProviderOnly) return;
     favorite: {
       hint: function (on) { try { _dockHint(on); } catch (e) {} },
       inZone: function (x, y) { try { return _inDockZone(x, y); } catch (e) { return false; } },
-      save: function (rec) { try { rec = rec || {}; rec.meta = rec.meta || _favMeta(); _dockLoad(function () { _favSave(rec); }); if (typeof _toast === 'function') _toast('已收入收藏夹'); return true; } catch (e) { return false; } },
+      save: function (rec) { try {
+        rec = rec || {}; rec.meta = rec.meta || _favMeta();
+        if (window.__bwNativeFavorites) return _nativeFavoriteRequest('save', { card: rec }).then(function () { return true; });
+        _dockLoad(function () { _favSave(rec); }); if (typeof _toast === 'function') _toast('已收入收藏夹'); return true;
+      } catch (e) { return false; } },
       prepare: function (rec) { try { return _favPrepare(rec || {}); } catch (e) { return { ok: false, error: '学习卡数据不完整，未加入收藏夹' }; } },   // 合同/宿主可预检；真正保存仍唯一走 save
       // ── 原生外壳用：网页层被藏着时，收藏夹按钮与面板由原生画，数据与写入仍走这里（_dock 同一份）──
       count: function () { return _dock.loaded ? _dock.list.length : 0; },
       load: function () {
+        if (window.__bwNativeFavorites) return _nativeFavoriteRequest('read').then(function (receipt) { return receipt.cards; });
         return new Promise(function (resolve) {
           try { _dockLoad(function () { resolve(_dock.list.slice()); }); } catch (e) { resolve([]); }
         });
@@ -5548,6 +5582,7 @@ if (window.__bwPwaProviderOnly) return;
       remove: function (ids) {
         ids = (Array.isArray(ids) ? ids : []).map(String).filter(Boolean);
         if (!ids.length) return false;
+        if (window.__bwNativeFavorites) return _nativeFavoriteRequest('delete', { ids: ids }).then(function () { return true; });
         fetch('/api/assistant/voice-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ op: 'del', ids: ids }) }).catch(function () {});
         _dock.list = _dock.list.filter(function (x) { return ids.indexOf(x.id) < 0; });
@@ -5556,10 +5591,12 @@ if (window.__bwPwaProviderOnly) return;
       },
       // 回收站（1 天内可恢复）与恢复：与收藏夹面板里「回收站 / 点卡=恢复」同一条端点。
       trash: function () {
+        if (window.__bwNativeFavorites) return _nativeFavoriteRequest('trash').then(function (receipt) { return receipt.cards; });
         return fetch('/api/assistant/voice-cards?trash=1').then(function (r) { return r.json(); })
           .then(function (d) { return (d && d.cards) || []; }).catch(function () { return []; });
       },
       restore: function (id) {
+        if (window.__bwNativeFavorites) return _nativeFavoriteRequest('restore', { id: String(id || '') }).then(function () { return true; });
         return fetch('/api/assistant/voice-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ op: 'restore', id: String(id || '') }) }).then(function () {
             _dock.loaded = false;
@@ -6260,6 +6297,7 @@ if (window.__bwPwaProviderOnly) return;
   };
   setTimeout(function () { try { _dockLoad(); } catch (e) {} }, 2500);   // 106(用户实测):收藏夹按钮曾是懒加载——有存货但页面加载后不显示,直到做一次收藏;开页主动拉一次
   function _dockBtn() {
+    if (window.__bwNativeFavorites) return;
     var b = document.getElementById('vc-dock-btn');
     if (!b) {
       b = document.createElement('button'); b.id = 'vc-dock-btn'; b.type = 'button';
@@ -6340,6 +6378,7 @@ if (window.__bwPwaProviderOnly) return;
     _cardLayout(); _dockHint(false);
   }
   function _dockPanel(show) {
+    if (window.__bwNativeFavorites) return;
     var p0 = document.getElementById('vc-dock-panel');
     if (!show) { if (p0) p0.remove(); _dock.open = false; _dock.delMode = false; _dock.trash = false; return; }
     if (!_dock.loaded) { _dockLoad(function () { if (_dock.open) _dockPanel(true); }); }

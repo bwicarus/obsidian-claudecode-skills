@@ -166,6 +166,11 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var sidebarOpen = false
     /// 卡片收藏夹里有几张（原版右下角收藏夹按钮上的数字）。
     @Published private(set) var favoritesCount = 0
+    private var nativeFavoritesCount: Int?
+    func setNativeFavoritesCount(_ value: Int?) {
+        nativeFavoritesCount = value
+        if let value, favoritesCount != value { favoritesCount = value }
+    }
     @Published private(set) var selectionText = ""
     /// 阅读器当前选中的文字。
     /// ⚠ 与 `selectionText` 不是一回事：那个来自 `__focusSel`，而
@@ -391,7 +396,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         webPlacements = (payload["placements"] as? [[String: Any]] ?? []).compactMap(ReaderNativePagePlacement.init)
         mergePlacements()
         sidebarOpen = payload["sidebarOpen"] as? Bool ?? false
-        favoritesCount = (payload["favoritesCount"] as? NSNumber)?.intValue ?? 0
+        favoritesCount = nativeFavoritesCount ?? (payload["favoritesCount"] as? NSNumber)?.intValue ?? 0
         selectionText = (payload["selection"] as? [String: Any])?["text"] as? String ?? ""
         readerSelectionText = (payload["readerSelection"] as? [String: Any])?["text"] as? String ?? ""
         attachments = (payload["attachments"] as? [[String: Any]] ?? []).compactMap(ReaderNativeContextAttachment.init)

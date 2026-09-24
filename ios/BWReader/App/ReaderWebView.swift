@@ -360,6 +360,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeServerGateway: ReaderNativeServerGateway?
     private var nativeAssistantStream: ReaderNativeAssistantStreamBridge?
     private var nativePhraseService: ReaderNativePhraseService?
+    private var nativeFavoritesService: ReaderNativeFavoritesService?
+    private var nativeFavoritesContext: UInt64?
     private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
     private var nativeServerRemoteLibraryCancellable: AnyCancellable?
     private var nativeServerSyncBridge: ReaderNativeServerSyncBridge?
@@ -1301,21 +1303,22 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             if outer == "inspectArtifact" { return ["ok":true,"detail":["kind":"general","title":html["label"] ?? "卡片","content":html]] }
             if outer == "mediaResource", let resource = action.resource { return ["ok":true,"resource":resource] }
             guard outer == "liveAction" else { throw ReaderNativeNoteRules.NoteError.invalid("卡片命令") }
-            if ["favorite","select","pin"].contains(action.key) {
+            if action.key == "favorite" {
+                let service = try prepareNativeFavoritesService()
+                let result = try await service.perform("save", ["card": [
+                    "label": html["label"] ?? "工具卡片", "raw": html["content"] ?? "",
+                    "text": html["contextText"] ?? html["content"] ?? "", "isHtml": html["isHtml"] as? Bool ?? false,
+                    "kind": "tool", "cid": html["cid"] ?? action.noteID,
+                    "meta": ["file": book.title, "page": ReaderNativeCardRules.string((note["anchor"] as? [String: Any])?["page"]), "q": ""]]])
+                return ["ok": true, "value": result]
+            }
+            if ["select","pin"].contains(action.key) {
                 // These shared registries are still being migrated. Their
                 // adapter accepts authoritative data and never reads a card
                 // element or forces a hidden page to mount.
                 let result = try await webView.callAsyncJavaScript("""
                     const html = note.html, cid = String(html.cid || note.id);
                     const registry = window.BWReaderRuntime?.contextSelections;
-                    if (action === 'favorite') {
-                      const owner = window.RC?.voiceCard?.favorite;
-                      if (!owner?.save) throw new Error('收藏夹尚未就绪');
-                      const value = await owner.save({label:html.label || '工具卡片', raw:html.content || '',
-                        isHtml:!!html.isHtml,text:html.content || '',kind:'tool',cid});
-                      if (value === false) throw new Error('收藏未确认');
-                      return {ok:true};
-                    }
                     if (action === 'select') {
                       if (typeof text !== 'string' || text.length > 16000) throw new Error('选区内容无效');
                       if (!text.trim()) { if (window.__bwNativeSelection?.owner === token) window.__bwNativeSelection.active = false; return {ok:true}; }
@@ -1567,13 +1570,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     //
     // 网页层在原生外壳里被藏着，原版右下角那个收藏夹按钮与面板也就看不见了
     // （2026-09-23 用户："卡片收藏进收藏夹后也没有显示收藏夹的图标按钮"）。
-    // 按钮与面板由原生画；数据与写入仍走 rc-voicecall 的收藏夹（同一份 _dock）。
+    // Swift owns collection requests and the session cache. The web adapter
+    // temporarily observes committed snapshots for shared context selection.
 
     func loadNativeFavorites() async -> [ReaderNativeFavorite] {
         let receipt = await requestNativeConversationCommand(["action": "favoritesList", "scope": nativeConversation.scope])
         guard receipt["ok"] as? Bool == true else {
             showTransientNotice(receipt["error"] as? String ?? "收藏夹没能打开。")
-            return []
+            return (nativeFavoritesService?.records ?? []).map { ReaderNativeFavoritesService.presentation($0) }.compactMap(ReaderNativeFavorite.init)
         }
         return (receipt["value"] as? [[String: Any]] ?? []).compactMap(ReaderNativeFavorite.init)
     }
@@ -1617,6 +1621,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     func loadNativeFavoritesTrash() async -> [ReaderNativeFavorite] {
         let receipt = await requestNativeConversationCommand(["action": "favoritesTrash", "scope": nativeConversation.scope])
+        if receipt["ok"] as? Bool != true {
+            showTransientNotice(receipt["error"] as? String ?? "回收站暂时无法读取。")
+            return (nativeFavoritesService?.trashRecords ?? []).map { ReaderNativeFavoritesService.presentation($0) }.compactMap(ReaderNativeFavorite.init)
+        }
         return (receipt["value"] as? [[String: Any]] ?? []).compactMap(ReaderNativeFavorite.init)
     }
 
@@ -1624,6 +1632,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         let receipt = await requestNativeConversationCommand([
             "action": "favoritesRestore", "scope": nativeConversation.scope, "value": ["id": id],
         ])
+        if receipt["ok"] as? Bool != true { showTransientNotice(receipt["error"] as? String ?? "恢复未获确认。") }
         return receipt["ok"] as? Bool == true
     }
 
@@ -2477,6 +2486,102 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
+    private func prepareNativeFavoritesService() throws -> ReaderNativeFavoritesService {
+        guard let gateway = nativeServerGateway, let book = currentLocalBook else {
+            throw ReaderNativeFavoritesService.Failure(message: "收藏夹连接尚未就绪")
+        }
+        let context = gateway.contextRevision, generation = bookUserStateContextGeneration
+        if let service = nativeFavoritesService, nativeFavoritesContext == context { return service }
+        nativeFavoritesService?.invalidate()
+        nativeFavoritesContext = context
+        nativeConversation.setNativeFavoritesCount(nil)
+        let surface: ReaderNativeInterfaceSurface = book.format == .epub ? .epub : .pdf
+        let service = ReaderNativeFavoritesService(fetch: { [weak self] path, method, body in
+            guard let self, self.bookUserStateContextGeneration == generation,
+                  gateway.contextRevision == context else { throw CancellationError() }
+            let result = try await gateway.fetchData(path: path, method: method, body: body ?? Data(), surface: surface)
+            guard self.bookUserStateContextGeneration == generation, gateway.contextRevision == context else { throw CancellationError() }
+            return .init(status: result.status, data: result.data)
+        }, changed: { [weak self] rows in
+            guard let self, self.bookUserStateContextGeneration == generation,
+                  self.nativeFavoritesContext == context else { return }
+            self.nativeConversation.setNativeFavoritesCount(rows.count)
+            self.webView.callAsyncJavaScript("window.__bwReaderAcceptNativeFavorites?.(snapshot); return true;",
+                arguments: ["snapshot": ["cards": rows, "context": String(context),
+                                         "revision": self.nativeFavoritesService?.projectionRevision ?? 0]],
+                in: nil, in: .page, completionHandler: nil)
+        })
+        nativeFavoritesService = service
+        return service
+    }
+
+    private func performNativeFavoritesCommand(_ command: [String: Any]) async -> [String: Any]? {
+        guard let action = command["action"] as? String,
+              ["favoritesList", "favoritesTrash", "favoritesDelete", "favoritesRestore", "favoritesPlace"].contains(action) else { return nil }
+        do {
+            guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope else {
+                throw ReaderNativeFavoritesService.Failure(message: "收藏夹所属页面已切换")
+            }
+            let service = try prepareNativeFavoritesService()
+            let scope = nativeConversation.scope
+            var value = command["value"] as? [String: Any] ?? [:]
+            if action == "favoritesPlace" {
+                guard let book = currentLocalBook, let access = currentLocalBookAccess,
+                      let document = nativePDFDocument, let digest = currentLocalBookContentSHA256,
+                      nativeReadingStoreBookID == book.id, let deviceID = nativeReadingStoreDeviceID,
+                      let id = value["id"] as? String, let page = value["page"] as? Int,
+                      let x = value["x"] as? Double, let y = value["y"] as? Double else {
+                    throw ReaderNativeFavoritesService.Failure(message: "书页卡片尚未就绪")
+                }
+                let generation = bookUserStateContextGeneration
+                let data = try await service.perform("read")
+                guard let rows = data["cards"] as? [[String: Any]], let row = rows.first(where: { $0["id"] as? String == id }) else {
+                    throw ReaderNativeFavoritesService.Failure(message: "这张卡已不在收藏夹里")
+                }
+                guard nativePDFMutationCommandDepth == 0 else { throw ReaderNativeBookStore.MutationError.unavailable }
+                let pending = try await nativePDFMutationActor.hasUnfinishedMutation(book: access)
+                guard !pending, nativePDFMutationCommandDepth == 0, generation == bookUserStateContextGeneration,
+                      currentLocalBookAccess === access, nativePDFDocument === document, scope == nativeConversation.scope,
+                      document.matches(bookID: book.id, contentSHA256: digest) else { throw ReaderNativeBookStore.MutationError.unavailable }
+                let body = try ReaderNativeFavoritePlacement.body(row, file: "localbook:" + book.id, page: page, x: x, y: y,
+                    pageWidth: Double(document.characterPageSize(page)?.width ?? 0))
+                let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+                let receipt = try ReaderNativeBookStore(store: store, bookID: book.id, deviceID: deviceID,
+                    displayName: book.title, contentSHA256: digest).perform([
+                        "bookID": book.id, "mutationId": "favorite-place-" + (body["id"] as! String),
+                        "operation": "note-create", "value": ["method": "POST", "body": body]])
+                nativeReplicationService?.wake(); markCloudSyncDirty()
+                await refreshNativePDFProjection()
+                if currentLocalBookAccess === access {
+                    webView.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('bw:native-book-committed',{detail:value})); return true;",
+                        arguments: ["value": ["bookID": book.id]], in: nil, in: .page, completionHandler: nil)
+                }
+                return ["ok": true, "value": receipt]
+            }
+            let operation: String
+            switch action {
+            case "favoritesList": operation = "read"; value["refresh"] = true
+            case "favoritesTrash": operation = "trash"
+            case "favoritesDelete": operation = "delete"
+            default: operation = "restore"
+            }
+            let result = try await service.perform(operation, value)
+            guard scope == nativeConversation.scope else { throw CancellationError() }
+            if operation == "read" || operation == "trash" {
+                let rows = result["cards"] as? [[String: Any]] ?? []
+                // Pin state still belongs to the shared selection registry.
+                // Read only its small identity set, never card HTML or nodes.
+                let ids = rows.compactMap { $0["id"] as? String }
+                let pinned = (try? await webView.callAsyncJavaScript(
+                    "return ids.filter(id => window.RC?.voiceCard?.favorite?.pinned?.(id));",
+                    arguments: ["ids": ids], in: nil, contentWorld: .page)) as? [String] ?? []
+                guard scope == nativeConversation.scope else { throw CancellationError() }
+                return ["ok": true, "value": rows.map { ReaderNativeFavoritesService.presentation($0, pinned: pinned.contains($0["id"] as? String ?? "")) }]
+            }
+            return ["ok": true, "value": result]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
     private func prepareNativePhraseService(deviceID: String) throws {
         if nativePhraseService?.deviceID == deviceID { return }
         let device = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-device").store
@@ -2516,6 +2621,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativeFavoritesCommand(command) { return result }
         if let result = await performNativeFigureCommand(command) { return result }
         if command["action"] as? String == "nativePhraseFav" {
             guard !isLoading, isTrustedReaderURL(webView.url),
@@ -6868,6 +6974,24 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                             }
                             replyHandler(try await service.set(text, enabled: enabled), nil)
                         }
+                    } catch { replyHandler(nil, error.localizedDescription) }
+                }
+                return
+            }
+            if body["action"] as? String == "favorites" {
+                guard let operation = body["operation"] as? String,
+                      ["read", "trash", "save", "delete", "restore"].contains(operation) else {
+                    replyHandler(nil, "收藏操作无效"); return
+                }
+                Task { @MainActor in
+                    do {
+                        let service = try prepareNativeFavoritesService()
+                        let context = nativeFavoritesContext
+                        var value = try await service.perform(operation, body["value"] as? [String: Any] ?? [:])
+                        guard context == nativeFavoritesContext else { throw CancellationError() }
+                        value["revision"] = service.projectionRevision
+                        value["context"] = String(context ?? 0)
+                        replyHandler(value, nil)
                     } catch { replyHandler(nil, error.localizedDescription) }
                 }
                 return
