@@ -555,7 +555,7 @@ async function harness(options = {}) {
         ...(options.nativeBookReply ? {
           bwNativeDataStore: {
             postMessage: async (message) => message.action === 'readingStoreReady'
-              ? { ok: true, nativeBookWrites: true }
+              ? { ok: true, nativeBookWrites: true, nativePhrases: !!options.nativePhrases }
               : options.nativeBookReply(clone(message)),
           },
         } : {}),
@@ -2060,6 +2060,32 @@ test('a delayed context report cannot overwrite the native committed page', asyn
 
 test('native-only App does not silently boot a second database when its store is unavailable', async () => {
   await assert.rejects(harness({nativeStoreRequired:true}), error => error.code === 'BW_NATIVE_STORE_REQUIRED');
+});
+
+test('native phrase requests keep one owner, normalize input, and never seed empty on failure', async () => {
+  const commands = [];
+  let fail = false;
+  const { context, dataStoresState, gatewayMessages, pageTextMessages } = await harness({
+    nativePhrases: true,
+    nativeBookReply(message) {
+      commands.push(message);
+      assert.equal(message.action, 'phrases');
+      if (fail) throw new Error('receipt lost');
+      return { ok: true, phrases: ['食中毒'], fav: message.enabled, source: 'native-device' };
+    },
+  });
+  assert.deepEqual((await (await context.fetch('/pdf/api/phrases')).json()).phrases, ['食中毒']);
+  assert.equal((await context.fetch('/pdf/api/phrases', {method:'POST',body:JSON.stringify({text:' 食\n中 毒　'})})).status, 200);
+  assert.deepEqual(commands.at(-1), {action:'phrases',operation:'set',text:'食中毒',enabled:true});
+  assert.equal((await context.fetch('/pdf/api/phrases', {method:'DELETE',body:JSON.stringify({text:'食中毒'})})).status, 200);
+  assert.equal(commands.at(-1).enabled, false);
+  fail = true;
+  assert.equal((await context.fetch('/pdf/api/phrases')).status, 503);
+  assert.equal((await context.fetch('/pdf/api/phrases', {method:'POST',body:JSON.stringify({text:'未確認'})})).status, 503);
+  assert.equal(commands.length, 5);
+  assert.equal([...dataStoresState.device.values.keys()].some(k => k.includes('phrase-favorites')), false);
+  assert.equal(gatewayMessages.length, 0);
+  assert.equal(pageTextMessages.length, 0, 'the native owner already updates the tokenizer');
 });
 
 test("ready App note requests use Swift business commands and never retry a rejected native write in JS", async () => {

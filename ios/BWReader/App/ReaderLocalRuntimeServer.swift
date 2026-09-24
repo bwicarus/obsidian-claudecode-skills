@@ -646,39 +646,8 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 object: ["ok": false, "code": "BW_BRIDGE_MIRROR_METHOD"]
             )
         }
-        var components = URLComponents(string: ReaderServer.origin + path)
-        if let query = object["query"] as? [String: Any], !query.isEmpty {
-            components?.queryItems = query.compactMap { key, value in
-                guard let text = value as? String else { return nil }
-                return URLQueryItem(name: key, value: text)
-            }
-        }
-        guard let url = components?.url else {
-            return jsonResponse(
-                request,
-                status: .badRequest,
-                object: ["ok": false, "code": "BW_BRIDGE_MIRROR_URL"]
-            )
-        }
-        var upstream = URLRequest(url: url)
-        upstream.httpMethod = method
-        upstream.timeoutInterval = 6
-        upstream.setValue(ReaderServer.origin, forHTTPHeaderField: "Origin")
-        if method == "POST" {
-            upstream.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let body = object["body"] ?? [String: Any]()
-            upstream.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        }
         do {
-            let (replyData, reply) = try await URLSession.shared.data(for: upstream)
-            let status = (reply as? HTTPURLResponse)?.statusCode ?? 0
-            let parsed = (try? JSONSerialization.jsonObject(with: replyData))
-                ?? (String(data: replyData, encoding: .utf8) ?? "")
-            return jsonResponse(
-                request,
-                status: .ok,
-                object: ["ok": (200...299).contains(status), "status": status, "body": parsed]
-            )
+            return jsonResponse(request, status: .ok, object: try await Self.requestBridgeMirror(object))
         } catch {
             return jsonResponse(
                 request,
@@ -687,6 +656,35 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                          "error": error.localizedDescription]
             )
         }
+    }
+
+    /// Native feature owners share the existing fixed bridge allowlist and
+    /// timeout; they no longer need a hidden webpage/loopback request to use it.
+    static func requestBridgeMirror(_ object: [String: Any]) async throws -> [String: Any] {
+        guard JSONSerialization.isValidJSONObject(object),
+              try JSONSerialization.data(withJSONObject: object).count <= 65_536,
+              let path = object["path"] as? String,
+              let methods = bridgeMirrorAllowed[path] else { throw URLError(.badURL) }
+        let method = (object["method"] as? String ?? "POST").uppercased()
+        guard methods.contains(method) else { throw URLError(.badURL) }
+        var components = URLComponents(string: ReaderServer.origin + path)
+        if let query = object["query"] as? [String: Any] {
+            components?.queryItems = query.compactMap { key, value in
+                (value as? String).map { URLQueryItem(name: key, value: $0) }
+            }
+        }
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var upstream = URLRequest(url: url)
+        upstream.httpMethod = method; upstream.timeoutInterval = 6
+        upstream.setValue(ReaderServer.origin, forHTTPHeaderField: "Origin")
+        if method == "POST" {
+            upstream.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            upstream.httpBody = try JSONSerialization.data(withJSONObject: object["body"] ?? [String: Any]())
+        }
+        let (data, response) = try await URLSession.shared.data(for: upstream)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let body = (try? JSONSerialization.jsonObject(with: data)) ?? (String(data: data, encoding: .utf8) ?? "")
+        return ["ok": (200...299).contains(status), "status": status, "body": body]
     }
 
     private func serveNativeTranslateDirect(

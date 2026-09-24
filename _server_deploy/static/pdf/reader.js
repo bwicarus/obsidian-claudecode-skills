@@ -7597,6 +7597,12 @@ function _phraseStateOf(text) {
   return { phrase: true, fav: _phraseFavSet.has(key),
            mastered: _phraseMarkSet.has(_phraseNorm(key)) };
 }
+// App-owned committed list: this is a display projection, not another writer.
+window.__bwReaderAcceptNativePhrases = function (phrases) {
+  if (!Array.isArray(phrases) || phrases.some(p => typeof p !== 'string')) return false;
+  _phraseFavSet = new Set(phrases.map(p => p.replace(/[\s\u3000]+/g, '')).filter(Boolean));
+  return true;
+};
 // 原生词组面板的「收藏为词组」。本地先翻 + 后台同步 + outbox 兜底都在 _phraseFav 里，
 // 这里复用它（btn 传 null：它只用来画按钮，原生那侧自己画）。
 window.__bwReaderPhraseFav = async function (request) {

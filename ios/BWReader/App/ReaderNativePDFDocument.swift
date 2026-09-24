@@ -142,6 +142,17 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     /// 结果缓存：一页的正文不会变，而滚动时这条路每帧都可能被问到。
     private var pageTexts: [Int: String] = [:]
 
+    /// Tokenizer changes invalidate derived character/word data, never PDF
+    /// pixels, annotations or their source character indices.
+    func invalidateTokenization() {
+        pageTexts = [:]; characterPages = [:]; unavailableCharacterPages = []
+        selectionCores = [:]
+        characterReads.values.forEach { $0.cancel() }; characterReads = [:]
+        characterReadTickets = [:]
+        textOverlays.values.forEach { $0.selectionCore = nil; $0.characters = nil }
+        loadVisibleCharacterPages()
+    }
+
     func pageText(_ page: Int) -> String? {
         if let cached = pageTexts[page] { return cached }
         guard let chars = characterPages[page], !chars.chars.isEmpty,

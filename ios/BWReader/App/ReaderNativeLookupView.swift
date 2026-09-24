@@ -165,8 +165,7 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
 
     // MARK: 词组收藏
 
-    /// 词组：收藏起来当一个分词单元。⚠ 本地先翻、真分词重算、长下划线即时画、
-    /// outbox 兜底，四件事都挂在底座 `_phraseFav` 上 —— 这里只发起，状态以回执为准。
+    /// Swift 保存明确的收藏状态；分词和镜像由持久化队列更新。
     @Published private(set) var favorited = false
     @Published private(set) var favoriting = false
 
@@ -176,7 +175,7 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
         defer { favoriting = false }
         let receipt = await request([
             "action": "nativePhraseFav",
-            "value": ["text": headword],
+            "value": ["text": headword, "enabled": !favorited],
         ])
         guard receipt["ok"] as? Bool == true else {
             error = receipt["error"] as? String ?? "收藏失败，请重试。"

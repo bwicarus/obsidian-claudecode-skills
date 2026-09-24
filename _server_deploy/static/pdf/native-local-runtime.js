@@ -729,6 +729,7 @@
   }
 
   var nativeBookWrites = false;
+  var nativePhrases = false;
   var nativeReplicationTransport = false;
   // This adapter carries commands, never derived records. Swift owns the
   // transaction and builds the indexes from the authoritative note payload.
@@ -15280,6 +15281,30 @@
     }).catch(function () { return false; });
   }
   function nativePhrasesFetch(input, init, url, route, method) {
+    return bootPromise.then(function () {
+      if (!nativePhrases) return legacyPhrasesFetch(input, init, url, route, method);
+      var request = { action: 'phrases', operation: 'read' };
+      if (method === 'POST' || method === 'DELETE') {
+        var body = null;
+        try { body = JSON.parse(init && init.body || '{}'); } catch (_) {}
+        var text = normalizePhrase(body && body.text);
+        if (!text || text.length > 64) return jsonResponse({ ok: false, error: '词组无效' }, 400);
+        request = { action: 'phrases', operation: 'set', text: text, enabled: method === 'POST' };
+      } else if (method !== 'GET') return jsonResponse({ ok: false, error: '词组操作无效' }, 405);
+      return root.webkit.messageHandlers.bwNativeDataStore.postMessage(request).then(function (value) {
+        if (!value || value.ok !== true || !Array.isArray(value.phrases)) throw new Error('词组保存未获确认');
+        return jsonResponse(value, 200);
+      });
+    }).catch(function (error) {
+      // Native ownership is final; an uncertain receipt must never rerun the
+      // legacy write or persist a fabricated empty seed.
+      return jsonResponse({ ok: false, error: String(error && error.message || error) }, 503);
+    });
+  }
+  root.addEventListener('bw:native-phrases-changed', function () {
+    if (nativePhrases) invalidateAllNativePageText('ready', null, null);
+  });
+  function legacyPhrasesFetch(input, init, url, route, method) {
     if (method === 'GET') {
       return phrasesRead().then(function (state) {
         if (state.seeded || state.phrases.length) {
@@ -15922,6 +15947,7 @@
           action: 'readingStoreReady', bookID: bookId, deviceID: deviceId
         }).then(function (response) {
           nativeBookWrites = !!(response && response.ok && response.nativeBookWrites);
+          nativePhrases = !!(response && response.ok && response.nativePhrases);
           nativeReplicationTransport = !!(response && response.ok && response.nativeReplicationTransport);
         });
       }).then(function () {

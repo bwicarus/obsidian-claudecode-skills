@@ -152,7 +152,7 @@ final class ReaderNativeServerProxyBroker: @unchecked Sendable {
             throw ReaderNativeServerProxyError.invalidUpstream
         }
         let key = "native-stream-" + UUID().uuidString
-        let transport = ReaderNativeServerUpstreamTransport { [weak self] in self?.finish(ticketToken: key) }
+        let transport = ReaderNativeServerUpstreamTransport(maximumBufferedBytes: 8 * 1024 * 1024) { [weak self] in self?.finish(ticketToken: key) }
         lock.lock()
         guard scopeEpoch == prepared.scopeEpoch else { lock.unlock(); throw ReaderNativeServerProxyError.staleScope }
         active[key] = transport; lock.unlock()
@@ -161,6 +161,7 @@ final class ReaderNativeServerProxyBroker: @unchecked Sendable {
             let upstream = try await transport.start(prepared.request)
             guard try await onResponse(upstream.response.statusCode) else { return }
             for try await chunk in upstream.body {
+                transport.consumed(chunk.count)
                 try Task.checkCancellation()
                 lock.lock(); let current = scopeEpoch == prepared.scopeEpoch; lock.unlock()
                 guard current else { throw ReaderNativeAssistantStream.Failure("阅读上下文已切换") }
@@ -310,6 +311,8 @@ private final class ReaderNativeServerUpstreamTransport:
     private var responseContinuation: CheckedContinuation<HTTPURLResponse, Error>?
     private var task: URLSessionDataTask?
     private var finished = false
+    private let maximumBufferedBytes: Int?
+    private var bufferedBytes = 0
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -324,8 +327,9 @@ private final class ReaderNativeServerUpstreamTransport:
         )
     }()
 
-    init(completion: @escaping @Sendable () -> Void) {
+    init(maximumBufferedBytes: Int? = nil, completion: @escaping @Sendable () -> Void) {
         self.completion = completion
+        self.maximumBufferedBytes = maximumBufferedBytes
         let pair = AsyncThrowingStream<Data, Error>.makeStream()
         bodyStream = pair.stream
         bodyContinuation = pair.continuation
@@ -375,6 +379,10 @@ private final class ReaderNativeServerUpstreamTransport:
         }
     }
 
+    func consumed(_ count: Int) {
+        lock.lock(); bufferedBytes = max(0, bufferedBytes - count); lock.unlock()
+    }
+
     func urlSession(
         _ session: URLSession,
         dataTask: URLSessionDataTask,
@@ -403,7 +411,16 @@ private final class ReaderNativeServerUpstreamTransport:
         guard !data.isEmpty else { return }
         lock.lock()
         let mayYield = !finished
+        let overflow = maximumBufferedBytes.map { data.count > $0 - bufferedBytes } ?? false
+        if mayYield && !overflow && maximumBufferedBytes != nil { bufferedBytes += data.count }
         lock.unlock()
+        if mayYield && overflow {
+            // Fail closed instead of buffering an unbounded response while a
+            // suspended consumer cannot acknowledge incoming actions.
+            finish(with: ReaderNativeAssistantStream.Failure("对话接收缓存超过上限，请恢复后继续"))
+            dataTask.cancel()
+            return
+        }
         if mayYield {
             bodyContinuation.yield(data)
         }

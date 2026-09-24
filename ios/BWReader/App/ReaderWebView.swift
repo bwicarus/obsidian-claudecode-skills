@@ -359,6 +359,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         WeakScriptMessageHandlerWithReply?
     private var nativeServerGateway: ReaderNativeServerGateway?
     private var nativeAssistantStream: ReaderNativeAssistantStreamBridge?
+    private var nativePhraseService: ReaderNativePhraseService?
     private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
     private var nativeServerRemoteLibraryCancellable: AnyCancellable?
     private var nativeServerSyncBridge: ReaderNativeServerSyncBridge?
@@ -2476,8 +2477,55 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
+    private func prepareNativePhraseService(deviceID: String) throws {
+        if nativePhraseService?.deviceID == deviceID { return }
+        let device = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-device").store
+        let global = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+        guard try device.meta("legacyImport") == "done", try global.meta("legacyImport") == "done" else {
+            throw ReaderNativeVocabularyState.Failure(message: "词组库尚未完成导入")
+        }
+        nativePhraseService = ReaderNativePhraseService(store: device, global: global, deviceID: deviceID,
+            seedSource: { [weak self] in
+                if let self, let gateway = self.nativeServerGateway {
+                    do {
+                        let response = try await gateway.fetchData(path: "/pdf/api/phrases",
+                            surface: self.currentLocalBook?.format == .epub ? .epub : .pdf)
+                        if (200..<300).contains(response.status),
+                           let value = try JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+                           value["ok"] as? Bool == true, let phrases = value["phrases"] as? [String] { return phrases }
+                    } catch { /* Read-only fallback to the existing mirror. */ }
+                }
+                let mirror = try await ReaderLocalRuntimeServer.requestBridgeMirror(["path": "/reader-phrases", "method": "GET"])
+                guard mirror["ok"] as? Bool == true, let body = mirror["body"] as? [String: Any],
+                      let phrases = body["phrases"] as? [String] else {
+                    throw ReaderNativeVocabularyState.Failure(message: "历史词组暂时无法取回，未写入空清单")
+                }
+                return phrases
+            }, changed: { [weak self] phrases, records in
+                guard let self else { return }
+                self.nativeLookupCache.removeAll(); self.nativeLookupCacheBytes = 0
+                self.nativePDFDocument?.invalidateTokenization()
+                self.refreshNativePageOverlays(force: true)
+                self.markCloudSyncDirty()
+                // Presentation observers consume committed state only. They
+                // must not write the list or call phrases-set a second time.
+                self.webView.callAsyncJavaScript("for (const record of records) await window.BWReaderRuntime?.vocabularyState?.importRecord(record,{source:'native'}); window.__bwReaderAcceptNativePhrases?.(phrases); window.dispatchEvent(new Event('bw:native-phrases-changed'));",
+                    arguments: ["phrases": phrases, "records": records], in: nil, in: .page, completionHandler: { _ in })
+            }, report: { [weak self] message in self?.postClientLog("原生词组：" + message) })
+        nativePhraseService?.wake()
+    }
+
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         if let result = await performNativeFigureCommand(command) { return result }
+        if command["action"] as? String == "nativePhraseFav" {
+            guard !isLoading, isTrustedReaderURL(webView.url),
+                  let service = nativePhraseService, let value = command["value"] as? [String: Any],
+                  let text = value["text"] as? String, let enabled = value["enabled"] as? Bool else {
+                return ["ok": false, "error": "词组上下文尚未就绪"]
+            }
+            do { return ["ok": true, "value": try await service.set(text, enabled: enabled)] }
+            catch { return ["ok": false, "error": error.localizedDescription] }
+        }
         if let result = await performNativeVocabularyCommand(command) { return result }
         if let result = await performNativeLookupCommand(command) { return result }
         if let result = await performNativeCardCommand(command) { return result }
@@ -5221,7 +5269,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         if !foreground { nativePDFNavigationBridge?.flushPendingPosition() }
         readerForeground = foreground
         nativeReplicationService?.setActive(foreground)
-        if foreground { scheduleNativeAnkiPCRetry() }
+        if foreground { scheduleNativeAnkiPCRetry(); nativePhraseService?.wake() }
         if foreground {
             // 接线必须无条件(幂等):readerForeground 初始值就是 true,
             // 依赖"后台→前台转换"意味着首启动直读的会话永远接不上线,
@@ -6770,6 +6818,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     }
                     nativeReadingStoreBookID = bookID
                     nativeReadingStoreDeviceID = deviceID
+                    try prepareNativePhraseService(deviceID: deviceID)
                     scheduleNativeAnkiPCRetry()
                     scheduleNativeAnkiMobileExpiry()
                     deliverPendingAnkiMobileCallbacks()
@@ -6792,7 +6841,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                             displayName:pendingBookID == bookID ? currentLocalBook?.title : nil,
                             contentSHA256:pendingBookID == bookID ? currentLocalBookContentSHA256 : nil))
                     }
-                    replyHandler(["ok": true, "nativeBookWrites": true, "nativeReplicationTransport":true], nil)
+                    replyHandler(["ok": true, "nativeBookWrites": true, "nativeReplicationTransport":true, "nativePhrases": true], nil)
                 } catch { replyHandler(nil, error.localizedDescription) }
                 return
             }
@@ -6802,6 +6851,25 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 }
                 nativeReplicationService?.wake()
                 replyHandler(["ok":true],nil)
+                return
+            }
+            if body["action"] as? String == "phrases" {
+                guard let service = nativePhraseService, service.deviceID == nativeReadingStoreDeviceID,
+                      nativeReadingStoreBookID == currentLocalBook?.id,
+                      let operation = body["operation"] as? String, ["read", "set"].contains(operation) else {
+                    replyHandler(nil, "词组库尚未就绪"); return
+                }
+                Task { @MainActor in
+                    do {
+                        if operation == "read" { replyHandler(try await service.read(), nil) }
+                        else {
+                            guard let text = body["text"] as? String, let enabled = body["enabled"] as? Bool else {
+                                throw ReaderNativeVocabularyState.Failure(message: "词组参数无效")
+                            }
+                            replyHandler(try await service.set(text, enabled: enabled), nil)
+                        }
+                    } catch { replyHandler(nil, error.localizedDescription) }
+                }
                 return
             }
             if body["action"] as? String == "cardRepository" {
