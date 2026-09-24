@@ -2167,7 +2167,55 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
+    private func performNativeVocabularyCommand(_ command: [String: Any]) async -> [String: Any]? {
+        guard command["action"] as? String == "nativeVocabMark" else { return nil }
+        do {
+            guard !isLoading, isTrustedReaderURL(webView.url), let book = currentLocalBook,
+                  let gateway = nativeServerGateway, let deviceID = nativeReadingStoreDeviceID,
+                  let input = command["value"] as? [String: Any], let original = input["word"] as? String else {
+                throw ReaderNativeVocabularyState.Failure(message: "词汇上下文尚未就绪")
+            }
+            let word = original.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !word.isEmpty, word.utf16.count <= 200, !word.contains("\0") else {
+                throw ReaderNativeVocabularyState.Failure(message: "词无效")
+            }
+            let generation = bookUserStateContextGeneration
+            let documentStore = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+            let languages = try ReaderNativeBookProjection(store: documentStore).state("book-languages", bookID: book.id).payload as? [String] ?? []
+            let japanese = input["jp"] as? Bool ?? ReaderNativeLookupRequest.isJapanese(word, languages: languages)
+            let mastered = input["mastered"] as? Bool != false
+            let vocabularyInput: [String: Any] = ["kind": "word", "language": japanese ? "ja" : "en", "lemma": word, "word": word]
+            _ = try ReaderNativeVocabularyState.normalized(vocabularyInput, property: "mastered", enabled: mastered)
+            let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+            guard try store.meta("legacyImport") == "done" else { throw ReaderNativeVocabularyState.Failure(message: "词汇库尚未就绪") }
+            // Keep the compatibility lexicon's confirmation semantics. Unknown
+            // transport results are reported; no second request is attempted.
+            let response = try await gateway.fetchData(path: japanese ? "/pdf/api/jp-vocab-mark" : "/pdf/api/vocab-mark",
+                method: "POST", body: JSONSerialization.data(withJSONObject: ["word": word, "mark": mastered ? "known" : "unknown"]),
+                surface: book.format == .pdf ? .pdf : .epub)
+            guard (200..<300).contains(response.status),
+                  let reply = try JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+                  (try? ReaderNativeCardRules.bool(reply["ok"], "ok")) == true else {
+                throw ReaderNativeVocabularyState.Failure(message: "词汇标记未获确认")
+            }
+            guard generation == bookUserStateContextGeneration, currentLocalBook?.id == book.id else {
+                throw ReaderNativeVocabularyState.Failure(message: "阅读页已切换，请刷新词汇状态")
+            }
+            let record = try ReaderNativeVocabularyState(store: store, deviceID: deviceID).set(vocabularyInput,
+                property: "mastered", enabled: mastered, mutation: "native-vocab-ui:" + UUID().uuidString)
+            nativeLookupCache.removeAll(); nativeLookupCacheBytes = 0
+            markCloudSyncDirty()
+            // Notify remaining presentation observers. This does not persist or
+            // re-run the mastery command, and does not delay the native receipt.
+            webView.callAsyncJavaScript("window.BWReaderRuntime?.vocabularyState?.importRecord(record,{source:'native'}); window.applyVocabLocalOverride?.(word,mastered,{word,surface:word,forms:[],jp});",
+                arguments: ["record": record, "word": word, "mastered": mastered, "jp": japanese], in: nil, contentWorld: .page,
+                completionHandler: { _ in })
+            return ["ok": true, "value": ["ok": true, "mastered": mastered, "jp": japanese]]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativeVocabularyCommand(command) { return result }
         if let result = await performNativeLookupCommand(command) { return result }
         if let result = await performNativeCardCommand(command) { return result }
         if let result = await performNativeHTMLNoteCommand(command) { return result }

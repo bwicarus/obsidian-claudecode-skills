@@ -334,7 +334,7 @@ struct ReaderNativeCardRepository {
         }
         let entityRev = try R.integer(input["entityRev"], "entityRev"), stateRev = try R.integer(input["stateRev"], "stateRev")
         guard try R.integer(current["entityRev"], "current entityRev") == entityRev,
-              R.integer(current["stateRev"], "current stateRev") == stateRev else {
+              try R.integer(current["stateRev"], "current stateRev") == stateRev else {
             throw R.fail("CONFLICT", "卡片或复习状态已更新，请刷新后评分")
         }
         let options: [String: Any] = ["ifEntityRev": entityRev, "ifStateRev": stateRev]

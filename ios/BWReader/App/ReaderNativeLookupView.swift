@@ -101,8 +101,7 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
 
     // MARK: 标记掌握
 
-    /// 标记掌握 —— 判据（日/英分流）和副作用（重画下划线）都在阅读器那侧，
-    /// 这里只发起。成功后本页的生词下划线会跟着消失。
+    /// 原生词汇命令确认服务器标记并提交本机词汇仓，成功后刷新当前页下划线。
     @Published private(set) var mastered = false
     @Published private(set) var marking = false
 
