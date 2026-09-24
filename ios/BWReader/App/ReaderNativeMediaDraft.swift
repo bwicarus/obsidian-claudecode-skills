@@ -5,6 +5,7 @@ import ImageIO
 import CoreTransferable
 import UIKit
 import PhotosUI
+import SwiftUI
 
 struct ReaderPickedMedia: Transferable {
     let url: URL
