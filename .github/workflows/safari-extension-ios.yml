@@ -232,6 +232,7 @@ jobs:
           grep -F "$XCODEGEN_VERSION" "$RUNNER_TEMP/xcodegen-version.txt"
 
       - name: Generate the Xcode project
+        id: native_project
         shell: bash
         run: |
           set -euo pipefail
@@ -244,6 +245,7 @@ jobs:
 
 
       - name: Verify native PDF crop coordinates
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativePDFCrop.swift ios/BWReader/Tests/NativePDFCrop/main.swift -o "$RUNNER_TEMP/native-pdf-crop-test"
           "$RUNNER_TEMP/native-pdf-crop-test"
@@ -252,6 +254,7 @@ jobs:
       # 片段（用户 2026-09-21）。这一步守两件事：变形并回词里，**且助词绝不被并走**
       # —— 后者错了会让点词查不到东西，比拆开更糟。
       - name: Verify Japanese word chain merging
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderJapaneseWordChain.swift ios/BWReader/Tests/JapaneseWordChain/main.swift -o "$RUNNER_TEMP/japanese-word-chain-test"
           "$RUNNER_TEMP/japanese-word-chain-test"
@@ -264,16 +267,19 @@ jobs:
       # 桥也一起编：`journal` 默认成 true 这种事，错了的表现是「改了能看见、就是
       # 同步不出去」，看文本看不出来，只能真跑一遍 commit 才知道。
       - name: Verify native data store
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeDataStoreBridge.swift ios/BWReader/Tests/NativeDataStore/main.swift -o "$RUNNER_TEMP/native-data-store-test"
           "$RUNNER_TEMP/native-data-store-test"
 
       - name: Verify native account command outbox
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeDataStoreBridge.swift ios/BWReader/App/ReaderNativeCommandOutbox.swift ios/BWReader/Tests/NativeCommandOutbox/main.swift -o "$RUNNER_TEMP/native-command-outbox-test"
           "$RUNNER_TEMP/native-command-outbox-test"
 
       - name: Verify native book projection
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         # Reading projection uses the actual SQLite records and package codec;
         # verify data identity before compiling the full UI.
         run: |
@@ -281,59 +287,70 @@ jobs:
           "$RUNNER_TEMP/native-book-projection-test"
 
       - name: Verify native page-card saga and interrupted writes
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderBookUserStatePackage.swift ios/BWReader/App/ReaderNativeBookProjection.swift ios/BWReader/App/ReaderNativeNoteRules.swift ios/BWReader/App/ReaderNativeStrokeRules.swift ios/BWReader/App/ReaderNativeNoteActions.swift ios/BWReader/App/ReaderNativeHighlightRules.swift ios/BWReader/App/ReaderNativeReadingPosition.swift ios/BWReader/App/ReaderNativeBookStore.swift ios/BWReader/App/ReaderNativeAssistantEdits.swift ios/BWReader/App/ReaderNativeReplicationOutbox.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeCardRepository.swift ios/BWReader/App/ReaderNativePageCardPlan.swift ios/BWReader/App/ReaderNativePageCardActions.swift ios/BWReader/App/ReaderNativePDFTextGeometry.swift ios/BWReader/App/ReaderNativePDFContext.swift ios/BWReader/Tests/NativePageCardActions/main.swift -o "$RUNNER_TEMP/native-page-card-test"
           "$RUNNER_TEMP/native-page-card-test"
 
       - name: Check native replication frame limits and reply correlation
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/DirectVoiceProtocol.swift ios/BWReader/App/DirectVoiceSocket.swift ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeReplicationOutbox.swift ios/BWReader/App/ReaderNativeReplicationTransport.swift ios/BWReader/Tests/NativeReplication/main.swift -o "$RUNNER_TEMP/native-replication-test"
           "$RUNNER_TEMP/native-replication-test"
 
       - name: Verify native conversation ordering and recovery
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeConversationStore.swift ios/BWReader/App/ReaderNativeConversationProjection.swift ios/BWReader/Tests/NativeConversationStore/main.swift -o "$RUNNER_TEMP/native-conversation-test"
           "$RUNNER_TEMP/native-conversation-test"
 
       - name: Verify native context selection graph and expiry
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativeContextSelection/fixtures.cjs "$RUNNER_TEMP/native-context-selection.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeContextSelection.swift ios/BWReader/Tests/NativeContextSelection/main.swift -o "$RUNNER_TEMP/native-context-selection-test"
           "$RUNNER_TEMP/native-context-selection-test" "$RUNNER_TEMP/native-context-selection.json"
 
       - name: Verify native live turns and history reconciliation
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeTurnStore.swift ios/BWReader/Tests/NativeTurns/main.swift -o "$RUNNER_TEMP/native-turns-test"
           "$RUNNER_TEMP/native-turns-test"
 
       - name: Verify native card repository parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node tests/native_card_fixtures.cjs "$RUNNER_TEMP/native-card-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeCardRepository.swift ios/BWReader/Tests/NativeCardRepository/main.swift -o "$RUNNER_TEMP/native-card-test"
           "$RUNNER_TEMP/native-card-test" "$RUNNER_TEMP/native-card-fixtures.json"
 
       - name: Verify native review queue acquisition and cancellation
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeReviewCards.swift ios/BWReader/App/ReaderNativeReviewQueue.swift ios/BWReader/Tests/NativeReviewQueue/main.swift -o "$RUNNER_TEMP/native-review-queue-test"
           "$RUNNER_TEMP/native-review-queue-test"
 
       - name: Verify native review improvement confirmation and receipts
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeReviewImprovements.swift ios/BWReader/Tests/NativeReviewImprovements/main.swift -o "$RUNNER_TEMP/native-review-improvements-test"
           "$RUNNER_TEMP/native-review-improvements-test"
 
       - name: Verify native card presentation parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativeCardPresentation/fixtures.mjs "$RUNNER_TEMP/native-card-presentation.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeCardPresentation.swift ios/BWReader/Tests/NativeCardPresentation/main.swift -o "$RUNNER_TEMP/native-card-presentation-test"
           "$RUNNER_TEMP/native-card-presentation-test" "$RUNNER_TEMP/native-card-presentation.json"
 
       - name: Verify native AnkiMobile export receipts
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeCardRepository.swift ios/BWReader/App/ReaderNativeAnkiMobile.swift ios/BWReader/Tests/NativeAnkiMobile/main.swift -o "$RUNNER_TEMP/native-anki-mobile-test"
           "$RUNNER_TEMP/native-anki-mobile-test"
 
       - name: Verify native Markdown and formula boundaries
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           mkdir -p "$RUNNER_TEMP/native-markdown-checks"
           cp ios/BWReader/Tests/NativeMarkdown/*.swift "$RUNNER_TEMP/native-markdown-checks/"
@@ -347,6 +364,7 @@ jobs:
           swift run --package-path "$RUNNER_TEMP/native-markdown-checks" NativeMarkdownChecks
 
       - name: Verify native EPUB archive reads
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           mkdir -p "$RUNNER_TEMP/native-epub-checks"
           cp ios/BWReader/Tests/NativeEPUBArchive/*.swift "$RUNNER_TEMP/native-epub-checks/"
@@ -355,23 +373,27 @@ jobs:
           swift run --package-path "$RUNNER_TEMP/native-epub-checks" NativeEPUBArchiveChecks "$RUNNER_TEMP/native-epub-fixtures"
 
       - name: Verify native desktop Anki export receipts
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeCardRepository.swift ios/BWReader/App/ReaderNativeAnkiPC.swift ios/BWReader/Tests/NativeAnkiPC/main.swift -o "$RUNNER_TEMP/native-anki-pc-test"
           "$RUNNER_TEMP/native-anki-pc-test"
 
       - name: Verify native stroke geometry parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativeStrokeRules/fixtures.mjs "$RUNNER_TEMP/native-stroke-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeStrokeRules.swift ios/BWReader/Tests/NativeStrokeRules/main.swift -o "$RUNNER_TEMP/native-stroke-test"
           "$RUNNER_TEMP/native-stroke-test" "$RUNNER_TEMP/native-stroke-fixtures.json"
 
       - name: Verify native text geometry parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativePDFTextGeometry/fixtures.mjs "$RUNNER_TEMP/native-geometry-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativePDFTextGeometry.swift ios/BWReader/Tests/NativePDFTextGeometry/main.swift -o "$RUNNER_TEMP/native-geometry-test"
           "$RUNNER_TEMP/native-geometry-test" "$RUNNER_TEMP/native-geometry-fixtures.json"
 
       - name: Verify native lookup data requests
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeLookupRequest.swift ios/BWReader/App/ReaderNativeWordLookup.swift ios/BWReader/Tests/NativeLookupRequest/main.swift -o "$RUNNER_TEMP/native-lookup-test"
           "$RUNNER_TEMP/native-lookup-test"
@@ -379,74 +401,89 @@ jobs:
           "$RUNNER_TEMP/native-lookup-supplement-test"
 
       - name: Verify native vocabulary state parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativeVocabularyState/fixtures.cjs "$RUNNER_TEMP/native-vocabulary-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeVocabularyState.swift ios/BWReader/Tests/NativeVocabularyState/main.swift -o "$RUNNER_TEMP/native-vocabulary-test"
           "$RUNNER_TEMP/native-vocabulary-test" "$RUNNER_TEMP/native-vocabulary-fixtures.json"
 
       - name: Verify native vocabulary overlay parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativeVocabularyOverlay/fixtures.cjs "$RUNNER_TEMP/native-vocabulary-overlay-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeVocabularyState.swift ios/BWReader/App/ReaderNativeVocabularyOverlay.swift ios/BWReader/App/ReaderNativePageOverlayStore.swift ios/BWReader/Tests/NativeVocabularyOverlay/main.swift -o "$RUNNER_TEMP/native-vocabulary-overlay-test"
           "$RUNNER_TEMP/native-vocabulary-overlay-test" "$RUNNER_TEMP/native-vocabulary-overlay-fixtures.json"
 
       - name: Verify native phrase transactions
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeVocabularyState.swift ios/BWReader/App/ReaderNativePhraseStore.swift ios/BWReader/Tests/NativePhraseStore/main.swift -o "$RUNNER_TEMP/native-phrase-test"
           "$RUNNER_TEMP/native-phrase-test"
 
       - name: Verify native page translation parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativePageTranslation/fixtures.cjs "$RUNNER_TEMP/native-page-translation-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeLookupRequest.swift ios/BWReader/App/ReaderNativePageTranslation.swift ios/BWReader/Tests/NativePageTranslation/main.swift -o "$RUNNER_TEMP/native-page-translation-test"
           "$RUNNER_TEMP/native-page-translation-test" "$RUNNER_TEMP/native-page-translation-fixtures.json"
 
       - name: Verify native figure ownership and parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativeFigures/fixtures.cjs "$RUNNER_TEMP/native-figures-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeFigures.swift ios/BWReader/Tests/NativeFigures/main.swift -o "$RUNNER_TEMP/native-figures-test"
           "$RUNNER_TEMP/native-figures-test" "$RUNNER_TEMP/native-figures-fixtures.json"
 
       - name: Verify native assistant stream lifecycle
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativeAssistantStream/response-fixture.mjs "$RUNNER_TEMP/native-assistant-response.json"
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantRequest.swift ios/BWReader/App/ReaderNativeAssistantTurn.swift ios/BWReader/App/ReaderNativeAssistantStream.swift ios/BWReader/Tests/NativeAssistantStream/main.swift -o "$RUNNER_TEMP/native-assistant-stream-test"
           "$RUNNER_TEMP/native-assistant-stream-test" "$RUNNER_TEMP/native-assistant-response.json"
 
       - name: Verify native assistant history lifecycle
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantStream.swift ios/BWReader/App/ReaderNativeAssistantTurn.swift ios/BWReader/App/ReaderNativeAssistantHistory.swift ios/BWReader/Tests/NativeAssistantHistory/main.swift -o "$RUNNER_TEMP/native-assistant-history-test"
           "$RUNNER_TEMP/native-assistant-history-test"
 
       - name: Verify native task tracking lifecycle
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeTaskMonitor.swift ios/BWReader/Tests/NativeTaskMonitor/main.swift -o "$RUNNER_TEMP/native-task-monitor-test"
           "$RUNNER_TEMP/native-task-monitor-test"
 
       - name: Verify native favorites ownership
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeFavoritesService.swift ios/BWReader/Tests/NativeFavorites/main.swift -o "$RUNNER_TEMP/native-favorites-test"
           "$RUNNER_TEMP/native-favorites-test"
 
       - name: Verify native preferences parity and transactions
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativePreferences/fixtures.cjs "$RUNNER_TEMP/native-preferences-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativePreferences.swift ios/BWReader/App/ReaderNativeVideoPreferences.swift ios/BWReader/Tests/NativePreferences/main.swift -o "$RUNNER_TEMP/native-preferences-test"
           "$RUNNER_TEMP/native-preferences-test" "$RUNNER_TEMP/native-preferences-fixtures.json"
 
       - name: Verify native Japanese dictionary parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativeJapaneseDictionary/fixtures.mjs "$RUNNER_TEMP/native-dictionary-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeJapaneseDictionary.swift ios/BWReader/Tests/NativeJapaneseDictionary/main.swift -o "$RUNNER_TEMP/native-dictionary-test"
           "$RUNNER_TEMP/native-dictionary-test" "$RUNNER_TEMP/native-dictionary-fixtures.json" ios/BWReader/DictionaryData
 
       - name: Verify native book merge parity
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         run: |
           node ios/BWReader/Tests/NativeBookMerge/fixtures.mjs "$RUNNER_TEMP/native-merge-fixtures.json"
           xcrun swiftc ios/BWReader/App/ReaderNativeBookMerge.swift ios/BWReader/App/ReaderUserStateMerge.swift ios/BWReader/Tests/NativeBookMerge/main.swift -o "$RUNNER_TEMP/native-merge-test"
           "$RUNNER_TEMP/native-merge-test" "$RUNNER_TEMP/native-merge-fixtures.json"
 
       - name: Build unsigned simulator application
+        # Collect App compiler diagnostics even when a standalone native check
+        # fails. Failed checks still fail the job and prevent signing/upload.
+        if: ${{ !cancelled() && steps.native_project.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail

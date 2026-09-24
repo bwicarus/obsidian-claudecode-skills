@@ -62,6 +62,7 @@ async function _verifyFurigana(pw) {
   } catch (_) { pw.__furiVerified = false; }
 }
 window.toggleRuby = () => {
+  if (window.__BW_NATIVE_DATA_STORE_REQUIRED__ === true) return window.BWReaderRuntime.nativePDFToolbar.perform('ruby');
   const on = !_rubyEnabled();
   try { localStorage.setItem('pdf-ruby', on ? '1' : '0'); } catch (_) {}
   const b = document.getElementById('ruby-toggle');
@@ -74,4 +75,3 @@ window.toggleRuby = () => {
   }
   refreshRubyAllPages();
 };
-

@@ -3550,9 +3550,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativePhraseService?.wake()
     }
 
-    func runNativePDFToolbar(_ action: String) async {
+    @discardableResult
+    func runNativePDFToolbar(_ action: String) async -> Bool {
         guard !nativePDFToolbarBusy, let book = currentLocalBook, book.format == .pdf,
-              let document = nativePDFDocument, let deviceID = nativeReadingStoreDeviceID else { return }
+              let document = nativePDFDocument, let deviceID = nativeReadingStoreDeviceID else { return false }
         nativePDFToolbarBusy = true; defer { nativePDFToolbarBusy = false }
         do {
             switch action {
@@ -3591,7 +3592,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 }
             default: throw ReaderBookUserStateWebAdapterError.unavailable
             }
-        } catch { showTransientNotice(error.localizedDescription) }
+            return true
+        } catch { showTransientNotice(error.localizedDescription); return false }
     }
 
     private func nativePDFToolRequest(tool:String, operation:String, value:[String:Any], bookID:String,
@@ -8798,6 +8800,15 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     do { replyHandler(["ok":true,"result":try await runNativePDFPageJob(body)],nil) }
                     catch { replyHandler(nil,error.localizedDescription) }
                 }
+                return
+            }
+            if body["action"] as? String == "pdfToolbar" {
+                guard body["bookID"] as? String == currentLocalBook?.id,
+                      body["deviceID"] as? String == nativeReadingStoreDeviceID,
+                      let tool = body["tool"] as? String, ["ruby","translation","favorite","insert"].contains(tool) else {
+                    replyHandler(nil,"阅读操作所属书籍已切换"); return
+                }
+                Task { @MainActor in replyHandler(["ok":await runNativePDFToolbar(tool)],nil) }
                 return
             }
             if body["action"] as? String == "pdfPageState" {

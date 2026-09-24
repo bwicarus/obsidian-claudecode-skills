@@ -16,6 +16,7 @@ window._favCurTarget = function () {
   return { file: (window.__PDF_CFG && __PDF_CFG.file_rel) || '', kind: 'pdf', page: page };
 };
 window._favOpenPicker = function () {
+  if (window.__BW_NATIVE_DATA_STORE_REQUIRED__ === true) return window.BWReaderRuntime.nativePDFToolbar.perform('favorite');
   if (!(window.RC && RC.favorites)) return;
   RC.favorites.openPicker(_favCurTarget());
 };
@@ -2008,6 +2009,7 @@ window._favOpenPicker = function () {
     }, 1000);
   }
   window._upCreate = function () {
+    if (window.__BW_NATIVE_DATA_STORE_REQUIRED__ === true) return window.BWReaderRuntime.nativePDFToolbar.perform('insert');
     if (_upEditing || document.body.classList.contains('up-editing')) { alert('先完成当前正在编辑的页'); return; }
     var after = 0;
     try { after = _upCurPage() | 0; } catch (_) {}

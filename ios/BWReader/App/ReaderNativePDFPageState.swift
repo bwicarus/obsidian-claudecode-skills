@@ -144,7 +144,10 @@ struct ReaderNativePDFPageState {
                     let value = try projection.highlights(key,bookID:book); before[key] = ["kind":key,"payload":value.items,"rev":value.revision]
                 } else {
                     let state = try projection.state(key,bookID:book)
-                    let fallback:Any = key == "reading-position" ? NSNull() : key == "ink" ? O() : [O]()
+                    let fallback:Any
+                    if key == "reading-position" { fallback = NSNull() }
+                    else if key == "ink" { fallback = O() }
+                    else { fallback = [O]() }
                     before[key] = ["kind":key,"payload":state.payload ?? fallback,"rev":state.revision]
                 }
             }

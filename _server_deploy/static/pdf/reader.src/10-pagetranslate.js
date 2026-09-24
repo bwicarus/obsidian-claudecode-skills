@@ -107,6 +107,7 @@ function _pageTranslateApplyAll() {
   document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => _pageTranslatePage(pw));
 }
 window.togglePageTranslate = () => {
+  if (window.__BW_NATIVE_DATA_STORE_REQUIRED__ === true) return window.BWReaderRuntime.nativePDFToolbar.perform('translation');
   _pageTrOn = !_pageTrOn;
   const b = document.getElementById('pagetr-toggle');
   if (b) b.classList.toggle('active', _pageTrOn);
@@ -123,4 +124,3 @@ window.togglePageTranslate = () => {
     document.querySelectorAll('[data-page-num]').forEach(pw => { pw.__pageTrSeq = null; });
   }
 };
-

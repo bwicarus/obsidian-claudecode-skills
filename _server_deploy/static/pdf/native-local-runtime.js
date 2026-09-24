@@ -8753,6 +8753,13 @@
       return true;
     }
   };
+  runtimeRoot.nativePDFToolbar = {
+    perform(tool) {
+      if (!nativeBookServiceEnabled()) return Promise.reject(new Error('原生阅读操作尚未就绪'));
+      return root.webkit.messageHandlers.bwNativeDataStore.postMessage({action:'pdfToolbar',tool,bookID:bookId,deviceID})
+        .then(reply => { if (reply?.ok !== true) throw new Error('阅读操作未完成'); return true; });
+    }
+  };
 
   function beginNativePDFMutationJob(plan) {
     if (activeNativePDFMutationJob) {
