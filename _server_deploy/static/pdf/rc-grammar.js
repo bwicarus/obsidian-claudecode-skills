@@ -419,10 +419,10 @@
     var v = null; try { v = localStorage.getItem(k); } catch (e) {}
     return ['deps', 'skeleton', 'components', 'tree'].indexOf(v) >= 0 ? v : 'components';
   }
-  function setViewMode(container, mode, storageKey) {
+  function setViewMode(container, mode, storageKey, persist) {
     var k = storageKey || DEFAULT_VIEW_KEY;
     mode = ['deps', 'skeleton', 'components', 'tree'].indexOf(mode) >= 0 ? mode : 'components';
-    try { localStorage.setItem(k, mode); } catch (e) {}
+    if (persist !== false) { try { localStorage.setItem(k, mode); } catch (e) {} }
     container = resolveContainer(container);
     if (!container) return;
     var blocks = container.querySelectorAll('.grammar-block');

@@ -1250,6 +1250,25 @@
       applyPatch: function (changes) { return applyPatch(changes, 'preference-api'); },
       attach: attach,
       ready: function () { return attaching || Promise.resolve(api); },
+      flush: function () {
+        return (attaching || Promise.resolve()).then(function () { return writeQueue; }).then(function () {
+          assertFence(lease);
+          // Failed/uncertain writes keep their dirty intent. A native view must
+          // not silently overwrite it or claim that the queue is settled.
+          if (Object.keys(pendingLatest).length) throw new PreferenceError('仍有未确认的设置写入', 'BW_PREFERENCE_PENDING');
+        });
+      },
+      acceptCommitted: function (record) {
+        assertFence(lease);
+        var entry = record && byIdentity[String(record.collection || '') + '/' + String(record.id || '')];
+        if (!entry) throw new PreferenceError('原生设置回执未登记', 'BW_PREFERENCE_RECORD');
+        validateStoredRecord(entry, record);
+        if (pendingLatest[entry.legacyKey]) return false;
+        mirror = readMirror(ops, namespace, byLegacy);
+        if (Number((mirror.states[entry.legacyKey] || {}).rev || 0) > Number(record.rev || 0)) return false;
+        applySyncedRecord(entry, record, 'native-settings');
+        return true;
+      },
       mirrorStorageKey: function () {
         assertFence(lease);
         return mirrorStorageKey(namespace);

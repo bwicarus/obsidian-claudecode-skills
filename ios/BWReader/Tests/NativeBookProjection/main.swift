@@ -368,3 +368,30 @@ check(try createStore.cursor() == creationCursor, "creation replay created a sec
 var collision = stickyRequest; collision["mutationId"] = "collision"
 do { _ = try createWriter.perform(collision); fatalError("same note ID replaced on creation") } catch ReaderNativeBookStore.MutationError.invalid {}
 print("Native note creation: stable ID, white default, atomic replication, rollback and replay passed")
+
+let settingsStore = try ReaderNativeDataStore(path: ":memory:")
+let settingsWriter = ReaderNativeBookStore(store: settingsStore, bookID: book, deviceID: "settings", now: { 800_000 })
+let settingsRead = ReaderNativeBookProjection(store: settingsStore)
+let languageRequest: [String: Any] = ["bookID": book, "mutationId": "languages", "operation": "book-languages",
+    "expectedRevision": 0, "value": ["ja", "en", "ja"]]
+_ = try settingsWriter.perform(languageRequest)
+check(try settingsRead.state("book-languages", bookID: book).payload as? [String] == ["ja", "en"], "languages changed order or failed deduplication")
+let settingsCursor = try settingsStore.cursor()
+_ = try settingsWriter.perform(languageRequest)
+check(try settingsStore.cursor() == settingsCursor, "language retry wrote twice")
+let cropRequest: [String: Any] = ["bookID": book, "mutationId": "crop", "operation": "book-crop",
+    "expectedRevision": 0, "value": ["l": 1.25, "r": 2.5, "t": 3, "b": 4]]
+try settingsStore.execute("CREATE TRIGGER fail_settings BEFORE INSERT ON journal BEGIN SELECT RAISE(ABORT, 'journal failed'); END")
+do { _ = try settingsWriter.perform(cropRequest); fatalError("crop journal error swallowed") } catch ReaderNativeDataStore.StoreError.sql {}
+check(try settingsRead.state("book-crop", bookID: book).payload == nil, "failed crop persisted")
+try settingsStore.execute("DROP TRIGGER fail_settings")
+_ = try settingsWriter.perform(cropRequest)
+check(try (settingsRead.state("book-crop", bookID: book).payload as? [String: Double])?["l"] == 1.25, "crop fraction lost")
+var staleCrop = cropRequest; staleCrop["mutationId"] = "crop-stale"
+do { _ = try settingsWriter.perform(staleCrop); fatalError("stale crop accepted") } catch ReaderNativeDataStore.StoreError.revisionConflict {}
+var invalidCrop = cropRequest; invalidCrop["mutationId"] = "crop-bad"; invalidCrop["expectedRevision"] = 1
+invalidCrop["value"] = ["l": 45, "r": 45, "t": 0, "b": 0]
+do { _ = try settingsWriter.perform(invalidCrop); fatalError("empty crop accepted") } catch ReaderNativeBookStore.MutationError.invalid {}
+let otherSettings = ReaderNativeBookProjection(store: settingsStore)
+check(try otherSettings.state("book-crop", bookID: "different-book").payload == nil, "book settings leaked")
+print("Native book settings: language order, fractional crop, revision conflict, replay and rollback passed")

@@ -1550,7 +1550,7 @@ enum ReaderNativeConversationScript {
       window.addEventListener('pointerup', schedule, { capture: true, passive: true });
       window.addEventListener('pageshow', () => { suspended = false; mountObserver.observe(document.documentElement, { childList: true, subtree: true }); thread = null; controls = null; drawerElement = null; contextElement = null; toolbarElement = null; schedule(); });
       window.addEventListener('pagehide', () => { suspended = true; threadObserver?.disconnect(); controlsObserver?.disconnect(); drawerObserver?.disconnect(); contextObserver?.disconnect(); toolbarObserver?.disconnect(); mountObserver.disconnect(); if (timer != null) clearTimeout(timer); timer = null; });
-      window.__bwNativeConversation = Object.freeze({ perform, setNativeMode, snapshot: () => { lastSignature = ''; snapshot(); } });
+      window.__bwNativeConversation = Object.freeze({ perform, setNativeMode, currentScope: () => scope, snapshot: () => { lastSignature = ''; snapshot(); } });
       schedule();
     })();
     """#

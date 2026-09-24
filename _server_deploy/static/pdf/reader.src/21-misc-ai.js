@@ -338,6 +338,21 @@ RC.readerPreferences = {
     return this.state();
   }
 };
+// Observe committed native preferences. No fetch, storage write, page image,
+// text scan or settings business rule executes in this compatibility adapter.
+window.__bwReaderAcceptNativeReadingSettings = (state, changedKey) => {
+  if (window.__BW_NATIVE_DATA_STORE_REQUIRED__ !== true || !state || state.book !== FILE_REL || state.host !== 'pdf') return false;
+  BOOK_LANGS = state.languages.slice();
+  _crop = { ...state.crop }; _cropOn = !!state.cropEnabled;
+  RC.readerPreferences.figuresAvailable = state.figuresAvailable === true;
+  RC.readerPreferences.warnings = state.warnings.slice();
+  if (state.figuresAvailable) window.__figBookOn = state.figures === true;
+  if (changedKey === 'languages') window.__bwNativeBookLanguagesChanged?.(FILE_REL, BOOK_LANGS);
+  if (changedKey === 'autoOrient' && state.autoOrient) window._rememberOrientLayout?.();
+  if (changedKey === 'debug') _applyDebugVisibility();
+  if (changedKey === 'grammar') window.setGrammarView?.(state.grammar, false);
+  return true;
+};
 function _applyDebugVisibility() {
   const el = document.getElementById('debug-log');
   if (!el) return;

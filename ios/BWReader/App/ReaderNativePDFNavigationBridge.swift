@@ -115,6 +115,24 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
             && document?.matches(bookID: bookID, contentSHA256: digest) == true
     }
 
+    /// Native settings use the same viewport/persistence path without making a
+    /// round trip through the web command dispatcher.
+    func applyCrop(_ crop: ReaderNativePDFCrop?, expectedBookID: String) async throws {
+        guard let lease = token, valid(lease), bookID == expectedBookID, let document else { throw unavailable() }
+        pending = nil; jumping = true
+        let old = document.position.crop
+        do {
+            try document.setCrop(crop)
+            try persist(payload(document.position))
+        } catch {
+            try? document.setCrop(old)
+            jumping = false
+            throw error
+        }
+        jumping = false
+        try await publish(document.position, lease: lease)
+    }
+
     private func enqueue(_ value: ReaderNativePDFDocument.Position) {
         guard !jumping, let lease = token, valid(lease) else { return }
         pending = value

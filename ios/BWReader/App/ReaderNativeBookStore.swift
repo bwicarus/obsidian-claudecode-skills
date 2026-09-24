@@ -133,6 +133,30 @@ struct ReaderNativeBookStore {
             case "reading-position":
                 guard value is [String: Any] else { throw MutationError.invalid("阅读位置") }
                 revision = try writeState(operation, value: value, expected: expected, mutation: mutation, at: stamp)
+            case "book-languages":
+                guard let languages = value as? [String], languages.count <= 16,
+                      languages.allSatisfy({ ["en", "ja", "zh", "ko", "fr", "de"].contains($0) }) else {
+                    throw MutationError.invalid("书籍语言")
+                }
+                var seen = Set<String>()
+                let languagesValue = languages.filter { seen.insert($0).inserted }
+                revision = try writeState(operation, value: languagesValue, expected: expected, mutation: mutation, at: stamp)
+                result = ["ok": true, "langs": languagesValue]
+            case "book-crop":
+                guard let crop = value as? [String: Any], Set(crop.keys) == Set(["l", "r", "t", "b"]) else {
+                    throw MutationError.invalid("书籍裁边")
+                }
+                var normalized: [String: Double] = [:]
+                for key in ["l", "r", "t", "b"] {
+                    guard let number = crop[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                          number.doubleValue.isFinite, (0...45).contains(number.doubleValue) else { throw MutationError.invalid("裁边比例") }
+                    normalized[key] = number.doubleValue
+                }
+                guard normalized["l"]! + normalized["r"]! < 90, normalized["t"]! + normalized["b"]! < 90 else {
+                    throw MutationError.invalid("裁边范围")
+                }
+                revision = try writeState(operation, value: normalized, expected: expected, mutation: mutation, at: stamp)
+                result = ["ok": true, "crop": normalized]
             case "ink", "epub-ink":
                 guard value is [String: [[String: Any]]] else { throw MutationError.invalid("墨迹") }
                 revision = try writeState(operation, value: value, expected: expected, mutation: mutation, at: stamp)

@@ -640,6 +640,12 @@
           return reply.result;
         });
       } : undefined,
+      observeCommitted: function (changes) {
+        assertOpen();
+        // Native UI transactions already wrote records and journal. This only
+        // wakes existing observers/sync; it must never call port.commit again.
+        notify(changes);
+      },
       get: get,
       getMany: getMany,
       list: list,

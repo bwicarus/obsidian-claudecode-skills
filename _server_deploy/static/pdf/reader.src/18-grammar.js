@@ -518,15 +518,15 @@ const GV_MODES = [['tree', '树'], ['components', '块'], ['skeleton', '主干']
 let _grammarViewMode = localStorage.getItem('pdf-grammar-view') || 'components';
 // ── 阶段6 门控:ui=shared → 分析块由 RC.grammar 渲染,gv-switch 按钮已直接闭包调 RC.grammar.setViewMode,
 //   这里只需处理"设置面板下拉改值"这一条剩余入口,转调同一份共享逻辑;else 走原生逐字。──
-window.setGrammarView = (mode) => {
+window.setGrammarView = (mode, persist) => {
   if (window.__uiShared && window.RC && RC.grammar) {
-    RC.grammar.setViewMode('grammar-panel-body', mode, 'pdf-grammar-view');
+    RC.grammar.setViewMode('grammar-panel-body', mode, 'pdf-grammar-view', persist);
     const sel = document.getElementById('set-grammar-view');
     if (sel) sel.value = RC.grammar.getViewMode('pdf-grammar-view');
     return;
   }
   _grammarViewMode = ['deps', 'skeleton', 'components', 'tree'].includes(mode) ? mode : 'components';
-  try { localStorage.setItem('pdf-grammar-view', _grammarViewMode); } catch (_) {}
+  if (persist !== false) { try { localStorage.setItem('pdf-grammar-view', _grammarViewMode); } catch (_) {} }
   // 立即用新模式重渲染已显示的所有语法卡的结构区
   document.querySelectorAll('#grammar-panel-body .grammar-block').forEach(b => {
     if (!b.__spacy) return;

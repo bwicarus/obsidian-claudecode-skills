@@ -1033,6 +1033,17 @@
     });
   }
 
+  root.__bwNativePreferencesObserve = function (receipt) {
+    if (!preferences || !receipt || receipt.ok !== true || !receipt.result) throw dataError('设置回执无效', 'BW_NATIVE_PREFERENCE_RECEIPT');
+    preferenceContext.assertCurrent(preferenceLease);
+    var record = receipt.result;
+    var target = record.collection === 'user-settings' ? stores.global
+      : record.collection === 'device-preferences' ? stores.device : null;
+    if (!target || typeof target.observeCommitted !== 'function') throw dataError('设置回执范围无效', 'BW_NATIVE_PREFERENCE_RECEIPT');
+    target.observeCommitted(receipt.changes || []);
+    return preferences.acceptCommitted(record);
+  };
+
   function blockingFailure(error) {
     bootState = 'failed';
     bootError = error;
@@ -1148,6 +1159,7 @@
     // boundary until that whole journaled operation has a native owner.
     var nativeOperation = nativeBookWrites && !batchOptions
       ? ({ 'document-notes-legacy': 'notes', 'reading-position': 'reading-position',
+          'book-languages': 'book-languages', 'book-crop': 'book-crop',
           ink: 'ink', 'epub-ink': 'epub-ink' })[kind] : null;
     function attempt() {
       attempts += 1;
@@ -7433,6 +7445,16 @@
   }
 
   var LOCAL_BOOK_LANGUAGES = new Set(['en', 'ja', 'zh', 'ko', 'fr', 'de']);
+  root.__bwNativeBookLanguagesChanged = function (file, langs) {
+    if (file !== localFileRef() || !Array.isArray(langs) || langs.some(function (lang) { return !LOCAL_BOOK_LANGUAGES.has(lang); })) return false;
+    nativeSearchGeneration += 1;
+    nativeSearchCache.clear();
+    nativeSearchPending.clear();
+    root.dispatchEvent(new CustomEvent('bw:native-book-languages-changed', {
+      detail: { contract: 'reader-native-book-languages/1', localBookId: bookId, langs: clone(langs) }
+    }));
+    return true;
+  };
   function localBookLanguages(input, init, url, method) {
     var code = 'BW_LOCAL_BOOK_LANGUAGES';
     if (method === 'GET') {

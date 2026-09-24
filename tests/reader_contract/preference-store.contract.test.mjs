@@ -117,7 +117,26 @@ test("App native preferences own boot migration and serialized writes without fa
   await assert.rejects(preferences.setRaw('pdf-ruby', '1'), /lost native reply/);
   assert.equal(calls.length, 5, 'native failure retried or wrote via fallback');
   assert.equal(readMirror(storage, ACCOUNT_A).states['pdf-ruby'].status, 'dirty');
+  await assert.rejects(preferences.flush(), error => error.code === 'BW_PREFERENCE_PENDING');
   preferences.destroy();
+});
+
+test("native settings projection preserves newer queued intent and rejects stale receipts", async () => {
+  const storage = new MemoryStorage(), context = contextFor(ACCOUNT_A), router = makeRouter('projection');
+  const prefs = createPreferences(storage, context);
+  await prefs.attach(router, context.lease());
+  const entry = DataRegistry.settingMigrations().find(e => e.legacyKey === 'pdf-ruby');
+  const record = rev => ({collection:entry.collection,id:'setting:'+entry.semanticKey, rev, deleted:false,
+    value:{id:'setting:'+entry.semanticKey,legacyKey:entry.legacyKey,semanticKey:entry.semanticKey,codec:entry.codec,rawValue:rev===2?'1':'0'}});
+  assert.equal(prefs.acceptCommitted(record(2)), true);
+  assert.equal(prefs.acceptCommitted(record(1)), false);
+  assert.equal(prefs.getRaw('pdf-ruby'), '1');
+  const pending = prefs.setRaw('pdf-ruby','0');
+  assert.equal(prefs.acceptCommitted(record(3)), false);
+  await pending; await prefs.flush();
+  assert.equal(prefs.getRaw('pdf-ruby'), '0');
+  assert.throws(() => prefs.acceptCommitted({...record(4), id:'different'}), /未登记/);
+  prefs.destroy();
 });
 
 test("A/B 切换先保全旧 owner，再只加载当前账户镜像", async () => {

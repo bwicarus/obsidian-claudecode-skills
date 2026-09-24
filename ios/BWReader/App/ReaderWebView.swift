@@ -760,6 +760,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private let nativeFigures = ReaderNativeFigures()
     private var nativeFigureTasks: [Int: Task<Void, Never>] = [:]
     private var nativeFigurePending: Set<Int> = []
+    private var nativeReadingFiguresSetting: (generation: UInt64, enabled: Bool?, warning: String?)?
 
     private func cancelNativePageWork(_ page: Int) {
         nativeOverlayTickets.removeValue(forKey: page)
@@ -2635,7 +2636,185 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativePhraseService?.wake()
     }
 
+    private func nativeReadingSettingsState(bookID: String, generation: UInt64) throws -> [String: Any] {
+        guard bookUserStateContextGeneration == generation, currentLocalBook?.id == bookID,
+              let document = nativePDFDocument, let deviceID = nativeReadingStoreDeviceID else {
+            throw ReaderBookUserStateWebAdapterError.contextChanged
+        }
+        let catalog = try ReaderNativePreferences.Catalog.packaged.get()
+        func raw(_ key: String) throws -> String? {
+            let entry = try catalog.entry(key)
+            let store = try nativeDataStoreHost.bridge(for: entry.storeName).store
+            guard try store.meta("legacyImport") == "done" else { throw ReaderBookUserStateWebAdapterError.unavailable }
+            return try ReaderNativePreferences(store: store, deviceID: deviceID).raw(entry)
+        }
+        func enabled(_ key: String, fallback: Bool) throws -> Bool {
+            guard let value = try raw(key) else { return fallback }
+            return value == "1"
+        }
+        let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+        let projection = ReaderNativeBookProjection(store: store)
+        let languages = try projection.state("book-languages", bookID: bookID).payload ?? []
+        guard let languages = languages as? [String], languages.allSatisfy({ ["en", "ja", "zh", "ko", "fr", "de"].contains($0) }) else {
+            throw ReaderNativeBookStore.MutationError.invalid("书籍语言")
+        }
+        let cropPayload = try projection.state("book-crop", bookID: bookID).payload
+        guard cropPayload == nil || cropPayload is [String: Any] else { throw ReaderNativeBookStore.MutationError.invalid("书籍裁边") }
+        let crop = cropPayload as? [String: Any] ?? [:]
+        guard Set(crop.keys).isSubset(of: Set(["l", "r", "t", "b"])) else { throw ReaderNativeBookStore.MutationError.invalid("裁边字段") }
+        var cropValue: [String: Double] = [:]
+        for key in ["l", "r", "t", "b"] {
+            if let value = crop[key] {
+                guard let numberValue = value as? NSNumber, CFGetTypeID(numberValue) != CFBooleanGetTypeID() else { throw ReaderNativeBookStore.MutationError.invalid("裁边比例") }
+                let number = try ReaderNativeCardRules.number(numberValue, "裁边")
+                guard number <= 45 else { throw ReaderNativeBookStore.MutationError.invalid("裁边比例") }
+                cropValue[key] = number
+            } else { cropValue[key] = 0 }
+        }
+        var colors = ["#fff59d", "#a7f3d0", "#a3d4ff", "#fda4af"]
+        if let value = try raw("pdf-hl-colors"), let bytes = value.data(using: .utf8),
+           let saved = try? JSONSerialization.jsonObject(with: bytes) as? [String], !saved.isEmpty { colors = saved }
+        let grammar = try raw("pdf-grammar-view") ?? "components"
+        let figures = nativeReadingFiguresSetting?.generation == generation ? nativeReadingFiguresSetting : nil
+        return ["host": "pdf", "book": "localbook:" + bookID,
+                "vocabulary": try enabled("pdf-vocab-underline", fallback: true),
+                "clickTranslate": try enabled("pdf-click-translate-unmastered", fallback: true),
+                "autoOrient": try enabled("pdf-auto-orient", fallback: false), "debug": try enabled("pdf-debug", fallback: false),
+                "languages": languages, "crop": cropValue, "cropEnabled": document.position.crop != nil,
+                "grammar": ["deps", "skeleton", "components", "tree"].contains(grammar) ? grammar : "components",
+                "colors": colors, "figures": figures?.enabled ?? false, "figuresAvailable": figures?.enabled != nil,
+                "warnings": figures?.warning.map { [$0] } ?? []]
+    }
+
+    private func performNativeReadingSettings(_ command: [String: Any]) async -> [String: Any]? {
+        guard let action = command["action"] as? String, ["readingSettingsRead", "readingSettingsWrite"].contains(action),
+              currentLocalBook?.format == .pdf else { return nil }
+        guard !isLoading, isTrustedReaderURL(webView.url), let book = currentLocalBook,
+              nativeReadingStoreBookID == book.id, let deviceID = nativeReadingStoreDeviceID,
+              let document = nativePDFDocument, command["scope"] as? String == nativeConversation.scope else {
+            return ["ok": false, "error": "阅读设置尚未就绪"]
+        }
+        let generation = bookUserStateContextGeneration, scope = nativeConversation.scope
+        func current() throws {
+            guard bookUserStateContextGeneration == generation, currentLocalBook?.id == book.id,
+                  nativePDFDocument === document, nativeConversation.scope == scope, !Task.isCancelled else {
+                throw ReaderBookUserStateWebAdapterError.contextChanged
+            }
+        }
+        do {
+            // Drain earlier compatibility intents once at an explicit settings
+            // action. Page rendering never needs this barrier.
+            _ = try await webView.callAsyncJavaScript("if (!window.__BW_READER_PREFERENCES__?.flush) throw new Error('设置尚未就绪'); await window.__BW_READER_PREFERENCES__.flush(); return true;",
+                arguments: [:], in: nil, contentWorld: .page)
+            try current()
+            var committed: [String: Any]? = nil
+            if action == "readingSettingsWrite" {
+                guard let key = command["key"] as? String, let value = command["value"] else { throw ReaderNativePreferences.Failure(message: "缺少设置值") }
+                let flags = ["vocabulary": "pdf-vocab-underline", "clickTranslate": "pdf-click-translate-unmastered", "autoOrient": "pdf-auto-orient", "debug": "pdf-debug"]
+                let settingKey: String?, raw: String?
+                if let name = flags[key] {
+                    settingKey = name; raw = try ReaderNativeCardRules.bool(value, key) ? "1" : "0"
+                } else if key == "grammar" {
+                    guard let mode = value as? String, ["deps", "skeleton", "components", "tree"].contains(mode) else { throw ReaderNativePreferences.Failure(message: "语法显示选项无效") }
+                    settingKey = "pdf-grammar-view"; raw = mode
+                } else if key == "colors" {
+                    guard let colors = value as? [String], !colors.isEmpty, colors.count <= 32,
+                          colors.allSatisfy({ $0.range(of: "^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$", options: .regularExpression) != nil }) else {
+                        throw ReaderNativePreferences.Failure(message: "请使用有效的颜色值")
+                    }
+                    var seen = Set<String>()
+                    settingKey = "pdf-hl-colors"; raw = String(decoding: try ReaderNativeCardRules.bytes(colors.filter { seen.insert($0).inserted }), as: UTF8.self)
+                } else { settingKey = nil; raw = nil }
+                if let settingKey, let raw {
+                    let entry = try ReaderNativePreferences.Catalog.packaged.get().entry(settingKey)
+                    let store = try nativeDataStoreHost.bridge(for: entry.storeName).store
+                    let owner = ReaderNativePreferences(store: store, deviceID: deviceID)
+                    committed = try owner.commit(entry, raw: raw, mutation: "native-settings-" + UUID().uuidString)
+                    markCloudSyncDirty()
+                } else if key == "languages" || key == "crop" {
+                    if key == "languages" {
+                        guard let languages = value as? [String], languages.count <= 2, languages.allSatisfy({ ["en", "ja"].contains($0) }) else {
+                            throw ReaderNativeBookStore.MutationError.invalid("语言选项")
+                        }
+                    }
+                    let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+                    let kind = key == "languages" ? "book-languages" : "book-crop"
+                    let previous = try ReaderNativeBookProjection(store: store).state(kind, bookID: book.id)
+                    _ = try ReaderNativeBookStore(store: store, bookID: book.id, deviceID: deviceID).perform([
+                        "bookID": book.id, "operation": kind, "value": value, "expectedRevision": previous.revision,
+                        "mutationId": "native-settings-" + UUID().uuidString])
+                    markCloudSyncDirty()
+                    if key == "languages" {
+                        nativeLookupCache.removeAll(); nativeLookupCacheBytes = 0; document.invalidateTokenization()
+                    } else {
+                        guard let data = value as? [String: Any], let crop = ReaderNativePDFCrop(data), let navigation = nativePDFNavigationBridge else {
+                            throw ReaderNativeBookStore.MutationError.invalid("裁边视口")
+                        }
+                        let enabled = document.position.crop != nil || data.values.contains { ($0 as? NSNumber)?.doubleValue ?? 0 > 0 }
+                        try await navigation.applyCrop(enabled ? crop : nil, expectedBookID: book.id)
+                        try current()
+                    }
+                } else if key == "cropEnabled" {
+                    let enabled = try ReaderNativeCardRules.bool(value, key)
+                    let state = try nativeReadingSettingsState(bookID: book.id, generation: generation)
+                    guard let data = state["crop"] as? [String: Any], let crop = ReaderNativePDFCrop(data), let navigation = nativePDFNavigationBridge,
+                          !enabled || data.values.contains(where: { ($0 as? NSNumber)?.doubleValue ?? 0 > 0 }) else {
+                        throw ReaderNativePreferences.Failure(message: "请先设置去边比例")
+                    }
+                    try await navigation.applyCrop(enabled ? crop : nil, expectedBookID: book.id)
+                    try current()
+                } else if key == "figures" {
+                    let enabled = try ReaderNativeCardRules.bool(value, key)
+                    guard let gateway = nativeServerGateway else { throw ReaderNativePreferences.Failure(message: "插图服务尚未连接") }
+                    let context = gateway.contextRevision
+                    let response = try await gateway.fetchData(path: "/pdf/api/book-figures", method: "POST",
+                        body: ReaderNativeCardRules.bytes(["file": "localbook:" + book.id, "enabled": enabled]), surface: .pdf)
+                    try current()
+                    guard gateway.contextRevision == context, (200..<300).contains(response.status),
+                          let reply = try JSONSerialization.jsonObject(with: response.data) as? [String: Any], reply["ok"] as? Bool == true,
+                          let flag = reply["enabled"] as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else {
+                        throw ReaderNativePreferences.Failure(message: "插图设置未确认保存")
+                    }
+                    nativeReadingFiguresSetting = (generation, flag.boolValue, nil)
+                } else { throw ReaderNativePreferences.Failure(message: "未知阅读设置") }
+                try current()
+                let snapshot = try nativeReadingSettingsState(bookID: book.id, generation: generation)
+                let result = try await webView.callAsyncJavaScript("""
+                    if (window.__bwNativeConversation?.currentScope?.() !== scope) return false;
+                    if (receipt) window.__bwNativePreferencesObserve(receipt);
+                    return window.__bwReaderAcceptNativeReadingSettings?.(snapshot, key) === true;
+                    """, arguments: ["snapshot": snapshot, "key": key, "receipt": committed as Any? ?? NSNull(), "scope": scope], in: nil, contentWorld: .page)
+                try current()
+                guard result as? Bool == true else { throw ReaderNativePreferences.Failure(message: "设置已保存，界面状态同步未完成，请重新打开设置核对") }
+                refreshNativePageOverlays(force: true)
+                return ["ok": true, "value": snapshot]
+            }
+            do {
+                guard let gateway = nativeServerGateway else { throw ReaderNativePreferences.Failure(message: "服务器尚未连接") }
+                let context = gateway.contextRevision
+                var path = URLComponents(); path.path = "/pdf/api/book-figures"; path.queryItems = [.init(name: "file", value: "localbook:" + book.id)]
+                let response = try await gateway.fetchData(path: path.string!, surface: .pdf)
+                try current()
+                guard gateway.contextRevision == context, (200..<300).contains(response.status),
+                      let reply = try JSONSerialization.jsonObject(with: response.data) as? [String: Any], reply["ok"] as? Bool == true,
+                      let enabled = reply["enabled"] as? NSNumber, CFGetTypeID(enabled) == CFBooleanGetTypeID() else { throw ReaderNativePreferences.Failure(message: "返回格式无效") }
+                nativeReadingFiguresSetting = (generation, enabled.boolValue, nil)
+            } catch {
+                try current()
+                nativeReadingFiguresSetting = (generation, nil, "插图分析设置暂不可读取：" + error.localizedDescription)
+            }
+            try current()
+            let snapshot = try nativeReadingSettingsState(bookID: book.id, generation: generation)
+            let mirrored = try await webView.callAsyncJavaScript("if (window.__bwNativeConversation?.currentScope?.() !== scope) return false; return window.__bwReaderAcceptNativeReadingSettings?.(snapshot, '') === true;",
+                arguments: ["scope": scope, "snapshot": snapshot], in: nil, contentWorld: .page)
+            try current()
+            guard mirrored as? Bool == true else { throw ReaderBookUserStateWebAdapterError.contextChanged }
+            return ["ok": true, "value": snapshot]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativeReadingSettings(command) { return result }
         if let result = await performNativeFavoritesCommand(command) { return result }
         if let result = await performNativeFigureCommand(command) { return result }
         if command["action"] as? String == "nativePhraseFav" {
