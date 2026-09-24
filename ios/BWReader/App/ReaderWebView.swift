@@ -362,6 +362,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativePhraseService: ReaderNativePhraseService?
     private var nativeFavoritesService: ReaderNativeFavoritesService?
     private var nativeFavoritesContext: UInt64?
+    private var nativeReviewQueue: ReaderNativeReviewQueue?
+    private var nativeReviewQueueContext: UInt64?
+    private var nativeReviewQueueGatewayContext: UInt64?
     private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
     private var nativeServerRemoteLibraryCancellable: AnyCancellable?
     private var nativeServerSyncBridge: ReaderNativeServerSyncBridge?
@@ -2500,6 +2503,43 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 completionHandler: { _ in })
             return ["ok": true, "value": ["ok": true, "mastered": mastered, "jp": japanese]]
         } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
+    private func prepareNativeReviewQueue() throws -> ReaderNativeReviewQueue {
+        guard let book = currentLocalBook, let deviceID = nativeReadingStoreDeviceID,
+              nativeReadingStoreBookID == book.id else {
+            throw ReaderNativeReviewQueue.Failure(message: "复习卡库尚未就绪")
+        }
+        let generation = bookUserStateContextGeneration
+        if let service = nativeReviewQueue, nativeReviewQueueContext == generation,
+           nativeReviewQueueGatewayContext == nativeServerGateway?.contextRevision { return service }
+        nativeReviewQueue?.invalidate()
+        let global = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+        let device = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-device").store
+        guard try global.meta("legacyImport") == "done", try device.meta("legacyImport") == "done" else {
+            throw ReaderNativeReviewQueue.Failure(message: "复习卡库尚未完成导入")
+        }
+        let surface: ReaderNativeInterfaceSurface = book.format == .epub ? .epub : .pdf
+        let gateway = nativeServerGateway, gatewayContext = nativeServerGateway?.contextRevision
+        let check: () throws -> Void = { [weak self] in
+            guard let self, self.bookUserStateContextGeneration == generation, self.currentLocalBook?.id == book.id,
+                  self.nativeServerGateway?.contextRevision == gatewayContext else { throw CancellationError() }
+        }
+        let service = ReaderNativeReviewQueue(local: {
+            try check()
+            return try ReaderNativeCardRepository(store: global, deviceID: deviceID).reviewQueue()
+        }, read: {
+            try check(); return try device.meta(ReaderNativeReviewQueue.cacheKey)
+        }, write: { text in
+            try check(); try device.putMeta(ReaderNativeReviewQueue.cacheKey, json: text)
+        }, fetch: { path, method, body in
+            try check()
+            guard let gateway else { throw ReaderNativeReviewQueue.Failure(message: "复习服务连接不可用") }
+            let result = try await gateway.fetchData(path: path, method: method, body: body, surface: surface)
+            try check(); return .init(status: result.status, data: result.data)
+        })
+        nativeReviewQueue = service; nativeReviewQueueContext = generation; nativeReviewQueueGatewayContext = gatewayContext
+        return service
     }
 
     private func prepareNativeFavoritesService() throws -> ReaderNativeFavoritesService {
@@ -7190,6 +7230,30 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 }
                 return
             }
+            if body["action"] as? String == "reviewQueue" {
+                Task { @MainActor [weak self] in
+                    do {
+                        guard let self, let request = body["request"] as? [String: Any],
+                              let operation = request["operation"] as? String else {
+                            throw ReaderNativeReviewQueue.Failure(message: "复习请求无效")
+                        }
+                        let service = try self.prepareNativeReviewQueue()
+                        switch operation {
+                        case "load": replyHandler(["ok": true, "value": try await service.load(request)], nil)
+                        case "peek": replyHandler(["ok": true, "value": try service.peek() as Any? ?? NSNull()], nil)
+                        case "save":
+                            guard let snapshot = request["snapshot"] as? [String: Any], let lease = request["lease"] as? String else {
+                                throw ReaderNativeReviewQueue.Failure(message: "复习保存缺少轮次")
+                            }
+                            replyHandler(["ok": true, "value": try service.save(snapshot, request: lease)], nil)
+                        case "cancel":
+                            service.cancel(request["lease"] as? String ?? ""); replyHandler(["ok": true], nil)
+                        default: throw ReaderNativeReviewQueue.Failure(message: "未知复习操作")
+                        }
+                    } catch { replyHandler(["ok": false, "error": error.localizedDescription], nil) }
+                }
+                return
+            }
             if body["action"] as? String == "preference" {
                 do {
                     guard let request = body["request"] as? [String: Any],
@@ -7487,6 +7551,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         //   页面里的线索随进程一起没了，能留下证据的只有 App 进程这一侧。
         noteWebContentTermination()
         nativeAssistantStream?.invalidate()
+        nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
         invalidateNativePDFDocument(reason: "webcontent-terminated")
         nativeConversation.resetForNavigation()
         webContentProcessNeedsReload = true
@@ -7561,6 +7626,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
         nativeAssistantStream?.invalidate()
+        nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
         invalidateNativePDFDocument(reason: "navigation-start")
         nativeLookupTasks.values.forEach { $0.task.cancel() }
         nativeLookupTasks.removeAll()

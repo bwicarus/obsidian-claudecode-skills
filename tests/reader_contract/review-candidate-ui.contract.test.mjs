@@ -313,7 +313,8 @@ function harness({
   dispatchImpl = null,
   outboxImpl = null,
   cardRepository = null,
-  markdownImpl = null
+  markdownImpl = null,
+  nativeQueue = null
 }) {
   const document = new FakeDocument();
   const pane = document.createElement("section");
@@ -481,6 +482,9 @@ function harness({
   };
   const window = {
     RC,
+    crypto: globalThis.crypto,
+    __BW_NATIVE_CONVERSATION_DATA__: !!nativeQueue,
+    ...(nativeQueue ? { webkit: { messageHandlers: { bwNativeDataStore: { postMessage: nativeQueue } } } } : {}),
     BWReaderRuntime: {
       contextSelections: ContextSelection.createRegistry(),
       ...(cardRepository ? { cardRepository } : {})
@@ -2428,4 +2432,59 @@ test("extension background permits only GET/POST and owns the private queue key"
     BACKGROUND,
     /add\(\["\/pdf\/api\/review-queue"\], \["GET", "POST"\]\)/
   );
+});
+
+test('native review never mounts a hidden workspace or pager; reveal, stage and undo remain usable', async () => {
+  const requests = [];
+  let cached;
+  const fixture = harness({ context: { file: 'localbook:book', page: 4 },
+    fetchImpl() { assert.fail('native acquisition must not call browser fetch'); },
+    async nativeQueue({ action, request }) {
+      assert.equal(action, 'reviewQueue'); requests.push(structuredClone(request));
+      if (request.operation === 'load') return { ok: true, value: {
+        request: request.request, kind: 'load', snapshot: { ts: Date.now(),
+          client_context_key: request.contextKey, due_total: 1, related_total: 1,
+          cards: [{ id: 123, question: '<b>题目</b>', answer: '答案' }], completed_ids: [], index: 0 }
+      } };
+      if (request.operation === 'save') { cached = request.snapshot; return { ok: true, value: true }; }
+      if (request.operation === 'peek') return { ok: true, value: cached };
+      return { ok: true };
+    }
+  });
+  fixture.RC.review.setMode(true);
+  await fixture.RC.review.load();
+  const state = fixture.RC.review.presentationState();
+  assert.equal(state.current.id, 'anki_card_123');
+  assert.equal(state.loading, false);
+  assert.equal(fixture.pane, null);
+  assert.equal(fixture.document.getElementById('rc-review-css'), null);
+  assert.deepEqual(fixture.learningCardRenders, []);
+  assert.deepEqual(fixture.pagerBindings, []);
+  fixture.RC.review.show();
+  assert.equal(fixture.RC.review.presentationState().showingAnswer, true);
+  fixture.RC.review.answer(3);
+  assert.equal(fixture.RC.review.presentationState().canUndo, true);
+  assert.equal(fixture.RC.review.presentationState().count, 0);
+  assert.equal(fixture.RC.review.undoLastRating(), true);
+  assert.equal(fixture.RC.review.presentationState().current.id, 'anki_card_123');
+  assert.deepEqual(fixture.calls, []);
+  assert.equal(fixture.storageCalls.some(([action]) => action === 'set'), false);
+  fixture.RC.review.setMode(false);
+  await flushPromises();
+  assert.ok(requests.some(request => request.operation === 'cancel'));
+  assert.ok(requests.filter(request => request.operation === 'save').every(request => request.lease));
+});
+
+test('failed native queue is visible and never starts legacy acquisition', async () => {
+  const fixture = harness({ context: { file: 'localbook:book', page: 4 },
+    fetchImpl() { assert.fail('no legacy fallback'); },
+    nativeQueue: async () => ({ ok: false, error: '原生数据库暂不可用' })
+  });
+  fixture.RC.review.setMode(true);
+  await fixture.RC.review.load();
+  const state = fixture.RC.review.presentationState();
+  assert.equal(state.loading, false);
+  assert.match(state.notice, /原生数据库暂不可用/);
+  assert.equal(fixture.pane, null);
+  assert.deepEqual(fixture.calls, []);
 });

@@ -56,6 +56,19 @@
   var _stagedRating = null;
   var _ratingCommitBusy = 0;
   var _presentationNotice = '';
+  var _nativeQueueLease = '';
+
+  function _nativeReviewUI() { return window.__BW_NATIVE_CONVERSATION_DATA__ === true; }
+  function _nativeQueuePort() {
+    return _nativeReviewUI() && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bwNativeDataStore;
+  }
+  async function _nativeQueueCall(operation, values) {
+    var port = _nativeQueuePort();
+    if (!port) throw new Error('原生复习入口不可用');
+    var response = await port.postMessage({ action: 'reviewQueue', request: Object.assign({ operation: operation }, values || {}) });
+    if (!response || response.ok !== true) throw new Error(response && response.error || '原生复习请求未完成');
+    return response.value;
+  }
 
   function _publishPresentation() {
     try { window.dispatchEvent(new CustomEvent('rc:review-presentation-changed')); } catch (_) {}
@@ -631,7 +644,7 @@
     }
   }
 
-  function _cacheGet() {
+  function _legacyCacheGet() {
     try {
       if (window.__bwExtensionStore && window.__bwExtensionStore.get) {
         return Promise.resolve(window.__bwExtensionStore.get(EXTQ));
@@ -642,7 +655,14 @@
     }
   }
 
+  function _cacheGet() {
+    return _nativeQueuePort() ? _nativeQueueCall('peek') : _legacyCacheGet();
+  }
+
   function _cacheSet(value) {
+    if (_nativeQueuePort()) return _nativeQueueCall('save', {
+      snapshot: value, lease: value.native_queue_lease || _nativeQueueLease
+    });
     try {
       if (window.__bwExtensionStore && window.__bwExtensionStore.set) {
         return Promise.resolve(window.__bwExtensionStore.set(EXTQ, value));
@@ -784,6 +804,7 @@
 
   function _saveLocal(snapshot, stillCurrent) {
     var frozen = snapshot || _currentQueueSnapshot();
+    if (_nativeQueuePort()) frozen = Object.assign({}, frozen, { native_queue_lease: frozen.native_queue_lease || _nativeQueueLease });
     _cacheWriteChain = _cacheWriteChain.catch(function () {
       return false;
     }).then(function () {
@@ -1236,7 +1257,7 @@
 
   function _notifyAssistant(reason) {
     _publishPresentation();
-    var card = _mode ? _cardForAssistant(_current()) : null;
+    var card = _mode && _current() ? _cardForAssistant(_current()) : null;
     var options = { card: card, reason: reason || 'mode' };
     try {
       if (RC.assistant && typeof RC.assistant.setMode === 'function') {
@@ -1366,6 +1387,7 @@
   }
 
   function _setBusy(message) {
+    if (_nativeReviewUI()) { _presentationNotice = String(message || ''); _publishPresentation(); return; }
     var body = _body();
     if (!body) return;
     body.innerHTML = '';
@@ -1396,6 +1418,7 @@
 
   async function loadQueue(force) {
     if (!_mounted && !mount()) return;
+    if (_nativeReviewUI()) return _loadNativeQueue(force);
     _commitStagedRating('load-queue');
     var body = _body();
     if (!body) return;
@@ -1613,6 +1636,49 @@
       fail.appendChild(document.createElement('br'));
       fail.appendChild(_button('reload', '重试', 'rv-btn'));
       body.appendChild(fail);
+    }
+  }
+
+  async function _loadNativeQueue(force) {
+    var context = _currentContext(), contextKey = _clientContextKey(context);
+    var epoch = ++_queueRequestEpoch;
+    var request = window.crypto.randomUUID();
+    // Do not race a queued score with the fresh local repository read.
+    await _commitStagedRating('load-queue');
+    if (epoch !== _queueRequestEpoch || !_mode) return;
+    if (_ratingCommitBusy) { _toast('评分正在保存，请稍后重试'); return; }
+    if (_contextCacheKey !== contextKey) {
+      _rememberAndDeactivateSelections(); _queue = []; _idx = 0;
+      _showingAnswer = false; _invalidateCardRequests(true);
+    }
+    _contextCacheKey = contextKey; _nativeQueueLease = request; _queueBusy = true;
+    _setBusy('读取复习卡…');
+    try {
+      _bindCardRepository(_cardRepository());
+      var legacy = await _legacyCacheGet();
+      if (!_queueRequestCurrent(epoch, contextKey)) return;
+      var result = await _nativeQueueCall('load', { request: request, contextKey: contextKey,
+        context: context, scope: _scopeMode, force: !!force, legacyCache: legacy,
+        rejectedIds: _rejectedForContext(contextKey).map(function (item) { return String(item.card && item.card.id); }) });
+      if (!_queueRequestCurrent(epoch, contextKey)) return;
+      if (!result || result.request !== request) throw new Error('复习返回轮次不匹配');
+      var snapshot = result.kind === 'local'
+        ? _queueSnapshot(contextKey, result.entries.map(function (entry) {
+            return _localReviewCard(entry.record, entry.card, entry.state, entry.cardIndex, entry.due === true);
+          }), 0, result.dueTotal, 0, [])
+        : result.snapshot;
+      snapshot = _consumeRejectedSnapshot(contextKey, snapshot);
+      snapshot.native_queue_lease = request;
+      _applyQueueSnapshot(snapshot);
+      await _saveLocal(snapshot, function () { return _queueRequestCurrent(epoch, contextKey); });
+      if (!_queueRequestCurrent(epoch, contextKey)) return;
+      _queueBusy = false; _presentationNotice = String(result.notice || '');
+      render(); _activateCurrentSelections(); _notifyAssistant('queue-' + result.kind);
+    } catch (error) {
+      if (!_queueRequestCurrent(epoch, contextKey)) return;
+      _queueBusy = false;
+      _toast('读取复习卡失败：' + String(error && error.message || '未知错误'));
+      // Never restart the legacy fetch/renderer after an ambiguous native result.
     }
   }
 
@@ -1902,6 +1968,7 @@
 
   function render() {
     _publishPresentation();
+    if (_nativeReviewUI()) return;
     var body = _body();
     if (!body) return;
     var workspace = _workspace();
@@ -2933,6 +3000,7 @@
 
   function _scheduleDecorate() {
     clearTimeout(_decorateTimer);
+    if (_nativeReviewUI()) return;
     _decorateTimer = setTimeout(_decorateAnswers, 140);
   }
 
@@ -3046,6 +3114,7 @@
 
   function _refreshSelectionUi() {
     _publishPresentation();
+    if (_nativeReviewUI()) return;
     var registry = _registry();
     Object.keys(_selectionRecords).forEach(function (id) {
       var record = _selectionRecords[id];
@@ -3617,6 +3686,7 @@
     if (!on) _commitStagedRating('mode-exit');
     _mode = on;
     if (!_mode) {
+      if (_nativeQueuePort()) _nativeQueueCall('cancel', { lease: _nativeQueueLease }).catch(function () {});
       _queueRequestEpoch += 1;
       _queueBusy = false;
       _showingAnswer = false;
@@ -3625,9 +3695,9 @@
       _invalidateCardRequests(true);
       render();
     }
-    var workspace = _workspace();
-    var pane = document.getElementById('side-pane-asst');
-    var toggle = document.getElementById('asst-review-toggle');
+    var workspace = _nativeReviewUI() ? null : _workspace();
+    var pane = _nativeReviewUI() ? null : document.getElementById('side-pane-asst');
+    var toggle = _nativeReviewUI() ? null : document.getElementById('asst-review-toggle');
     if (workspace) workspace.hidden = !_mode;
     if (pane) pane.classList.toggle('review-mode', _mode);
     if (toggle) {
@@ -3752,6 +3822,9 @@
 
   function mount() {
     if (_mounted) return true;
+    if (_nativeReviewUI()) {
+      _subscribeSelections(); _mounted = true; return true;
+    }
     var pane = document.getElementById('side-pane-asst');
     var quick = document.getElementById('asst-quick');
     var thread = document.getElementById('asst-thread');
@@ -3810,6 +3883,12 @@
       attributeFilter: ['class', 'aria-busy']
     });
 
+    _subscribeSelections();
+    _mounted = true;
+    return true;
+  }
+
+  function _subscribeSelections() {
     var registry = _registry();
     if (registry && typeof registry.subscribe === 'function') {
       try {
@@ -3824,8 +3903,6 @@
       } catch (_) {}
     }
 
-    _mounted = true;
-    return true;
   }
 
   // Full presentation for native UI, separate from the intentionally truncated

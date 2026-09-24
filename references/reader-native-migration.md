@@ -361,6 +361,18 @@ Swift 串行执行原服务器集合的读取、保存、删除与恢复，学�
 检查及 Apple 编译待本批验证；未发布或声称全部原生迁移完成。
 # Native preference transaction ownership (2026-09-24)
 
+`fa4e99f7` passed Apple workflow `35948651511`, including the complete App build.
+The next stage moves review queue acquisition and its device-local recovery snapshot to Swift:
+local Reader cards remain authoritative, remote related/due selection uses the existing native
+gateway, and request leases reject delayed loads/saves after a context change. Local database or
+snapshot-save failures never fall back to a second browser acquisition. The App no longer mounts
+the hidden review workspace, toolbar, carousel, CSS or answer-decoration observer; the existing
+structured answer selection and staged score/undo commands remain available to the native view.
+The review interaction reducer, improvement drafts and HTML face projection are still transitional
+JavaScript, so this is not the complete native review migration. Local Node checks: 2436 passed;
+new Apple queue tests cover scope separation, local authority, offline recovery and cancellation.
+No new installable release has been uploaded from this stage.
+
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 
 The App now sends preference intent (including first legacy-mirror migration) to Swift. `ReaderNativePreferences` owns envelope construction, tombstones, causal parents for global settings, expected-revision checks, durable replay receipts and journal writes in one SQLite transaction. The existing 55-key DataRegistry allowlist generates the packaged native catalog; no second settings namespace or database is introduced. Browser/extension PreferenceStore behavior is retained. Native failures leave dirty compatibility intent and never invoke the old writer as a fallback.
