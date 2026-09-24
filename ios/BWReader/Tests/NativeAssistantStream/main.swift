@@ -37,6 +37,39 @@ actor Harness {
 }
 
 @main struct Test {
+    static func turnState() throws {
+        var turn = ReaderNativeAssistantTurn()
+        func event(_ name: String, _ value: Any) throws -> ReaderNativeAssistantEvent {
+            .init(name: name, data: String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]), as: UTF8.self))
+        }
+        _ = try turn.consume(event("answer", "第一个增量"))
+        let tool = try turn.consume(event("tool2", ["name": "lookup"]))
+        precondition(tool["sawTool"] as? Bool == true && tool["answer"] == nil)
+        let answer = try turn.consume(event("answer", "[语气:认真]完整回答[[FOLLOWUP]]为什么[[/FOLLOWUP]]"))
+        precondition(answer["displayText"] as? String == "完整回答" && turn.answer.hasPrefix("[语气:"))
+        precondition(answer["voiceText"] as? String == "[语气:认真]完整回答")
+        _ = try turn.consume(event("tool2", ["name": "do_task", "task_id": "task-one"]))
+        precondition(turn.sawTool && turn.sawCLICard)
+        let done = try turn.consume(event("done", [:]))
+        precondition(done["done"] as? Bool == true && done["answer"] == nil)
+        do { _ = try turn.consume(event("answer", "late")); preconditionFailure("post-completion event accepted") }
+        catch is ReaderNativeAssistantStream.Failure {}
+        var invalid = ReaderNativeAssistantTurn()
+        do { _ = try invalid.consume(event("answer", ["wrong": "type"])); preconditionFailure("non-text answer accepted") }
+        catch is ReaderNativeAssistantStream.Failure {}
+        let failed = try invalid.consume(event("error", "连接失败"))
+        precondition(failed["answer"] as? String == "⚠️ 连接失败")
+        if CommandLine.arguments.count > 1 {
+            let fixtures = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))) as! [[String: Any]]
+            for fixture in fixtures {
+                let answer = fixture["answer"] as! String, result = ReaderNativeAssistantTurn.content(answer)
+                precondition(result.voiceText == fixture["voiceText"] as? String, "voice differs: \(answer)")
+                precondition(result.displayText == fixture["displayText"] as? String, "display differs: \(answer)")
+                precondition(result.finalDisplayText == fixture["finalDisplayText"] as? String, "final differs: \(answer)")
+                precondition(result.followups == fixture["followups"] as? [String], "followups differ: \(answer)")
+            }
+        }
+    }
     static func requestPolicy() throws {
         func plan(_ context: [String: Any], message: String = "", mode: String = "normal", noBook: Bool = false) throws -> [String: Any] {
             try ReaderNativeAssistantRequest(["message": message, "context": context, "assistant_mode": mode,
@@ -83,6 +116,7 @@ actor Harness {
     }
     static func main() async throws {
         try requestPolicy()
+        try turnState()
         let wire = Data("\u{feff}: heartbeat\r\nevent: answer\r\ndata: \"日本😀\"\r\n\r\nevent: actions\rdata: {\rdata: \"id\":1}\r\revent: done\ndata: {}\n\n".utf8)
         let expected = [ReaderNativeAssistantEvent(name: "answer", data: "\"日本😀\""),
                         .init(name: "actions", data: "{\n\"id\":1}"), .init(name: "done", data: "{}")]

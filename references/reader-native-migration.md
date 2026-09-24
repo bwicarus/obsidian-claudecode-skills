@@ -482,6 +482,18 @@ is read-only, and a failure or mode switch cannot silently submit the old reques
 native SSE transport reuses that frozen identity for continuation. The web event/action reducer
 is still a compatibility dependency and remains part of the migration work, not a completed
 native release. Card tables now inherit the same readable Dynamic Type font as card text.
+Request policy checks and the full App compilation passed Apple run `35960095948`
+(`5a35c92f`); no signing or upload was performed.
+
+Streamed answer ownership, cumulative response state and voice/display/follow-up parsing
+now run in a native per-request reducer. The compatibility effect handler consumes its
+projection; it no longer reparses native text increments or chooses between the normal,
+tool and delegated-task answer surfaces. Completed or malformed events are rejected,
+and an uncertain effect acknowledgement stops without replay. Legacy/browser parsing
+is retained and used to generate native comparison fixtures. Tool action dispatch and
+historical message assembly are still compatibility dependencies; this does not remove
+the complete old conversation runtime. Full Reader checks found one obsolete busy-state
+assertion; the assertion now includes the new request-preparation boundary.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

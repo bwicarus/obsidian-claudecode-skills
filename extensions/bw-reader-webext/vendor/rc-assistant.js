@@ -2837,7 +2837,7 @@ if (window.__bwPwaProviderOnly) return;
       } catch (_) {}
     }
     delete sentCtx.want_viewshot;   // 前端标志,不入后端 ctx / 历史 meta
-    var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0;
+    var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0, nativeTurnState = null;
     // 逐字浮现的"揭示游标":跟 SSE delta 到达节奏解耦,由 rAF 稳定速度推进 → 连续逐字(不段一段)
     var _revN = 0, _spans = [], _tot = 0, _raf = null, _lastTs = 0, _acc = 0, _noChar = false;
     function _revealTick(ts) {
@@ -2863,18 +2863,23 @@ if (window.__bwPwaProviderOnly) return;
     function _stopReveal() { if (_raf) { try { cancelAnimationFrame(_raf); } catch (_) {} _raf = null; } }
     var rid = nativePrepared ? nativePrepared.rid : 'c' + Date.now() + '_' + (_ridCtr++);   // retries resume this same task
     var evSeen = 0, done = false;                      // 已消费的缓冲事件数(重连用 from=evSeen 续传)
-    function _handleEv(ev, parsed) {
+    function _handleEv(ev, parsed, nativeState) {
       if (turnEpoch !== _modeEpoch) return;
       if (ev === 'meta') return;                       // rid 确认,不计数
+      if (nativeState) {
+        nativeTurnState = Object.assign(nativeTurnState || {}, nativeState);
+        if (typeof nativeState.answer === 'string') answer = nativeState.answer;
+        sawTool = nativeState.sawTool; sawCliCard = nativeState.sawCliCard;
+      } else if (ev === 'error') nativeTurnState = null;
       evSeen++;
       if (ev === 'done') { done = true; return; }
       if (ev === 'tool' || ev === 'tool-done') delete aMsg.__bwNativeMessageSource;
       if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool"><span class="rc-i rc-i-wrench"></span> ' + esc(parsed) + '…</span>'; scrollDown(); try { window.__vcCapStatus && window.__vcCapStatus('<span class="rc-i rc-i-gear"></span>︎ ' + parsed + '…'); } catch (_) {} }   // 朗读字幕兼状态显示(侧栏关着也能看到)
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} try { window.__vcCapStatus && window.__vcCapStatus(null); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
-        answer = parsed;
-        var _raw = _stripTornFU(_splitFollowups(answer).text);
-        var _at = (window.RC && RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_raw).text : _raw;
+        if (!nativeState) answer = parsed;
+        var _raw = nativeState ? nativeState.voiceText : _stripTornFU(_splitFollowups(answer).text);
+        var _at = nativeState ? nativeState.displayText : ((window.RC && RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_raw).text : _raw);
         try { window.__asstVoiceTap && window.__asstVoiceTap(_raw, false); } catch (_) {}   // tap 收**原文**(含语气标签,自己解析转折点逐句换情绪)
         if (sawTool && window.RC && RC.turnCard && RC.turnCard.has(_vTid)) {   // ★工具方块模式:回答直接流进卡 body(不再回气泡,收尾也在卡)
           try { RC.turnCard.draftText(_vTid, _at); } catch (_) {}
@@ -2901,7 +2906,9 @@ if (window.__bwPwaProviderOnly) return;
       }
       else if (ev === 'actions') { try { runActions(parsed); } catch (_) {} }   // 实时:工具一执行完就应用(高亮/跳页立即生效),不等 AI 输出完
       else if (ev === 'tool2' && parsed && parsed.name) {
-        if (parsed.task_id && (parsed.name === 'do_task' || parsed.name === 'make_paper' || parsed.name === 'read_check_report' || parsed.name === 'run_saved_task')) {   // #2 委托 CLI:CLI 卡接管 → 隐藏单独的编排答案气泡
+        if (nativeState) {
+          if (nativeState.sawCliCard || nativeState.sawTool) { try { aMsg.style.display = 'none'; } catch (_) {} }
+        } else if (parsed.task_id && (parsed.name === 'do_task' || parsed.name === 'make_paper' || parsed.name === 'read_check_report' || parsed.name === 'run_saved_task')) {   // #2 委托 CLI:CLI 卡接管 → 隐藏单独的编排答案气泡
           sawCliCard = true; try { aMsg.style.display = 'none'; } catch (_) {}
         } else if (!sawTool) {   // ★第一个工具调用出现 → 本轮进入「工具方块」模式:此后所有输出(含最终回答)都在卡内
           sawTool = true; try { aMsg.style.display = 'none'; } catch (_) {}
@@ -2916,7 +2923,7 @@ if (window.__bwPwaProviderOnly) return;
         var _ujp = parsed.page ? ' <button class="asst-jump" data-page="' + esc(parsed.page) + '">↗ 跳转</button>' : '';
         addMsg('asst-a', '<span class="rc-i rc-i-check"></span> ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
       }
-      else if (ev === 'error') { answer = '⚠️ ' + parsed; if (_nativeOwnsThread()) renderMd(aMsg, answer, true); else aMsg.innerHTML = esc(answer); }
+      else if (ev === 'error') { if (!nativeState) answer = '⚠️ ' + parsed; if (_nativeOwnsThread()) renderMd(aMsg, answer, true); else aMsg.innerHTML = esc(answer); }
     }
     // 开一条 SSE 读到自然结束/断开。首连带 message+context;重连只带 rid+from(服务端按 rid 续发缓冲事件)。
     async function _stream(body) {
@@ -2959,7 +2966,7 @@ if (window.__bwPwaProviderOnly) return;
           media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined),
           force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined,
           voice: (turnMode === 'normal' && window.__asstVoiceOn && window.__asstVoiceOn()) ? 1 : undefined
-        }, function (name, data) { _lastProgressTs = Date.now(); _handleEv(name, data); }, nativeAbort.signal);
+        }, function (name, data, state) { _lastProgressTs = Date.now(); _handleEv(name, data, state); }, nativeAbort.signal);
         if (nativeStatus === 'gone') done = 'gone';
       } catch (e) {
         if (e && e.name === 'AbortError') aborted = true;
@@ -2990,14 +2997,16 @@ if (window.__bwPwaProviderOnly) return;
     if ((done === 'gone' || (!done && !aborted)) && !answer) {
       try { aMsg.innerHTML = '<span class="asst-tool">正在恢复…</span>'; } catch (_) {}
       var rec = await _recoverFromHistory(0, turnMode, turnEpoch);
-      if (rec && rec.content) { answer = rec.content; traceData = rec.trace || traceData; _recTs = rec.ts || 0; }
+      if (rec && rec.content) { answer = rec.content; nativeTurnState = null; traceData = rec.trace || traceData; _recTs = rec.ts || 0; }
     }
     if (turnEpoch !== _modeEpoch) { _stopReveal(); try { aMsg.remove(); } catch (_) {} return; }
     // 收尾:剥 FOLLOWUP → 完整渲染(MathJax 这一次)→ 追问 chip
     _stopReveal();                            // stream-fx:停揭示循环(下面 renderMd 重渲成干净 markdown,无 span/光标)
     aMsg.classList.remove('mfx-streaming');   // 停止提亮
-    var pf = _splitFollowups(answer);
-    try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(_stripTornFU(pf.text || ''), true); } catch (_) {}   // 语音对话:回答完,尾句也念(原文含标签,tap 自己解析;撕裂 FOLLOWUP 残段截掉)
+    var pf = nativeTurnState && typeof nativeTurnState.answer === 'string'
+      ? {text: nativeTurnState.finalDisplayText, followups: nativeTurnState.followups}
+      : _splitFollowups(answer);
+    try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(nativeTurnState?.voiceText ?? _stripTornFU(pf.text || ''), true); } catch (_) {}   // 语音对话:回答完,尾句也念(原文含标签,tap 自己解析;撕裂 FOLLOWUP 残段截掉)
     if (sawCliCard) {
       // #2 委托 CLI:CLI 卡即回答,撤掉这个多余的编排答案气泡(连带追问建议按钮),跟语音模式一致。
       try { aMsg.remove(); } catch (_) {}
@@ -3006,7 +3015,7 @@ if (window.__bwPwaProviderOnly) return;
       //   感叹号信息并入卡:编排模型/耗时/tok/时刻 → meta part(流程面板顶部,⚙ 直达编排设置)。
       try {
         try { RC.turnCard.idle(_vTid); } catch (_) {}   // 审查 Q1:工具 running 后走 error/停止,done 永不来 → 收尾必须掐掉卡头 spinner
-        var _pftT = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
+        var _pftT = nativeTurnState ? pf.text : ((RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text);
         if (_pftT && !aborted) RC.turnCard.draftText(_vTid, _pftT);
         else RC.turnCard.status(_vTid, aborted ? '已停止' : '没拿到回答(可以重问一次)', true);   // 空回答兜底:别让卡空着像没结束(审查后补)
         RC.turnCard.freezeDraft(_vTid);
@@ -3024,7 +3033,7 @@ if (window.__bwPwaProviderOnly) return;
         aMsg.remove();
       } catch (_) {}
     } else {
-      var _pft = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
+      var _pft = nativeTurnState ? pf.text : ((RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text);
       if (_nativeOwnsThread()) renderMd(aMsg, _pft || (aborted ? '(已停止)' : '(没拿到回答)'), true);
       else if (_pft) renderMd(aMsg, _pft, true);
       else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');

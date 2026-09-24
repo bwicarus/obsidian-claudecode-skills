@@ -14,6 +14,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     private var epoch = UUID()
     private var tasks: [String: Task<Void, Never>] = [:]
     private var sequences: [String: Int] = [:]
+    private var turns: [String: ReaderNativeAssistantTurn] = [:]
     private var activeWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var observer: NSObjectProtocol?
     private var history: ReaderNativeAssistantHistory?
@@ -38,7 +39,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         let previousHistory = history
         history = nil; historyContext = nil
         Task { await previousHistory?.invalidate() }
-        epoch = UUID(); tasks.values.forEach { $0.cancel() }; tasks.removeAll(); sequences.removeAll()
+        epoch = UUID(); tasks.values.forEach { $0.cancel() }; tasks.removeAll(); sequences.removeAll(); turns.removeAll()
         let pending = activeWaiters; activeWaiters.removeAll()
         pending.values.forEach { $0.resume(throwing: CancellationError()) }
     }
@@ -99,9 +100,10 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         }
         let lease = epoch
         let gatewayContext = gateway.contextRevision
+        turns[id] = ReaderNativeAssistantTurn()
         tasks[id] = Task { @MainActor [weak self] in
             guard let self else { replyHandler(nil, "对话已关闭"); return }
-            defer { if self.epoch == lease { self.tasks.removeValue(forKey: id); self.sequences.removeValue(forKey: id) } }
+            defer { if self.epoch == lease { self.tasks.removeValue(forKey: id); self.sequences.removeValue(forKey: id); self.turns.removeValue(forKey: id) } }
             do {
                 let stream = try ReaderNativeAssistantStream(initial: data, connect: { [weak self] body, response, chunk in
                     guard let self else { throw CancellationError() }
@@ -176,14 +178,19 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         try Task.checkCancellation()
         guard epoch == lease, let webView, surface(webView.url) != nil else { throw CancellationError() }
         let next = (sequences[id] ?? 0) + 1
+        guard var turn = turns[id] else { throw CancellationError() }
+        let projected: [[String: Any]] = try events.map { event in
+            ["name": event.name, "data": event.data, "state": try turn.consume(event)]
+        }
         let result = try await webView.callAsyncJavaScript(
             "return window.__bwNativeAssistantStream?.accept(payload);",
             arguments: ["payload": ["id": id, "sequence": next,
-                                    "events": events.map { ["name": $0.name, "data": $0.data] }]],
+                                    "events": projected]],
             in: nil, contentWorld: .page)
         guard epoch == lease, let ack = result as? [String: Any], ack["ok"] as? Bool == true,
               ack["sequence"] as? Int == next else { throw ReaderNativeAssistantStream.Failure("对话接收状态已改变，未重复执行事件") }
         sequences[id] = next
+        turns[id] = turn
     }
 
     private func surface(_ url: URL?) -> ReaderNativeInterfaceSurface? {
@@ -249,7 +256,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
           entry.sequence = payload.sequence;
           for (const event of payload.events) {
             let value; try { value = JSON.parse(event.data); } catch (_) { value = event.data; }
-            entry.consume(event.name, value);
+            entry.consume(event.name, value, event.state);
           }
           return {ok: true, sequence: entry.sequence};
         }

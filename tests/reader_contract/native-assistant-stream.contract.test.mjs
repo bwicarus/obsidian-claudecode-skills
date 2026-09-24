@@ -63,6 +63,23 @@ test('native stream consumes structured events once and waits for native complet
   resolve({ok:true,status:'done'});assert.equal(await result,'done');
   assert.equal(api.accept({...batch,sequence:2}).ok,false);
 });
+
+test('native response projection drives display and voice without browser parsing or reveal layout',()=>{
+  const source=readFileSync(new URL('../../_server_deploy/static/pdf/rc-assistant.js',import.meta.url),'utf8');
+  const start=source.indexOf('    function _handleEv('), end=source.indexOf('    async function _stream(body)',start);
+  const displayed=[],spoken=[];
+  const runtime={turnEpoch:1,_modeEpoch:1,evSeen:0,done:false,answer:'',nativeTurnState:null,sawTool:false,sawCliCard:false,
+    window:{__asstVoiceTap:text=>spoken.push(text)},aMsg:{classList:{add(){}},style:{}},
+    _nativeOwnsThread:()=>true,_stopReveal(){},renderMd:(_,text)=>displayed.push(text),scrollDown(){},
+    _toolChip(){},_splitFollowups(){throw new Error('browser parsing invoked');}};
+  vm.createContext(runtime); vm.runInContext(source.slice(start,end)+'globalThis.accept = _handleEv;',runtime);
+  runtime.accept('answer','raw markers',{answer:'raw markers',displayText:'干净正文',voiceText:'朗读正文',followups:[],sawTool:false,sawCliCard:false,done:false});
+  assert.deepEqual(displayed,['干净正文']);assert.deepEqual(spoken,['朗读正文']);
+  runtime.accept('tool2',{name:'lookup'},{sawTool:true,sawCliCard:false,done:false});
+  assert.equal(runtime.sawTool,true); assert.equal(runtime.aMsg.style.display,'none');
+  runtime.accept('done',{}, {sawTool:true,sawCliCard:false,done:true});
+  assert.equal(runtime.done,true);
+});
 test('stop sends native cancellation; late events cannot execute actions',async()=>{
   const {api,requests,resolve}=setup(), controller=new AbortController(), events=[];
   const result=api.run('/api/assistant/chat',{},event=>events.push(event),controller.signal);

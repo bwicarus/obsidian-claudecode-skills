@@ -389,8 +389,9 @@ jobs:
 
       - name: Verify native assistant stream lifecycle
         run: |
-          xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantRequest.swift ios/BWReader/App/ReaderNativeAssistantStream.swift ios/BWReader/Tests/NativeAssistantStream/main.swift -o "$RUNNER_TEMP/native-assistant-stream-test"
-          "$RUNNER_TEMP/native-assistant-stream-test"
+          node ios/BWReader/Tests/NativeAssistantStream/response-fixture.mjs "$RUNNER_TEMP/native-assistant-response.json"
+          xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantRequest.swift ios/BWReader/App/ReaderNativeAssistantTurn.swift ios/BWReader/App/ReaderNativeAssistantStream.swift ios/BWReader/Tests/NativeAssistantStream/main.swift -o "$RUNNER_TEMP/native-assistant-stream-test"
+          "$RUNNER_TEMP/native-assistant-stream-test" "$RUNNER_TEMP/native-assistant-response.json"
 
       - name: Verify native assistant history lifecycle
         run: |
