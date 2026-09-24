@@ -4,8 +4,7 @@
 // `_pageTranslateApplyAll` 只处理 `[data-loaded="1"]` 的页 —— 原生接管后一页都没有，
 // 于是点了「译页」什么都不发生。原生自己按可见页去取。
 //
-// 切分/分配/字号只能有一处判据：同一行译文在两个表面上必须落在同一个位置，
-// 否则「刚才那行」指的是不同的东西。
+// 浏览器保留原布局；App 使用 Swift 分句和排版，与旧函数的真实输出对照。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -24,7 +23,7 @@ const body = (source, from, to) => source.slice(source.indexOf(from), source.ind
 const code = (source) =>
   source.split(/\r?\n/).filter((line) => !/^\s*(\/\/|\/\*|\*|\/\/\/)/.test(line)).join("\n");
 
-test("① 切分只有一处，且用点坐标（两个表面各自缩放）", () => {
+test("① 浏览器切分用点坐标，DOM 消费共享布局", () => {
   const slices = body(SRC, "function _pageTranslateSlices(sentences)", "function _drawPageTranslate");
   assert.match(slices, /_mergeLines\(raw\)/, "按视觉行合并");
   assert.match(slices, /h \* 0\.40/, "字号 = 行高 × 0.4");
@@ -37,7 +36,7 @@ test("① 切分只有一处，且用点坐标（两个表面各自缩放）", (
   assert.doesNotMatch(code(dom), /h \* 0\.40/, "DOM 路径不许再算一遍字号");
 });
 
-test("② 原生入口不做「翻过就跳过」的去重", () => {
+test("② 兼容入口保留完整结果，App 不再调用它分句和排版", () => {
   const entry = body(SRC, "window.__bwReaderPageTranslateSlices",
                      "window.__bwReaderPageTranslateOn");
   assert.match(entry, /if \(!_pageTrOn \|\| !page\) return \[\]/, "开关关着回空");
@@ -47,6 +46,9 @@ test("② 原生入口不做「翻过就跳过」的去重", () => {
   assert.match(entry, /@interaction document\.page-translate\.read/);
   assert.match(POLICY, /'document\.page-translate\.read'/);
   assert.match(READER, /__bwReaderPageTranslateSlices/, "改完 reader.src 要拼合");
+  assert.doesNotMatch(WEBVIEW, /__bwReaderPageTranslateSlices/);
+  assert.match(WEBVIEW, /ReaderNativePageTranslation\.sentences\(chars\)/);
+  assert.match(WEBVIEW, /ReaderNativePageTranslation\.slices\(translated\)/);
 });
 
 test("③ 原生按页高归一化字号，不存 pt", () => {

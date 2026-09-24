@@ -84,19 +84,17 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     private var settleTask: Task<Void, Never>?
     @Published private(set) var ink: [Int: [ReaderNativeCardStroke]] = [:] { didSet { refreshDecorations() } }
     @Published private(set) var highlights: [Int: [Highlight]] = [:] { didSet { refreshDecorations() } }
-    /// 生词下划线。rects 是点坐标（与高亮同一空间），由网页那侧算好该画哪些 ——
-    /// 「已掌握的不画」牵涉共享仓库、本地覆盖和服务端 label 的收敛顺序，
-    /// 判据留在 `_vocabMarksForDisplay` 一处，这里只负责画。
+    /// 生词下划线由原生词汇投影计算；文档只画归一化矩形。
     @Published private(set) var vocabMarks: [Int: [VocabMark]] = [:] { didSet { refreshDecorations() } }
 
-    struct VocabMark {
+    struct VocabMark: Equatable {
         let slug: String
         let rects: [CGRect]        // 归一化，便于 viewRect 直接换算
     }
 
     /// 由壳按可见页填。传 nil 表示这一页还没取到，保留旧的别闪。
     func setVocabMarks(_ marks: [VocabMark]?, page: Int) {
-        guard let marks else { return }
+        guard let marks, vocabMarks[page] != marks else { return }
         vocabMarks[page] = marks
     }
 
@@ -109,8 +107,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     @Published private(set) var furiganaMastered: [Int: Set<String>] = [:] { didSet { refreshDecorations() } }
 
     func setFuriganaMastered(_ words: [String]?, enabled: Bool, page: Int) {
-        furiganaEnabled[page] = enabled
-        furiganaMastered[page] = Set(words ?? [])
+        if furiganaEnabled[page] != enabled { furiganaEnabled[page] = enabled }
+        let mastered = Set(words ?? [])
+        if furiganaMastered[page] != mastered { furiganaMastered[page] = mastered }
     }
 
     /// 这一页要画的振假名条目（点坐标，来自原生字符层自带的 furigana）。
@@ -126,7 +125,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
 
     /// 生词句子：含未掌握词的整句，网页那侧画成排线框 + 行首一个「译」按钮。
     /// rects 归一化；text 留着，点「译」时直接送进翻译，不必再回网页问一次。
-    struct VocabSentence: Identifiable {
+    struct VocabSentence: Identifiable, Equatable {
         let id: String
         let index: Int
         let page: Int
@@ -154,16 +153,17 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     }
 
     func setVocabSentences(_ sentences: [VocabSentence], page: Int) {
+        guard vocabSentences[page] != sentences else { return }
         vocabSentences[page] = sentences
     }
 
     /// 整页翻译（译页）的一个译文片段：一行译文落在原文那一行的**字框顶部留白**里
-    /// ——「行间对照」而不是遮住原文。切分/分配/字号全在网页那侧算好
-    /// （`_pageTranslateSlices`），这里只按页面缩放画。
+    /// ——「行间对照」而不是遮住原文。ReaderNativePageTranslation 计算
+    /// 切分、分配和字号，这里只按页面缩放画。
     ///
     /// ⚠ `fontScale` 是**按页高归一化**的字号，不是 pt：画的时候乘回该页在屏幕上的
     /// 高度，缩放才跟着页面走。存 pt 的话放大页面译文就还是小的。
-    struct TranslationSlice {
+    struct TranslationSlice: Equatable {
         let origin: CGPoint        // 归一化，左上
         let width: Double          // 归一化
         let fontScale: Double      // 归一化字号（× 页面屏幕高度 = 实际字号）
@@ -172,6 +172,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     @Published private(set) var translationSlices: [Int: [TranslationSlice]] = [:] { didSet { refreshDecorations() } }
 
     func setTranslationSlices(_ slices: [TranslationSlice], page: Int) {
+        guard translationSlices[page] != slices else { return }
         translationSlices[page] = slices
     }
 
@@ -179,7 +180,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     /// ⚠ `badge` 可能为空 —— 服务端还没算好锚点。DOM 那侧此时会试四个角并避开正文，
     /// 那要文字层；接管后退成图框右上角内缩，位置与网页不保证一致（记在这里，
     /// 不要以为是 bug）。
-    struct Figure: Identifiable {
+    struct Figure: Identifiable, Equatable {
         let id: String
         let page: Int
         let box: CGRect            // 归一化
@@ -192,11 +193,13 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     @Published private(set) var figures: [Int: [Figure]] = [:] { didSet { refreshDecorations() } }
 
     func setFigures(_ items: [Figure], page: Int) {
+        guard figures[page] != items else { return }
         figures[page] = items
     }
 
     func setFigureAttached(_ attached: Bool, id: String, page: Int) {
         guard var items = figures[page], let index = items.firstIndex(where: { $0.id == id }) else { return }
+        guard items[index].attached != attached else { return }
         items[index].attached = attached
         figures[page] = items
     }

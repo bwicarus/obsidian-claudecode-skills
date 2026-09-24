@@ -747,6 +747,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeOverlayGeneration: UInt64 = 0
     private var nativeOverlayVocabularyGeneration: UInt64?
     private var nativeVocabularyEnrichmentTasks: [Int: Task<Void, Never>] = [:]
+    private var nativePageTranslationTasks: [Int: Task<Void, Never>] = [:]
+    private var nativePageTranslationCache: [String: [[String: Any]]] = [:]
+    private var nativePageTranslationCacheBytes = 0
 
     private func refreshNativePageOverlays(force: Bool = false) {
         guard let document = nativePDFDocument else { return }
@@ -758,6 +761,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             nativeOverlayGeneration &+= 1
             nativeVocabularyEnrichmentTasks.values.forEach { $0.cancel() }
             nativeVocabularyEnrichmentTasks = [:]
+            nativePageTranslationTasks.values.forEach { $0.cancel() }
+            nativePageTranslationTasks = [:]
         }
         for page in document.position.visiblePages.prefix(8) where !nativeOverlayPages.contains(page) {
             nativeOverlayPages.insert(page)
@@ -765,7 +770,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             Task { @MainActor [weak self, weak document] in
                 guard let self, let document else { return }
                 do {
-                    try await self.loadNativeVocabularyOverlay(page: page, document: document, generation: generation)
+                    let input = try await self.loadNativeVocabularyOverlay(page: page, document: document, generation: generation)
+                    self.startNativePageTranslation(source: input.source, enabled: input.flags["translation"] as? Bool == true,
+                        page: page, document: document, generation: generation)
                 } catch {
                     if self.nativePDFDocument === document, self.nativeOverlayGeneration == generation {
                         self.nativeOverlayPages.remove(page)
@@ -773,27 +780,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     }
                 }
                 guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation else { return }
-                // 整页翻译（译页）：另一次调用，因为它自带开关且要出网取译文，
-                // 塞进 page-overlay 会让关着译页的常规刷新也等它一遍。
-                let slices = try? await self.webView.callAsyncJavaScript(
-                    "return await window.__bwReaderPageTranslateSlices?.(page);",
-                    arguments: ["page": page], in: nil, contentWorld: .page)
-                guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation,
-                      let size = document.characterPageSize(page) else { return }
-                let rows = (slices as? [[String: Any]] ?? []).compactMap {
-                    row -> ReaderNativePDFDocument.TranslationSlice? in
-                    guard let text = row["text"] as? String, !text.isEmpty,
-                          let x = row["x"] as? Double, let y = row["y"] as? Double,
-                          let width = row["w"] as? Double,
-                          let fontSize = row["fontSize"] as? Double,
-                          size.width > 0, size.height > 0 else { return nil }
-                    // 点坐标 → 归一化，跟高亮/下划线同一口径。字号按页高归一化：
-                    // 画的时候乘回该页在屏幕上的高度，缩放跟着页面走。
-                    return .init(origin: CGPoint(x: x / size.width, y: y / size.height),
-                                 width: width / size.width,
-                                 fontScale: fontSize / size.height, text: text)
-                }
-                document.setTranslationSlices(rows, page: page)
                 // 插图：徽标 + 图框 + 已生成好的描述。本书没开「插图描述」时网页那侧
                 // 直接回空（不拉端点、不烧 AI），所以这里也就是一个空数组。
                 let figures = try? await self.webView.callAsyncJavaScript(
@@ -866,7 +852,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func loadNativeVocabularyOverlay(page: Int, document: ReaderNativePDFDocument, generation: UInt64) async throws {
+    private func loadNativeVocabularyOverlay(page: Int, document: ReaderNativePDFDocument, generation: UInt64) async throws -> (source: [String: Any], flags: [String: Any]) {
         guard let book = currentLocalBook, nativeReadingStoreBookID == book.id,
               let deviceID = nativeReadingStoreDeviceID else { throw NativeBookOCRError.pageUnavailable }
         let source = try await document.sourceCharacters(page: page)
@@ -884,6 +870,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         let raw = try await webView.callAsyncJavaScript("""
             return {vocabulary:typeof _vocabUnderlineEnabled==='function'?_vocabUnderlineEnabled():true,
                     ruby:typeof _rubyEnabled==='function'?_rubyEnabled():false,
+                    translation:window.__bwReaderPageTranslateOn?.()===true,
                     overrides:Object.fromEntries(window.__vocabOverride||[]),
                     mastered:Array.from(window.__masteredLocal||[]),
                     searchQuery:typeof _takePendingSearchQuery==='function'?_takePendingSearchQuery(page):''};
@@ -903,10 +890,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 "searchQuery": search ? flags["searchQuery"] as? String ?? "" : ""]
         }
         applyNativeVocabularyOverlay(payload(cached, search: true), page: page, document: document)
-        guard let gateway = nativeServerGateway else { return }
+        guard let gateway = nativeServerGateway else { return (source, flags) }
         var url = URLComponents(); url.path = "/pdf/api/page-overlay"
         url.queryItems = [URLQueryItem(name: "file", value: "localbook:" + book.id), URLQueryItem(name: "page", value: String(page))]
-        guard let path = url.string else { return }
+        guard let path = url.string else { return (source, flags) }
         let vocabularyGeneration = global.generation(collection: ReaderNativeVocabularyState.collection)
         nativeVocabularyEnrichmentTasks[page]?.cancel()
         nativeVocabularyEnrichmentTasks[page] = Task { @MainActor [weak self, weak document] in
@@ -934,6 +921,60 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 // persisted cached projection visible, without a web retry.
                 if !(error is CancellationError), !Task.isCancelled {
                     self.postClientLog("native-overlay-enrichment: " + error.localizedDescription)
+                }
+            }
+        }
+        return (source, flags)
+    }
+
+    private func startNativePageTranslation(source: [String: Any], enabled: Bool, page: Int,
+                                            document: ReaderNativePDFDocument, generation: UInt64) {
+        guard nativePDFDocument === document, nativeOverlayGeneration == generation else { return }
+        nativePageTranslationTasks[page]?.cancel()
+        nativePageTranslationTasks.removeValue(forKey: page)
+        guard enabled else { document.setTranslationSlices([], page: page); return }
+        guard let chars = source["chars"] as? [[String: Any]], let revision = source["revision"] as? String,
+              let bookID = currentLocalBook?.id, let gateway = nativeServerGateway else { return }
+        let cacheKey = bookID + ":" + String(page) + ":" + revision
+        func display(_ rows: [[String: Any]]) {
+            guard let size = document.characterPageSize(page), size.width > 0, size.height > 0 else { return }
+            let slices = rows.compactMap { row -> ReaderNativePDFDocument.TranslationSlice? in
+                guard let text = row["text"] as? String, !text.isEmpty,
+                      let x = row["x"] as? Double, let y = row["y"] as? Double,
+                      let width = row["w"] as? Double, let sizePt = row["fontSize"] as? Double,
+                      [x, y, width, sizePt].allSatisfy(\.isFinite) else { return nil }
+                return .init(origin: CGPoint(x: x / size.width, y: y / size.height), width: width / size.width,
+                             fontScale: sizePt / size.height, text: text)
+            }
+            document.setTranslationSlices(slices, page: page)
+        }
+        if let cached = nativePageTranslationCache[cacheKey] { display(cached); return }
+        let sentences = ReaderNativePageTranslation.sentences(chars)
+        guard !sentences.isEmpty else { display([]); return }
+        nativePageTranslationTasks[page] = Task { @MainActor [weak self, weak document] in
+            guard let self, let document else { return }
+            defer { if self.nativeOverlayGeneration == generation { self.nativePageTranslationTasks.removeValue(forKey: page) } }
+            do {
+                let response = try await gateway.fetchData(path: "/pdf/api/epub-translate-section", method: "POST",
+                    body: JSONSerialization.data(withJSONObject: ["texts": sentences.map { $0["text"] as? String ?? "" }]), surface: .pdf)
+                try Task.checkCancellation()
+                let translated = try ReaderNativePageTranslation.translated(sentences, status: response.status, data: response.data)
+                let slices = Array(ReaderNativePageTranslation.slices(translated).prefix(400))
+                let current = try await document.sourceCharacters(page: page)
+                guard !Task.isCancelled, self.nativePDFDocument === document, self.nativeOverlayGeneration == generation,
+                      current["revision"] as? String == revision else { return }
+                display(slices)
+                let bytes = try JSONSerialization.data(withJSONObject: slices).count
+                if bytes <= 1024 * 1024 {
+                    if self.nativePageTranslationCache.count >= 24 || self.nativePageTranslationCacheBytes + bytes > 2 * 1024 * 1024 {
+                        self.nativePageTranslationCache.removeAll(); self.nativePageTranslationCacheBytes = 0
+                    }
+                    self.nativePageTranslationCache[cacheKey] = slices; self.nativePageTranslationCacheBytes += bytes
+                }
+            } catch {
+                if !(error is CancellationError), !Task.isCancelled, self.nativePDFDocument === document, self.nativeOverlayGeneration == generation {
+                    self.nativeOverlayPages.remove(page)
+                    self.postClientLog("native-page-translation: " + error.localizedDescription)
                 }
             }
         }
@@ -1719,6 +1760,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeOverlayGeneration &+= 1
         nativeVocabularyEnrichmentTasks.values.forEach { $0.cancel() }
         nativeVocabularyEnrichmentTasks = [:]
+        nativePageTranslationTasks.values.forEach { $0.cancel() }
+        nativePageTranslationTasks = [:]
         nativeOverlayPages = []
         nativeOverlayDocument = nil
         nativePDFNavigationBridge?.invalidate()
@@ -2700,9 +2743,18 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             nativeBookOCRUpdateCancellable = NativeBookOCRManager.shared
                 .$lastUpdate
                 .compactMap { $0 }
-                .sink { [weak nativeBookOCRBridge, weak webView] update in
+                .sink { [weak self, weak nativeBookOCRBridge, weak webView] update in
                     guard let nativeBookOCRBridge, let webView else { return }
                     Task { @MainActor in
+                        if let self, update.bookID == self.currentLocalBook?.id {
+                            self.nativeOverlayGeneration &+= 1
+                            self.nativeVocabularyEnrichmentTasks.values.forEach { $0.cancel() }
+                            self.nativeVocabularyEnrichmentTasks = [:]
+                            self.nativePageTranslationTasks.values.forEach { $0.cancel() }
+                            self.nativePageTranslationTasks = [:]
+                            self.nativeOverlayPages = []
+                            self.scheduleNativeInkSurfacePublish()
+                        }
                         await nativeBookOCRBridge.sendUpdate(
                             update,
                             to: webView

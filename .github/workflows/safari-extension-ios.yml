@@ -345,6 +345,12 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeVocabularyState.swift ios/BWReader/App/ReaderNativeVocabularyOverlay.swift ios/BWReader/App/ReaderNativePageOverlayStore.swift ios/BWReader/Tests/NativeVocabularyOverlay/main.swift -o "$RUNNER_TEMP/native-vocabulary-overlay-test"
           "$RUNNER_TEMP/native-vocabulary-overlay-test" "$RUNNER_TEMP/native-vocabulary-overlay-fixtures.json"
 
+      - name: Verify native page translation parity
+        run: |
+          node ios/BWReader/Tests/NativePageTranslation/fixtures.cjs "$RUNNER_TEMP/native-page-translation-fixtures.json"
+          xcrun swiftc ios/BWReader/App/ReaderNativeLookupRequest.swift ios/BWReader/App/ReaderNativePageTranslation.swift ios/BWReader/Tests/NativePageTranslation/main.swift -o "$RUNNER_TEMP/native-page-translation-test"
+          "$RUNNER_TEMP/native-page-translation-test" "$RUNNER_TEMP/native-page-translation-fixtures.json"
+
       - name: Verify native Japanese dictionary parity
         run: |
           node ios/BWReader/Tests/NativeJapaneseDictionary/fixtures.mjs "$RUNNER_TEMP/native-dictionary-fixtures.json"
