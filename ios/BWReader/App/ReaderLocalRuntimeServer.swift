@@ -1492,7 +1492,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 object: ["ok": false, "error": "PDF outline unavailable"]
             )
         }
-        let entries = Self.nativeTOCEntries(in: document)
+        let entries = ReaderNativePDFOutline.entries(in: document)
         var payload: [String: Any] = [
             "ok": true,
             "exists": !entries.isEmpty,
@@ -1506,35 +1506,6 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         return jsonResponse(request, status: .ok, object: payload)
     }
 
-    static func nativeTOCEntries(
-        in document: PDFDocument
-    ) -> [[String: Any]] {
-        guard let root = document.outlineRoot else { return [] }
-        var entries: [[String: Any]] = []
-
-        func appendChildren(of parent: PDFOutline, level: Int) {
-            for index in 0..<parent.numberOfChildren {
-                guard let outline = parent.child(at: index) else { continue }
-                let title = (outline.label ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let destination = outline.destination
-                if !title.isEmpty, let page = destination?.page {
-                    let pageIndex = document.index(for: page)
-                    if (0..<document.pageCount).contains(pageIndex) {
-                        entries.append([
-                            "title": title,
-                            "page": pageIndex + 1,
-                            "level": max(1, level),
-                        ])
-                    }
-                }
-                appendChildren(of: outline, level: level + 1)
-            }
-        }
-
-        appendChildren(of: root, level: 1)
-        return entries
-    }
 
     private func serveStatic(
         _ request: HTTPRequest,

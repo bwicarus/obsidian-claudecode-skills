@@ -39,7 +39,7 @@ final class ReaderNativePDFIndex {
         case "tocRead":
             guard let pdf = document.view.document else { throw NativeBookOCRError.pageUnavailable }
             toc.removeAll()
-            let rows = ReaderLocalRuntimeServer.nativeTOCEntries(in:pdf).compactMap { row -> [String:Any]? in
+            let rows = ReaderNativePDFOutline.entries(in:pdf).compactMap { row -> [String:Any]? in
                 guard let page = row["page"] as? Int else { return nil }
                 let id = UUID().uuidString
                 toc[id] = Entry(page:page,query:"")
@@ -80,5 +80,38 @@ final class ReaderNativePDFIndex {
             return ["ok":true]
         default: throw ReaderNativeTurnStore.Failure(message:"未知阅读索引操作")
         }
+    }
+}
+
+/// Shared outline data for native navigation and the retained local HTTP adapter.
+enum ReaderNativePDFOutline {
+    static func entries(
+        in document: PDFDocument
+    ) -> [[String: Any]] {
+        guard let root = document.outlineRoot else { return [] }
+        var entries: [[String: Any]] = []
+
+        func appendChildren(of parent: PDFOutline, level: Int) {
+            for index in 0..<parent.numberOfChildren {
+                guard let outline = parent.child(at: index) else { continue }
+                let title = (outline.label ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let destination = outline.destination
+                if !title.isEmpty, let page = destination?.page {
+                    let pageIndex = document.index(for: page)
+                    if (0..<document.pageCount).contains(pageIndex) {
+                        entries.append([
+                            "title": title,
+                            "page": pageIndex + 1,
+                            "level": max(1, level),
+                        ])
+                    }
+                }
+                appendChildren(of: outline, level: level + 1)
+            }
+        }
+
+        appendChildren(of: root, level: 1)
+        return entries
     }
 }
