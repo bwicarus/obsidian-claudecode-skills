@@ -883,9 +883,10 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             let identity = id + ":" + String(access.record.byteCount) + ":" + String(access.record.modifiedAt?.timeIntervalSince1970 ?? 0)
             if catalog {
                 let entries = try await epubArchive.list(url: access.url, identity: identity)
+                let publication = try await epubArchive.describe(url: access.url, identity: identity)
                 guard await state.access(for: id) === access else { throw CancellationError() }
                 try access.validateCurrentFile(maximumEPUBBytes: ReaderLocalRuntimeServer.maximumEPUBBytes)
-                return jsonResponse(request, status: .ok, object: ["ok": true, "entries": entries, "identity": identity])
+                return jsonResponse(request, status: .ok, object: ["ok": true, "entries": entries, "identity": identity, "publication": publication])
             }
             guard let path = request.query["path"], let limit = request.query["limit"], let maximum = Int(limit) else {
                 return response(status: .badRequest, text: "invalid EPUB entry")

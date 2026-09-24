@@ -4,4 +4,4 @@ let package = Package(name: "NativeEPUBArchiveChecks", platforms: [.macOS(.v13)]
     .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20")
 ], targets: [.executableTarget(name: "NativeEPUBArchiveChecks", dependencies: [
     .product(name: "ZIPFoundation", package: "ZIPFoundation")
-], path: ".", exclude: ["Package.swift"], sources: ["main.swift", "ReaderNativeEPUBArchive.swift"])])
+], path: ".", exclude: ["Package.swift"], sources: ["main.swift", "ReaderNativeEPUBArchive.swift", "ReaderNativeEPUBPublication.swift"])])

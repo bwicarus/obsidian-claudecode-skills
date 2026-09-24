@@ -9677,7 +9677,14 @@
               _data: { uncompressedSize: item.size, compressedSize: item.compressedSize } };
             files[item.name] = entry; byPath[item.path] = entry;
           });
-          return { files: files, file: function (path) {
+          var publication = value.publication;
+          if (!publication || typeof publication.opfPath !== 'string' || typeof publication.title !== 'string' ||
+              !Array.isArray(publication.manifestItems) || !Array.isArray(publication.spine) || !publication.spine.length ||
+              !Array.isArray(publication.toc)) throw new RuntimeError('EPUB 原生章节目录无效', 'BW_LOCAL_EPUB_SPINE');
+          var manifest = Object.create(null);
+          publication.manifestItems.forEach(function (item) { manifest[item.id] = item; });
+          return { files: files, publication: { manifest: manifest, spine: publication.spine, toc: publication.toc,
+            opfPath: publication.opfPath, title: publication.title }, file: function (path) {
             var entry = byPath[path]; return entry && !entry.dir ? entry : null;
           } };
         });
@@ -9701,6 +9708,11 @@
     if (epubPromise) return epubPromise;
     epubPromise = loadEPUBArchive()
       .then(function (zip) {
+        if (zip.publication) {
+          var info = zip.publication;
+          return { zip: zip, opfPath: info.opfPath, manifest: info.manifest, spine: info.spine, toc: info.toc,
+            title: info.title || String(root.EPUB_CFG && root.EPUB_CFG.fileName || '').slice(0, 500), sha: configuredEPUBSHA() };
+        }
         var names = Object.keys(zip.files);
         if (names.length > 10000) throw new RuntimeError('EPUB 文件项过多', 'BW_LOCAL_EPUB_LIMIT');
         var total = 0;

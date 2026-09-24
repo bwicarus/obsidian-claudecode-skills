@@ -1225,13 +1225,17 @@ test("App EPUB reads a native catalog and selected entry without copying or infl
   const context = {
     Promise, Error, Uint8Array, encodeURIComponent,
     root: { __BW_NATIVE_EPUB_ARCHIVE__: true, JSZip: { loadAsync() { throw Error("web inflation"); } } },
-    basePath: "/r/capability", bookId: "opaque-id",
+    basePath: "/r/capability", bookId: "opaque-id", epubPromise: null,
+    configuredEPUBSHA: () => "same-book-sha", DOMParser: class { constructor() { throw Error("web XML parsing"); } },
     RuntimeError: class extends Error {},
     originalFetch: async (raw) => {
       const url = new URL(raw, "http://localhost"); requests.push(url);
       if (failed) return { ok: false };
       if (url.pathname.endsWith("/catalog")) return { ok: true, json: async () => ({
-        ok: true, identity: "book-revision", entries: [
+        ok: true, identity: "book-revision", publication: {
+          opfPath: 'OPS/package.opf', title: 'test', toc: [{ label: '章', idx: 0 }],
+          manifestItems: [{id: 'chapter', path: 'OPS/章.xhtml'}], spine: [{id: 'chapter', path: 'OPS/章.xhtml'}],
+        }, entries: [
           { name: "OPS/", path: "OPS", directory: true, size: 0, compressedSize: 0 },
           { name: "OPS/章.xhtml", path: "OPS/章.xhtml", directory: false, size: bytes.length, compressedSize: bytes.length },
         ],
@@ -1246,14 +1250,20 @@ test("App EPUB reads a native catalog and selected entry without copying or infl
     SOURCE.slice(SOURCE.indexOf("function canonicalZipPath"), SOURCE.indexOf("function xmlDocument")),
     SOURCE.slice(SOURCE.indexOf("function boundedInflate"), SOURCE.indexOf("function zipText")),
     SOURCE.slice(SOURCE.indexOf("function loadEPUBArchive"), SOURCE.indexOf("function loadEPUB()")),
-    "this.load=loadEPUBArchive;this.inflate=boundedInflate;",
+    SOURCE.slice(SOURCE.indexOf("function loadEPUB()"), SOURCE.indexOf("function manifestItemForPath")),
+    "this.load=loadEPUBArchive;this.inflate=boundedInflate;this.publication=loadEPUB;",
   ].join("\n"), context);
   const archive = await context.load();
   assert.equal(requests.length, 1, "catalog does not read member content");
   assert.equal(archive.file("OPS"), null);
+  assert.equal(archive.publication.spine[0].id, "chapter");
   const entry = archive.file("OPS/章.xhtml");
   assert.deepEqual([...await context.inflate(entry, 8 * 1024 * 1024, "LIMIT", "chapter")], [...bytes]);
   assert.equal(requests.length, 2);
+  const info = await context.publication();
+  assert.equal(info.sha, "same-book-sha");
+  assert.equal(info.manifest.chapter.path, "OPS/章.xhtml");
+  assert.equal(requests.length, 3, "native publication metadata needs no web XML/TOC requests");
   await assert.rejects(context.inflate(entry, 1, "LIMIT", "chapter"), /大小不符/);
   failed = true;
   await assert.rejects(context.load(), /原生目录/);

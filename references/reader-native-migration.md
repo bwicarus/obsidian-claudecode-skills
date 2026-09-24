@@ -422,7 +422,14 @@ retain archive identity, size/CRC/path checks and the current security-scoped bo
 The compatibility chapter sanitizer, spine/TOC parser and display remain pending migration;
 this stage does not claim a native EPUB reading surface. Browser archive behavior is retained.
 Local verification: 163 focused Node checks and seven packaging checks passed. Native ZIP
-fixtures and the complete App still require the next Apple build.
+fixtures and full App compilation passed in Apple run `35954743708` (`4fb06d1f`).
+
+Follow-up: package manifest, spine order and EPUB 2/3 table-of-contents parsing now run in
+the native archive actor using Foundation XMLParser. Chapter indices, original UTF-8 paths,
+title/TOC whitespace, duplicate-link filtering and filename fallback remain compatible.
+The web adapter consumes the resulting metadata without parsing container/OPF/nav documents.
+Chapter HTML sanitization/display and existing anchors are unchanged pending the user's EPUB
+layout choice. Native publication fixtures and full App compilation require the follow-up build.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

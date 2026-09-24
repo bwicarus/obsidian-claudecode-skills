@@ -14,6 +14,7 @@ actor ReaderNativeEPUBArchive {
     private var archive: Archive?
     private var entries: [Data: Entry] = [:]
     private var catalog: [[String: Any]] = []
+    private var publication: [String: Any]?
 
     static func canonicalPath(_ raw: String) -> String? {
         let path = raw.replacingOccurrences(of: "\\", with: "/")
@@ -72,7 +73,7 @@ actor ReaderNativeEPUBArchive {
 
     private func open(_ url: URL, identity nextIdentity: String) throws {
         if archive != nil, source == url, identity == nextIdentity { return }
-        archive = nil; entries = [:]; catalog = []; source = nil; identity = ""
+        archive = nil; entries = [:]; catalog = []; publication = nil; source = nil; identity = ""
         let count = try Self.checkEnvelope(url)
         let candidate = try Archive(url: url, accessMode: .read)
         var records: [[String: Any]] = [], found: [Data: Entry] = [:], total: UInt64 = 0
@@ -101,6 +102,17 @@ actor ReaderNativeEPUBArchive {
 
     func list(url: URL, identity: String) throws -> [[String: Any]] {
         try open(url, identity: identity); return catalog
+    }
+
+    func describe(url: URL, identity: String) throws -> [String: Any] {
+        try open(url, identity: identity)
+        if let publication { return publication }
+        let available = Set(entries.filter { $0.value.type == .file }.keys)
+        let result = try ReaderNativeEPUBPublication.load(available: available) { path in
+            try read(url: url, identity: identity, path: path, maximumBytes: 8 * 1024 * 1024)
+        }
+        publication = result
+        return result
     }
 
     func read(url: URL, identity: String, path: String, maximumBytes: Int) throws -> Data {
