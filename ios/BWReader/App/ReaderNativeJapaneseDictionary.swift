@@ -167,7 +167,9 @@ final class ReaderNativeJapaneseDictionary {
         if !head.isEmpty, text.hasPrefix(head + "【"), let end = text.firstIndex(of: "】") {
             text = replace(String(text[text.index(after: end)...]), #"^[\s：:、，。]+"#, "")
         }
-        if matches(text, #"(?i)(?:\balt-of\b|\balternative\s+(?:form|spelling|kanji)\b|\bredirected\s+from\b|\bromanization\b|\bnon-lemma\b|\b(?:stem|continuative|imperfective|attributive)\b)"#) { return "" }
+        // JavaScript's word boundary is ASCII here; ICU's Unicode boundary
+        // would miss metadata glued to Japanese (来るalternative kanji来るstem).
+        if matches(text, #"(?i)(?<![a-z0-9_])(?:alt-of|alternative\s+(?:form|spelling|kanji)|redirected\s+from|romanization|non-lemma|stem|continuative|imperfective|attributive)(?![a-z0-9_])"#) { return "" }
         text = normalize(replace(text, #"(?i)^onoma\s*"#, ""))
         return matches(text, "[㐀-鿿]") ? text : ""
     }

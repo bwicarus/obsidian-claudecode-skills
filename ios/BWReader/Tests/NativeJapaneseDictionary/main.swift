@@ -8,12 +8,20 @@ let dictionary = ReaderNativeJapaneseDictionary { path in
     reads[path, default: 0] += 1
     return try Data(contentsOf: root.appendingPathComponent(path))
 }
+var failures = 0
 func equal(_ actual: Any, _ expected: Any, _ label: String) throws {
     let a = try JSONSerialization.data(withJSONObject: actual, options: [.sortedKeys, .fragmentsAllowed])
     let b = try JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys, .fragmentsAllowed])
     guard a == b else {
-        print("Mismatch \(label)\nactual: \(String(decoding:a,as:UTF8.self))\nexpected: \(String(decoding:b,as:UTF8.self))")
-        exit(1)
+        failures += 1
+        if let left = actual as? [String: Any], let right = expected as? [String: Any] {
+            let keys = try Set(left.keys).union(right.keys).sorted().filter { key in
+                try JSONSerialization.data(withJSONObject: left[key] ?? NSNull(), options: [.sortedKeys, .fragmentsAllowed]) !=
+                    JSONSerialization.data(withJSONObject: right[key] ?? NSNull(), options: [.sortedKeys, .fragmentsAllowed])
+            }
+            print("Mismatch \(label): fields \(keys.joined(separator: ", "))")
+        } else { print("Mismatch \(label): \(String(decoding:a,as:UTF8.self).prefix(400)) != \(String(decoding:b,as:UTF8.self).prefix(400))") }
+        return
     }
 }
 for test in fixture["candidates"] as! [[String: Any]] {
@@ -36,4 +44,5 @@ _ = try dictionary.lookup("日本語")
 precondition(reads["manifest.json"] == 2, "cache invalidation did not reload installed files")
 let invalid = ReaderNativeJapaneseDictionary { _ in Data(#"{"contract":"wrong"}"#.utf8) }
 do { _ = try invalid.lookup("日本"); preconditionFailure("invalid manifest accepted") } catch {}
+guard failures == 0 else { exit(1) }
 print("Native Japanese dictionary: real data, forms, variants, rich fields and cache ownership passed")
