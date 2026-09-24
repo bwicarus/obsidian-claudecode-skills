@@ -861,13 +861,15 @@
 
   function _localReviewCard(record, card, state, cardIndex, due) {
     var source = record.source || {};
+    var nativeFaces = _nativeReviewUI();
+    function face(reveal) {
+      if (card.type !== 'cloze') return nativeFaces ? String(card[reveal ? 'back' : 'front'] || '') : _localMarkdownFace(card[reveal ? 'back' : 'front'] || '');
+      var text = String(card.cloze || card.text || '');
+      return nativeFaces ? text.replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, reveal ? '<b>$1</b>' : '<b>[…]</b>') : _localClozeFace(text, reveal);
+    }
     var mapped = Object.assign({}, card, {
-      question: card.type === 'cloze'
-        ? _localClozeFace(card.cloze || card.text || '', false)
-        : _localMarkdownFace(card.front || ''),
-      answer: card.type === 'cloze'
-        ? _localClozeFace(card.cloze || card.text || '', true)
-        : _localMarkdownFace(card.back || ''),
+      question: face(false),
+      answer: face(true),
       deck: String(card.deck || ''),
       reason: String(card.reason || ''),
       local_id: record.id + ':' + cardIndex,
@@ -1220,7 +1222,9 @@
 
   function _cardIdentity(card) {
     card = card || {};
-    var legacySource = _legacyMaterialSource(card);
+    // Source navigation still validates legacy links on explicit user action;
+    // state publication must not repeatedly parse hidden HTML for provenance.
+    var legacySource = _nativeReviewUI() ? null : _legacyMaterialSource(card);
     return {
       card_id: card.id == null ? '' : String(card.id),
       note_id: card.note_id == null ? '' : String(card.note_id),
@@ -1238,10 +1242,13 @@
   function _cardForAssistant(card) {
     card = card || {};
     var identity = _cardIdentity(card);
-    var projected = _projectReviewFaces(
-      card.question || card.front || '',
-      card.answer || card.back || ''
-    );
+    var nativeFaces = _nativeReviewUI();
+    var projected = nativeFaces ? { front: card.question || card.front || '', back: card.answer || card.back || '', revealMode: 'append' }
+      : _projectReviewFaces(card.question || card.front || '', card.answer || card.back || '');
+    if (nativeFaces) {
+      identity.native_review_faces = true;
+      identity.face_format = card._localReview ? 'markdown' : 'html';
+    }
     identity.front = projected.front;
     identity.back = projected.back;
     identity.question = projected.front;

@@ -2451,6 +2451,7 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
       return { ok: true };
     }
   });
+  fixture.document.createElement = () => { assert.fail('native review must not parse or render web card faces'); };
   fixture.RC.review.setMode(true);
   await fixture.RC.review.load();
   const state = fixture.RC.review.presentationState();
@@ -2487,4 +2488,29 @@ test('failed native queue is visible and never starts legacy acquisition', async
   assert.match(state.notice, /原生数据库暂不可用/);
   assert.equal(fixture.pane, null);
   assert.deepEqual(fixture.calls, []);
+});
+
+test('native local review publishes semantic Markdown and cloze data without calling the web parser', async () => {
+  const fixture = harness({ context: { file: 'localbook:book', page: 4 },
+    markdownImpl() { assert.fail('Swift owns native Markdown'); },
+    fetchImpl() { assert.fail('native local cards do not need a network'); },
+    async nativeQueue({ request }) {
+      if (request.operation !== 'load') return { ok: true, value: true };
+      return { ok: true, value: { request: request.request, kind: 'local', dueTotal: 0, entries: [{
+        record: { id: 'card_abcd', entityRev: 4, stateRev: 6, source: { kind: 'reader', bookId: 'book' } },
+        card: { type: 'cloze', cloze: '**語**は{{c1::言葉::ヒント}}。', deck: '日本語' },
+        state: { review: { status: 'new' }, projections: {} }, cardIndex: 2, due: false
+      }] } };
+    }
+  });
+  fixture.document.createElement = () => { assert.fail('no hidden nodes for native local cards'); };
+  fixture.RC.review.setMode(true); await fixture.RC.review.load();
+  const state = fixture.RC.review.presentationState();
+  assert.equal(state.current.front, '**語**は<b>[…]</b>。');
+  assert.equal(state.current.back, '**語**は<b>言葉</b>。');
+  assert.equal(state.current.face_format, 'markdown');
+  assert.equal(state.current.native_review_faces, true);
+  assert.equal(state.current.entity_id, 'card_abcd');
+  assert.equal(state.current.entity_index, 2);
+  assert.equal(fixture.RC.review.currentCard()._localReview.entityRev, 4);
 });

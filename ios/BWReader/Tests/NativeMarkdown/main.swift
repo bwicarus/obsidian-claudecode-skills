@@ -39,6 +39,41 @@ await MainActor.run {
 }
 print("Native Markdown: GFM, math boundaries, native image routes and stale-token revocation passed")
 try await MainActor.run {
+    typealias Review = ReaderNativeReviewFaces
+    let explicit = try Review.project(front: "<p>Question</p>", back: "<p>Question</p><hr id='answer'><p>Answer</p>", format: "html")
+    precondition(!explicit.back.contains("Question") && explicit.back.contains("Answer") && explicit.mode == "append")
+    let repeated = try Review.project(front: "<p>Question</p>", back: "<p>Question</p><hr><p>Answer</p>", format: "html")
+    precondition(!repeated.back.contains("Question") && repeated.mode == "append")
+    let unrelated = try Review.project(front: "<p>Question</p>", back: "<p>Different</p><hr><p>Answer</p>", format: "html")
+    precondition(unrelated.back.contains("Different") && unrelated.back.contains("<hr"))
+    let nested = try Review.project(front: "<p>Question</p>", back: "<div><hr id='answer'><p>Nested original</p></div>", format: "html")
+    precondition(nested.back.contains("Nested original"))
+    let cloze = try Review.project(front: "<span class='cloze'>[…]</span>", back: "<span class='cloze'>答案</span>", format: "html")
+    precondition(cloze.mode == "replace" && cloze.back.contains("答案"))
+    let japanese = try Review.project(front: "<div class='jp-sent'>日本語</div>", back: "<div class='jp-sent'><ruby>日本語<rt>にほんご</rt></ruby></div>", format: "html")
+    precondition(japanese.mode == "replace" && japanese.back.contains("<ruby>"))
+    let ruby = try Review.project(front: "<p><ruby>漢字<rt>かんじ</rt></ruby></p>", back: "<p><ruby>漢字<rt>別読み</rt></ruby></p><hr><p>説明</p>", format: "html")
+    precondition(!ruby.back.contains("別読み") && ruby.back.contains("説明"))
+    let metadata = try Review.project(front: "題", back: "<p>答案</p><div>来源： 本书 卡片编号： abcdef</div><!--@src:book.pdf-->", format: "html")
+    precondition(metadata.back.contains("答案") && !metadata.back.contains("来源"))
+    let natural = try Review.project(front: "題", back: "<p>来源：河流源头，这是学习内容。</p>", format: "html")
+    precondition(natural.back.contains("河流源头"))
+    let material = try Review.project(front: "題", back: "<p>答案</p><div class='url'><a href='/pdf/view?file=books%2Fa.pdf&page=2'>来源</a></div><div class='more'>保留补充</div>", format: "html")
+    precondition(!material.back.contains("books") && material.back.contains("保留补充") && material.back.contains("<details"))
+    let unsafe = try Review.project(front: "<script>bad()</script>题", back: "<div class='url'><a href='/pdf/view?file=%252e%252e%252fsecret&page=2'>正文链接</a></div><img src='https://example.com/x' onerror='bad()'>", format: "html")
+    precondition(!unsafe.front.contains("<script") && !unsafe.back.contains("onerror") && unsafe.back.contains("正文链接"))
+    let markdown = try Review.project(front: "**題**\n\n|A|B|\n|-|-|\n|1|2|", back: "答： $x^2$\n\n![図](https://example.com/x.png)", format: "markdown")
+    precondition(markdown.front.contains("<strong>") && markdown.front.contains("<table>"))
+    precondition(markdown.back.contains("data-reader-math") && markdown.back.contains("example.com/x.png"))
+    let original: [String: Any] = ["id": "anki_card_123", "front": "題", "back": "答", "native_review_faces": true, "face_format": "markdown"]
+    let state = Review.state(["current": original, "previous": original, "next": original, "showingAnswer": false, "ratingSaving": true])
+    precondition((state["current"] as! [String: Any])["id"] as? String == "anki_card_123" && state["ratingSaving"] as? Bool == true)
+    precondition(original["front"] as? String == "題" && state["showingAnswer"] as? Bool == false)
+    let cached = try Review.project(front: "題", back: "答", format: "markdown")
+    precondition(cached.front == (state["current"] as! [String: Any])["front"] as? String)
+}
+print("Native review faces: dividers, cloze, ruby, proven provenance, original content and GFM passed")
+try await MainActor.run {
     let exported = try ReaderNativeAnkiProjection.html("**題**\n\n<ruby>漢字<rt>かんじ</rt></ruby>\n\n\\(x^2\\)\n\n![図](https://example.com/image.png)\n\n<img src='existing.png' onerror='bad()'><script>bad()</script>")
     for part in ["<strong>", "<ruby>", "\\(x^2\\)", "https://example.com/image.png", "existing.png"] { precondition(exported.contains(part), "Anki projection lost \(part): \(exported)") }
     precondition(!exported.contains("onerror") && !exported.contains("<script") && !exported.contains("data-reader-math"))

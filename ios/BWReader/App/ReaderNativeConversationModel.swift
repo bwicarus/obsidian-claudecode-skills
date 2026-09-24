@@ -389,7 +389,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         scope = nextScope
         title = (payload["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "阅读助手"
         conversationMode = nextMode
-        review = payload["review"] as? [String: Any] ?? [:]
+        review = ReaderNativeReviewFaces.state(payload["review"] as? [String: Any] ?? [:])
         ready = payload["ready"] as? Bool ?? false
         busy = payload["busy"] as? Bool ?? false
         legacyVisible = payload["legacyVisible"] as? Bool ?? false

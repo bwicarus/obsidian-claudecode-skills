@@ -373,6 +373,14 @@ JavaScript, so this is not the complete native review migration. Local Node chec
 new Apple queue tests cover scope separation, local authority, offline recovery and cancellation.
 No new installable release has been uploaded from this stage.
 
+`6e05fdc2` passed Apple workflow `35949941653`, including native queue cancellation/cache checks
+and the full App build. The following review-face change sends original Markdown/HTML as data
+to Swift and applies divider/replacement/provenance rules with SwiftSoup and the existing native
+GFM parser. A bounded cache reuses unchanged faces; original card content and scheduling IDs
+are never rewritten. Native state publication and flip/undo no longer create even detached web
+face nodes. Source navigation and the review action reducer remain compatibility operations;
+the native parser and full App build for this follow-up still require Apple verification.
+
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 
 The App now sends preference intent (including first legacy-mirror migration) to Swift. `ReaderNativePreferences` owns envelope construction, tombstones, causal parents for global settings, expected-revision checks, durable replay receipts and journal writes in one SQLite transaction. The existing 55-key DataRegistry allowlist generates the packaged native catalog; no second settings namespace or database is introduced. Browser/extension PreferenceStore behavior is retained. Native failures leave dirty compatibility intent and never invoke the old writer as a fallback.

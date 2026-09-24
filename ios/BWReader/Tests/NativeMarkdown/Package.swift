@@ -6,4 +6,4 @@ let package = Package(name: "NativeMarkdownChecks", platforms: [.macOS(.v13)], d
 ], targets: [.executableTarget(name: "NativeMarkdownChecks", dependencies: [
     .product(name: "cmark-gfm", package: "swift-cmark"), .product(name: "cmark-gfm-extensions", package: "swift-cmark"),
     .product(name: "SwiftSoup", package: "SwiftSoup")
-], path: ".", exclude: ["Package.swift"], sources: ["main.swift", "ReaderNativeMarkdown.swift", "ReaderNativeMathSyntax.swift", "ReaderNativeInlineMedia.swift", "ReaderNativeMediaRoute.swift", "ReaderNativeAnkiProjection.swift"])])
+], path: ".", exclude: ["Package.swift"], sources: ["main.swift", "ReaderNativeMarkdown.swift", "ReaderNativeMathSyntax.swift", "ReaderNativeInlineMedia.swift", "ReaderNativeMediaRoute.swift", "ReaderNativeAnkiProjection.swift", "ReaderNativeReviewFaces.swift"])])

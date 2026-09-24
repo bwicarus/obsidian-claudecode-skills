@@ -166,11 +166,11 @@ struct ReaderNativeReviewView: View {
                     // 把它套到邻卡上会提前泄题。
                     let showsAnswer = live && state["showingAnswer"] as? Bool == true
                     if !showsAnswer || card["reveal_mode"] as? String != "replace" {
-                        ReaderNativeRichDocument(content: card["front"] as? String ?? "", format: "html", imageModel: model)
+                        ReaderNativeRichDocument(content: card["front"] as? String ?? "", format: card["face_format"] as? String ?? "html", imageModel: model)
                     }
                     if showsAnswer {
                         if card["reveal_mode"] as? String != "replace" { Divider() }
-                        ReaderNativeRichDocument(content: card["back"] as? String ?? "", format: "html", imageModel: model)
+                        ReaderNativeRichDocument(content: card["back"] as? String ?? "", format: card["face_format"] as? String ?? "html", imageModel: model)
                     }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
