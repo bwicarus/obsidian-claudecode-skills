@@ -7481,6 +7481,8 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                         markCloudSyncDirty()
                     }
                     replyHandler(receipt, nil)
+                } catch let error as ReaderNativeAssistantEdits.Failure {
+                    replyHandler(["ok":false,"code":"BW_NATIVE_PDF_ASSISTANT_ACTION","status":error.conflict ? 409 : 400,"error":error.localizedDescription],nil)
                 } catch ReaderNativeDataStore.StoreError.revisionConflict {
                     replyHandler(["ok": false, "code": "BW_DATA_CONFLICT"], nil)
                 } catch ReaderNativeNoteRules.NoteError.missing {

@@ -46,13 +46,46 @@ struct ReaderNativeBookStore {
                       number.doubleValue >= 0, number.doubleValue <= 9_007_199_254_740_991 else { throw MutationError.invalid("预期修订号") }
                 expected = number.int64Value
             } else {
-                guard ["reading-position", "pdf-position", "note-api", "note-create", "note-operation", "highlight-api", "highlight-edit", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
+                guard ["reading-position", "pdf-position", "note-api", "note-create", "note-operation", "highlight-api", "highlight-edit", "assistant-actions", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
                 expected = nil
             }
             let revision: Int64
             var result: [String: Any]? = nil
             var bindingChanges: [[String: Any]] = []
             switch operation {
+            case "assistant-actions":
+                guard let input = value as? [String:Any] else { throw MutationError.invalid("助手操作") }
+                let high = try projection.highlights("document-highlights", bookID: bookID)
+                let notesState = try projection.state("document-notes-legacy", bookID: bookID)
+                let undoState = try projection.state("pdf-assistant-undo", bookID: bookID)
+                let receiptState = try projection.state("pdf-assistant-ops", bookID: bookID)
+                func list(_ value: Any?) throws -> [[String:Any]] {
+                    guard value == nil || value is [[String:Any]] else { throw MutationError.invalid("助手操作记录损坏") }
+                    return value as? [[String:Any]] ?? []
+                }
+                let oldNotes = try list(notesState.payload)
+                let changes = try ReaderNativeAssistantEdits.apply(input, file: "localbook:" + bookID,
+                    highlights: high.items, highlightRevision: high.revision, notes: oldNotes, noteRevision: notesState.revision,
+                    undo: list(undoState.payload), receipts: list(receiptState.payload), now: stamp)
+                var highRevision = high.revision, notesRevision = notesState.revision
+                if changes.touchedHighlights {
+                    highRevision = try writeHighlights("document-highlights", items: changes.highlights, expected: high.revision, mutation: mutation + ":highlights", at: stamp)
+                }
+                if changes.touchedNotes {
+                    notesRevision = try writeNotes(changes.notes, expected: notesState.revision, mutation: mutation + ":notes", at: stamp)
+                    let before = Dictionary(Self.wordBindings(oldNotes).map { ($0["cid"] as! String, $0["key"] as! String) }, uniquingKeysWith: { _, last in last })
+                    let after = Dictionary(Self.wordBindings(changes.notes).map { ($0["cid"] as! String, $0["key"] as! String) }, uniquingKeysWith: { _, last in last })
+                    bindingChanges = Set(before.keys).union(after.keys).sorted().compactMap { id in
+                        before[id] == after[id] ? nil : ["cid":id,"before":before[id] ?? "","after":after[id] ?? ""]
+                    }
+                }
+                if changes.touchedUndo { try writeState("pdf-assistant-undo", value: changes.undo, expected: undoState.revision, mutation: mutation + ":undo", at: stamp) }
+                if changes.touchedReceipts { try writeState("pdf-assistant-ops", value: changes.receipts, expected: receiptState.revision, mutation: mutation + ":ops", at: stamp) }
+                let expectedState = input["expectedState"] as? [String:Any] ?? [:]
+                var revisions = expectedState["revisions"] as? [String:Any] ?? expectedState
+                revisions["highlights"] = highRevision; revisions["notes"] = notesRevision
+                revision = max(highRevision, notesRevision)
+                result = ["actions":changes.actions,"revisions":revisions,"replayed":changes.replayed,"receipt":changes.receipt.map { $0 as Any } ?? NSNull()]
             case "pdf-position":
                 guard let input = value as? [String:Any] else { throw MutationError.invalid("PDF 位置") }
                 let viewport = try ReaderNativeReadingPosition.validated(input)

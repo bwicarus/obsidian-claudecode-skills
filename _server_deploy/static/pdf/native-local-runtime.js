@@ -12210,6 +12210,19 @@
     if (!hasLocal) {
       return Promise.resolve({ actions: clone(actions), revisions: clone(expectedRevisions) });
     }
+    if (nativeBookWrites) {
+      return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
+        assertNativePDFWriterLease(writerLease);
+        return nativeBookMutation('assistant-actions', { actions: actions, expectedState: expectedState })
+          .then(function (receipt) {
+            assertNativePDFWriterLease(writerLease);
+            if (!receipt.result || !Array.isArray(receipt.result.actions) || !receipt.result.revisions) {
+              throw new RuntimeError('原生助手写入未返回完整回执', 'BW_NATIVE_BOOK_WRITE');
+            }
+            return receipt.result;
+          });
+      });
+    }
     var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
     return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
       assertNativePDFWriterLease(writerLease);

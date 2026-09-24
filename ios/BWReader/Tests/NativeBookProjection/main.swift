@@ -1,8 +1,63 @@
 import Foundation
 
+func testNativeAssistantEdits() throws {
+    typealias Object = [String:Any]
+    let db = try ReaderNativeDataStore(path: ":memory:"), book = "assistant-edits"
+    let writer = ReaderNativeBookStore(store: db, bookID: book, deviceID: "test", now: { 500_000 })
+    let projection = ReaderNativeBookProjection(store: db)
+    func op(_ c: String) -> String { "npdf_" + String(repeating: c, count: 24) }
+    func action(_ c: String, _ type: String, _ operation: String, _ items: [Object]) -> Object {
+        ["fn":"_assistEdit","args":[["type":type,"op":operation,"native_operation_id":op(c),"file":"remote-file","items":items]]]
+    }
+    func commit(_ mutation: String, _ actions: [Object], high: Int = 0, notes: Int = 0) throws -> Object {
+        let receipt = try writer.perform(["bookID":book,"mutationId":mutation,"operation":"assistant-actions",
+            "value":["actions":actions,"expectedState":["revisions":["highlights":high,"notes":notes,"ink":9]]]])
+        return receipt["result"] as! Object
+    }
+    func notes() throws -> [Object] { try projection.state("document-notes-legacy",bookID:book).payload as? [Object] ?? [] }
+    let highlight: Object = ["id":"h_original","pdf_page":44,"rects":[[1,2,10,20]],"text":"接種","color":"#ff0","time":123]
+    let note: Object = ["id":"n_original","anchor":["kind":"pdf","page":44],"text":"original","color":"#fff","created":123,"updated":123,
+        "html":["cid":"card_original","content":"<b>original</b>","bind":["kind":"page-chars","page":44,"text":"接種"]]]
+    let batch = [action("1","highlight","",[highlight]),action("2","note","create",[["id":"n_original","note":note]])]
+    try db.execute("CREATE TRIGGER fail_assistant BEFORE INSERT ON records WHEN NEW.collection = 'native-pdf-assistant-ops' BEGIN SELECT RAISE(ABORT, 'receipt failure'); END")
+    do { _ = try commit("first",batch); fatalError("partial assistant transaction accepted") }
+    catch ReaderNativeDataStore.StoreError.sql { }
+    check(try db.cursor() == 0 && notes().isEmpty && projection.highlights("document-highlights",bookID:book).items.isEmpty, "assistant failure leaked data or journal")
+    try db.execute("DROP TRIGGER fail_assistant")
+    let saved = try commit("first",batch)
+    check((saved["revisions"] as? Object)?["ink"] as? Int == 9, "unrelated authority revision lost")
+    check(try notes()[0]["id"] as? String == "n_original", "assistant replaced stable note identity")
+    check(try (notes()[0]["created"] as? NSNumber)?.intValue == 123, "assistant changed original timestamp")
+    check(try (projection.state("word-bindings",bookID:book).payload as? [Object])?.first?["cid"] as? String == "card_original", "assistant skipped derived word binding")
+    let shown = (saved["actions"] as! [Object])[0]["args"] as! [Object]
+    check(shown[0]["file"] as? String == "localbook:" + book, "UI received remote file identity")
+    let beforeReplay = try db.cursor()
+    check(try commit("retry",batch)["replayed"] as? Bool == true, "semantic retry duplicated assistant work")
+    check(try db.cursor() == beforeReplay, "semantic retry wrote records")
+    var changed = highlight; changed["text"] = "different"
+    do { _ = try commit("collision",[action("1","highlight","",[changed])],high:1,notes:1); fatalError("same ID with different edits accepted") }
+    catch let e as ReaderNativeAssistantEdits.Failure { check(e.conflict,"wrong collision failure") }
+    let edit = action("3","note","edit",[["id":"n_original","old":["text":"original","color":"#fff"],"new":["text":"first","color":"#fff"]],
+        ["id":"n_original","old":["text":"first","color":"#fff"],"new":["text":"second","color":"#fff"]]])
+    _ = try commit("edit",[edit],high:1,notes:1)
+    _ = try commit("undo-edit",[["fn":"_nativePDFUndoLast","args":[op("4")]]],high:1,notes:2)
+    check(try notes()[0]["text"] as? String == "original", "reverse edit order did not restore original")
+    _ = try commit("undo-note",[["fn":"_nativePDFUndoLast","args":[op("5")]]],high:1,notes:3)
+    check(try notes().isEmpty, "prior undo revision was not advanced")
+    _ = try commit("undo-highlight",[["fn":"_nativePDFUndoLast","args":[op("6")]]],high:1,notes:4)
+    check(try projection.highlights("document-highlights",bookID:book).items.isEmpty, "highlight undo did not remove original ID")
+    do { _ = try commit("stale",[action("7","highlight","",[highlight])],high:1,notes:4); fatalError("stale revision accepted") }
+    catch let e as ReaderNativeAssistantEdits.Failure { check(e.conflict,"wrong stale failure") }
+    do { _ = try commit("duplicate",[action("8","highlight","",[highlight,highlight])],high:2,notes:4); fatalError("duplicate action IDs accepted") }
+    catch let e as ReaderNativeAssistantEdits.Failure { check(e.conflict,"wrong duplicate failure") }
+    check(try projection.highlights("document-highlights",bookID:book).items.isEmpty, "rejected actions changed the book")
+    print("Native assistant edits: stable IDs, atomic rollback, semantic replay, CAS and undo chain passed")
+}
+
 func check(_ condition: Bool, _ message: String) {
     if !condition { fatalError(message) }
 }
+try testNativeAssistantEdits()
 let store = try ReaderNativeDataStore(path: ":memory:")
 let projection = ReaderNativeBookProjection(store: store)
 let book = "book_%_📖"

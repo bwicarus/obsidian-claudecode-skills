@@ -4269,6 +4269,41 @@ test("HTML page-card edit sanitizes persisted markup and derives AI context from
   assert.equal(listed.notes[0].html.contextText, "安全正文");
 });
 
+test("App assistant edits wait for Swift commit and never retry a failed native write in JavaScript", async () => {
+  const commands = [];
+  let release, fail = false;
+  const submitted = { fn: '_assistEdit', args: [{ type: 'highlight', native_operation_id: 'npdf_' + '8'.repeat(24),
+    items: [{ id: 'h_original', pdf_page: 7, rects: [[1,2,10,20]], text: '正文' }] }] };
+  const result = await harness({
+    interfaceManifest: withGenericAssistantRoutesSupported(),
+    nativeBookReply(message) {
+      commands.push(message);
+      assert.equal(message.request.operation, 'assistant-actions');
+      assert.deepEqual(message.request.value.actions, [submitted]);
+      if (fail) throw new Error('native commit receipt lost');
+      return new Promise(resolve => { release = () => resolve({ ok: true, result: {
+        actions: [{ fn: '_nativePDFRefreshAnnotations', args: [] }], revisions: {highlights: 1, notes: 0}, receipt: {id: 'original'}
+      }}); });
+    },
+    piProxyResponse() { return { ok: true, result: { ok: true, client_action: submitted } }; }
+  });
+  const request = () => result.context.fetch('/api/assistant/voice-tool', {method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({cmd:'{}',ctx:{page:7,pages:[7]}})});
+  let exposed = false;
+  const response = request().then(r => { exposed = true; return r; });
+  for (let i=0; i<100 && !release; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(typeof release,'function'); assert.equal(exposed,false);
+  release();
+  const payload = await (await response).json();
+  assert.equal(payload.result.client_action.fn,'_nativePDFRefreshAnnotations');
+  assert.equal(commands.length,1);
+  fail = true;
+  const failed = await request();
+  assert.equal(failed.ok,false);
+  assert.equal(commands.length,2);
+  assert.equal([...result.dataStoresState.document.values.keys()].some(k=>k.includes('native-document-highlights')),false);
+});
+
 test("Pi page-card action receives exact renderer numbering and cannot expose success before App delete", async () => {
   let nextAction = null;
   let piPlacementId = "";
