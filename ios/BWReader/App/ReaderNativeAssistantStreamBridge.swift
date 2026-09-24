@@ -14,6 +14,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     private var epoch = UUID()
     private var tasks: [String: Task<Void, Never>] = [:]
     private var sequences: [String: Int] = [:]
+    private var bookActionSequences: [String: Int] = [:]
     private var turns: [String: ReaderNativeAssistantTurn] = [:]
     private var watchers: [String: Task<Void, Never>] = [:]
     private var watcherKeys: [String: String] = [:]
@@ -45,7 +46,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         let previousHistory = history
         history = nil; historyContext = nil
         Task { await previousHistory?.invalidate() }
-        epoch = UUID(); tasks.values.forEach { $0.cancel() }; tasks.removeAll(); sequences.removeAll(); turns.removeAll()
+        epoch = UUID(); tasks.values.forEach { $0.cancel() }; tasks.removeAll(); sequences.removeAll(); bookActionSequences.removeAll(); turns.removeAll()
         watchers.values.forEach { $0.cancel() }; watchers.removeAll(); watcherKeys.removeAll(); watchedEffectCounts.removeAll()
         let pending = activeWaiters; activeWaiters.removeAll()
         pending.values.forEach { $0.resume(throwing: CancellationError()) }
@@ -112,7 +113,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         turns[id] = ReaderNativeAssistantTurn()
         tasks[id] = Task { @MainActor [weak self] in
             guard let self else { replyHandler(nil, "对话已关闭"); return }
-            defer { if self.epoch == lease { self.tasks.removeValue(forKey: id); self.sequences.removeValue(forKey: id); self.turns.removeValue(forKey: id) } }
+            defer { if self.epoch == lease { self.tasks.removeValue(forKey: id); self.sequences.removeValue(forKey: id); self.bookActionSequences.removeValue(forKey: id); self.turns.removeValue(forKey: id) } }
             do {
                 let prepared = try await self.beginDocumentSession(id: id, body: body, path: path, lease: lease)
                 let stream = try ReaderNativeAssistantStream(initial: prepared, connect: { [weak self] body, response, chunk in
@@ -278,16 +279,27 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         guard epoch == lease, let webView, surface(webView.url) != nil else { throw CancellationError() }
         let next = (sequences[id] ?? 0) + 1
         guard var turn = turns[id] else { throw CancellationError() }
-        let committed = try await webView.callAsyncJavaScript(
-            "return await window.BWReaderRuntime?.nativeLocalRuntime?.commitAssistantEvents(id,sequence,events);",
-            arguments:["id":id,"sequence":next,"events":events.map { ["name":$0.name,"data":$0.data] }], in:nil, contentWorld:.page)
-        guard epoch == lease, let receipt = committed as? [String:Any], receipt["ok"] as? Bool == true,
-              receipt["sequence"] as? Int == next, let values = receipt["events"] as? [[String:Any]], values.count == events.count else {
-            throw ReaderNativeAssistantStream.Failure("本机改动未确认，未显示完成或重复执行")
+        let batch = try ReaderNativeAssistantEventBatch(events)
+        var receipts: [ReaderNativeAssistantEvent] = []
+        if !batch.actions.isEmpty {
+            // The document adapter has its own mutation sequence. Skipping a
+            // text-only batch must not create a gap or advance a write receipt.
+            let actionSequence = (bookActionSequences[id] ?? 0) + 1
+            let committed = try await webView.callAsyncJavaScript(
+                "return await window.BWReaderRuntime?.nativeLocalRuntime?.commitAssistantEvents(id,sequence,events);",
+                arguments:["id":id,"sequence":actionSequence,"events":batch.actions.map { ["name":$0.name,"data":$0.data] }], in:nil, contentWorld:.page)
+            guard epoch == lease, let receipt = committed as? [String:Any], receipt["ok"] as? Bool == true,
+                  receipt["sequence"] as? Int == actionSequence, let values = receipt["events"] as? [[String:Any]] else {
+                throw ReaderNativeAssistantStream.Failure("本机改动未确认，未显示完成或重复执行")
+            }
+            receipts = try values.map { value in
+                guard let name = value["name"] as? String, let data = value["data"] as? String else { throw ReaderNativeAssistantStream.Failure("助手改动回执不完整") }
+                return .init(name:name,data:data)
+            }
+            bookActionSequences[id] = actionSequence
         }
-        let projected: [[String: Any]] = try values.map { value in
-            guard let name = value["name"] as? String, let data = value["data"] as? String else { throw ReaderNativeAssistantStream.Failure("助手改动回执不完整") }
-            let event = ReaderNativeAssistantEvent(name:name,data:data)
+        try Task.checkCancellation()
+        let projected: [[String: Any]] = try batch.committed(receipts).map { event in
             return ["name": event.name, "data": event.data, "state": try turn.consume(event)]
         }
         let result = try await webView.callAsyncJavaScript(

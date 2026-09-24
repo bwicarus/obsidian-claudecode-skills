@@ -56,7 +56,8 @@ test('native artifact data retains full originals without rendering them for ins
   const original={cid:'original',kind:'fact',title:'标题',data:{answer:'完整正文'.repeat(10000),detail:'详情'},sources:[{url:'https://example.com'}]};
   const node={querySelector:()=>null};
   const projected=context.projectPart({kind:'card',card:original},'part',node,'turn')[0];
-  assert.ok(projected.text.length<=1600);
+  assert.equal(projected.text,'','web adapter must not repeat native subtitle/content projection');
+  assert.equal(projected.data.answer,undefined);
   assert.equal(JSON.stringify(projected.data.nativeDetail.content),JSON.stringify(original));
   const updated={...original,data:{answer:'更新后的原文'}};
   const replaced=context.projectPart({kind:'card',card:original},'part',{__vcCard:updated},'turn')[0];
@@ -70,6 +71,21 @@ test('native artifact data retains full originals without rendering them for ins
   assert.ok(image.data.items[0].mediaID.startsWith('native-artifact:'));
   assert.ok(image.data.items[0].selectID && image.data.items[0].removeID);
   assert.equal(JSON.stringify(image.data.nativeDetail.content),JSON.stringify(media));
+});
+
+test('multi-group turns resolve the requested learning identity rather than the first mounted group', () => {
+  const from=script.indexOf('function flashGroup('),to=script.indexOf('function inlineImageSources(',from);
+  const first={__fc:{gid:'first',cards:[{front:'第一组'}]}};
+  const second={__fc:{gid:'second',cards:[{front:'第二组'}]}};
+  const registered=new Map([['second',second]]);
+  const context=vm.createContext({rc:()=>({flashcard:{containerOf:gid=>registered.get(gid)}})});
+  vm.runInContext(script.slice(from,to),context);
+  const node={querySelectorAll:()=>[first,second]};
+  assert.equal(context.flashGroup(node,'second'),second);
+  registered.clear();
+  assert.equal(context.flashGroup(node,'second'),second);
+  assert.equal(context.flashGroup(node,'missing'),null,'missing identity may not borrow another card group');
+  assert.equal(context.flashGroup(node),first,'legacy unscoped inspection stays available');
 });
 
 test('native media operations need no hidden image cell and notify removal only after acknowledgement', async () => {

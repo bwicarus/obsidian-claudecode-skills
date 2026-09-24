@@ -713,3 +713,23 @@ the consolidated Apple build and are not yet run. Registration still comes from
 the remaining conversation adapter; review mode/load/rating effect coordination,
 conversation orchestration and startup/PC context integration remain unfinished.
 No new App build, signed package or TestFlight upload is available.
+
+### Native artifact projection and stream mutation gating (candidate)
+
+Tool outcomes and semantic/Anki card display fields now come from original
+events in Swift. The adapter supplies action handles and complete originals,
+not another truncated web projection. Live learning-card records take precedence
+over historical faces; multi-group messages resolve the requested gid instead
+of whichever group is mounted first. Media indices and existing commands remain.
+
+Native SSE batches now send only book mutation events to the document commit
+adapter. Plain text, tool telemetry and completion bypass that extra round trip;
+committed actions retain their original event positions and use a separate
+mutation receipt sequence. An incomplete receipt stops delivery without replay.
+
+Focused conversation/stream checks pass. Full Reader Node run had one failure
+in the unchanged legacy POST retry test (fixed 90 ms wait); its focused rerun
+passed. Swift projection/order checks are queued for the final consolidated
+Apple build, not yet run. Conversation ordering/action registration, document
+mutation adapters, review orchestration and startup/PC-context integration
+still retain compatibility code. No new App package or TestFlight upload.

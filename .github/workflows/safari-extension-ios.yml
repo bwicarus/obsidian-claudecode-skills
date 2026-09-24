@@ -292,7 +292,7 @@ jobs:
 
       - name: Verify native conversation ordering and recovery
         run: |
-          xcrun swiftc ios/BWReader/App/ReaderNativeConversationStore.swift ios/BWReader/Tests/NativeConversationStore/main.swift -o "$RUNNER_TEMP/native-conversation-test"
+          xcrun swiftc ios/BWReader/App/ReaderNativeConversationStore.swift ios/BWReader/App/ReaderNativeConversationProjection.swift ios/BWReader/Tests/NativeConversationStore/main.swift -o "$RUNNER_TEMP/native-conversation-test"
           "$RUNNER_TEMP/native-conversation-test"
 
       - name: Verify native context selection graph and expiry

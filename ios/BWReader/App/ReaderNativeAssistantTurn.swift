@@ -1,5 +1,35 @@
 import Foundation
 
+/// Only book mutation events need the document commit adapter. Text, tool
+/// telemetry and completion stay in the native stream; receipts replace their
+/// original slots without changing the SSE cursor or event ordering.
+struct ReaderNativeAssistantEventBatch {
+    let events: [ReaderNativeAssistantEvent]
+    let actions: [ReaderNativeAssistantEvent]
+    init(_ events: [ReaderNativeAssistantEvent]) throws {
+        guard events.count <= 10000 else { throw ReaderNativeAssistantStream.Failure("对话事件批次过大") }
+        self.events = events
+        actions = events.filter { $0.name == "actions" }
+        for event in actions {
+            guard (try? JSONSerialization.jsonObject(with: Data(event.data.utf8))) is [Any] else {
+                throw ReaderNativeAssistantStream.Failure("助手书籍动作列表无效，未执行本批改动")
+            }
+        }
+    }
+    func committed(_ receipts: [ReaderNativeAssistantEvent]) throws -> [ReaderNativeAssistantEvent] {
+        guard receipts.count == actions.count,
+              receipts.allSatisfy({ $0.name == "actions" && (try? JSONSerialization.jsonObject(with: Data($0.data.utf8))) is [Any] }) else {
+            throw ReaderNativeAssistantStream.Failure("助手书籍改动回执不完整，未重复执行")
+        }
+        var index = 0
+        return events.map { event in
+            guard event.name == "actions" else { return event }
+            defer { index += 1 }
+            return receipts[index]
+        }
+    }
+}
+
 /// Semantic state for one streamed answer. Web compatibility handlers receive
 /// effects and a read projection; they no longer decide answer ownership or
 /// reparse each native text increment for voice/display/follow-up markers.

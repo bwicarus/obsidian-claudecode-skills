@@ -59,6 +59,23 @@ actor Harness {
         catch is ReaderNativeAssistantStream.Failure {}
         let failed = try invalid.consume(event("error", "连接失败"))
         precondition(failed["answer"] as? String == "⚠️ 连接失败")
+        let textOnly = [try event("answer", "文字增量"), try event("tool2", ["name": "lookup"]), try event("done", [:])]
+        let fastBatch = try ReaderNativeAssistantEventBatch(textOnly)
+        precondition(fastBatch.actions.isEmpty, "non-mutation events crossed the document commit adapter")
+        let fastResult = try fastBatch.committed([])
+        precondition(fastResult == textOnly, "native text order or bytes changed")
+        let firstAction = try event("actions", [["fn": "first"]]), secondAction = try event("actions", [["fn": "second"]])
+        let mixed = try ReaderNativeAssistantEventBatch([textOnly[0], firstAction, textOnly[1], secondAction, textOnly[2]])
+        precondition(mixed.actions == [firstAction, secondAction])
+        let firstReceipt = try event("actions", [["fn": "first-committed"]]), secondReceipt = try event("actions", [["fn": "second-committed"]])
+        let mixedResult = try mixed.committed([firstReceipt, secondReceipt])
+        precondition(mixedResult == [textOnly[0], firstReceipt, textOnly[1], secondReceipt, textOnly[2]], "action receipts changed the stream cursor positions")
+        do { _ = try mixed.committed([firstReceipt]); preconditionFailure("missing receipt exposed completion") }
+        catch is ReaderNativeAssistantStream.Failure {}
+        do { _ = try mixed.committed([firstReceipt, textOnly[0]]); preconditionFailure("non-action receipt accepted") }
+        catch is ReaderNativeAssistantStream.Failure {}
+        do { _ = try ReaderNativeAssistantEventBatch([firstAction, event("actions", "not an array")]); preconditionFailure("malformed batch started a partial mutation") }
+        catch is ReaderNativeAssistantStream.Failure {}
         if CommandLine.arguments.count > 1 {
             let fixtures = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))) as! [[String: Any]]
             for fixture in fixtures {

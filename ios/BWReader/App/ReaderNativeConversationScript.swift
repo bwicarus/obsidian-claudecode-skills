@@ -113,9 +113,44 @@ enum ReaderNativeConversationScript {
         if (/^(done|completed|success|succeeded)$/.test(String(value?.status || '')) || value?.result != null) return 'completed';
         return 'unknown';
       }
+      function nativePartHandles(part, id, node, tid) {
+        const descriptor = (key, kind, title, original) => {
+          const actionId = registerAction(key, node, () => {});
+          const detail = { kind, title, content: original };
+          actions.get(actionId).inspect = () => detail;
+          return { id: key, kind, title: '', text: '', status: 'unknown',
+            data: { nativeDetail: detail }, actionId, actionLabel: tid ? '查看完整流程' : '查看原件' };
+        };
+        if (part.kind === 'tool') return [descriptor(id, 'tool', part.label || part.tool || '工具调用', part)];
+        if (part.kind === 'cards' && Array.isArray(part.cards)) return part.cards.map((card, index) => {
+          const result = descriptor(id + '-c-' + index, 'anki', card.title || '学习卡片',
+            { gid: part.gid, cardIndex: index, card });
+          result.data.gid = String(part.gid || ''); result.data.draft = !!part.draft;
+          return result;
+        });
+        if (part.kind === 'card' && part.card) {
+          const mounted = node.__vcCard || node.querySelector('.vc-card')?.__vcCard;
+          const card = mounted?.cid && mounted.cid === part.card.cid ? mounted : part.card;
+          const result = descriptor(id, card.kind || 'artifact', card.title || '生成物', card);
+          if (['images', 'videos'].includes(card.kind)) {
+            const registry = window.BWReaderRuntime?.contextSelections;
+            result.data.items = (card.data?.items || []).flatMap((item, index) => item._gone ? [] : [{
+              index, mediaID: 'native-artifact:' + registerAction(id + '-image-' + index, node, () => {}),
+              selected: !!registry?.isSelected('card:' + (card.cid || '') + '/item:' + index),
+              selectID: registerAction(id + '-image-select-' + index, node, () => rc().voiceCard.mediaAction(null, card, index, 'toggle')),
+              removeID: registerAction(id + '-image-remove-' + index, node, () => rc().voiceCard.mediaAction(null, card, index, 'remove'))
+            }]);
+          }
+          return [result];
+        }
+        // Unknown historical kinds keep their existing inspection adapter until
+        // their original event contract has a native renderer.
+        return [artifact(id, node, part.title || part.label || (part.kind === 'hlcard' ? '操作记录' : '生成物'))];
+      }
       function projectPart(part, id, node, tid) {
         const kind = part.kind;
         if (kind === 'text' || kind === 'meta') return [];
+        if (nativeMode) return nativePartHandles(part, id, node, tid);
         if (kind === 'tool') {
           const result = artifact(id, node, part.label || part.tool || '工具调用', '', tid);
           result.kind = 'tool'; result.status = statusOf(part);
@@ -125,7 +160,6 @@ enum ReaderNativeConversationScript {
             successCount: steps.filter(x => statusOf(x) === 'completed').length,
             failureCount: steps.filter(x => statusOf(x) === 'failed').length,
             runningCount: steps.filter(x => statusOf(x) === 'running').length };
-          if (nativeMode) result.data.nativeDetail = { kind: 'tool', title: result.title, content: part };
           actions.get(result.actionId).inspect = () => ({ kind: 'tool', title: result.title, content: part });
           return [result];
         }
@@ -148,16 +182,7 @@ enum ReaderNativeConversationScript {
           const card = mounted?.cid && mounted.cid === part.card.cid ? mounted : part.card, data = card.data || {};
           const result = artifact(id, node, card.title || '生成物');
           actions.get(result.actionId).inspect = () => ({ kind: card.kind || 'artifact', title: result.title, content: card });
-          if (nativeMode && ['images', 'videos'].includes(card.kind)) {
-            result.kind = card.kind;
-            const registry = window.BWReaderRuntime?.contextSelections;
-            result.data.items = (card.data?.items || []).flatMap((item, index) => item._gone ? [] : [{
-              index, mediaID: 'native-artifact:' + registerAction(id + '-image-' + index, node, () => {}),
-              selected: !!registry?.isSelected('card:' + (card.cid || '') + '/item:' + index),
-              selectID: registerAction(id + '-image-select-' + index, node, () => rc().voiceCard.mediaAction(null, card, index, 'toggle')),
-              removeID: registerAction(id + '-image-remove-' + index, node, () => rc().voiceCard.mediaAction(null, card, index, 'remove'))
-            }]);
-          } else if (['images', 'videos'].includes(card.kind) && rc().voiceCard?.mediaPresentation) {
+          if (['images', 'videos'].includes(card.kind) && rc().voiceCard?.mediaPresentation) {
             result.kind = card.kind;
             const root = node.matches('.vc-card') ? node : node.querySelector('.vc-card');
             result.data.items = rc().voiceCard.mediaPresentation(card).map(item => {
@@ -182,9 +207,6 @@ enum ReaderNativeConversationScript {
             result.text = text(card.brief || '', 1600);
             if (card.kind === 'images' || card.kind === 'videos') result.data = { kind: card.kind, count: Array.isArray(data.items) ? data.items.length : 0 };
           }
-          // Original event data, never a truncated preview or rendered DOM.
-          // Native inspection/drop uses the same revision as the visible card.
-          if (nativeMode) result.data.nativeDetail = { kind: card.kind || 'artifact', title: result.title, content: card };
           return [result];
         }
         return [artifact(id, node, part.title || part.label || (kind === 'hlcard' ? '操作记录' : '生成物'))];
@@ -238,11 +260,19 @@ enum ReaderNativeConversationScript {
       //   gid 是这组卡的身份，比"它此刻挂在哪儿"稳得多 —— 这也是把判断从 DOM
       //   上摘下来的第一步。
       function flashGroup(node, gid) {
+        // The requested identity wins over whichever group happens to be the
+        // first descendant of a multi-artifact turn.
+        if (gid) {
+          try {
+            const registered = rc().flashcard?.containerOf?.(gid);
+            if (registered?.__fc?.gid === gid) return registered;
+          } catch (_) {}
+        }
         const found = node?.querySelectorAll
-          ? [node, ...node.querySelectorAll('*')].find(el => el.__fc && Array.isArray(el.__fc.cards))
+          ? [node, ...node.querySelectorAll('*')].find(el => el.__fc && Array.isArray(el.__fc.cards) && (!gid || el.__fc.gid === gid))
           : null;
         if (found) return found;
-        try { return rc().flashcard?.containerOf?.(gid) || null; } catch (_) { return null; }
+        return null;
       }
       function inlineImageSources(values) {
         const sources = new Set();
@@ -320,7 +350,8 @@ enum ReaderNativeConversationScript {
             if (part.kind === 'anki') part.data.liveReason = 'node-gone';
             continue;
           }
-          const group = flashGroup(node, part.data?.gid);
+          const group = !nativeMode || part.kind === 'anki' || part.kind === 'artifact'
+            ? flashGroup(node, part.data?.gid) : null;
           const cardIndex = Number(part.id.match(/-c-(\d+)$/)?.[1] || 0);
           const pinOwner = [node, ...node.querySelectorAll('*')].find(el => el.__bwPinHoldBindings?.length);
           const pin = pinOwner && rc().voiceCard?.contextControl?.(pinOwner);

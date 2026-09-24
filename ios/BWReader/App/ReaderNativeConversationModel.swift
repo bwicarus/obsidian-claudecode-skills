@@ -25,6 +25,7 @@ struct ReaderNativeConversationPart: Identifiable {
     }
 
     init?(_ value: [String: Any]) {
+        let value = ReaderNativeConversationProjection.part(value)
         guard let id = value["id"] as? String, !id.isEmpty,
               let kind = value["kind"] as? String, !kind.isEmpty else { return nil }
         self.id = id
