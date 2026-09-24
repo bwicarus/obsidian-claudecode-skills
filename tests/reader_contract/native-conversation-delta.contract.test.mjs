@@ -51,3 +51,44 @@ test('native inline images do not inspect the hidden document or card renderer',
   // No RC, DOM, action registry or inspection callback exists in this host.
   assert.equal(JSON.stringify(context.inlineImageActions({}, null, null)), '{}');
 });
+
+test('plain assistant replies retain Markdown without hidden parsing, media, layout or reveal animation', () => {
+  const source = readFileSync(new URL('../../_server_deploy/static/pdf/rc-assistant.js', import.meta.url), 'utf8');
+  const events = [];
+  const forbidden = () => assert.fail('native message touched web rendering');
+  const context = vm.createContext({
+    window: { __BW_NATIVE_CONVERSATION_DATA__: true, dispatchEvent: event => events.push(event.type) },
+    document: { createElement: forbidden },
+    CustomEvent: class { constructor(type) { this.type = type; } },
+    md: forbidden, esc: forbidden, _linkifyPages: forbidden, _assetInline: forbidden,
+    requestAnimationFrame: forbidden, setTimeout: forbidden,
+  });
+  vm.runInContext(source.slice(source.indexOf('function _nativeOwnsThread()'), source.indexOf('function _splitFollowups(text)')), context);
+  vm.runInContext(source.slice(source.indexOf('function scrollDown(target)'), source.indexOf('function addMsg(cls, html)')), context);
+  const node = { textContent: 'old rendered body', querySelector: forbidden, appendChild: forbidden };
+  Object.defineProperty(node, 'innerHTML', { get: forbidden, set: forbidden });
+  const body = '**bold** $x$ [link](https://example.com/) ![](image.png)\n'.repeat(1000);
+  context.renderMd(node, body, false);
+  assert.equal(node.__bwNativeMessageSource.text, body);
+  assert.equal(node.__bwNativeMessageSource.streaming, true);
+  assert.equal(node.textContent, '');
+  context.renderMd(node, body, false);
+  assert.equal(events.length, 1, 'unchanged text was re-published');
+  context.renderMd(node, body, true);
+  assert.equal(node.__bwNativeMessageSource.streaming, false);
+  assert.equal(events.length, 2, 'completion must publish even when text is unchanged');
+  context._appendCaret(node); context._streamWrap(node, 0); context._fadeInAfter(node); context.scrollDown(node);
+  assert.match(source, /renderMd\(aMsg, _at, false\);[^\n]*\n\s*if \(_nativeOwnsThread\(\)\) \{ _stopReveal\(\); return; \}/);
+
+  const project = vm.createContext({
+    messageID: () => 'message', rc: () => ({}), flashGroup: () => null,
+    cleanText: forbidden, text: value => value || '',
+  });
+  vm.runInContext(script.slice(script.indexOf('function projectMessage('), script.indexOf('// 找这组学习卡当前挂着的容器')), project);
+  const message = project.projectMessage({
+    __bwNativeMessageSource: node.__bwNativeMessageSource, getAttribute: () => '',
+    classList: { contains: () => false }, querySelectorAll: () => [], querySelector: () => null,
+  }, 0);
+  assert.equal(message.text, body, 'native original text was truncated or replaced by DOM text');
+  assert.equal(message.streaming, false);
+});

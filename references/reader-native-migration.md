@@ -12,6 +12,10 @@ iOS 使用原生能力实现原软件的全部功能，包括阅读区。允许�
 - 回退是整版恢复到已保存的发布点，不是日常操作时在两套界面之间切换。
 - 全部功能原生化以前，独立迁移分支不作为“已经完整原生化”的 TestFlight 版本发布。
 
+2026-09-24 用户最新确认：**EPUB 正文保留 WebKit**，不再迁成纯原生文字排版。
+已做的 Swift 按章读取、目录解析及数据层迁移继续保留；只保留正文所需的 WebKit
+显示，清除隐藏界面的重复渲染。PDF、卡片、对话与其他已确认的原生迁移范围不变。
+
 ## 完整性验收
 
 按用户能完成的任务验收，而不是按画出了多少组件验收。下列是已确认的最低范围，
@@ -428,8 +432,18 @@ Follow-up: package manifest, spine order and EPUB 2/3 table-of-contents parsing 
 the native archive actor using Foundation XMLParser. Chapter indices, original UTF-8 paths,
 title/TOC whitespace, duplicate-link filtering and filename fallback remain compatible.
 The web adapter consumes the resulting metadata without parsing container/OPF/nav documents.
-Chapter HTML sanitization/display and existing anchors are unchanged pending the user's EPUB
-layout choice. Native publication fixtures and full App compilation require the follow-up build.
+Chapter HTML sanitization/display and existing anchors remain in the EPUB WebKit reading
+surface, as explicitly chosen by the user. Native publication fixtures and full App compilation
+passed Apple run `35955305125` (`1cd60150`).
+
+Plain assistant responses now publish source Markdown and completion state to the native
+conversation alongside structured turns. The App no longer constructs their hidden Markdown,
+inline images, math layout, word-reveal spans or animation loop, and no longer reads the
+hidden thread's scroll metrics. Existing follow-up/feedback/playback actions remain available
+through the compatibility action layer while it is migrated. Browser rendering is unchanged.
+Full Reader regression: 2441 passed; native source publication also verifies unchanged-body
+completion, long Markdown preservation and absence of web render/layout calls. These changes
+still need the next Apple compile; no installable full-migration build has been released.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

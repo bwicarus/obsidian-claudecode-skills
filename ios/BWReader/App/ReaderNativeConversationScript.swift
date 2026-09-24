@@ -182,12 +182,14 @@ enum ReaderNativeConversationScript {
         try { if (tid) presentation = rc().turnCard?.presentationOf(tid); } catch (_) {}
         const source = presentation?.parts || [];
         const role = presentation?.role || (node.classList.contains('asst-u') ? 'user' : 'assistant');
+        const messageSource = !tid && typeof node.__bwNativeMessageSource?.text === 'string' ? node.__bwNativeMessageSource : null;
         // Structured turns include live drafts without reading a rendered web
-        // bubble. Standalone legacy messages remain pending migration.
+        // bubble. Plain replies carry their original Markdown separately from
+        // the compatibility node used to retain existing action controls.
         const body = presentation
           ? source.filter(part => part.kind === 'text').map(part => typeof part.text === 'string' ? part.text : '').join('\n\n')
-          : (!tid && !node.__vcCard && !flashGroup(node) ? cleanText(node) : '');
-        const streaming = presentation ? presentation.streaming : (!tid && (node.matches('.mfx-streaming,.mfx-typing') || !!node.querySelector('.mfx-streaming,.mfx-typing')));
+          : messageSource ? messageSource.text : (!tid && !node.__vcCard && !flashGroup(node) ? cleanText(node) : '');
+        const streaming = presentation ? presentation.streaming : messageSource ? messageSource.streaming : (!tid && (node.matches('.mfx-streaming,.mfx-typing') || !!node.querySelector('.mfx-streaming,.mfx-typing')));
         const parts = [];
         const contentNodes = Array.from(node.querySelectorAll(':scope > .rc-turn-bd > .rc-part:not(.rc-part-text)'));
         const usedContent = new Set();
@@ -206,11 +208,11 @@ enum ReaderNativeConversationScript {
         if (!parts.length && !body && !streaming && (node.matches('.vc-card,.vc-if') || node.querySelector('.vc-card,.fc-wrap,iframe,video'))) {
           parts.push(artifact(id + '-artifact', node, node.querySelector('.vc-card-hd,.vc-if-hd')?.textContent || '生成物'));
         }
-        if ((!presentation && body.length >= 32000) || node.querySelector('iframe,video,img,mjx-container,a,.asst-ctx,.asst-ctx-card,.rc-asst-ctx,.asst-pagelink,.actx-page,.asst-btm,.asst-followups,.asst-clip,.asst-jump,.asst-undo')) {
+        if ((!presentation && !messageSource && body.length >= 32000) || node.querySelector('iframe,video,img,mjx-container,a,.asst-ctx,.asst-ctx-card,.rc-asst-ctx,.asst-pagelink,.actx-page,.asst-btm,.asst-followups,.asst-clip,.asst-jump,.asst-undo')) {
           parts.push(artifact(id + '-original', node, '完整内容与操作', cleanText(node.querySelector('.asst-ctx,.asst-ctx-card,.rc-asst-ctx'), 1200)));
         }
         return body || parts.length || streaming || presentation?.title ? {
-          id, role, text: presentation ? body : text(body), streaming, parts,
+          id, role, text: presentation || messageSource ? body : text(body), streaming, parts,
           title: text(presentation?.title, 240), statusText: text(presentation?.status?.text, 1000),
           progress: presentation?.progress || null
         } : null;
@@ -1544,7 +1546,7 @@ enum ReaderNativeConversationScript {
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
       ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:native-document-position', 'bw-native-computer-voice-state', 'bw-native-figure-projection'].forEach(name => window.addEventListener(name, schedule));
-      ['rc:assistant-mode-changed','rc:review-presentation-changed','rc:placement-changed','rc:favorites-changed','bw:native-favorites-changed','rc:flashcard-state-changed'].forEach(name => window.addEventListener(name,scheduleMessages));
+      ['rc:assistant-mode-changed','rc:assistant-message-changed','rc:review-presentation-changed','rc:placement-changed','rc:favorites-changed','bw:native-favorites-changed','rc:flashcard-state-changed'].forEach(name => window.addEventListener(name,scheduleMessages));
       window.addEventListener('scroll', schedule, { capture: true, passive: true });
       window.addEventListener('resize', schedule, { passive: true });
       window.addEventListener('pointerup', schedule, { capture: true, passive: true });

@@ -1472,10 +1472,23 @@
   // (2026-09-22 用户:"后台如果在运行那些代码会很消耗性能")。
   // ⚠ 每次现查 class,不缓存:模式是会被 setNativeMode/setLegacy 改的。
   function _nativeOwnsThread() {
+    if (window.__BW_NATIVE_CONVERSATION_DATA__ === true) return true;
     try { return document.documentElement.classList.contains('bw-native-conversation-active'); }
     catch (_) { return false; }
   }
   function renderMd(el, text, withMath) {
+    if (_nativeOwnsThread()) {
+      var source = { text: String(text || ''), streaming: withMath === false };
+      var previous = el.__bwNativeMessageSource;
+      if (previous && previous.text === source.text && previous.streaming === source.streaming) return;
+      el.__bwNativeMessageSource = source;
+      // Keep only semantic content. Existing action controls are attached after
+      // renderMd, as before; the native text view owns Markdown/media/layout.
+      el.textContent = '';
+      try { window.dispatchEvent(new CustomEvent('rc:assistant-message-changed')); } catch (_) {}
+      return;
+    }
+    delete el.__bwNativeMessageSource;
     try { el.innerHTML = (typeof md === 'function') ? md(text || ' ') : esc(text).replace(/\n/g, '<br>'); }
     catch (_) { el.innerHTML = esc(text).replace(/\n/g, '<br>'); }
     _linkifyPages(el);
@@ -1492,13 +1505,14 @@
     }
   }
   // stream-fx(mfx):流式期间在回答末尾挂一个闪烁光标(renderMd 每 delta 重渲 innerHTML,故每次都补挂)
-  function _appendCaret(el) { try { var c = document.createElement('span'); c.className = 'mfx-caret'; el.appendChild(c); } catch (_) {} }
+  function _appendCaret(el) { if (_nativeOwnsThread()) return; try { var c = document.createElement('span'); c.className = 'mfx-caret'; el.appendChild(c); } catch (_) {} }
   // 逐字浮现 —— 把 el 正文按 字/词 切片包进 .mfx-w(返回 {spans,total})。
   //   下标 < revN(揭示游标,已揭示)的字打 .mfx-shown → 即时显示,不重播(整段重渲下防闪);
   //   下标 ≥ revN 的字默认隐藏(CSS),由 _revealTick 揭示游标连续推进时逐个加 .mfx-reveal 淡入。
   //   这样"揭示节奏"由稳定速度的游标驱动,跟 SSE delta 的到达节奏解耦 → 真·连续逐字(不是段一段)。
   //   光标放在揭示 frontier(第 revN-1 个)后面。长答案(>5000 字)外层跳过逐字以保性能。
   function _streamWrap(el, revN) {
+    if (_nativeOwnsThread()) return { spans: [], total: 0 };
     var idx = 0, spans = [];
     function walk(node) {
       var kids = Array.prototype.slice.call(node.childNodes);
@@ -1528,6 +1542,7 @@
   }
   // 收尾:把追问 chip / 「!」反馈条做一次淡入(逐个错峰)
   function _fadeInAfter(el) {
+    if (_nativeOwnsThread()) return;
     try {
       var xs = el.querySelectorAll('.asst-followups,.asst-fb-bar');
       Array.prototype.forEach.call(xs, function (x, k) {
@@ -1572,7 +1587,7 @@
       box.appendChild(b);
     });
     _btmBar(afterEl).appendChild(box);   // 进底部操作行(▶/chips/! 同一行)
-    try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([box]).catch(function () {}); } catch (_) {}   // 追问 chip 里的公式渲染
+    try { if (!_nativeOwnsThread() && window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([box]).catch(function () {}); } catch (_) {}   // 追问 chip 里的公式渲染
     scrollDown();
   }
 
@@ -1922,6 +1937,7 @@
     }
   });
   function scrollDown(target) {
+    if (_nativeOwnsThread()) return;
     // requestAnimationFrame(scrollDown) 会把时间戳当第一个参数；只有真实容器才接受为 target。
     if (!target || typeof target.appendChild !== 'function') target = thread;
     if (target === thread) target.scrollTop = target.scrollHeight;
@@ -2791,7 +2807,7 @@
     var _revN = 0, _spans = [], _tot = 0, _raf = null, _lastTs = 0, _acc = 0, _noChar = false;
     function _revealTick(ts) {
       _raf = null;
-      if (!streaming) return;
+      if (!streaming || _nativeOwnsThread()) return;
       if (!_lastTs) _lastTs = ts;
       var dt = Math.min(ts - _lastTs, 120); _lastTs = ts;   // clamp:切后台回来 dt 巨大,别一次灌完
       var backlog = _tot - _revN;
@@ -2817,6 +2833,7 @@
       if (ev === 'meta') return;                       // rid 确认,不计数
       evSeen++;
       if (ev === 'done') { done = true; return; }
+      if (ev === 'tool' || ev === 'tool-done') delete aMsg.__bwNativeMessageSource;
       if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool"><span class="rc-i rc-i-wrench"></span> ' + esc(parsed) + '…</span>'; scrollDown(); try { window.__vcCapStatus && window.__vcCapStatus('<span class="rc-i rc-i-gear"></span>︎ ' + parsed + '…'); } catch (_) {} }   // 朗读字幕兼状态显示(侧栏关着也能看到)
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} try { window.__vcCapStatus && window.__vcCapStatus(null); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
@@ -2829,6 +2846,7 @@
           scrollDown(); return;
         }
         renderMd(aMsg, _at, false); aMsg.classList.add('mfx-streaming');
+        if (_nativeOwnsThread()) { _stopReveal(); return; }
         if (!_noChar && _at.length > 5000) { _noChar = true; _stopReveal(); }   // 超长答案:停揭示,改普通(保性能)
         if (_noChar) { _appendCaret(aMsg); }
         else {
@@ -2863,7 +2881,7 @@
         var _ujp = parsed.page ? ' <button class="asst-jump" data-page="' + esc(parsed.page) + '">↗ 跳转</button>' : '';
         addMsg('asst-a', '<span class="rc-i rc-i-check"></span> ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
       }
-      else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
+      else if (ev === 'error') { answer = '⚠️ ' + parsed; if (_nativeOwnsThread()) renderMd(aMsg, answer, true); else aMsg.innerHTML = esc(answer); }
     }
     // 开一条 SSE 读到自然结束/断开。首连带 message+context;重连只带 rid+from(服务端按 rid 续发缓冲事件)。
     async function _stream(body) {
@@ -2973,7 +2991,8 @@
       } catch (_) {}
     } else {
       var _pft = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
-      if (_pft) renderMd(aMsg, _pft, true);
+      if (_nativeOwnsThread()) renderMd(aMsg, _pft || (aborted ? '(已停止)' : '(没拿到回答)'), true);
+      else if (_pft) renderMd(aMsg, _pft, true);
       else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
       if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
       if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData, _recTs || Math.floor(Date.now() / 1000)); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 耗时/时刻 + 可重答)
