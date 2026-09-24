@@ -106,6 +106,11 @@ final class ReaderNativeReviewQueue {
         return cards[index]
     }
 
+    func presentedCard(lease expected: String, cardID: String) throws -> Object {
+        guard !expected.isEmpty, expected == lease else { throw Failure(message: "复习轮次已切换") }
+        return try currentCard(context: contextKey, cardID: cardID)
+    }
+
     func presentation() -> Object {
         presentationRevision += 1
         let cards = activeSnapshot?["cards"] as? [Object] ?? []

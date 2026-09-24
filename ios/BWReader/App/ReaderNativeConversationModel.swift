@@ -160,6 +160,22 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var title = "阅读助手"
     @Published private(set) var conversationMode = "normal"
     @Published private(set) var review: [String: Any] = [:]
+    private var committedReviewPresentation: [String: Any]?
+    private func reviewPresentation(_ incoming: [String: Any]) -> [String: Any] {
+        var result = incoming
+        if let native = committedReviewPresentation, native["lease"] as? String == incoming["lease"] as? String,
+           ((native["revision"] as? NSNumber)?.int64Value ?? 0) > ((incoming["revision"] as? NSNumber)?.int64Value ?? 0) {
+            result.merge(native) { _, value in value }
+            result["contextKey"] = native["lease"]
+        }
+        return ReaderNativeReviewFaces.state(result)
+    }
+    func acceptReviewPresentation(_ value: [String: Any]) {
+        guard let lease = value["lease"] as? String, !lease.isEmpty, lease == review["lease"] as? String,
+              ((value["revision"] as? NSNumber)?.int64Value ?? 0) > ((review["revision"] as? NSNumber)?.int64Value ?? 0) else { return }
+        committedReviewPresentation = value
+        review = reviewPresentation(review)
+    }
     @Published private(set) var ready = false
     @Published private(set) var busy = false
     @Published private(set) var legacyVisible = false
@@ -241,6 +257,13 @@ final class ReaderNativeConversationModel: ObservableObject {
             return (input, match.key)
         }
         return nil
+    }
+    func artifactPart(_ token: String, field: String? = nil) -> ReaderNativeConversationPart? {
+        guard !token.isEmpty else { return nil }
+        return (messages.flatMap(\.parts) + placements.flatMap(\.parts)).first { part in
+            if let field { return part.data[field] as? String == token }
+            return part.actionId == token
+        }
     }
     private var nativeHTMLNotes: [ReaderNativePagePlacement]? = nil
     private var webPlacements: [ReaderNativePagePlacement] = []
@@ -364,6 +387,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         if nextScope != scope {
             inlineMedia.reset()
             committedCards = [:]
+            committedReviewPresentation = nil
             inspection = nil
             settingsPanel = nil
             readingSettingsPanel = nil
@@ -399,7 +423,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         scope = nextScope
         title = (payload["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "阅读助手"
         conversationMode = nextMode
-        review = ReaderNativeReviewFaces.state(payload["review"] as? [String: Any] ?? [:])
+        review = reviewPresentation(payload["review"] as? [String: Any] ?? [:])
         ready = payload["ready"] as? Bool ?? false
         busy = payload["busy"] as? Bool ?? false
         legacyVisible = payload["legacyVisible"] as? Bool ?? false
@@ -506,6 +530,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         title = "阅读助手"
         conversationMode = "normal"
         review = [:]
+        committedReviewPresentation = nil
         ready = false
         busy = false
         legacyVisible = false

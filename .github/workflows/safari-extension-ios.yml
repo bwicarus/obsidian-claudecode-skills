@@ -337,6 +337,7 @@ jobs:
           cp ios/BWReader/App/ReaderNativeAnkiProjection.swift "$RUNNER_TEMP/native-markdown-checks/"
           cp ios/BWReader/App/ReaderNativeReviewFaces.swift "$RUNNER_TEMP/native-markdown-checks/"
           cp ios/BWReader/App/ReaderNativeWordCards.swift ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeLookupRequest.swift "$RUNNER_TEMP/native-markdown-checks/"
+          cp ios/BWReader/App/ReaderNativeFavoritePlacement.swift ios/BWReader/App/ReaderNativeFavoritesService.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativePageCardHTML.swift "$RUNNER_TEMP/native-markdown-checks/"
           swift run --package-path "$RUNNER_TEMP/native-markdown-checks" NativeMarkdownChecks
 
       - name: Verify native EPUB archive reads

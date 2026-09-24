@@ -2395,6 +2395,96 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return try localRuntimeServer.visualCaptureBroker.captureImage(region: nil)
     }
 
+    private func performNativeArtifactCommand(_ command: [String: Any]) async -> [String: Any]? {
+        let action = command["action"] as? String ?? ""
+        guard ["inspectArtifact", "liveAction"].contains(action),
+              let token = command["actionId"] as? String,
+              let part = nativeConversation.artifactPart(token, field: action == "liveAction" ? "dragId" : nil) else { return nil }
+        let input = part.data["nativeCard"] as? [String: Any]
+        let detail = part.data["nativeDetail"] as? [String: Any]
+        // EPUB still resolves its own reflow anchor. Media snapshots retain
+        // their existing renderer contract until their data adapter is migrated.
+        if action == "liveAction" {
+            guard currentLocalBook?.format == .pdf,
+                  input != nil || ["weather", "news", "fact", "general"].contains(detail?["kind"] as? String ?? "") else { return nil }
+        } else if input == nil && detail == nil { return nil }
+        do {
+            guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
+                  let deviceID = nativeReadingStoreDeviceID else {
+                throw ReaderNativeFavoritesService.Failure(message: "卡片所属页面已切换")
+            }
+            if action == "inspectArtifact" {
+                if let input {
+                    guard let gid = input["gid"] as? String, let index = input["cardIndex"] as? Int else {
+                        throw ReaderNativeFavoritesService.Failure(message: "学习卡原件缺少身份信息")
+                    }
+                    let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+                    guard try store.meta("legacyImport") == "done",
+                          let record = try ReaderNativeCardRepository(store: store, deviceID: deviceID).load(gid),
+                          let cards = ReaderNativeCardPresentation.placementCards(record), cards.indices.contains(index),
+                          cards[index]["_removed"] as? Bool != true else {
+                        throw ReaderNativeFavoritesService.Failure(message: "这张卡已更新或移除")
+                    }
+                    return ["ok": true, "detail": ["kind": "anki", "title": part.title,
+                        "content": ["gid": gid, "cardIndex": index, "card": cards[index]]]]
+                }
+                guard let detail else { throw ReaderNativeFavoritesService.Failure(message: "生成物原件尚未就绪") }
+                return ["ok": true, "detail": detail]
+            }
+            guard let book = currentLocalBook, let access = currentLocalBookAccess,
+                  let document = nativePDFDocument, let digest = currentLocalBookContentSHA256,
+                  nativeReadingStoreBookID == book.id, let target = command["value"] as? [String: Any],
+                  let page = target["page"] as? Int, page > 0, page <= (document.view.document?.pageCount ?? 0),
+                  let x = target["x"] as? Double, let y = target["y"] as? Double else {
+                throw ReaderNativeFavoritesService.Failure(message: "请把卡片放到当前书页上")
+            }
+            let generation = bookUserStateContextGeneration, scope = nativeConversation.scope
+            guard nativePDFMutationCommandDepth == 0 else { throw ReaderNativeBookStore.MutationError.unavailable }
+            let pending = try await nativePDFMutationActor.hasUnfinishedMutation(book: access)
+            guard !pending, nativePDFMutationCommandDepth == 0, !Task.isCancelled,
+                  generation == bookUserStateContextGeneration, currentLocalBookAccess === access,
+                  nativePDFDocument === document, scope == nativeConversation.scope,
+                  document.matches(bookID: book.id, contentSHA256: digest),
+                  let current = nativeConversation.artifactPart(token, field: "dragId"), current.id == part.id else {
+                throw ReaderNativeBookStore.MutationError.unavailable
+            }
+            let source: [String: Any]
+            if let cardInput = current.data["nativeCard"] as? [String: Any], let gid = cardInput["gid"] as? String,
+               let index = cardInput["cardIndex"] as? Int {
+                guard gid == input?["gid"] as? String, index == input?["cardIndex"] as? Int else {
+                    throw ReaderNativeFavoritesService.Failure(message: "学习卡原件已变化，请重新拖放")
+                }
+                let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+                guard try store.meta("legacyImport") == "done",
+                      let record = try ReaderNativeCardRepository(store: store, deviceID: deviceID).load(gid),
+                      let cards = ReaderNativeCardPresentation.placementCards(record), cards.indices.contains(index),
+                      cards[index]["_removed"] as? Bool != true else {
+                    throw ReaderNativeFavoritesService.Failure(message: "学习卡原件尚未就绪或已经移除")
+                }
+                source = ["id": gid, "cid": gid, "gid": gid, "kind": "cards", "payload": ["cards": cards]]
+            } else if let currentDetail = current.data["nativeDetail"] as? [String: Any], let original = currentDetail["content"] as? [String: Any],
+                      original["cid"] as? String == (detail?["content"] as? [String: Any])?["cid"] as? String,
+                      let record = try ReaderNativeFavoritePlacement.semanticRecord(original) { source = record }
+            else { throw ReaderNativeFavoritesService.Failure(message: "卡片内容已变化，请重新拖放") }
+            let body = try ReaderNativeFavoritePlacement.body(source, file: "localbook:" + book.id, page: page, x: x, y: y,
+                pageWidth: Double(document.characterPageSize(page)?.width ?? 0))
+            let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+            let receipt = try ReaderNativeBookStore(store: store, bookID: book.id, deviceID: deviceID,
+                displayName: book.title, contentSHA256: digest).perform([
+                    "bookID": book.id, "mutationId": "artifact-place-" + (body["id"] as! String),
+                    "operation": "note-create", "value": ["method": "POST", "body": body]])
+            // The local transaction is the result. Compatibility observers only
+            // receive a committed-state notification, never another create call.
+            nativeReplicationService?.wake(); markCloudSyncDirty()
+            await refreshNativePDFProjection()
+            if currentLocalBookAccess === access {
+                webView.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('bw:native-book-committed',{detail:value})); return true;",
+                    arguments: ["value": ["bookID": book.id]], in: nil, in: .page, completionHandler: nil)
+            }
+            return ["ok": true, "committed": true, "value": receipt]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
     private func performNativeCardCommand(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "liveAction", let token = command["actionId"] as? String,
               let target = nativeConversation.nativeCardAction(token),
@@ -3147,13 +3237,38 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
+    private func performNativeReviewPresentation(_ command: [String: Any]) async -> [String: Any]? {
+        guard command["action"] as? String == "reviewAction", let value = command["value"] as? [String: Any],
+              let key = value["key"] as? String, ["reveal", "expanded"].contains(key) else { return nil }
+        do {
+            guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
+                  let queue = nativeReviewQueue, nativeConversation.review["active"] as? Bool == true,
+                  nativeReviewQueueContext == bookUserStateContextGeneration,
+                  nativeReviewQueueGatewayContext == nativeServerGateway?.contextRevision,
+                  nativeConversation.review["loading"] as? Bool != true, nativeConversation.review["ratingSaving"] as? Bool != true,
+                  let lease = value["contextKey"] as? String, lease == nativeConversation.review["lease"] as? String else {
+                throw ReaderNativeReviewQueue.Failure(message: "复习界面尚未就绪或正在保存")
+            }
+            if key == "reveal" { _ = try queue.presentedCard(lease: lease, cardID: value["cardId"] as? String ?? "") }
+            var input = value; input["lease"] = lease
+            let state = try queue.interact(input)
+            nativeConversation.acceptReviewPresentation(state)
+            // Compatibility code observes the completed state. It must not
+            // call back into Swift or render another hidden card face.
+            webView.callAsyncJavaScript("return window.RC?.review?.acceptNativePresentation?.(state) === true;",
+                arguments: ["state": state], in: nil, in: .page, completionHandler: nil)
+            return ["ok": true, "value": state]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
     private func performNativeReviewSource(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "reviewAction", let value = command["value"] as? [String: Any],
               value["key"] as? String == "source" else { return nil }
         guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
-              let queue = nativeReviewQueue else { return ["ok": false, "error": "复习队列尚未就绪"] }
+              let queue = nativeReviewQueue, nativeReviewQueueContext == bookUserStateContextGeneration,
+              nativeReviewQueueGatewayContext == nativeServerGateway?.contextRevision else { return ["ok": false, "error": "复习队列尚未就绪"] }
         do {
-            let card = try queue.currentCard(context: value["contextKey"] as? String ?? "", cardID: value["cardId"] as? String ?? "")
+            let card = try queue.presentedCard(lease: value["contextKey"] as? String ?? "", cardID: value["cardId"] as? String ?? "")
             let target = ReaderNativeReviewFaces.source(card)
             if let file = target.file, let page = target.page {
                 let localID = file.hasPrefix("localbook:") ? String(file.dropFirst(10)) : file
@@ -3187,6 +3302,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativeArtifactCommand(command) { return result }
+        if let result = await performNativeReviewPresentation(command) { return result }
         if let result = await performNativeReviewSource(command) { return result }
         if command["action"] as? String == "settingsRead", command["section"] as? String == "computer" {
             guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,

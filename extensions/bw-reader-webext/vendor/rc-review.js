@@ -4316,6 +4316,14 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   RC.review = {
+    acceptNativePresentation: function (state) {
+      if (!_nativeReviewUI() || !state || state.lease !== _nativeQueueLease ||
+          state.index !== _idx || state.count !== _queue.length ||
+          JSON.stringify(state.queueIds) !== JSON.stringify(_queue.map(_stableCardId))) return false;
+      _acceptNativeReviewState(state);
+      _publishPresentation();
+      return true;
+    },
     presentationState: _presentationState,
     presentationSelections: _presentationSelections,
     performNativeInteraction: _performNativeInteraction,

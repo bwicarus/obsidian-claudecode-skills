@@ -637,5 +637,35 @@ than resubmitting generation. Anki operations reserve a durable operation id
 before sending and retain uncertain results across panel retries. The existing
 authorized gateway and endpoints are retained. Twenty-one focused Reader
 contracts passed; new native behavioral checks and full App compilation are
-pending. Conversation/artifact effects and review compatibility dependencies
-remain; this entry does not declare the migration or release complete.
+pending at that checkpoint. Apple run `35997315139` (`82f3a329`) subsequently
+passed the native behavioral checks and full App compilation. The following
+`fe5f9b2a` bounded related-card index has not yet had an Apple build.
+
+### Installed server verification and remaining App work
+
+ReaderPC `0.1.296` is installed; its local status endpoint reports that version
+and the process runs from its release directory. Direct `0.1.440` is installed;
+the canonical package verifier and installed executable self-tests pass. The
+Direct installer was interrupted before producing its final install receipt;
+these are independent recovery checks, not a reconstructed installer receipt.
+The retained rollback snapshot is
+`install-0.1.440-20260924T121344Z-a0efd264` in the existing Direct backup root.
+No signed App or TestFlight migration release has been produced.
+
+The current App batch moves learning-group drops and fact/general/weather/news
+card drops onto the existing native note transaction. It reads canonical card
+state, retains removed group slots and source identities, and uses complete
+event originals rather than hidden card HTML or truncated previews. Original
+inspection also uses native data. Review reveal/expand now updates the native
+queue directly; compatibility code observes committed state without rendering
+or repeating the operation. Source navigation and other review UI commands
+share the native queue lease, fixing the prior hashed/raw context mismatch.
+Focused conversation/review Node checks pass; the new Swift placement/lease
+checks join the next consolidated Apple build and are not yet verified.
+
+Remaining migration scope: media artifact effects and original event delivery;
+conversation command orchestration and legacy selection adapters; review mode,
+draft/effect coordination and account command outbox; PDF startup state and
+ReaderPC context publication still provided by compatibility code. EPUB body
+and localized video WebKit remain approved exceptions. This is not a release
+candidate and must not be described as only waiting for packaging.

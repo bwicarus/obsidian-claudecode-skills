@@ -42,6 +42,28 @@ test('explicit resync retransmits data even when bodies did not change', () => {
   assert.ok(next.revision > first.revision);
 });
 
+test('native artifact data retains full originals without rendering them for inspection or dropping', () => {
+  const from = script.indexOf('function safeFields('), to = script.indexOf('function projectMessage(', from);
+  const context = vm.createContext({});
+  vm.runInContext(`let nativeMode=true;
+    const actions=new Map();
+    const text=(v,limit=32000)=>String(v??'').slice(0,limit);
+    const artifact=(id,node,title,body)=>{actions.set(id,{});return {id,kind:'artifact',title,text:body||'',data:{},actionId:id};};
+    const registerAction=(id)=>{actions.set(id,{});return id;};
+    const rc=()=>({});
+    ${script.slice(from,to)}`, context);
+  const original={cid:'original',kind:'fact',title:'标题',data:{answer:'完整正文'.repeat(10000),detail:'详情'},sources:[{url:'https://example.com'}]};
+  const node={querySelector:()=>null};
+  const projected=context.projectPart({kind:'card',card:original},'part',node,'turn')[0];
+  assert.ok(projected.text.length<=1600);
+  assert.equal(JSON.stringify(projected.data.nativeDetail.content),JSON.stringify(original));
+  const updated={...original,data:{answer:'更新后的原文'}};
+  const replaced=context.projectPart({kind:'card',card:original},'part',{__vcCard:updated},'turn')[0];
+  assert.equal(replaced.data.nativeDetail.content.data.answer,'更新后的原文');
+  const tool={kind:'tool',tool:'reader_card',status:'completed',result:{content:'实际回执'}};
+  assert.equal(context.projectPart(tool,'tool',node,'turn')[0].data.nativeDetail.content.result.content,'实际回执');
+});
+
 test('native inline images do not inspect the hidden document or card renderer', () => {
   const from = script.indexOf('function inlineImageActions(');
   const to = script.indexOf('// 学习卡组', from);

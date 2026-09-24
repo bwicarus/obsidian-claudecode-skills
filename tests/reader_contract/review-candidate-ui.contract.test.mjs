@@ -2490,6 +2490,16 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
   assert.deepEqual(fixture.pagerBindings, []);
   await fixture.RC.review.show();
   assert.equal(fixture.RC.review.presentationState().showingAnswer, true);
+  const uiLease = requests.find(request => request.operation === 'interact').lease;
+  const nativePresentation = { lease: uiLease, revision: ++nativeRevision, index: 0, count: 1,
+    queueIds: ['anki_card_123'], current: state.current, showingAnswer: true, expanded: false, improveMode: 'verbose' };
+  const beforeNativeObserver = requests.length;
+  assert.equal(fixture.RC.review.acceptNativePresentation(nativePresentation), true);
+  assert.equal(fixture.RC.review.presentationState().expanded, false);
+  assert.equal(requests.length, beforeNativeObserver, 'committed native UI observation must not issue another mutation');
+  assert.equal(fixture.RC.review.acceptNativePresentation({ ...nativePresentation, lease: 'other' }), false);
+  assert.equal(fixture.RC.review.acceptNativePresentation({ ...nativePresentation, index: 1 }), false);
+  assert.equal(fixture.RC.review.acceptNativePresentation({ ...nativePresentation, queueIds: ['wrong-card'] }), false);
   await fixture.RC.review.answer(3);
   assert.equal(fixture.RC.review.presentationState().canUndo, true);
   assert.equal(fixture.RC.review.presentationState().count, 0);

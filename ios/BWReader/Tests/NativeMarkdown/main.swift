@@ -98,6 +98,33 @@ try await MainActor.run {
     precondition(cached.front == (state["current"] as! [String: Any])["front"] as? String)
 }
 print("Native review faces: dividers, cloze, ruby, proven provenance, original content and GFM passed")
+try await MainActor.run {
+    typealias Placement = ReaderNativeFavoritePlacement
+    let longText = String(repeating: "保留原文", count: 7000)
+    let original: [String: Any] = ["cid": "original-card", "kind": "fact", "title": "原题",
+        "data": ["answer": "**重点**\n\n" + longText, "detail": "<ruby>接種<rt>せっしゅ</rt></ruby><script>evil()</script>"],
+        "sources": [["title": "原始来源", "url": "https://example.com/source"], ["title": "bad", "url": "javascript:evil()"]]]
+    let projected = try Placement.semanticRecord(original)!
+    let body = try Placement.body(projected, file: "localbook:book", page: 8, x: 0.2, y: 0.7, pageWidth: 600)
+    let saved = body["html"] as! [String: Any], html = saved["content"] as! String
+    precondition(saved["cid"] as? String == "original-card" && saved["bind"] == nil)
+    precondition((body["anchor"] as! [String: Any])["page"] as? Int == 8)
+    for value in [longText, "<strong>", "<ruby>", "https://example.com/source"] { precondition(html.contains(value), "placement lost original \(value.prefix(40))") }
+    precondition(!html.contains("<script") && !html.contains("javascript:"))
+    precondition((saved["contextText"] as! String).contains(longText))
+    let another = try Placement.body(projected, file: "localbook:book", page: 9, x: 0, y: 1, pageWidth: 600)
+    precondition(body["id"] as? String != another["id"] as? String, "placements must not reuse content identity as their ID")
+    let weather = try Placement.semanticRecord(["cid": "weather", "kind": "weather", "data": ["lo": 0, "hi": 12, "precip": 0, "cond": "<晴>"]])!
+    precondition((weather["raw"] as! String).contains("0–12°C") && (weather["raw"] as! String).contains("降水 0%"))
+    precondition((weather["raw"] as! String).contains("&lt;晴&gt;"))
+    for invalid in [(Double.nan, 0.1), (-0.1, 0.5), (0.4, 1.1)] {
+        do { _ = try Placement.body(projected, file: "localbook:book", page: 8, x: invalid.0, y: invalid.1, pageWidth: 600); preconditionFailure("invalid drop accepted") }
+        catch is ReaderNativeFavoritesService.Failure {}
+    }
+    let retainedVideo = try Placement.semanticRecord(["kind": "videos", "cid": "video"])
+    precondition(retainedVideo == nil)
+}
+print("Native artifact placement: complete originals, Markdown, identity, sources, safe HTML and PDF coordinates passed")
 await MainActor.run {
     typealias Review = ReaderNativeReviewFaces
     let explicit = Review.source(["source_ref": "book:localbook:abc#p45", "source": ["url": "https://example.com/note"]])

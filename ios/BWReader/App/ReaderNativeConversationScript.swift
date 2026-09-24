@@ -125,6 +125,7 @@ enum ReaderNativeConversationScript {
             successCount: steps.filter(x => statusOf(x) === 'completed').length,
             failureCount: steps.filter(x => statusOf(x) === 'failed').length,
             runningCount: steps.filter(x => statusOf(x) === 'running').length };
+          if (nativeMode) result.data.nativeDetail = { kind: 'tool', title: result.title, content: part };
           actions.get(result.actionId).inspect = () => ({ kind: 'tool', title: result.title, content: part });
           return [result];
         }
@@ -172,6 +173,9 @@ enum ReaderNativeConversationScript {
             result.text = text(card.brief || '', 1600);
             if (card.kind === 'images' || card.kind === 'videos') result.data = { kind: card.kind, count: Array.isArray(data.items) ? data.items.length : 0 };
           }
+          // Original event data, never a truncated preview or rendered DOM.
+          // Native inspection/drop uses the same revision as the visible card.
+          if (nativeMode) result.data.nativeDetail = { kind: card.kind || 'artifact', title: result.title, content: card };
           return [result];
         }
         return [artifact(id, node, part.title || part.label || (kind === 'hlcard' ? '操作记录' : '生成物'))];
@@ -851,7 +855,7 @@ enum ReaderNativeConversationScript {
         const readingTools = toolbarActions();
         const attachments = selectedAttachments();
         const review = conversationMode() === 'review' ? rc().review?.presentationState?.() || null : null;
-        if (review) review.contextKey = hash(review.contextKey);
+        if (review) review.contextKey = review.lease || hash(review.contextKey);
         const payload = { version: 1, scope, revision: 0, title: text(document.title, 160) || '阅读助手', ready: isReady(), busy: isBusy(),
           // ⚠ `selection`（来自 __focusSel）**只在助手侧栏开着时才有值** ——
           //   __setFocusSel 第一行就是 `if (!window.__asstOpen()) return;`。
@@ -1509,7 +1513,7 @@ enum ReaderNativeConversationScript {
           } else if ((action === 'openReview' || action === 'reviewAction') && rc().review?.performNativeInteraction) {
             const owner = rc().review, state = owner.presentationState();
             const value = action === 'openReview' ? { key: 'mode', enabled: !state.active } : command.value;
-            if (!value || (action === 'reviewAction' && value.contextKey !== hash(state.contextKey))) return { ok: false, error: '复习内容已更新，请重试' };
+            if (!value || (action === 'reviewAction' && value.contextKey !== (state.lease || hash(state.contextKey)))) return { ok: false, error: '复习内容已更新，请重试' };
             await owner.performNativeInteraction({ ...value, contextKey: state.contextKey });
           } else if (action === 'openReview' && document.getElementById('asst-review-toggle')) {
             setLegacy(true); document.getElementById('asst-review-toggle').click();

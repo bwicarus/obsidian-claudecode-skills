@@ -42,3 +42,21 @@ precondition(ReaderNativeCardPresentation.applying(tombstone, to: confirmed) == 
 var other = record; other["gid"] = "card_other"
 precondition(json(ReaderNativeCardPresentation.applying(other, to: draft)!) == json(draft))
 print("Native card receipts: immediate edited fields, revision fences, pending precedence and removal passed")
+
+let placed: [String: Any] = ["gid": "same-group", "entityRev": 3, "stateRev": 7,
+    "cards": [["front": "first", "back": "answer", "source_ref": "book:a#p2"],
+              ["front": "removed", "back": "preserve this slot"],
+              ["type": "cloze", "cloze": "{{c1::third}}", "source_id": "original-source"]],
+    "states": ["0": ["phase": "confirmed", "exactState": ["front": "edited", "_nid": 42]],
+               "1": ["phase": "draft", "removed": true],
+               "2": ["phase": "draft", "exactState": ["cloze": "{{c1::updated}}"]]]]
+let pageCards = ReaderNativeCardPresentation.placementCards(placed)!
+precondition(pageCards.count == 3 && pageCards[1]["_removed"] as? Bool == true)
+precondition(pageCards[0]["front"] as? String == "edited" && pageCards[0]["_st"] as? String == "learn")
+precondition(pageCards[0]["_nid"] as? Int == 42 && pageCards[0]["source_ref"] as? String == "book:a#p2")
+precondition(pageCards[2]["cloze"] as? String == "{{c1::updated}}" && pageCards[2]["source_id"] as? String == "original-source")
+var deletedGroup = placed; deletedGroup["deleted"] = true
+precondition(ReaderNativeCardPresentation.placementCards(deletedGroup) == nil)
+var incompleteGroup = placed; incompleteGroup["states"] = ["0": ["phase": "draft"]]
+precondition(ReaderNativeCardPresentation.placementCards(incompleteGroup) == nil)
+print("Native card placements: canonical fields, identity, removed slots and unavailable originals passed")

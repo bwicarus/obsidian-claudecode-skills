@@ -3,6 +3,41 @@ import Foundation
 /// Native display policy for draft, review and saved cards. Inputs are data;
 /// no HTML document, hidden controls, layout or JavaScript renderer is needed.
 enum ReaderNativeCardPresentation {
+    /// A page placement carries the whole learning group, including removed
+    /// slots. Compacting it would change cardIndex and detach review receipts.
+    static func placementCards(_ record: [String: Any]) -> [[String: Any]]? {
+        guard record["deleted"] as? Bool != true, let gid = record["gid"] as? String,
+              let cards = record["cards"] as? [[String: Any]], !cards.isEmpty,
+              let states = record["states"] as? [String: Any] else { return nil }
+        var result: [[String: Any]] = []
+        for (index, original) in cards.enumerated() {
+            guard let state = states[String(index)] as? [String: Any] else { return nil }
+            var card = original
+            card["type"] = card["type"] ?? "basic"
+            card["front"] = card["front"] ?? card["question"] ?? ""
+            card["back"] = card["back"] ?? card["answer"] ?? ""
+            card["cloze"] = card["cloze"] ?? card["text"] ?? ""
+            card["_st"] = card["_st"] ?? "draft"
+            card["_showBack"] = card["_showBack"] as? Bool ?? false
+            card["_nid"] = card["_nid"] ?? card["note_id"] ?? NSNull()
+            card["_next"] = card["_next"] ?? NSNull()
+            // Reuse the canonical presentation policy; a zero revision forces
+            // state/projection application without reading any hidden card UI.
+            var liveRecord = record
+            var liveStates = states
+            var liveState = state; liveState["removed"] = false
+            liveStates[String(index)] = liveState; liveRecord["states"] = liveStates
+            let input: [String: Any] = ["gid": gid, "cardIndex": index, "card": card,
+                                        "entityRev": 0, "stateRev": 0]
+            guard let data = applying(liveRecord, to: ["nativeCard": input]),
+                  let updated = data["nativeCard"] as? [String: Any],
+                  var value = updated["card"] as? [String: Any] else { return nil }
+            value["_removed"] = state["removed"] as? Bool ?? false
+            result.append(value)
+        }
+        return result
+    }
+
     /// Apply an authoritative local receipt immediately. Late web snapshots
     /// cannot roll an edit back or make the next field save use an old revision.
     static func applying(_ record: [String: Any], to data: [String: Any]) -> [String: Any]? {

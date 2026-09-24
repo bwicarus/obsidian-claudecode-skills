@@ -5,6 +5,62 @@ import SwiftSoup
 /// placement gets a new ID; learning gid/cid and the complete cards stay intact.
 @MainActor
 enum ReaderNativeFavoritePlacement {
+    /// Event originals use the same durable page HTML contract as favorites.
+    /// Serialize only on a drop; no hidden card body or webpage layout is built.
+    static func semanticRecord(_ card: [String: Any]) throws -> [String: Any]? {
+        guard let kind = card["kind"] as? String, ["weather", "news", "fact", "general"].contains(kind) else { return nil }
+        guard let cid = card["cid"] as? String, !cid.isEmpty else {
+            throw ReaderNativeFavoritesService.Failure(message: "卡片原件缺少身份编号")
+        }
+        let data = card["data"] as? [String: Any] ?? [:]
+        func string(_ value: Any?) -> String { ReaderNativeCardRules.string(value) }
+        func escaped(_ value: Any?) -> String { ReaderNativeMathSyntax.escape(string(value)) }
+        func markdown(_ value: Any?) throws -> String {
+            try ReaderNativePageCardHTML.sanitize(ReaderNativeMarkdown.html(string(value))).content
+        }
+        let title = string(card["title"])
+        var html: String, context: String
+        switch kind {
+        case "weather":
+            html = "<div class=\"vc-if-w\"><div class=\"vc-if-wt\">" + escaped(data["lo"]) + "–" + escaped(data["hi"]) + "°C</div>"
+                + "<div class=\"vc-if-wc\">" + escaped(data["cond"])
+                + (data["precip"] == nil || data["precip"] is NSNull ? "" : " · 降水 " + escaped(data["precip"]) + "%") + "</div>"
+                + "<div class=\"vc-if-ws\">" + escaped(data["loc"]) + " " + escaped(data["date"]) + "</div>"
+            if !string(data["tip"]).isEmpty { html += "<div class=\"vc-if-tip\">" + escaped(data["tip"]) + "</div>" }
+            html += "</div>"
+            let temperature = data["lo"] == nil || data["lo"] is NSNull ? "" : string(data["lo"]) + "-" + string(data["hi"]) + "°C"
+            let rain = data["precip"] == nil || data["precip"] is NSNull ? "" : "降水" + string(data["precip"]) + "%"
+            context = (title.isEmpty ? "天气" : title) + ":" + [string(data["loc"]), string(data["date"]), string(data["cond"]), temperature, rain, string(data["tip"])].filter { !$0.isEmpty }.joined(separator: ",")
+        case "news":
+            let items = data["items"] as? [[String: Any]] ?? []
+            html = "<div class=\"vc-if-n\">" + items.prefix(5).map { item in
+                "<div class=\"vc-if-ni\"><div class=\"vc-if-nt\">" + escaped(item["t"]) + "</div><div class=\"vc-if-ns\">"
+                    + escaped(item["s"]) + (string(item["src"]).isEmpty ? "" : " <span class=\"vc-if-src\">— " + escaped(item["src"]) + "</span>") + "</div></div>"
+            }.joined() + "</div>"
+            context = (title.isEmpty ? "新闻" : title) + ":" + items.map { string($0["t"]) + "(" + string($0["s"]) + ")" }.joined(separator: ";")
+        case "fact":
+            html = "<div class=\"vc-if-f\"><div class=\"vc-if-fa\">" + (try markdown(data["answer"])) + "</div>"
+            if !string(data["detail"]).isEmpty { html += "<div class=\"vc-if-fd\">" + (try markdown(data["detail"])) + "</div>" }
+            html += "</div>"
+            context = title + ":" + string(data["answer"]) + " " + string(data["detail"])
+        default:
+            let text = string(data["text"]).isEmpty ? string(card["brief"]) : string(data["text"])
+            html = "<div class=\"vc-if-g\">" + (try markdown(text)) + "</div>"
+            context = text.isEmpty ? title : text
+        }
+        let sources = card["sources"] as? [[String: Any]] ?? []
+        if !sources.isEmpty {
+            html += "<div class=\"vc-if-srcs\">" + sources.prefix(3).map { source in
+                let label = string(source["title"]).isEmpty ? "来源" : string(source["title"]).components(separatedBy: ".")[0]
+                // Sanitization below rejects executable links in source data.
+                return "<a href=\"" + escaped(source["url"] ?? "#") + "\" target=\"_blank\" rel=\"noopener\">" + escaped(label) + "</a>"
+            }.joined(separator: " · ") + "</div>"
+        }
+        html = try ReaderNativePageCardHTML.sanitize(html).content
+        return ["id": cid, "cid": cid, "kind": kind, "raw": html, "text": context,
+                "label": title.isEmpty ? "卡片" : title, "isHtml": true]
+    }
+
     static func body(_ record: [String: Any], file: String, page: Int, x: Double, y: Double,
                      pageWidth: Double) throws -> [String: Any] {
         guard page > 0, x.isFinite, y.isFinite, (0...1).contains(x), (0...1).contains(y) else {

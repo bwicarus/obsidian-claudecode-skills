@@ -252,6 +252,11 @@ typealias Q = ReaderNativeReviewQueue
         precondition(resumed["index"] as? Int == 0)
         precondition((resumed["cards"] as! [Q.Object])[0]["answer"] as? String == "新答案", "resumed cached card content")
         let sourceCard = try reopening.service.currentCard(context: "ctx-book-4", cardID: "card_two_i0")
+        let currentLease = reopening.service.presentation()["lease"] as! String
+        let presented = try reopening.service.presentedCard(lease: currentLease, cardID: "card_two_i0")
+        precondition(ReaderNativeCardRules.same(sourceCard, presented))
+        do { _ = try reopening.service.presentedCard(lease: "stale-lease", cardID: "card_two_i0"); preconditionFailure("old review lease admitted") } catch {}
+        do { _ = try reopening.service.presentedCard(lease: currentLease, cardID: "card_one_i0"); preconditionFailure("old review card admitted") } catch {}
         precondition(sourceCard["entity_id"] as? String == "card_two")
         do { _ = try reopening.service.currentCard(context: "ctx-book-4", cardID: "card_one_i0"); preconditionFailure("old source button admitted") } catch {}
         reopening.failSave = true
