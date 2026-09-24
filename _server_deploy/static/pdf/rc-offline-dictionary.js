@@ -15,6 +15,19 @@
   var nativeBase = String(window.__BW_NATIVE_LOCAL_BASE_PATH__ || '').replace(/\/+$/, '');
   var BASE = nativeBase + '/native-api/offline-dictionary/';
   var localMode = !!nativeBase;
+  var nativeLookup = localMode && window.__BW_NATIVE_OFFLINE_DICTIONARY__ === true;
+  async function lookupNative(term, legacy) {
+    // The App owns the verified dictionary files and bounded shard cache.
+    // Do not load another copy of the manifest, shards or kanji into WebKit.
+    // @interaction reader.shell.read
+    var response = await fetch(BASE + 'lookup', {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ term: String(term == null ? '' : term), legacy: legacy })
+    });
+    if (!response.ok) throw new Error('离线词典查询失败: HTTP ' + response.status);
+    return response.json();
+  }
   var manifestPromise = null;
   var shardPromises = new Map();
   var kanjiPromise = null;
@@ -325,6 +338,7 @@
   }
 
   async function lookupJapanese(term) {
+    if (nativeLookup) return lookupNative(term, false);
     var query = normalize(term);
     if (!query) return { ok: false, code: 'BW_OFFLINE_DICTIONARY_EMPTY', source: 'local-jmdict' };
     if (!localMode) return { ok: false, unavailable: true, code: 'BW_OFFLINE_DICTIONARY_NOT_LOCAL' };
@@ -453,6 +467,7 @@
     isLocalMode: function () { return localMode; },
     lookupJapanese: lookupJapanese,
     lookupJapaneseLegacy: function (term) {
+      if (nativeLookup) return lookupNative(term, true);
       return lookupJapanese(term).then(function (result) { return asLegacy(result, term); });
     },
     _candidateForms: candidateForms,

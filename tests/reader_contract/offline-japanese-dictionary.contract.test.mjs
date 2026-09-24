@@ -41,6 +41,27 @@ function harness(resources, { local = true } = {}) {
   return { dictionary: sandbox.RC.offlineDictionary, requests };
 }
 
+test("App dictionary delegates to Swift without fetching WebKit shards or falling back on failure", async () => {
+  const calls = [];
+  let fail = false;
+  const sandbox = { TextEncoder, __BW_NATIVE_LOCAL_BASE_PATH__: "/r/fixture", __BW_NATIVE_OFFLINE_DICTIONARY__: true, RC: {},
+    async fetch(url, options) {
+      assert.equal(url, "/r/fixture/native-api/offline-dictionary/lookup");
+      assert.equal(options.method, "POST");
+      calls.push(JSON.parse(options.body));
+      return { ok: !fail, status: fail ? 409 : 200, async json() { return { ok: true, marker: "native" }; } };
+    }
+  };
+  sandbox.window = sandbox;
+  vm.runInNewContext(source, sandbox);
+  assert.equal((await sandbox.RC.offlineDictionary.lookupJapaneseLegacy("出している")).marker, "native");
+  await sandbox.RC.offlineDictionary.lookupJapanese("出している");
+  assert.deepEqual(calls, [{ term: "出している", legacy: true }, { term: "出している", legacy: false }]);
+  fail = true;
+  await assert.rejects(sandbox.RC.offlineDictionary.lookupJapaneseLegacy("日本"), /409/);
+  assert.equal(calls.length, 3, "failed native read must not start the old dictionary runtime");
+});
+
 test("offline rich dictionary restores Japanese stem and exposes pronunciation, examples and kanji", async () => {
   const resources = {
     "manifest.json": {

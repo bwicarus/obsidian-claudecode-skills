@@ -333,6 +333,12 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativeLookupRequest.swift ios/BWReader/Tests/NativeLookupRequest/main.swift -o "$RUNNER_TEMP/native-lookup-test"
           "$RUNNER_TEMP/native-lookup-test"
 
+      - name: Verify native Japanese dictionary parity
+        run: |
+          node ios/BWReader/Tests/NativeJapaneseDictionary/fixtures.mjs "$RUNNER_TEMP/native-dictionary-fixtures.json"
+          xcrun swiftc ios/BWReader/App/ReaderNativeJapaneseDictionary.swift ios/BWReader/Tests/NativeJapaneseDictionary/main.swift -o "$RUNNER_TEMP/native-dictionary-test"
+          "$RUNNER_TEMP/native-dictionary-test" "$RUNNER_TEMP/native-dictionary-fixtures.json" ios/BWReader/DictionaryData
+
       - name: Verify native book merge parity
         run: |
           node ios/BWReader/Tests/NativeBookMerge/fixtures.mjs "$RUNNER_TEMP/native-merge-fixtures.json"

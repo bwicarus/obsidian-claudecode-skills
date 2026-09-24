@@ -1,4 +1,5 @@
 import CryptoKit
+import CoreFoundation
 import FlyingFox
 import FlyingSocks
 import Foundation
@@ -436,6 +437,8 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             return await serveNativeVisualCapture(request)
         case "native-api/sf-symbol":
             return serveSFSymbol(request)
+        case "native-api/offline-dictionary/lookup":
+            return await serveNativeDictionaryLookup(request)
         default:
             if relative.hasPrefix("native-api/offline-dictionary/") {
                 return serveOfflineDictionary(
@@ -925,6 +928,28 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 "mtime": Int(modifiedAt.timeIntervalSince1970),
             ]
         )
+    }
+
+    private let nativeDictionary = ReaderNativeOfflineDictionary()
+
+    private func serveNativeDictionaryLookup(_ request: HTTPRequest) async -> HTTPResponse {
+        guard request.method == .POST else { return response(status: .methodNotAllowed, text: "method not allowed") }
+        guard trustedResourceSurface(referer: request.headers[HTTPHeader("Referer")]) != nil else {
+            return response(status: .forbidden, text: "invalid referer")
+        }
+        guard let bytes = try? await request.bodyData, bytes.count <= 16_384,
+              let input = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              Set(input.keys).isSubset(of: ["term", "legacy"]), let term = input["term"] as? String,
+              term.utf16.count <= 2000, !term.contains("\0"),
+              let legacy = input["legacy"] as? NSNumber, CFGetTypeID(legacy) == CFBooleanGetTypeID() else {
+            return jsonResponse(request, status: .badRequest, object: ["ok": false, "code": "BW_OFFLINE_DICTIONARY_REQUEST"])
+        }
+        do {
+            let data = try await nativeDictionary.lookup(term, legacy: legacy.boolValue)
+            return dataResponse(request, data: data, contentType: "application/json; charset=utf-8", cacheControl: "no-store")
+        } catch {
+            return jsonResponse(request, status: .conflict, object: ["ok": false, "code": "BW_OFFLINE_DICTIONARY_INVALID"])
+        }
     }
 
     private func serveOfflineDictionary(
@@ -1615,6 +1640,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         let bootstrap = """
         window.__BW_NATIVE_LOCAL_BOOK_ID__=\(Self.jsonLiteral(opaqueID));
         window.__BW_NATIVE_LOCAL_BASE_PATH__=\(Self.jsonLiteral(tokenBase));
+        window.__BW_NATIVE_OFFLINE_DICTIONARY__=true;
         """
         shell = shell.replacingOccurrences(
             of: "window.__BW_NATIVE_LOCAL_READER__=true;",
