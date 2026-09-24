@@ -149,6 +149,29 @@ final class ReaderNativeReviewQueue {
         return ReaderNativeCardRules.same(left, right)
     }
 
+    /// Change only the active card, preserving queue order, original identities
+    /// and completed IDs. Persistence must succeed before the UI advances.
+    func selectCard(_ input: Object) throws -> Object {
+        guard input["lease"] as? String == lease, !lease.isEmpty, !cancelled,
+              stagedRating == nil, let raw = input["snapshot"] as? Object,
+              let currentCard = input["current"] as? Object,
+              let targetCard = input["target"] as? Object else {
+            throw Failure(message: "复习卡片切换已失效")
+        }
+        var source = try Self.snapshot(raw)
+        guard source["client_context_key"] as? String == contextKey else { throw Failure(message: "复习内容已切换") }
+        let cards = source["cards"] as! [Object], index = source["index"] as! Int
+        guard cards.indices.contains(index), ReaderNativeCardRules.same(cards[index], currentCard) else {
+            throw Failure(message: "当前复习卡已更新")
+        }
+        let matches = cards.indices.filter { Self.sameCard(cards[$0], targetCard) }
+        guard matches.count == 1, let target = matches.first,
+              ReaderNativeCardRules.same(cards[target], targetCard) else { throw Failure(message: "目标复习卡已更新或不唯一") }
+        source["index"] = target; source["native_queue_lease"] = lease
+        if target != index { try save(source, request: lease) }
+        return ["changed": target != index, "snapshot": source]
+    }
+
     /// One action of undo is a reversible in-memory stage, not an external
     /// scheduler undo. The persisted recovery snapshot keeps the original card
     /// until the existing commit operation has a durable result.

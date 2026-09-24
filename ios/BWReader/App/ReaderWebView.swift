@@ -7367,6 +7367,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                         case "load": replyHandler(["ok": true, "value": try await service.load(request)], nil)
                         case "peek": replyHandler(["ok": true, "value": try service.peek() as Any? ?? NSNull()], nil)
                         case "stageRating": replyHandler(["ok": true, "value": try service.stageRating(request)], nil)
+                        case "selectCard": replyHandler(["ok": true, "value": try service.selectCard(request)], nil)
                         case "answer": replyHandler(["ok": true, "value": try await service.answer(request)], nil)
                         case "undoRating": replyHandler(["ok": true, "value": try service.undoRating(request)], nil)
                         case "takeRating":

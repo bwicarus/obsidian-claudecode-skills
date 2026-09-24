@@ -517,7 +517,13 @@ reserved before acknowledgement, so an uncertain delivery is not replayed. The e
 task-status GET is explicitly registered in the shared native interface manifest; unrelated
 voice endpoints are not admitted. Result and undo controls remain connected through the
 compatibility effect adapter. All 2459 Reader Node checks passed; Apple compilation of
-this task-monitor stage is pending. No installable migration release has been published.
+this task-monitor stage passed run `35962906764`. No installable migration release has been published.
+
+Review-card navigation now commits its recovery position through the native queue before
+changing the visible question. Duplicate navigation joins the same operation; failed saves,
+changed cards and expired queue leases retain the previous question. Earlier staged ratings
+and queued cache writes settle before selecting a new card. The 100 focused review checks
+passed; Swift navigation cases and App compilation are pending for this stage.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

@@ -59,6 +59,7 @@
   var _nativeQueueLease = '';
   var _nativeDraftLease = '';
   var _nativeStageWork = null;
+  var _nativeNavigationWork = null;
 
   function _nativeReviewUI() { return window.__BW_NATIVE_CONVERSATION_DATA__ === true; }
   function _nativeQueuePort() {
@@ -2138,7 +2139,47 @@
     panel.appendChild(reviewControls);
   }
 
+  function _selectNativeCard(index, reason) {
+    if (_nativeNavigationWork) return _nativeNavigationWork;
+    if (_nativeStageWork) return _nativeStageWork.then(function () { return _selectNativeCard(index, reason); });
+    if (!_queue.length || _queueBusy || _ratingCommitBusy) return Promise.resolve(false);
+    var next = Math.round(Math.max(0, Math.min(_queue.length - 1, Number(index || 0))));
+    if (!Number.isFinite(next)) next = 0;
+    if (next === _idx) return Promise.resolve(false);
+    var target = _queue[next], targetId = _stableCardId(target);
+    var epoch = _queueRequestEpoch, contextKey = _contextCacheKey, lease = _nativeQueueLease;
+    function current() { return epoch === _queueRequestEpoch && contextKey === _contextCacheKey && lease === _nativeQueueLease; }
+    _nativeNavigationWork = Promise.resolve().then(async function () {
+      var staged = !!_stagedRating;
+      var committed = await _commitStagedRating('card-change');
+      if (!current() || staged && committed === false) return false;
+      // Drain prior saves before the native selection transaction; otherwise
+      // an older queued recovery write could restore the previous index.
+      await _cacheWriteChain;
+      if (!current()) return false;
+      target = _queue.find(function (card) { return _stableCardId(card) === targetId; });
+      if (!target || !_current()) return false;
+      var snapshot = _currentQueueSnapshot(), before = JSON.stringify(snapshot.cards), oldIndex = _idx;
+      var result = await _nativeQueueCall('selectCard', {lease:lease, snapshot:snapshot, current:_current(), target:target});
+      if (!current() || oldIndex !== _idx || before !== JSON.stringify(_queue)) return false;
+      if (!result || !result.snapshot || typeof result.changed !== 'boolean') throw new Error('卡片切换缺少保存回执');
+      if (!result.changed) return false;
+      _rememberAndDeactivateSelections();
+      _invalidateCardRequests(true);
+      _idx = result.snapshot.index; _showingAnswer = false; _improveExpanded = false;
+      render(); _activateCurrentSelections(); _scheduleDecorate();
+      _notifyAssistant(reason === 'pager' ? 'card-swipe' : 'card-change');
+      return true;
+    }).catch(function (error) {
+      if (current()) { _presentationNotice = '切换未完成：' + String(error.message || error); _toast(_presentationNotice); }
+      return false;
+    }).finally(function () { _nativeNavigationWork = null; _publishPresentation(); });
+    _publishPresentation();
+    return _nativeNavigationWork;
+  }
+
   function _selectCard(index, reason) {
+    if (_nativeReviewUI()) return _selectNativeCard(index, reason);
     if (_nativeStageWork) return _nativeStageWork.then(function () { return _selectCard(index, reason); });
     if (!_queue.length) return false;
     var next = Math.max(
@@ -2171,6 +2212,7 @@
   }
 
   function _showAnswer() {
+    if (_nativeNavigationWork) return _nativeNavigationWork.then(_showAnswer);
     if (_nativeStageWork) return _nativeStageWork.then(_showAnswer);
     if (!_current() || _showingAnswer) return;
     _commitStagedRating('show-answer');
@@ -2690,6 +2732,7 @@
   }
 
   function _stageNativeRating(ease) {
+    if (_nativeNavigationWork) return Promise.resolve(false);
     var card = _current();
     if (!card || !_showingAnswer || _ratingCommitBusy || _nativeStageWork) return Promise.resolve(false);
     var epoch = _queueRequestEpoch, contextKey = _contextCacheKey, cardKey = _cardKey(card);
@@ -4036,7 +4079,7 @@
       previous: _neighbour(-1), next: _neighbour(1),
       deleteKind: card && card._localReview ? 'reader-card' : _legacyReviewNoteId(card) ? 'anki-note' : '',
       showingAnswer: _showingAnswer, expanded: _cardExpanded,
-      canUndo: !!_stagedRating, ratingSaving: _ratingCommitBusy > 0 || !!_nativeStageWork,
+      canUndo: !!_stagedRating, ratingSaving: _ratingCommitBusy > 0 || !!_nativeStageWork || !!_nativeNavigationWork,
       ratingStaged: _stagedRating ? { cardId: _stableCardId(_stagedRating.card), ease: _stagedRating.ease } : null,
       improveExpanded: _improveExpanded, improveMode: _improveMode,
       selectedPairs: selectedPairs(), draft: _draftState, commits: _commitState,
@@ -4107,7 +4150,7 @@
     } else if (key === 'select') {
       var index = _queue.findIndex(function (card) { return _stableCardId(card) === command.targetId; });
       if (index < 0) throw new Error('目标复习卡已不在队列中');
-      _selectCard(index, 'native');
+      await _selectCard(index, 'native');
     } else if (key === 'reload' || key === 'scope') {
       if (key === 'scope') {
         if (!['all', 'current'].includes(command.value)) throw new Error('复习范围无效');

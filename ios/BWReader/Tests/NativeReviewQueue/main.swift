@@ -103,6 +103,27 @@ typealias Q = ReaderNativeReviewQueue
         let replacement = try await wait.value
         precondition(replacement["kind"] as? String == "local" && arrived.cache == nil)
         let scoring = Fixture()
+        let navigation = Fixture()
+        navigation.reply["cards"] = [["id": 7, "question": "one"], ["id": 8, "question": "two"]]
+        let navigationInput = navigation.input(scope: "all")
+        let navigationLoaded = try await navigation.service.load(navigationInput)
+        let navigationSnapshot = navigationLoaded["snapshot"] as! Q.Object
+        let navigationCards = navigationSnapshot["cards"] as! [Q.Object]
+        let navigationRequest: Q.Object = ["lease": navigationInput["request"]!, "snapshot": navigationSnapshot,
+            "current": navigationCards[0], "target": navigationCards[1]]
+        let beforeNavigation = navigation.cache
+        navigation.failSave = true
+        do { _ = try navigation.service.selectCard(navigationRequest); preconditionFailure("failed selection saved") } catch {}
+        precondition(navigation.cache == beforeNavigation)
+        navigation.failSave = false
+        let selection = try navigation.service.selectCard(navigationRequest)
+        let selectedSnapshot = selection["snapshot"] as! Q.Object
+        precondition(selection["changed"] as? Bool == true && selectedSnapshot["index"] as? Int == 1)
+        precondition(ReaderNativeCardRules.same(navigationSnapshot["cards"]!, selectedSnapshot["cards"]!))
+        var staleTarget = navigationRequest; staleTarget["target"] = ["id": 8, "question": "changed"]
+        do { _ = try navigation.service.selectCard(staleTarget); preconditionFailure("changed card selected") } catch {}
+        navigation.service.invalidate()
+        do { _ = try navigation.service.selectCard(navigationRequest); preconditionFailure("stale scope selected") } catch {}
         let loaded = try await scoring.service.load(scoring.input())
         let scoreLease = loaded["request"] as! String
         var scoreSnapshot = loaded["snapshot"] as! Q.Object

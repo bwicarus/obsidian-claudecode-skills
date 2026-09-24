@@ -12,7 +12,7 @@ function fixture() {
   const state = {
     _mode: true, _contextCacheKey: 'book-a', _scopeMode: 'current',
     _queueBusy: false, _idx: 0, _queue: [card], _dueTotal: 4, _relatedTotal: 2,
-    _showingAnswer: false, _cardExpanded: true, _stagedRating: null, _ratingCommitBusy: 0, _nativeStageWork: null,
+    _showingAnswer: false, _cardExpanded: true, _stagedRating: null, _ratingCommitBusy: 0, _nativeStageWork: null, _nativeNavigationWork: null,
     _improveExpanded: false, _improveMode: 'verbose', _draftState: null, _commitState: {}, _presentationNotice: '',
     _stableCardId: c => 'anki_card_' + c.id,
     _legacyReviewNoteId: c => c?.note_id ?? null,

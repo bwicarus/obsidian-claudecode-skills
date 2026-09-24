@@ -9,6 +9,32 @@ const Repository = require('../../_server_deploy/static/reader-runtime/card-repo
 const source = readFileSync(new URL('../../_server_deploy/static/pdf/rc-review.js', import.meta.url), 'utf8');
 const load = source.slice(source.indexOf('  async function _loadLocalReviewQueue'), source.indexOf('  function _cardRequestCurrent'));
 
+test('native navigation changes the visible card only after persistence; errors and stale replies preserve selection', async () => {
+  const code=source.slice(source.indexOf('  function _selectNativeCard('),source.indexOf('  function _selectCard('));
+  for (const scenario of ['success','failed','stale']) {
+    let finish, fail, calls=0;
+    const result=new Promise((resolve,reject)=>{finish=resolve;fail=reject;});
+    const cards=[{id:'a'},{id:'b'}], sideEffects=[];
+    const r={_nativeNavigationWork:null,_nativeStageWork:null,_stagedRating:null,_queue:cards,_queueBusy:false,_ratingCommitBusy:0,
+      _queueRequestEpoch:1,_contextCacheKey:'context',_nativeQueueLease:'lease',_idx:0,_showingAnswer:true,_improveExpanded:true,
+      _cacheWriteChain:Promise.resolve(),_stableCardId:x=>x.id,_commitStagedRating:async()=>false,
+      _current:()=>cards[r._idx],_currentQueueSnapshot:()=>({cards,index:r._idx}),
+      _nativeQueueCall:async(operation,input)=>{calls++;assert.equal(operation,'selectCard');assert.equal(input.target.id,'b');return result;},
+      _rememberAndDeactivateSelections:()=>sideEffects.push('release'),_invalidateCardRequests(){},render(){},_activateCurrentSelections(){},
+      _scheduleDecorate(){},_notifyAssistant(){},_publishPresentation(){},_toast(){}};
+    vm.createContext(r);vm.runInContext(code,r);
+    const work=r._selectNativeCard(1,'native');
+    assert.equal(r._selectNativeCard(1,'native'),work);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(calls,1);assert.equal(r._idx,0);assert.equal(sideEffects.length,0);
+    if(scenario==='failed') fail(new Error('disk full'));
+    else {if(scenario==='stale') r._queueRequestEpoch++;finish({changed:true,snapshot:{index:1}});}
+    assert.equal(await work,scenario==='success');
+    assert.equal(r._idx,scenario==='success'?1:0);assert.equal(sideEffects.length,scenario==='success'?1:0);
+    if(scenario==='failed') assert.match(r._presentationNotice,/disk full/);
+  }
+});
+
 test('native queue crosses once with a bounded batch and no whole-library read', async () => {
   const prepared = { hasLocalCards: true, dueTotal: 1, entries: [{
     record: { id: 'card_aabb', entityRev: 2, stateRev: 3, source: { kind: 'book' } },
