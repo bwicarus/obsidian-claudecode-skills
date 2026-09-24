@@ -322,6 +322,14 @@ jobs:
           cp ios/BWReader/App/ReaderNativeReviewFaces.swift "$RUNNER_TEMP/native-markdown-checks/"
           swift run --package-path "$RUNNER_TEMP/native-markdown-checks" NativeMarkdownChecks
 
+      - name: Verify native EPUB archive reads
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-epub-checks"
+          cp ios/BWReader/Tests/NativeEPUBArchive/*.swift "$RUNNER_TEMP/native-epub-checks/"
+          cp ios/BWReader/App/ReaderNativeEPUBArchive.swift "$RUNNER_TEMP/native-epub-checks/"
+          python3 ios/BWReader/Tests/NativeEPUBArchive/fixtures.py "$RUNNER_TEMP/native-epub-fixtures"
+          swift run --package-path "$RUNNER_TEMP/native-epub-checks" NativeEPUBArchiveChecks "$RUNNER_TEMP/native-epub-fixtures"
+
       - name: Verify native desktop Anki export receipts
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeCardRepository.swift ios/BWReader/App/ReaderNativeAnkiPC.swift ios/BWReader/Tests/NativeAnkiPC/main.swift -o "$RUNNER_TEMP/native-anki-pc-test"

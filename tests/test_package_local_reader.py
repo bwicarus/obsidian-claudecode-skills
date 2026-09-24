@@ -95,18 +95,19 @@ class LocalReaderPackagerTests(unittest.TestCase):
         )
         self.assertNotIn('rel="manifest"', shell)
 
-    def test_epub_shell_contract_and_jszip_order(self) -> None:
+    def test_epub_shell_contract_and_native_archive_order(self) -> None:
         shell = self.packager.build_epub_shell()
         self.assertTrue(shell.lstrip().lower().startswith("<!doctype html>"))
         for placeholder in self.packager.EPUB_PLACEHOLDERS:
             self.assertIn(placeholder, shell)
         flag = shell.index("window.__BW_NATIVE_LOCAL_READER__=true")
-        jszip = shell.index("/static/pdf/vendor/jszip.min.js")
+        archive = shell.index("window.__BW_NATIVE_EPUB_ARCHIVE__=true")
+        self.assertNotIn("/static/pdf/vendor/jszip.min.js", shell)
         purifier = shell.index("/static/pdf/vendor/purify.min.js")
         runtime = shell.index("/static/pdf/native-local-runtime.js")
         marked = shell.index("/static/qa/marked.js")
-        self.assertLess(flag, jszip)
-        self.assertLess(jszip, purifier)
+        self.assertLess(flag, archive)
+        self.assertLess(archive, purifier)
         self.assertLess(purifier, runtime)
         self.assertLess(runtime, marked)
         self.assertTrue(all(

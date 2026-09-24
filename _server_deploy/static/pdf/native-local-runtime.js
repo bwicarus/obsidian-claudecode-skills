@@ -9396,6 +9396,20 @@
     return doc;
   }
   function boundedInflate(entry, maximumBytes, code, label) {
+    if (entry && entry._nativeEPUBPath) {
+      return originalFetch(basePath + '/native-api/epub/entry?book=' + encodeURIComponent(bookId) +
+        '&path=' + encodeURIComponent(entry._nativeEPUBPath) + '&limit=' + maximumBytes +
+        '&identity=' + encodeURIComponent(entry._nativeEPUBIdentity), { cache: 'no-store' })
+        .then(function (response) {
+          if (!response.ok) throw new RuntimeError(String(label || 'EPUB 项') + ' 原生读取失败', code);
+          return response.arrayBuffer();
+        }).then(function (buffer) {
+          if (buffer.byteLength > maximumBytes || buffer.byteLength !== entry._data.uncompressedSize) {
+            throw new RuntimeError(String(label || 'EPUB 项') + ' 大小不符', code);
+          }
+          return new Uint8Array(buffer);
+        });
+    }
     return new Promise(function (resolve, reject) {
       var chunks = [];
       var length = 0;
@@ -9640,9 +9654,35 @@
       return toc.length ? toc : fallbackEPUBTOC(epub);
     });
   }
-  function loadEPUB() {
-    if (epubPromise) return epubPromise;
-    epubPromise = Promise.resolve().then(function () {
+  function loadEPUBArchive() {
+    if (root.__BW_NATIVE_EPUB_ARCHIVE__ === true) {
+      return originalFetch(basePath + '/native-api/epub/catalog?book=' + encodeURIComponent(bookId),
+        { cache: 'no-store' }).then(function (response) {
+          if (!response.ok) throw new RuntimeError('无法读取 EPUB 原生目录', 'BW_LOCAL_EPUB_FETCH');
+          return response.json();
+        }).then(function (value) {
+          if (!value || value.ok !== true || typeof value.identity !== 'string' || !value.identity ||
+              !Array.isArray(value.entries) || value.entries.length > 10000) {
+            throw new RuntimeError('EPUB 原生目录无效', 'BW_LOCAL_EPUB_LIMIT');
+          }
+          var files = Object.create(null), byPath = Object.create(null);
+          value.entries.forEach(function (item) {
+            if (!item || typeof item.name !== 'string' || typeof item.path !== 'string' ||
+                canonicalZipPath(item.name, '') !== item.path || byPath[item.path] ||
+                typeof item.directory !== 'boolean' || !Number.isSafeInteger(item.size) || item.size < 0 ||
+                !Number.isSafeInteger(item.compressedSize) || item.compressedSize < 0) {
+              throw new RuntimeError('EPUB 原生文件项无效', 'BW_LOCAL_EPUB_PATH');
+            }
+            var entry = { dir: item.directory, _nativeEPUBPath: item.path, _nativeEPUBIdentity: value.identity,
+              _data: { uncompressedSize: item.size, compressedSize: item.compressedSize } };
+            files[item.name] = entry; byPath[item.path] = entry;
+          });
+          return { files: files, file: function (path) {
+            var entry = byPath[path]; return entry && !entry.dir ? entry : null;
+          } };
+        });
+    }
+    return Promise.resolve().then(function () {
       if (!root.JSZip || typeof root.JSZip.loadAsync !== 'function') {
         throw new RuntimeError('EPUB 解包器未加载', 'BW_LOCAL_EPUB_ZIP');
       }
@@ -9655,7 +9695,11 @@
     }).then(function (bytes) {
       assertEPUBCentralDirectoryEnvelope(bytes);
       return root.JSZip.loadAsync(bytes, { checkCRC32: false });
-    })
+    });
+  }
+  function loadEPUB() {
+    if (epubPromise) return epubPromise;
+    epubPromise = loadEPUBArchive()
       .then(function (zip) {
         var names = Object.keys(zip.files);
         if (names.length > 10000) throw new RuntimeError('EPUB 文件项过多', 'BW_LOCAL_EPUB_LIMIT');

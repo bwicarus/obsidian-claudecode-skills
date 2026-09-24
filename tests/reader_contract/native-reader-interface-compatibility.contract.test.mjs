@@ -390,7 +390,7 @@ test("packaging copies one manifest and injects it before native-local-runtime u
   );
   assert.match(PACKAGE, /return f"<script>window\.\{NATIVE_INTERFACE_GLOBAL\}=\{encoded\};<\/script>\\n"/);
   assert.match(PACKAGE, /flag < interface_manifest < purifier < runtime < marked/);
-  assert.match(PACKAGE, /interface_manifest < jszip < purifier < runtime/);
+  assert.match(PACKAGE, /interface_manifest < archive < purifier < runtime/);
   assert.match(PACKAGE, /validate_native_interface_coverage\(root, interface_manifest\)/);
   assert.match(PACKAGE, /validate_bundle\(staging, require_manifest=False\)[\s\S]*write_manifest\(staging\)/);
   assert.match(PACKAGE, /<script\\b\(\?!\[\^>\]\*\\bnonce/);

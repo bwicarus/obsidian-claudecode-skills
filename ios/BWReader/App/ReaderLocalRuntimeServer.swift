@@ -235,6 +235,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     let imageProxyBroker: ReaderNativeImageProxyBroker
     let pageRenderer: ReaderNativePDFPageRenderer
     let visualCaptureBroker: ReaderNativeVisualCaptureBroker
+    private let epubArchive = ReaderNativeEPUBArchive()
 
     func handleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
         guard request.method == .GET
@@ -433,6 +434,8 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             return await serveShell(request, relative: relative)
         case "native-api/book-meta":
             return await serveBookMeta(request)
+        case "native-api/epub/catalog", "native-api/epub/entry":
+            return await serveEPUBArchive(request, catalog: relative.hasSuffix("/catalog"))
         case "native-api/visual-capture":
             return await serveNativeVisualCapture(request)
         case "native-api/sf-symbol":
@@ -868,6 +871,33 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 ]
             )
         }
+    }
+
+    private func serveEPUBArchive(_ request: HTTPRequest, catalog: Bool) async -> HTTPResponse {
+        guard request.method == .GET, let id = request.query["book"], Self.isOpaqueBookID(id),
+              let access = await state.access(for: id), access.record.format == .epub else {
+            return response(status: .notFound, text: "EPUB unavailable")
+        }
+        do {
+            try access.validateCurrentFile(maximumEPUBBytes: ReaderLocalRuntimeServer.maximumEPUBBytes)
+            let identity = id + ":" + String(access.record.byteCount) + ":" + String(access.record.modifiedAt?.timeIntervalSince1970 ?? 0)
+            if catalog {
+                let entries = try await epubArchive.list(url: access.url, identity: identity)
+                guard await state.access(for: id) === access else { throw CancellationError() }
+                try access.validateCurrentFile(maximumEPUBBytes: ReaderLocalRuntimeServer.maximumEPUBBytes)
+                return jsonResponse(request, status: .ok, object: ["ok": true, "entries": entries, "identity": identity])
+            }
+            guard let path = request.query["path"], let limit = request.query["limit"], let maximum = Int(limit) else {
+                return response(status: .badRequest, text: "invalid EPUB entry")
+            }
+            guard request.query["identity"] == identity else {
+                return response(status: .conflict, text: "EPUB archive changed")
+            }
+            let data = try await epubArchive.read(url: access.url, identity: identity, path: path, maximumBytes: maximum)
+            guard await state.access(for: id) === access else { throw CancellationError() }
+            try access.validateCurrentFile(maximumEPUBBytes: ReaderLocalRuntimeServer.maximumEPUBBytes)
+            return dataResponse(request, data: data, contentType: "application/octet-stream", cacheControl: "no-store")
+        } catch { return jsonResponse(request, status: .conflict, object: ["ok": false, "error": error.localizedDescription]) }
     }
 
     private func serveBookMeta(_ request: HTTPRequest) async -> HTTPResponse {

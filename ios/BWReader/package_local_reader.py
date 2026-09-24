@@ -1163,7 +1163,7 @@ def build_epub_shell(
     bootstrap = (
         '<script>window.__BW_NATIVE_LOCAL_READER__=true;</script>\n'
         + _native_interface_bootstrap(interface_manifest)
-        + '<script src="/static/pdf/vendor/jszip.min.js"></script>\n'
+        + '<script>window.__BW_NATIVE_EPUB_ARCHIVE__=true;</script>\n'
         '<script src="/static/pdf/vendor/purify.min.js"></script>\n'
         '<script src="/static/pdf/native-local-runtime.js"></script>\n'
     )
@@ -1775,13 +1775,9 @@ def validate_shell(root: Path, relative: str, placeholders: tuple[str, ...], *, 
     ):
         raise SystemExit(f"native runtime order is invalid in {relative}")
     if epub:
-        jszip = shell.find('/static/pdf/vendor/jszip.min.js')
-        if min(jszip, purifier) < 0 or not (
-            interface_manifest < jszip < purifier < runtime
-        ):
-            raise SystemExit(
-                "EPUB must load JSZip and DOMPurify before native-local-runtime"
-            )
+        archive = shell.find('window.__BW_NATIVE_EPUB_ARCHIVE__=true')
+        if not (interface_manifest < archive < purifier < runtime) or '/static/pdf/vendor/jszip.min.js' in shell:
+            raise SystemExit("App EPUB must use the native archive and retain DOMPurify")
     sync_runtime = shell.find('/static/reader-runtime/sync-runtime.js')
     native_sync = shell.find('/static/reader-runtime/native-sync-bootstrap.js')
     if min(sync_runtime, native_sync) < 0 or sync_runtime >= native_sync:

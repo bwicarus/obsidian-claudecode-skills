@@ -20,6 +20,9 @@ settings:
     TARGETED_DEVICE_FAMILY: "1,2"
 
 packages:
+  zipFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    exactVersion: 0.9.20
   swiftCmark:
     url: https://github.com/swiftlang/swift-cmark.git
     exactVersion: 0.9.0
@@ -104,6 +107,8 @@ targets:
         product: FlyingSocks
       - package: swiftSoup
         product: SwiftSoup
+      - package: zipFoundation
+        product: ZIPFoundation
       - package: swiftCmark
         product: cmark-gfm
       - package: swiftCmark

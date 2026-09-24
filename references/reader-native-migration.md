@@ -412,7 +412,17 @@ answer IDs and retains their result through view cancellation. The existing acco
 offline outbox remains the durable retry owner; no second unscoped retry queue is introduced.
 The follow-up Apple run rejected the legacy adapter's undeclared `review.scheduleSource`:
 native provenance is now kept in the durable operation receipt, without changing the shared
-card-state schema. Interval/counter checks and the full App build must pass on this correction.
+card-state schema. Interval/counter checks, native queue/answer tests and the full App build
+passed Apple run `35953888490` on `55b84e1c`.
+
+EPUB archive access now uses a file-backed ZIPFoundation 0.9.20 actor, independent of the UI
+thread. The App reads a bounded catalog then individual original chapter/resource bytes; it
+no longer loads JSZip or copies the complete compressed book into web memory. Entry reads
+retain archive identity, size/CRC/path checks and the current security-scoped book lease.
+The compatibility chapter sanitizer, spine/TOC parser and display remain pending migration;
+this stage does not claim a native EPUB reading surface. Browser archive behavior is retained.
+Local verification: 163 focused Node checks and seven packaging checks passed. Native ZIP
+fixtures and the complete App still require the next Apple build.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

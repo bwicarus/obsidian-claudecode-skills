@@ -1218,6 +1218,49 @@ test("EPUB validates central-directory limits before any member inflation", () =
   assert.match(textReader, /BW_LOCAL_EPUB_TEXT_LIMIT/);
 });
 
+test("App EPUB reads a native catalog and selected entry without copying or inflating the book in JS", async () => {
+  const requests = [];
+  const bytes = new TextEncoder().encode("<p>結核 &amp; SARS</p>");
+  let failed = false;
+  const context = {
+    Promise, Error, Uint8Array, encodeURIComponent,
+    root: { __BW_NATIVE_EPUB_ARCHIVE__: true, JSZip: { loadAsync() { throw Error("web inflation"); } } },
+    basePath: "/r/capability", bookId: "opaque-id",
+    RuntimeError: class extends Error {},
+    originalFetch: async (raw) => {
+      const url = new URL(raw, "http://localhost"); requests.push(url);
+      if (failed) return { ok: false };
+      if (url.pathname.endsWith("/catalog")) return { ok: true, json: async () => ({
+        ok: true, identity: "book-revision", entries: [
+          { name: "OPS/", path: "OPS", directory: true, size: 0, compressedSize: 0 },
+          { name: "OPS/章.xhtml", path: "OPS/章.xhtml", directory: false, size: bytes.length, compressedSize: bytes.length },
+        ],
+      }) };
+      assert.equal(url.pathname, "/r/capability/native-api/epub/entry");
+      assert.equal(url.searchParams.get("path"), "OPS/章.xhtml");
+      assert.equal(url.searchParams.get("identity"), "book-revision");
+      return { ok: true, arrayBuffer: async () => bytes.buffer };
+    },
+  };
+  vm.runInNewContext([
+    SOURCE.slice(SOURCE.indexOf("function canonicalZipPath"), SOURCE.indexOf("function xmlDocument")),
+    SOURCE.slice(SOURCE.indexOf("function boundedInflate"), SOURCE.indexOf("function zipText")),
+    SOURCE.slice(SOURCE.indexOf("function loadEPUBArchive"), SOURCE.indexOf("function loadEPUB()")),
+    "this.load=loadEPUBArchive;this.inflate=boundedInflate;",
+  ].join("\n"), context);
+  const archive = await context.load();
+  assert.equal(requests.length, 1, "catalog does not read member content");
+  assert.equal(archive.file("OPS"), null);
+  const entry = archive.file("OPS/章.xhtml");
+  assert.deepEqual([...await context.inflate(entry, 8 * 1024 * 1024, "LIMIT", "chapter")], [...bytes]);
+  assert.equal(requests.length, 2);
+  await assert.rejects(context.inflate(entry, 1, "LIMIT", "chapter"), /大小不符/);
+  failed = true;
+  await assert.rejects(context.load(), /原生目录/);
+  await assert.rejects(context.inflate(entry, 8 * 1024 * 1024, "LIMIT", "chapter"), /原生读取失败/);
+  assert.ok(requests.every(url => url.pathname.includes("/native-api/epub/")), "no whole-book fallback on native failure");
+});
+
 test("bounded inflater rejects actual bytes even when ZIP metadata lies", async () => {
   const inflateSource = SOURCE.slice(
     SOURCE.indexOf("function boundedInflate"),
