@@ -247,6 +247,10 @@ class SubprocessRunner:
 
     def run(self, args: Sequence[str], *, cwd: Path) -> CommandResult:
         environment = os.environ.copy()
+        # Do not inherit a frozen launcher's ephemeral Tcl installation when
+        # compiling or verifying an independent candidate process.
+        environment.pop("TCL_LIBRARY", None)
+        environment.pop("TK_LIBRARY", None)
         environment.update(self._environment_overrides)
         try:
             completed = subprocess.run(

@@ -111,9 +111,10 @@ test("PDFKit serves the legacy TOC shape locally without a Pi book dependency", 
   assert.equal(route?.remoteBook, null);
   assert.match(SERVER, /decodedPath == "\/pdf\/api\/toc"/);
   assert.match(SERVER, /trustedResourceSurface\([\s\S]*\) == \.pdf/);
-  assert.match(SERVER, /let entries = Self\.nativeTOCEntries\(in: document\)/);
-  assert.match(SERVER, /document\.outlineRoot/);
-  assert.match(SERVER, /"title": title,[\s\S]*"page": pageIndex \+ 1,[\s\S]*"level": max\(1, level\)/);
+  assert.match(SERVER, /let entries = ReaderNativePDFOutline\.entries\(in: document\)/);
+  const outline = read('ios/BWReader/App/ReaderNativePDFIndex.swift');
+  assert.match(outline, /document\.outlineRoot/);
+  assert.match(outline, /"title": title,[\s\S]*"page": pageIndex \+ 1,[\s\S]*"level": max\(1, level\)/);
   assert.match(SERVER, /"exists": !entries\.isEmpty/);
   assert.match(SERVER, /"source": entries\.isEmpty \? "none" : "native"/);
   assert.match(SERVER, /if request\.query\["entries"\] != nil/);

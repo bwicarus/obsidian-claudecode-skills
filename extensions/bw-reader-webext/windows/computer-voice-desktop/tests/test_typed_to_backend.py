@@ -23,6 +23,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RUNNER = HERE.parent / "voice_cli_runner.py"
+sys.path.insert(0, str(RUNNER.parent))
 
 _spec = importlib.util.spec_from_file_location("voice_cli_runner_typed", RUNNER)
 vcr = importlib.util.module_from_spec(_spec)

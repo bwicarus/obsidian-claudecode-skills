@@ -600,3 +600,27 @@ exports, preventing Send from racing ahead of selected images. Software IME comp
 confirmation is held through the current event loop, alongside hardware-key marked-text
 handling. These changes join the same consolidated Apple verification; they are not an
 installed release or proof that every compatibility adapter has been removed.
+
+### Consolidated build and server integration, 2026-09-24
+
+The attachment/composer/native-review batch passed all native checks and full App
+compilation in Apple run `35990279682` (`b5e8456d`). Two compile errors were corrected:
+the PhotosPicker SwiftUI overlay import and the shared PDF outline function's owner.
+This is an unsigned build, not an installed App or TestFlight release.
+
+The Windows candidate has been reconciled with the **actually installed** Jev runner,
+artifact resend and trace handling, rather than replacing them with the older branch
+copy. Their 63 checks and the existing typed-input/turn checks passed. ReaderPC 0.1.296
+and Direct 0.1.440 passed packaged self-tests. Earlier 0.1.294/295 and 0.1.439 candidates
+failed because the frozen parent exported expired Tcl/Tk paths to PyInstaller; both
+build processes now discard those process-local paths. Failed candidates are not for
+installation. Production services have not yet been switched by this entry.
+
+The next native lookup batch removes ordinary word/phrase requests from the hidden
+popup adapter. Swift preserves offline-first rich dictionary data, Chinese-only meaning
+and examples, inflection/origin, live vocabulary/phrase state, bounded device cache and
+the existing server/ReaderPC fallback. Dictionary inference uses a separate data socket;
+it cannot occupy the audio channel. Stale server entries refresh only while the panel
+is visible. Eighteen focused Reader checks passed; the new Swift checks and App build
+remain pending. Supplemental dictionary actions, conversation/artifact effect adapters
+and the review compatibility controller are still tracked migration work.

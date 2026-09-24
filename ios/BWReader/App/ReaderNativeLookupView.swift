@@ -4,7 +4,7 @@ import SwiftUI
 /// 原生阅读区的查词 / 整段翻译结果面板。
 ///
 /// 此模型负责显示，数据由宿主路由：翻译、例句中译和完整英语词典直接走 Swift
-/// 网关；日语词条、改进和其他尚未迁移的动作仍走共享语义接口。
+/// 网关；单词和词组由 Swift 整理，部分补充操作仍走共享语义接口。
 /// 语言判断读取当前书声明的语言，迁移时须保留原字段和后备行为。
 ///
 /// 2026-09-24 用户："词典内容也和之前不一样，少了很多元素 …… 应该在旧的基础上改动，
@@ -97,6 +97,25 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
         guard mode == "dict" || mode == "phrase" else { return }
         Task { await fillExampleZh() }
         Task { await loadCards() }
+    }
+
+    /// The server can return an old entry while preparing richer data. Refresh
+    /// only the still-visible panel; SwiftUI cancels this task on dismissal.
+    func refreshStaleEntry() async {
+        guard (mode == "dict" || mode == "phrase"), value["stale"] as? Bool == true else { return }
+        for delay in [12, 30] {
+            do { try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000) }
+            catch { return }
+            guard !Task.isCancelled, value["stale"] as? Bool == true, !expanded else { return }
+            let receipt = await lookup(mode, text)
+            guard !Task.isCancelled else { return }
+            if receipt["ok"] as? Bool == true, let refreshed = receipt["value"] as? [String: Any] {
+                value = refreshed
+                favorited = refreshed["fav"] as? Bool == true
+                mastered = refreshed["mastered"] as? Bool == true
+                Task { await fillExampleZh() }
+            }
+        }
     }
 
     // MARK: 标记掌握
@@ -388,6 +407,7 @@ struct ReaderNativeLookupContent: View {
             }
         }
         .foregroundStyle(.white)
+        .task(id: model.value["stale"] as? Bool == true) { await model.refreshStaleEntry() }
     }
 
     // MARK: 翻译 / 解释 / 非日语词组

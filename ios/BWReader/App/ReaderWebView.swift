@@ -2455,16 +2455,124 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeLookupCache: [String: [String: Any]] = [:]
     private var nativeLookupCacheBytes = 0
     private var nativeLookupTasks: [String: (id: UUID, task: Task<[String: Any], Error>)] = [:]
+    private var nativeWordLookupEntries: [String: [String: Any]] = [:]
+    private var nativeWordLookupOrder: [String] = []
+    private var nativeWordLookupCacheLoaded = false
+
+    private func nativeWordEntry(_ input: [String: Any], book: ReaderLocalBookRecord,
+                                 languages: [String], gateway: ReaderNativeServerGateway) async throws -> [String: Any] {
+        let word = (input["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !word.isEmpty, word.utf16.count <= 2000, !word.contains("\0") else {
+            throw ReaderNativeLookupRequest.Failure(message: "BW_READER_LOOKUP_TEXT")
+        }
+        let context = String((input["context"] as? String ?? "").prefix(320))
+        let japanese = ReaderNativeLookupRequest.isJapanese(word, languages: languages)
+        let generation = bookUserStateContextGeneration, gatewayContext = gateway.contextRevision
+        let surface: ReaderNativeInterfaceSurface = book.format == .pdf ? .pdf : .epub
+        let deviceStore = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-device").store
+        let globalStore = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+        let cacheMeta = "native-word-lookup-cache-v1"
+        if !nativeWordLookupCacheLoaded {
+            if let raw = try deviceStore.meta(cacheMeta), raw.utf8.count <= 4 * 1024 * 1024,
+               let cached = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] {
+                nativeWordLookupOrder = Array((cached["order"] as? [String] ?? []).suffix(600))
+                let entries = cached["entries"] as? [String: [String: Any]] ?? [:]
+                for key in nativeWordLookupOrder { nativeWordLookupEntries[key] = entries[key] }
+            }
+            nativeWordLookupCacheLoaded = true
+        }
+        var query = URLComponents(); query.path = "/pdf/api/dict-quick"
+        let page = max(0, (input["page"] as? NSNumber)?.intValue ?? 0)
+        query.queryItems = [.init(name: "word", value: word), .init(name: "file", value: "localbook:" + book.id),
+            .init(name: "page", value: String(page)), .init(name: "context", value: context),
+            .init(name: "langs", value: languages.joined(separator: ","))]
+        query.percentEncodedQuery = query.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        guard let path = query.string else { throw ReaderNativeLookupRequest.Failure(message: "BW_READER_LOOKUP_TEXT") }
+        let cacheKey = path, taskKey = "word:" + String(generation) + ":" + path
+        let raw: [String: Any]
+        if let hit = nativeWordLookupEntries[cacheKey], ReaderNativeWordLookup.cacheable(hit, japanese: japanese) { raw = hit }
+        else {
+            let job: Task<[String: Any], Error>, jobID: UUID
+            if let running = nativeLookupTasks[taskKey] { job = running.task; jobID = running.id }
+            else {
+                guard nativeLookupTasks.count < 24 else { throw ReaderNativeLookupRequest.Failure(message: "查询正在处理中，请稍候") }
+                jobID = UUID()
+                job = Task { @MainActor in
+                    try await ReaderNativeWordLookup.lookup(japanese: japanese, local: {
+                        let data = try await ReaderNativeOfflineDictionary.shared.lookup(word)
+                        return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+                    }, remote: {
+                        let response = try await gateway.fetchData(path: path, surface: surface)
+                        guard (200..<300).contains(response.status) else { throw ReaderNativeLookupRequest.Failure(message: "词典服务器暂不可用") }
+                        return try JSONSerialization.jsonObject(with: response.data) as? [String: Any] ?? [:]
+                    }, fallback: { base in
+                        guard word.utf16.count <= 256 else { return nil }
+                        let socket = DirectVoiceSocket(configuration: .readerContext) { _ in }
+                        do {
+                            _ = try await socket.openReaderContext()
+                            let reply = try await socket.requestReaderDictionary(term: word, context: context,
+                                reading: String((base["reading"] as? String ?? "").prefix(128)))
+                            await socket.disconnect()
+                            let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reply)) as? [String: Any] ?? [:]
+                            var value = base
+                            value["ok"] = true; value["jp"] = true; value["word"] = word
+                            if (value["lemma"] as? String ?? "").isEmpty { value["lemma"] = word }
+                            value["zh"] = object["text"]; value["translation"] = object["text"]
+                            value["meaning_source"] = "pc-codex-cli"; value["cli_cached"] = object["cached"]
+                            if (value["source"] as? String ?? "").isEmpty { value["source"] = "pc-codex-cli" }
+                            return ReaderNativeWordLookup.meaning(value).isEmpty ? nil : value
+                        } catch { await socket.disconnect(); throw error }
+                    })
+                }
+                nativeLookupTasks[taskKey] = (jobID, job)
+            }
+            defer { if nativeLookupTasks[taskKey]?.id == jobID { nativeLookupTasks.removeValue(forKey: taskKey) } }
+            raw = try await job.value
+            try Task.checkCancellation()
+            guard generation == bookUserStateContextGeneration, gatewayContext == gateway.contextRevision,
+                  currentLocalBook?.id == book.id else { throw CancellationError() }
+            if ReaderNativeWordLookup.cacheable(raw, japanese: japanese) {
+                var cached = raw
+                for field in ["mastered", "cached", "cli_cached"] { cached.removeValue(forKey: field) }
+                nativeWordLookupEntries[cacheKey] = cached
+                nativeWordLookupOrder.removeAll { $0 == cacheKey }; nativeWordLookupOrder.append(cacheKey)
+                while nativeWordLookupOrder.count > 600 { nativeWordLookupEntries.removeValue(forKey: nativeWordLookupOrder.removeFirst()) }
+                var data = try JSONSerialization.data(withJSONObject: ["order": nativeWordLookupOrder, "entries": nativeWordLookupEntries])
+                while data.count > 4 * 1024 * 1024, !nativeWordLookupOrder.isEmpty {
+                    nativeWordLookupEntries.removeValue(forKey: nativeWordLookupOrder.removeFirst())
+                    data = try JSONSerialization.data(withJSONObject: ["order": nativeWordLookupOrder, "entries": nativeWordLookupEntries])
+                }
+                // A disposable lookup cache cannot turn a successful read into
+                // a failed query; canonical vocabulary state is separate.
+                try? deviceStore.putMeta(cacheMeta, json: String(decoding: data, as: UTF8.self))
+            }
+        }
+        guard generation == bookUserStateContextGeneration, gatewayContext == gateway.contextRevision else { throw CancellationError() }
+        var mastered = raw["mastered"] as? Bool == true
+        if let deviceID = nativeReadingStoreDeviceID {
+            let spec: [String: Any] = ["kind": "word", "language": japanese ? "ja" : "en",
+                "lemma": (raw["lemma"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? word,
+                "word": word, "forms": raw["forms"] as? [String] ?? []]
+            if let id = (try? ReaderNativeVocabularyState.normalized(spec, property: "mastered"))?["id"] as? String,
+               try globalStore.record(collection: ReaderNativeVocabularyState.collection, id: id) != nil {
+                mastered = try ReaderNativeVocabularyState(store: globalStore, deviceID: deviceID).enabled(spec, property: "mastered")
+            }
+        }
+        return try ReaderNativeWordLookup.entry(raw, word: word, japanese: japanese, mastered: mastered)
+    }
 
     private func performNativeLookupCommand(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "nativeSelectionLookup", let input = command["value"] as? [String: Any],
-              let mode = input["mode"] as? String, ["translate", "example-zh", "dict-full", "phrase"].contains(mode) else { return nil }
+              let mode = input["mode"] as? String, ["translate", "example-zh", "dict", "dict-full", "phrase"].contains(mode) else { return nil }
         do {
             guard !isLoading, let book = currentLocalBook, let gateway = nativeServerGateway,
                   isTrustedReaderURL(webView.url) else { throw ReaderNativeLookupRequest.Failure(message: "阅读页尚未就绪") }
             let generation = bookUserStateContextGeneration
             let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
             let languages = try ReaderNativeBookProjection(store: store).state("book-languages", bookID: book.id).payload as? [String] ?? []
+            if mode == "dict" {
+                return ["ok": true, "value": try await nativeWordEntry(input, book: book, languages: languages, gateway: gateway)]
+            }
             if mode == "phrase" {
                 guard let text = input["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       text.utf16.count <= 2000, let service = nativePhraseService else {
@@ -2473,16 +2581,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 let japanese = ReaderNativeLookupRequest.isJapanese(text, languages: languages)
                 var value: [String: Any]
                 if japanese {
-                    // Dictionary content remains shared; the saved phrase's
-                    // identity and state belong to the native stores.
-                    let raw = try await webView.callAsyncJavaScript(
-                        "return await window.__bwNativeConversation?.perform(command);",
-                        arguments: ["command": command], in: nil, contentWorld: .page)
-                    guard let receipt = raw as? [String: Any], receipt["ok"] as? Bool == true,
-                          let content = receipt["value"] as? [String: Any] else {
-                        throw ReaderNativeLookupRequest.Failure(message: (raw as? [String: Any])?["error"] as? String ?? "词组查询失败")
-                    }
-                    value = content
+                    value = try await nativeWordEntry(input, book: book, languages: languages, gateway: gateway)
                 } else {
                     var translation = input; translation["mode"] = "translate"
                     let receipt = await performNativeLookupCommand(["action": "nativeSelectionLookup", "value": translation])

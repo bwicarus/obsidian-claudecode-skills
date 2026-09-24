@@ -145,6 +145,8 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "voice_cli_runner.py"
     ),
+    "readerpc-runtime/voice_jev_context.py": DESKTOP_SOURCE / "voice_jev_context.py",
+    "readerpc-runtime/voice_artifact_resend.py": DESKTOP_SOURCE / "voice_artifact_resend.py",
     # 自建定时任务（2026-09-14）：flow 执行器 + 调度；语音核心按稳定路径 import bw_scheduler
     "readerpc-runtime/bw_flow_runner.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
@@ -370,6 +372,10 @@ def build_candidate(version: str) -> Path:
     work = destination / "_work"
     dist = work / "dist"
     environment = os.environ.copy()
+    # This command can be launched by the frozen ReaderPC host. Its temporary
+    # Tcl paths belong to that process, not to the build Python installation.
+    environment.pop("TCL_LIBRARY", None)
+    environment.pop("TK_LIBRARY", None)
     environment.update({"PYTHONHASHSEED": "0", "SOURCE_DATE_EPOCH": "315532800"})
     try:
         version_result = subprocess.run(
@@ -423,6 +429,7 @@ def build_candidate(version: str) -> Path:
             timeout=600,
             env=environment,
         )
+        (destination / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         if result.returncode != 0:
             _fail(f"PyInstaller 失败: {(result.stderr or result.stdout)[-1200:]}")
         if _source_inputs() != source_inputs:
@@ -626,6 +633,7 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             "codex_restart.py",
             # 自建语音会话运行器
             "voice_cli_runner.py",
+            "voice_jev_context.py", "voice_artifact_resend.py",
             # 语音核心的 MCP 服务器（后台模型自己开口用）
             "voice_core_mcp.py",
             # 自建定时任务：执行器 + 调度

@@ -365,7 +365,7 @@ jobs:
 
       - name: Verify native lookup data requests
         run: |
-          xcrun swiftc ios/BWReader/App/ReaderNativeLookupRequest.swift ios/BWReader/Tests/NativeLookupRequest/main.swift -o "$RUNNER_TEMP/native-lookup-test"
+          xcrun swiftc ios/BWReader/App/ReaderNativeLookupRequest.swift ios/BWReader/App/ReaderNativeWordLookup.swift ios/BWReader/Tests/NativeLookupRequest/main.swift -o "$RUNNER_TEMP/native-lookup-test"
           "$RUNNER_TEMP/native-lookup-test"
 
       - name: Verify native vocabulary state parity

@@ -3,6 +3,7 @@ import Foundation
 /// File IO, digest verification and JSON decoding are serialized off the UI
 /// actor. Install replacement/removal invalidates every cached shard.
 actor ReaderNativeOfflineDictionary {
+    static let shared = ReaderNativeOfflineDictionary()
     private let dictionary = ReaderNativeJapaneseDictionary(read: ReaderOfflineDictionaryStore.readRuntimeResource)
     private var installation: ReaderOfflineDictionaryInfo?
 

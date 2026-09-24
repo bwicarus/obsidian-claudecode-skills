@@ -30,6 +30,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
+from voice_jev_context import JevContext, build_tool_context, skip_context_reason
+from voice_artifact_resend import ArtifactResender, latest_artifact
 
 # 定时任务调度（2026-09-14）：与运行器同目录（源码树）或 %LOCALAPPDATA%\BWReader（稳定副本）
 for _cand in (Path(__file__).resolve().parent, Path(os.environ.get("LOCALAPPDATA", "")) / "BWReader"):
@@ -366,6 +368,11 @@ DEFAULTS: dict = {
     "promiseIdleSeconds": 4.0,
     "promiseMaxWaitSeconds": 45.0,
     "steerWaitSeconds": 3.0,          # 委托之后等这一轮起来的上限（实测 22~60 ms 就起）
+    "jevContextEnabled": False,  # 可热切换的 Jev 路由开关。
+    "jevResendEnabled": False,  # 桥端点检查通过后单独打开；可独立回退。
+    "jevWaitMilliseconds": 1500,
+    "jevKeyFile": str(Path.home() / "Desktop" / "jev api.txt"),
+    "jevQuestionFile": str(BASE / "jev-routing-question.json"),
     "contextInjectOn": "delegationSteer",  # 后台那份状态什么时候投。
                                       # delegationSteer（默认，2026-09-17）= 后台真的开工之后，
                                       #   用 turn/steer 插进**正在跑的那一轮**。不跟轮的启动赛跑，
@@ -1162,6 +1169,11 @@ class Runner:
         self._stream_terminal = set()
         self._transcript_streams = None
         threading.Thread(target=self._history_worker, name="history-writer", daemon=True).start()
+        self._artifact_resender = ArtifactResender(self)
+        self._jev = JevContext(self.settings, self._ctx_snapshot, self._jev_dialogue,
+                               self._jev_task_state, self.log,
+                               artifact_source=latest_artifact, on_prepared=self._artifact_resender.prepared)
+        self.log('artifact_resend_ready', mode='attempt_then_failure_only', cooldown_ms=4000)
 
     # ---------- 设置 ----------
     def load_settings(self) -> dict:
@@ -1185,6 +1197,8 @@ class Runner:
     async def update_settings(self, patch: dict) -> dict:
         changed = {k: v for k, v in patch.items() if k in DEFAULTS and self.settings.get(k) != v}
         self.settings.update(changed)
+        if "jevContextEnabled" in changed and not self.settings.get("jevContextEnabled"):
+            self._jev.reset()
         self.save_settings()
         hot = [k for k in changed if k in HOT_KEYS]
         cold = [k for k in changed if k in COLD_KEYS]
@@ -1407,6 +1421,14 @@ class Runner:
         t = d.get("type", "?")
         if t in ("turn.created", "turn.done"):
             turn = d.get("turn") or {}
+            if self.settings.get("jevContextEnabled"):
+                if turn.get("role") == "user":
+                    key = self._jev_key(turn.get("id"))
+                    self._jev.observe(key, (turn.get("transcript") or self._voice_user_acc or "").strip(),
+                                      new_turn=t == "turn.created", completed=t == "turn.done")
+                elif turn.get("role") == "assistant" and t == "turn.created":
+                    # Preparation alone never injects or starts a backend turn.
+                    self.loop.call_soon_threadsafe(self._jev.assistant_started, self._jev.completed_user)
             if self._subtitle_mode() and turn.get("role") in ("user", "assistant"):
                 if t == "turn.created":
                     self._transcript_state().start(turn["role"], turn.get("id"))
@@ -1471,7 +1493,8 @@ class Runner:
                             # 延迟 6 秒：委托前的过渡句（「我来做个卡片」）此刻还没有后台轮可对照，
                             # 等一等——后台轮在窗口内开始就说明它是过渡句，丢弃；否则才落库。
                             asyncio.run_coroutine_threadsafe(self._voice_write_deferred(atext, tid), self.loop)
-            self.log("dc_" + t.replace(".", "_"), role=turn.get("role"), transcript=(turn.get("transcript") or "")[:80])
+            self.log("dc_" + t.replace(".", "_"), role=turn.get("role"),
+                     voiceTurnId=turn.get("id"), transcript=(turn.get("transcript") or "")[:80])
         elif t == "session.usage.updated":
             u = d.get("usage") or {}
             # audio_duration_ms 是实时语音真正的用量表针（按音频时长走）。
@@ -1490,6 +1513,14 @@ class Runner:
                 self.mark_activity("delegation")   # 委派后台 = 人在用
                 self._promise_pending = None       # 真派活了，看门狗不必补
                 self._delegation_seq += 1          # 供"这中间零委派"判据用（见 _promise_watch）
+                jev_key = None
+                if self.settings.get("jevContextEnabled"):
+                    item = d.get("item") or {}
+                    jev_key = self._jev_key(item.get("user_bidi_turn_id"))
+                    request = "\n".join(str(c.get("text") or "") for c in item.get("content", [])
+                                        if c.get("type") == "input_text")
+                    self._jev.delegated(jev_key, request)
+                    self.loop.call_soon_threadsafe(self._jev.start, jev_key, "delegation")
                 # ⭐ 语音委派的那一轮，**答案由 app-server 直接交给语音模型念**。
                 #   后台此时再调 voice_say 就是同一个问题念两遍（见 say() 的闸）。
                 self._delegation_open_at = time.time()
@@ -1503,7 +1534,8 @@ class Runner:
                 # 默认不在这里投：留给注入的时间中位只有 38 ms，而注入要 80 ms，
                 # 实测只有 8% 赶得上。想对照时把 contextInjectOn 设成 delegation
                 if str(self.settings.get("contextInjectOn") or "delegationSteer") in ("delegation", "delegationSteer"):
-                    asyncio.run_coroutine_threadsafe(self._ctx_on_delegation(), self.loop)
+                    asyncio.run_coroutine_threadsafe(self._ctx_on_delegation(
+                        jev_key=jev_key, delegation_seq=self._delegation_seq), self.loop)
             # 委托这条留全：它是**两个模型之间的完整交接报文**（语音模型转给后台的原话、
             # handoff_id、target），也是链路上「何时召唤后台、交了什么过去」的唯一来源。
             # 其余事件仍截 200 字，免得把 events.jsonl 撑大。
@@ -1872,6 +1904,7 @@ class Runner:
             self._board_pending_voice = self._board_last_sent
 
     async def session_stop(self, reason: str = "manual", after_speech: bool = False, grace: float = 10.0) -> dict:
+        self._jev.reset()
         if after_speech and self.session_state == "connected":
             waited = await self.wait_for_speech(grace)
             self.log("stop_after_speech", waited=waited, reason=reason)
@@ -2536,7 +2569,8 @@ class Runner:
         self._ctx["sent_pages"] = {}
         self.log("ctx_scope_reset", threadId=(self.thread_id or "")[-12:])
 
-    async def _ctx_inject_backend(self, with_text: bool, via_steer: bool = False) -> bool:
+    async def _ctx_inject_backend(self, with_text: bool, via_steer: bool = False,
+                                  jev_bundle: dict | None = None) -> bool:
         """后台线程：状态变了投状态；正文指纹没投过再投正文。
 
         via_steer=True 时改用 turn/steer 送进**正在跑的那一轮** ——
@@ -2547,15 +2581,53 @@ class Runner:
         """
         if not self.settings.get("contextInjectEnabled", True) or not (self.app and self.thread_id):
             return False
+        # Jev mode has one admission rule for EVERY entry, including direct turns
+        # and promise rescue. Timeout/missing/stale advice means no extra message;
+        # it must never resurrect the legacy full-page injection. The original
+        # user request still runs and the backend can read required data on demand.
+        if self.settings.get("jevContextEnabled") and not jev_bundle:
+            self.log("jev_context_skipped", reason="no_valid_recommendation", chars=0)
+            return False
+        if jev_bundle:
+            if not str(jev_bundle.get("requestKey") or "").startswith(f"{self.thread_id}:{self.session_no}:"):
+                self.log("jev_context_skipped", requestKey=jev_bundle.get("requestKey"),
+                         reason="voice_scope_changed", chars=0)
+                return False
+            invalid = self._jev.invalid_reason(jev_bundle)
+            skip = skip_context_reason(jev_bundle) if not invalid else None
+            if skip:
+                # No context means NO call, not an empty turn/steer. Do this
+                # before building text/images or changing the delivered ledger.
+                self.log("jev_context_skipped", requestKey=jev_bundle["requestKey"],
+                         contextChoice=jev_bundle.get("contextChoice"),
+                         contextProbability=jev_bundle.get("contextProbability"),
+                         choice=jev_bundle["choice"], reason=skip, chars=0)
+                return False
+            if invalid:
+                self.log("jev_fallback", requestKey=jev_bundle.get("requestKey"), reason=invalid)
+                if self.settings.get("jevContextEnabled"):
+                    self.log("jev_context_skipped", requestKey=jev_bundle.get("requestKey"),
+                             reason=invalid, chars=0)
+                    return False
+                jev_bundle = None
         self._ctx_thread_scope()
         snap = self._ctx_snapshot()
-        if not snap:
+        if not snap and not (jev_bundle and jev_bundle.get('choice') == 'review_deck'):
             return False
-        b = self._ctx_build(snap)
+        snap = snap or {}
+        fields = ()
+        if jev_bundle:
+            cp = snap.get("currentPage") or {}
+            sections = self._split_page_sections(str(cp.get("text") or ""))
+            body, fields = build_tool_context(jev_bundle, snap, sections["cur"], self._jev_task_state())
+            digest = "jev-tool:" + hashlib.sha256(body.encode()).hexdigest()
+            b = {"state": body, "text": "", "fp_state": digest, "fp_text": digest}
+        else:
+            b = self._ctx_build(snap)
         if not b.get("state"):
             return False
         fp = self._ctx["fp"]
-        body = None
+        body = b["state"] if jev_bundle else None
         # 正文被去重跳过时要出声：静默省略会让模型以为"没有正文"，转头去调工具
         # （实录 2026-09-16：为此倒出 6,555 字的整页卡片列表，还调了两次）。
         text_skipped = bool(with_text and b["text"] and fp["backend_text"] == b["fp_text"])
@@ -2570,7 +2642,10 @@ class Runner:
                          "别用 reader_page_cards 把整页倒出来。）")
         # 笔迹图：桥已经在每次笔迹稳定时抓好放着了，这里只挑本页没送过的。
         # 只在开口边沿（with_text）考虑 —— 快板那种状态刷新不带图。
-        pending = self._ink_standby_pending(snap) if with_text else []
+        pending = (self._ink_standby_pending(snap) if with_text and
+                   (not jev_bundle or "selection_regions" in fields or
+                    ("selected_items" in fields and any(
+                       it.get("kind") in ("drawing", "image") for it in snap.get("selectedItems", [])))) else [])
         if body is None and not pending:
             return False
         # ⚠ 2026-09-17：这里原来把笔迹图当 input_image 直接塞进注入的 developer 消息。
@@ -2603,6 +2678,18 @@ class Runner:
         text_part = (body if body is not None else b["state"]) + ((chr(10) + note) if pending else "")
         content = [{"type": "input_text", "text": text_part}]
 
+        if jev_bundle:
+            target = (self._turn or {}).get("id")
+            if (not via_steer or not self.backend_busy or not target or
+                    target != jev_bundle.get("backendTurnId", target)):
+                self.log("jev_context_skipped", requestKey=jev_bundle["requestKey"],
+                         reason="backend_turn_changed", chars=0)
+                return False
+            if not self._jev.claim_injection(jev_bundle):
+                self.log("jev_context_skipped", requestKey=jev_bundle["requestKey"],
+                         reason="already_injected_this_round", chars=0)
+                return False
+
         # 后台正在跑的那一轮读不到我们现在追加的东西（它的上下文早就组好了）。
         # 所以忙碌时**先不注入**，把最新一份压在这里，等那轮结束再送 —— 见 _ctx_flush_pending。
         # 这样用户在 AI 干活期间连改三次选中，历史里也只落最新的一条，
@@ -2626,21 +2713,33 @@ class Runner:
             only_text = all(c.get("type") == "input_text" for c in content)
             if only_text:
                 whole = "".join(c.get("text") or "" for c in content)
-                res = await self.steer_running_turn(
-                    "【当前阅读状态·状态记录，不是提问】" + whole +
-                    chr(10) + "继续完成手上的事；用到「选中/当前页」时以这条为准。",
+                wire_text = (("" if jev_bundle else "【当前阅读状态·状态记录，不是提问】") + whole +
+                             chr(10) + "继续完成手上的事；用到「选中/当前页」时以这条为准。")
+                res = await self.steer_running_turn(wire_text,
                     tag="delegation", image_paths=[x["path"] for x in pending])
                 if res.get("ok"):
+                    if jev_bundle:
+                        self.log("jev_injected", requestKey=jev_bundle["requestKey"],
+                                 choice=jev_bundle["choice"], probability=jev_bundle["probability"],
+                                 waitMs=jev_bundle["waitMs"], turnId=res.get("turnId"))
                     fp["backend_state"] = b["fp_state"]
                     if with_text and b["text"]:
                         fp["backend_text"] = b["fp_text"]
                     for x in pending:
                         self._ink_sent.add(x["name"])
-                    self.log("ctx_steer", chars=len(whole), page=self._ctx["page_key"][-40:],
-                             withText=bool(with_text and b["text"]), body=self._log_body(whole),
+                    self.log("ctx_steer", chars=len(wire_text), page=self._ctx["page_key"][-40:],
+                             withText=bool(with_text and b["text"]), body=wire_text,
+                             requestKey=jev_bundle.get("requestKey") if jev_bundle else None,
+                             backendTurnId=res.get("turnId"),
+                             contextSource="jev-tool-data" if jev_bundle else "original-fallback",
+                             dataFields=list(fields),
                              images=[x["name"] for x in pending])
                     return True
                 self.log("ctx_steer_fallback", reason=str(res.get("error"))[:80])
+                if jev_bundle or self.settings.get("jevContextEnabled"):
+                    # Do not append to thread history after a failed/late steer:
+                    # that would leak this round's packet into a future round.
+                    return False
                 # 没赶上就照常追加，被下一轮读到
         try:
             await self.app.call("thread/inject_items", {"threadId": self.thread_id, "items": [
@@ -2662,7 +2761,8 @@ class Runner:
             self._ink_sent.add(x["name"])
         self.log("ctx_backend", withText=bool(with_text and b["text"]), chars=len(body or ""),
                  images=[x["name"] for x in pending],
-                 page=self._ctx["page_key"][-40:], body=self._log_body(text_part))
+                 page=self._ctx["page_key"][-40:], body=text_part,
+                 contextSource="jev-tool-data" if jev_bundle else "original-fallback", dataFields=list(fields))
         return True
 
     async def _ctx_flush_pending(self):
@@ -2675,6 +2775,9 @@ class Runner:
         if not pend or not (self.app and self.thread_id):
             return
         self._ctx_pending = None
+        if self.settings.get("jevContextEnabled"):
+            self.log("jev_context_skipped", reason="legacy_pending_context", chars=0)
+            return
         try:
             await self.app.call("thread/inject_items", {"threadId": self.thread_id, "items": [
                 {"type": "message", "role": "developer", "content": pend["content"]}]}, timeout=30)
@@ -2958,17 +3061,37 @@ class Runner:
             "%s：%s" % ("用户" if r == "user" else "语音助手", str(x).strip()[:300])
             for r, x in rows) or ("用户：" + (getattr(self, "_last_user_ask", (0, ""))[1] or ""))
 
-    async def _ctx_on_delegation(self):
-        """后台真的开工了 —— 把**完整**状态（含带编号的正文）送进正在跑的那一轮。
+    def _jev_key(self, user_turn_id):
+        return f"{self.thread_id}:{self.session_no}:{user_turn_id}" if user_turn_id else None
 
-        为什么能在这一刻送完整的：turn/steer 不跟轮的启动赛跑，等轮起来再插也来得及
-        （实验 16 轮全部被采纳、一次没打哑）。而且只在真委托时才投 ——
-        477 句开口只有 262 句委托，省下来的额度正好用来把正文发全。
-        """
+    def _jev_dialogue(self):
+        return [("用户：" if role == "user" else "助手：") + text
+                for _at, role, text in list(self.transcripts) if role in ("user", "assistant")]
+
+    def _jev_task_state(self):
+        # Actual tool events only. A backend turn starting is not proof that the
+        # requested artifact is being made, nor is voice commentary a receipt.
+        return [{k: event.get(k) for k in ("seq", "kind", "tool", "status", "text")}
+                for event in list(self.events)
+                if event.get("kind") in ("item/started", "item/completed")
+                and event.get("itemType") == "mcpToolCall"][-8:]
+
+    async def _ctx_on_delegation(self, jev_key=None, delegation_seq=None):
+        """Each voice user round may deliver one Jev-approved packet to its backend turn."""
         if not self.settings.get("contextInjectEnabled", True):
             return
+        jev_enabled = self.settings.get("jevContextEnabled")
+        if jev_enabled and not str(jev_key or "").startswith(f"{self.thread_id}:{self.session_no}:"):
+            self.log("jev_context_skipped", requestKey=jev_key, reason="voice_scope_changed", chars=0)
+            return
+        if jev_enabled and not self._jev.claim_delegation(jev_key):
+            return
         try:
+            jev_wait = (asyncio.create_task(self._jev.for_delegation(jev_key))
+                        if jev_key and self.settings.get("jevContextEnabled") else None)
             if str(self.settings.get("contextInjectOn") or "delegationSteer") != "delegationSteer":
+                if jev_wait:
+                    jev_wait.cancel()
                 await self._ctx_inject_backend(with_text=True)
                 return
             # 等这一轮真的起来：delegation 之后 22~60 ms 才 turn/started
@@ -2977,7 +3100,28 @@ class Runner:
                 if self.backend_busy and self._turn and self._turn.get("id"):
                     break
                 await asyncio.sleep(0.05)
-            await self._ctx_inject_backend(with_text=True, via_steer=True)
+            turn_id = (self._turn or {}).get("id")
+            bundle = await jev_wait if jev_wait else None
+            if not jev_enabled and delegation_seq is not None and delegation_seq != self._delegation_seq:
+                self.log("jev_fallback", requestKey=jev_key, reason="newer_delegation")
+                return
+            if bundle and turn_id != (self._turn or {}).get("id"):
+                self.log("jev_fallback", requestKey=jev_key, reason="backend_turn_changed")
+                bundle = None
+            if bundle:
+                bundle['backendTurnId'] = turn_id
+            if bundle and bundle.get('actionNotice'):
+                if self._jev.claim_injection(bundle):
+                    notice = bundle['actionNotice']
+                    result = await self.steer_running_turn(notice, tag='artifact-attempt')
+                    self.log('artifact_resend_notice', requestKey=jev_key, turnId=turn_id,
+                             ok=result.get('ok', False), text=notice)
+                    if result.get('ok'):
+                        self.log('ctx_steer', chars=len(notice), withText=False, body=notice,
+                                 requestKey=jev_key, backendTurnId=turn_id,
+                                 contextSource='jev-resend-attempt', dataFields=['artifact_attempt'], images=[])
+                return
+            await self._ctx_inject_backend(with_text=True, via_steer=True, jev_bundle=bundle)
         except Exception as e:   # noqa: BLE001
             self.log("ctx_delegation_error", message=clean(e))
 
@@ -4340,7 +4484,9 @@ class Runner:
             "bridgeFlag": BRIDGE_FLAG.exists(),
             "audioPipe": PIPE_FLAG.exists(),
             "history": dict(self.history_stats),
-            "context": {"pageKey": self._ctx["page_key"], "dwellSeconds": round(time.time() - self._ctx["page_since"]) if self._ctx["page_since"] else None,
+            "context": {"reviewPrefetchAvailable": callable(getattr(self._jev, "review_source", None)),
+                        "reviewCache": dict(self._jev.review_cache_status),
+                        "pageKey": self._ctx["page_key"], "dwellSeconds": round(time.time() - self._ctx["page_since"]) if self._ctx["page_since"] else None,
                         "fp": dict(self._ctx["fp"])},
         }
 
@@ -4648,6 +4794,7 @@ def main():
     runner.write_bridge_flag(True)   # 运行器在 = 外部语音后端在：桥把 App 的 START/STOP 交给我们
 
     async def boot():
+        asyncio.create_task(runner._jev.maintain_review_snapshot(lambda: runner.shutting_down))
         try:
             await runner.ensure_app()
         except Exception as e:

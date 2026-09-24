@@ -959,7 +959,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         )
     }
 
-    private let nativeDictionary = ReaderNativeOfflineDictionary()
+    private let nativeDictionary = ReaderNativeOfflineDictionary.shared
 
     private func serveNativeDictionaryLookup(_ request: HTTPRequest) async -> HTTPResponse {
         guard request.method == .POST else { return response(status: .methodNotAllowed, text: "method not allowed") }

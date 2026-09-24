@@ -154,15 +154,18 @@ class RuntimeSourceListsAgreeTest(unittest.TestCase):
     """
 
     def test_every_flat_runtime_source_is_also_installed_to_the_stable_path(self):
-        source = Path(module.__file__).read_text("utf-8")
-        block = source[source.index("for stable_name in ("):]
-        stable = block[:block.index(")")]
+        import ast
+        source = ast.parse(Path(module.__file__).read_text("utf-8"))
+        loops = [node for node in ast.walk(source) if isinstance(node, ast.For)
+                 and isinstance(node.target, ast.Name) and node.target.id == "stable_name"]
+        self.assertEqual(len(loops), 1)
+        stable = ast.literal_eval(loops[0].iter)
         missing = []
         for key in module.RUNTIME_SOURCES:
             prefix, _, name = key.partition("/")
             if prefix != "readerpc-runtime" or "/" in name:
                 continue   # scripts/ 子目录那几个复制口径不同，单列在下面
-            if '"' + name + '"' not in stable:
+            if name not in stable:
                 missing.append(name)
         self.assertEqual(
             missing, [],

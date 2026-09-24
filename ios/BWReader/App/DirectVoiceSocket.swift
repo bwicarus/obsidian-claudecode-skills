@@ -83,6 +83,31 @@ actor DirectVoiceSocket {
         return try await request(action: "anki-add-cards-local", fields: input, timeoutNanoseconds: 45_000_000_000)
     }
 
+    /// Dictionary inference gets a short-lived data connection of its own.
+    /// It must never queue behind or block the real-time audio receive loop.
+    func requestReaderDictionary(term: String, context: String, reading: String) async throws -> DirectJSONValue {
+        guard configuration == .readerContext, state == .ready, contextSessionID != nil,
+              !term.isEmpty, term.utf16.count <= 256, context.utf16.count <= 1200, reading.utf16.count <= 256,
+              !(term + context + reading).contains("\0") else {
+            throw failure("BW_READER_DICTIONARY_REQUEST_INVALID", "词典数据连接或查询无效", retryable: false)
+        }
+        // This existing command does not take a sessionId in its payload.
+        let reply = try await request(action: "dictionary-lookup", fields: ["mode": .string("meaning"),
+            "term": .string(term), "context": .string(context), "reading": .string(reading), "english": .string("")],
+            timeoutNanoseconds: 70_000_000_000)
+        let result = try requireObject(reply, label: "DICTIONARY")
+        try result.requireExactKeys(["term", "mode", "language", "text", "source", "cached"])
+        guard try result.requireString("term", maximum: 256) == term,
+              try result.requireString("mode", maximum: 16) == "meaning",
+              try result.requireString("language", maximum: 16) == "zh-CN",
+              try result.requireString("source", maximum: 64) == "pc-codex-cli",
+              !(try result.requireString("text", maximum: 6000)).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw failure("BW_READER_DICTIONARY_RESPONSE", "词典响应与查询不匹配", retryable: false)
+        }
+        _ = try result.requireBool("cached")
+        return reply
+    }
+
     /// Opens the fixed WSS and completes the protocol-v3 HELLO exchange.
     /// Calling it while already ready/active is a no-op.
     func connect() async throws {

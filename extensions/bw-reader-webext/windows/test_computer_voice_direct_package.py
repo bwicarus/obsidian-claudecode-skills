@@ -1164,6 +1164,19 @@ class DirectPackageTests(unittest.TestCase):
         for key, value in package.DETERMINISTIC_BUILD_ENV.items():
             self.assertEqual(run.call_args.kwargs["env"][key], value)
 
+    def test_runner_does_not_reuse_frozen_launcher_tcl_paths(self) -> None:
+        runner = package.SubprocessRunner(timeout_seconds=1)
+        inherited = {"TCL_LIBRARY": r"C:\Temp\_MEIexpired\_tcl_data",
+                     "TK_LIBRARY": r"C:\Temp\_MEIexpired\_tk_data"}
+        with patch.dict(package.os.environ, inherited), patch.object(
+            package.subprocess, "run", return_value=package.subprocess.CompletedProcess([], 0, "", "")
+        ) as run:
+            result = runner.run(("pyinstaller.exe", "--version"), cwd=HERE)
+            self.assertEqual(result.returncode, 0)
+            self.assertNotIn("TCL_LIBRARY", run.call_args.kwargs["env"])
+            self.assertNotIn("TK_LIBRARY", run.call_args.kwargs["env"])
+            self.assertEqual(package.os.environ["TCL_LIBRARY"], inherited["TCL_LIBRARY"])
+
     def test_reparse_candidates_root_is_rejected_before_tools_run(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

@@ -146,9 +146,11 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
             imgs = d.get("images")
             if not isinstance(imgs, list):
                 imgs = [x for x in str(d.get("image") or "").split(",") if x]
+            failure = d.get("contextSource") == "artifact-resend-failure"
             rows.append({"lane": "text", "kind": "inject", "at": at,
-                         "title": "插进运行中的轮" + ("（带 %d 张笔迹图）" % len(imgs) if imgs else ""),
-                         "meta": "%s 字 · 第 %s 页" % (d.get("chars"), str(d.get("page") or "?")[-6:]),
+                         "title": "重发失败通知（已送达后台）" if failure else "插进运行中的轮" + ("（带 %d 张笔迹图）" % len(imgs) if imgs else ""),
+                         "meta": "%s 字 · 注入成功" % d.get("chars") if failure else "%s 字 · 第 %s 页" % (d.get("chars"), str(d.get("page") or "?")[-6:]),
+                         "contextSource": d.get("contextSource"), "requestKey": d.get("requestKey"),
                          # 图不再以 base64 进历史（那会毒死线程），只留文件名；
                          # 界面按这个名字向 /ink-image 取，点一下展开。
                          "images": imgs,
@@ -185,10 +187,12 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
                          "title": "插播没赶上，退回追加",
                          "meta": _clip(d.get("reason") or "", 60), "body": ""})
         elif kind in ("ctx_backend", "ctx_backend_deferred"):
+            failure = d.get("contextSource") == "artifact-resend-failure"
             rows.append({"lane": "text", "kind": "inject", "at": at,
-                         "title": "注入阅读状态" + ("（带正文）" if d.get("withText") else "") +
+                         "title": "重发失败通知（已送达后台新轮次）" if failure else "注入阅读状态" + ("（带正文）" if d.get("withText") else "") +
                                   ("（延后补投）" if kind == "ctx_backend_deferred" else ""),
-                         "meta": "%s 字 · 第 %s 页" % (d.get("chars"), str(d.get("page") or "?")[-6:]),
+                         "meta": "%s 字 · 注入成功" % d.get("chars") if failure else "%s 字 · 第 %s 页" % (d.get("chars"), str(d.get("page") or "?")[-6:]),
+                         "contextSource": d.get("contextSource"), "requestKey": d.get("requestKey"),
                          "body": _clip(d.get("body") or "", 8000)})
         elif kind == "dc_delegation_created":
             # 两个模型的交接点 —— 时间轴上最该看见的一步：语音模型在这一刻把活交给后台，
@@ -294,6 +298,7 @@ def _lane_from_items(rows: list[dict]) -> list[dict]:
 #: role=user 的消息不一定是「用户说的话」—— Codex 和运行器都会以 user 身份塞东西进来。
 #: 2026-09-16 用户问「为何 11178 字那条标成语音」，就是 <recommended_plugins> 被当成了用户说话。
 _SYSTEM_USER_MARKS = (
+    ("【生成物发送异常回执】", "重发失败通知（后台会话记录）"),
     ("<realtime_delegation>", "语音转交后台"),
     ("<recommended_plugins>", "Codex 插件清单"),
     ("<multi_agent_mode>", "Codex 多智能体说明"),
@@ -797,9 +802,25 @@ def _dedupe_injections(rows: list[dict]) -> list[dict]:
                 break
         return int(digits) if digits else -1
 
+    # Receipt logs carry the actual successful injection time. The same user
+    # message can reach rollout much later; consume one matching copy per ack,
+    # without merging independent retries merely because their lengths match.
+    receipt_acks = [r for r in rows if r.get("contextSource") == "artifact-resend-failure"]
+    used_acks = set()
     keep, seen = [], []
     for row in rows:
         if row.get("lane") != "text" or row.get("kind") != "inject":
+            keep.append(row)
+            continue
+        if str(row.get("body") or "").startswith("【生成物发送异常回执】"):
+            if row.get("contextSource") != "artifact-resend-failure":
+                candidates = [(abs((ack.get("at") or 0) - (row.get("at") or 0)), i)
+                              for i, ack in enumerate(receipt_acks) if i not in used_acks
+                              and ack.get("body") == row.get("body")
+                              and -1 <= (row.get("at") or 0) - (ack.get("at") or 0) <= 120]
+                if candidates:
+                    used_acks.add(min(candidates)[1])
+                    continue
             keep.append(row)
             continue
         size, at = size_of(row), row.get("at") or 0
