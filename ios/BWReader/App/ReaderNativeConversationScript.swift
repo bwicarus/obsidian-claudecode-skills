@@ -58,12 +58,77 @@ enum ReaderNativeConversationScript {
         return text(copy.textContent || '', limit).trim();
       }
       function messageID(node, index) {
+        const known = nodeIDs.get(node);
+        if (known) return known;
         const id = node.getAttribute('data-turn-id') || node.getAttribute('data-turn') || node.getAttribute('data-message-id');
-        if (id) return 'm-' + hash(id + ':' + (node.classList.contains('asst-u') ? 'user' : 'assistant'));
+        if (id) { const value = 'm-' + hash(id + ':' + (node.classList.contains('asst-u') ? 'user' : 'assistant')); nodeIDs.set(node,value); return value; }
         let stable = nodeIDs.get(node);
         if (!stable) { stable = 'legacy-' + index + '-' + hash(node.classList.contains('asst-u') ? 'user' : 'assistant'); nodeIDs.set(node, stable); }
         return stable;
       }
+      function createMessageSources() {
+        let key = '', serial = 0, groupSerial = 0, pending = [];
+        const groups = new Map(), owners = new Map(), groupIDs = new WeakMap();
+        function fence() {
+          const current = getScopeKey();
+          if (key !== current) { key = current; groups.clear(); owners.clear(); pending = []; resetMessages = true; messagesDirty = true; }
+        }
+        function groupOf(target) {
+          if (target?.id === 'asst-thread') return 'thread';
+          const value = target && groupIDs.get(target);
+          return value?.key === key ? value.id : null;
+        }
+        function emit(value) { pending.push(value); scheduleMessages(); }
+        function unlink(node) {
+          const owner = owners.get(node);
+          if (owner) { const values = groups.get(owner) || []; groups.set(owner,values.filter(value => value !== node)); owners.delete(node); }
+        }
+        function publish(node,target,before) {
+          if (!node || !target) return;
+          fence(); const group = groupOf(target); if (!group) return;
+          const id = messageID(node,++serial);
+          if (before === node) return;
+          const previous = owners.get(node); unlink(node);
+          const values = groups.get(group) || [], index = before ? values.indexOf(before) : -1;
+          if (index >= 0) values.splice(index,0,node); else values.push(node);
+          groups.set(group,values); owners.set(node,group);
+          emit({action:'place',group,id,...(previous && previous !== group ? {from:previous} : {}),...(index >= 0 ? {before:messageID(before,++serial)} : {})});
+        }
+        function remove(node) {
+          fence(); if (!owners.has(node)) return;
+          const group = owners.get(node), id = messageID(node,++serial); unlink(node);
+          if (!(groups.get(group) || []).some(value => messageID(value,++serial) === id)) emit({action:'remove',group,id});
+        }
+        function clear(target) {
+          if (!target) return; fence(); const group = groupOf(target);
+          if (!group) return;
+          for (const node of groups.get(group) || []) owners.delete(node);
+          groups.delete(group); groupIDs.delete(target); emit({action:'clear',group});
+        }
+        function commit(stage) {
+          fence(); const group = groupOf(stage); if (!group) return;
+          const next = groups.get(group) || [];
+          for (const node of groups.get('thread') || []) owners.delete(node);
+          groups.delete(group); groups.set('thread',next);
+          for (const node of next) owners.set(node,'thread');
+          emit({action:'adopt',group});
+        }
+        return Object.freeze({publish,remove,clear,commit,
+          stage(target) { fence(); groupIDs.set(target,{key,id:'history-' + (++groupSerial)}); },
+          replace(node,old,target) { publish(node,target,old); remove(old); },
+          sources(target) { fence(); return [...(groups.get(groupOf(target)) || [])]; },
+          events(reset) {
+            fence();
+            const result = reset ? [...groups].flatMap(([group,values]) => values.map(node => ({action:'place',group,id:messageID(node,++serial)}))) : pending;
+            pending = []; return result;
+          }
+        });
+      }
+      const messageSources = createMessageSources();
+      // Compatibility producers announce semantic mount/remove/history events.
+      // Node references retain legacy action resources, never decide membership
+      // by querying a hidden thread's children during scrolling or selection.
+      window.__bwNativeMessages = messageSources;
       function partID(part, message, index) {
         return message + '-p-' + hash(String(part.id || part.item_id || part.call_id || part.cid || part.gid || part.card?.cid || (part.seq ?? index)) + ':' + (part.kind || 'artifact'));
       }
@@ -851,7 +916,7 @@ enum ReaderNativeConversationScript {
           // An account/book switch can precede asynchronous history replacement.
           // Do not relabel the previous DOM as the new account's conversation.
           if (scopeKey) previousNodes.forEach(node => excludedNodes.add(node));
-          scopeKey = nextKey; scope = 'reader-' + hash(nextKey); actions.clear(); nodeIDs = new WeakMap(); lastSignature = '';
+          scopeKey = nextKey; scope = 'reader-' + hash(nextKey); actions.clear(); lastSignature = '';
           messagesDirty = true; messageActions.clear(); messageProjection = [];
           messageRevision = 0; messageSignatures.clear(); messageOrder = []; resetMessages = true;
           window.__bwNativeSelection = null;
@@ -863,9 +928,9 @@ enum ReaderNativeConversationScript {
         const rebuildMessages = messagesDirty;
         actions = messagesDirty ? new Map() : new Map(messageActions);
         if (messagesDirty) {
-        const all = thread ? Array.from(thread.children).filter(el => el.matches('.asst-msg,.vc-card,.vc-if,.rc-turn')) : [];
+        const all = thread ? messageSources.sources(thread) : [];
         let reviewQuestion = '';
-        const messages = all.filter(node => !excludedNodes.has(node)).map((node, index) => {
+        const messages = all.map((node, index) => {
           const message = projectMessage(node, index);
           if (message?.role === 'user') reviewQuestion = message.text;
           if (nativeMode && conversationMode() === 'review' && message?.role === 'assistant' && !message.streaming && rc().review?.presentationSelections) {
@@ -879,7 +944,7 @@ enum ReaderNativeConversationScript {
         messageActions = new Map(actions);
         messagesDirty = false;
         }
-        const messageDelta = rebuildMessages || resetMessages ? prepareMessageDelta(messageProjection) : null;
+        const messageDelta = rebuildMessages || resetMessages ? prepareMessageDelta(messageProjection,messageSources.events(resetMessages)) : null;
         // 原生正文接管 PDF 时，页卡由原生按便签数据自己画 —— 网页不挂、这里也不交。
         // （交了就是两份：一份网页按它自己的页挂出来，一份原生按 PDFKit 画，永远对不上。）
         const nativePageCards = !!window.RC?.readerNavigation?.nativeViewport;
@@ -924,7 +989,7 @@ enum ReaderNativeConversationScript {
         if (!suspended && timer == null) timer = setTimeout(snapshot, 60);
       }
       function scheduleMessages() { messagesDirty = true; schedule(); }
-      function prepareMessageDelta(messages) {
+      function prepareMessageDelta(messages, events) {
         const next = new Map(), upserts = [], order = [];
         for (const source of messages) {
           const message = compactNativeMessage(source);
@@ -933,9 +998,10 @@ enum ReaderNativeConversationScript {
           next.set(message.id, signature); order.push(message.id);
           if (resetMessages || messageSignatures.get(message.id) !== signature) upserts.push(message);
         }
-        if (!resetMessages && !upserts.length && order.length === messageOrder.length && order.every((id,i) => id === messageOrder[i])) return null;
-        const delta = {contract:'reader-native-conversation-delta/1', reset:resetMessages,
-          baseRevision:messageRevision, revision:++messageRevision, order, upserts};
+        if (!resetMessages && !upserts.length && !(events?.length) && order.length === messageOrder.length && order.every((id,i) => id === messageOrder[i])) return null;
+        const erased = [...messageSignatures.keys()].filter(id => !next.has(id));
+        const delta = {contract:events ? 'reader-native-conversation-delta/2' : 'reader-native-conversation-delta/1', reset:resetMessages,
+          baseRevision:messageRevision, revision:++messageRevision, ...(events ? {events,erased} : {order}), upserts};
         messageSignatures = next; messageOrder = order; resetMessages = false;
         return delta;
       }
@@ -1605,11 +1671,16 @@ enum ReaderNativeConversationScript {
         .bw-native-conversation-active body.ep-side-open #ep-content {padding-right:0!important}
         .bw-native-conversation-active body.ep-side-open #ep-viewer,.bw-native-conversation-active body.ep-side-open #html-content {margin-right:0!important}
       `;
-      document.documentElement.appendChild(style);
       const mountObserver = new MutationObserver(records => {
         if (!thread || !thread.isConnected || records.some(record => Array.from(record.addedNodes).some(node => node.nodeType === 1 && (['asst-thread', 'asst-input', 'asst-computer', 'asst-call'].includes(node.id) || node.querySelector?.('#asst-thread,#asst-input,#asst-computer,#asst-call'))))) schedule();
       });
-      mountObserver.observe(document.documentElement, { childList: true, subtree: true });
+      function observeDocument() {
+        if (!document.documentElement) return;
+        if (!style.isConnected) document.documentElement.appendChild(style);
+        mountObserver.observe(document.documentElement, { childList: true, subtree: true });
+      }
+      observeDocument();
+      window.addEventListener('DOMContentLoaded', observeDocument, {once:true});
       ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:native-document-position', 'bw-native-computer-voice-state', 'bw-native-figure-projection'].forEach(name => window.addEventListener(name, schedule));
       ['rc:native-turn-update','rc:assistant-mode-changed','rc:assistant-message-changed','rc:review-presentation-changed','rc:placement-changed','rc:favorites-changed','bw:native-favorites-changed','rc:flashcard-state-changed'].forEach(name => window.addEventListener(name,scheduleMessages));
       window.addEventListener('scroll', schedule, { capture: true, passive: true });

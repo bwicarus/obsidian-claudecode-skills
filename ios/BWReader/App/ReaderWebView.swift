@@ -4230,7 +4230,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         ))
         contentController.addUserScript(WKUserScript(
             source: ReaderNativeConversationScript.source,
-            injectionTime: .atDocumentEnd,
+            injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
         nativeConversation.commandHandler = { [weak self] command in

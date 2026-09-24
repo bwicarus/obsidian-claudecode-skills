@@ -13,6 +13,43 @@ function host() {
   return context;
 }
 const message = (id,text) => ({id,role:'assistant',text,streaming:false,parts:[]});
+
+function sourceHost() {
+  const from=script.indexOf('function createMessageSources()'),to=script.indexOf('const messageSources =',from);
+  let scope='one';
+  const context=vm.createContext({getScopeKey:()=>scope,messageID:node=>node.id,scheduleMessages(){},resetMessages:true,messagesDirty:true});
+  vm.runInContext(script.slice(from,to),context);
+  return {sources:context.createMessageSources(),changeScope:value=>{scope=value;}};
+}
+test('message lifecycle preserves late voice ordering without reading hidden DOM children',()=>{
+  const {sources}=sourceHost(),thread={id:'asst-thread',get children(){throw Error('DOM scan');}},answer={id:'answer'},user={id:'user'};
+  sources.publish(answer,thread);sources.publish(user,thread,answer);
+  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['user','answer']);
+  const initial=sources.events(true);
+  const delta=host().prepareMessageDelta([message('user','问'),message('answer','答')],initial);
+  assert.equal(delta.contract,'reader-native-conversation-delta/2');
+  assert.equal(delta.order,undefined);
+  sources.remove(user);
+  assert.equal(sources.events(false)[0].action,'remove');
+  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['answer']);
+});
+test('history adoption preserves a live response and cancellation preserves active messages',()=>{
+  const {sources,changeScope}=sourceHost(),thread={id:'asst-thread'},stage={},old={id:'old'},live={id:'live'},replay={id:'live'},past={id:'past'};
+  sources.publish(old,thread);sources.publish(live,thread);sources.stage(stage);
+  sources.publish(past,stage);sources.publish(replay,stage);
+  assert.equal(sources.sources(thread).length,2,'uncommitted history replaced visible messages');
+  sources.replace(live,replay,stage);sources.commit(stage);sources.clear(stage);
+  const moves=sources.events(false);
+  assert.equal(moves.some(event=>event.action==='remove' && event.id==='live'),false,'discarded replay removed its live replacement');
+  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['past','live']);
+  const aborted={};sources.stage(aborted);sources.publish({id:'never'},aborted);sources.clear(aborted);
+  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['past','live']);
+  sources.publish({id:'nested'},{id:'internal-part'});
+  assert.equal(sources.events(true).some(event=>event.id==='nested'),false,'nested component became a conversation');
+  const stale={};sources.stage(stale);sources.publish({id:'old-account'},stale);
+  changeScope('two');sources.publish({id:'new'},thread);sources.commit(stale);
+  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['new']);
+});
 test('conversation batches send only changed messages and retain explicit ordering', () => {
   const context = host(), a=message('a','已有的大段内容'.repeat(10000)), b=message('b','新回复');
   const first = context.prepareMessageDelta([a,b]);

@@ -66,7 +66,7 @@
     var bd = document.createElement('div'); bd.className = 'rc-turn-bd';
     var flow = document.createElement('div'); flow.className = 'rc-turn-flow'; flow.hidden = true;
     el.appendChild(bd); el.appendChild(flow);
-    th.appendChild(el);
+    th.appendChild(el); window.__bwNativeMessages?.publish(el,th);
     var t = _turns[tid] = { tid: tid, el: el, hd: null, bd: bd, flow: flow,
       parts: [], draft: null, orchTaskId: null,
       meta: (options.meta && typeof options.meta === 'object') ? options.meta : null,   // 历史来源(via/threadId/turnId):语音轮次的「保存为工具」要靠它送通知
@@ -797,7 +797,8 @@
       var replacement = Array.prototype.filter.call(stage.children || [], function (node) {
         return (node.getAttribute('data-turn-id') || node.getAttribute('data-turn')) === realId;
       })[0];
-      if (replacement) replacement.replaceWith(t.el); else stage.appendChild(t.el);
+      if (replacement) { window.__bwNativeMessages?.replace(t.el,replacement,stage); replacement.replaceWith(t.el); }
+      else { stage.appendChild(t.el); window.__bwNativeMessages?.publish(t.el,stage); }
     });
   }
 
@@ -913,7 +914,7 @@
       streaming: parts.some(function (p) { return p.streaming; }) || !!(state.text && !state.done)
     }));
   }
-  function reset() { _turns = {}; _cur = null; }
+  function reset() { Object.values(_turns).forEach(function(t) { window.__bwNativeMessages?.remove(t.el); }); _turns = {}; _cur = null; }
   function setNativePresentation(enabled) {
     enabled = !!enabled;
     if (_nativePresentation() === enabled) return;
@@ -965,7 +966,7 @@
       dst._live = dst._live || t._live;
       dst._streamVersion = Math.max(dst._streamVersion || 0, t._streamVersion || 0);
       if (dst.draft) dst._liveFinal = false;
-      try { if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (e) {}
+      try { window.__bwNativeMessages?.remove(t.el); if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (e) {}
       if (t._progressResize) t._progressResize.disconnect();
       delete _turns[oldTid];
       if (_cur === oldTid) _cur = newTid;
@@ -997,7 +998,7 @@
       var t = _turns[tid];
       if (!t || !t.el || !t.el.isConnected) {
         if (t && t._progressResize) t._progressResize.disconnect();
-        delete _turns[tid];
+        window.__bwNativeMessages?.remove(t?.el); delete _turns[tid];
       }
     });
     if (_cur && !_turns[_cur]) _cur = null;
@@ -1190,7 +1191,7 @@
     tid = String(tid || '');
     var t = tid && _turns[tid];
     if (!t) return false;
-    try { if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (_) {}
+    try { window.__bwNativeMessages?.remove(t.el); if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (_) {}
     if (t._progressResize) t._progressResize.disconnect();
     delete _turns[tid];
     return true;

@@ -976,7 +976,7 @@
   function threadMsg(cls, text) {
     var th = document.getElementById('asst-thread'); if (!th) return null;
     var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.textContent = text;
-    th.appendChild(d); th.scrollTop = th.scrollHeight; return d;
+    th.appendChild(d); window.__bwNativeMessages?.publish(d,th); th.scrollTop = th.scrollHeight; return d;
   }
 
   // ── 工具调用状态按钮(v3-⑤,用户设计):执行通知**不进侧栏对话流**,收敛到固定小按钮——
@@ -1461,7 +1461,7 @@
       body.style.display = open ? 'block' : 'none';
       d.querySelector('.vc-tc-x').textContent = open ? '▾' : '▸';
     });
-    th.appendChild(d); th.scrollTop = th.scrollHeight;
+    th.appendChild(d); window.__bwNativeMessages?.publish(d,th); th.scrollTop = th.scrollHeight;
   }
   // 字幕改**累积对话流**(iMessage 风,右蓝=你/左灰=AI):旧版只有"最后一句"两行,用户反馈看不到对话内容。
   // AI 一轮 = 一个气泡(550 增量更新同一元素;450 用户开口 = 上一轮定稿,curAEl 置空)。
@@ -4442,7 +4442,7 @@
         _tcOk = !!(_tcPart && _tcPart.isConnected);
       }
     } catch (e) {}
-    if (th && !_tcOk) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; if (d.isConnected) _hosts.push(d); }
+    if (th && !_tcOk) { var d = _infoCardEl(card); th.appendChild(d); window.__bwNativeMessages?.publish(d,th); th.scrollTop = th.scrollHeight; if (d.isConnected) _hosts.push(d); }
     if (!_sideOpen()) {
       // ⚠ 浮层镜像**不要再套一层 vc-if-hd**:_cardPush 自己就有卡头(标题+按钮)——套了就是两条标题栏(用户实测)
       // 132(用户):结果卡(天气/图/视频/新闻)也要有**同一套三态** —— 标记 / 长条 / 方块,单击循环。
@@ -6860,7 +6860,7 @@
     ['pointerdown', 'pointerup', 'click', 'touchstart', 'touchend', 'dblclick'].forEach(function (evn) {
       el.addEventListener(evn, function (ev) { ev.stopPropagation(); });
     });
-    if (host) host.appendChild(el);
+    if (host) { host.appendChild(el); window.__bwNativeMessages?.publish(el,host); }
     return { el: el, bd: d.bd };
   }
   function _cardPush(text, kindLabel, isHtml, force, cid, opts) {

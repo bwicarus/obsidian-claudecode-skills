@@ -1780,7 +1780,7 @@
     var label = String(head || '工具结果').replace(/<[^>]+>/g, '');
     if (sub) label += ' · ' + String(sub).slice(0, 40) + (String(sub).length > 40 ? '…' : '');
     var body = (window.RC && RC.ui && RC.ui.appendToolCard) ? RC.ui.appendToolCard(_asstBody(), { label: label, type: '#b9a8ff', form: 'full' }) : null;
-    if (!body) { var card = document.createElement('div'); card.className = 'ep-card'; card.innerHTML = '<div class="h">' + head + (sub ? '<span class="ep-sel-chip">' + esc(sub.slice(0, 40)) + (sub.length > 40 ? '…' : '') + '</span>' : '') + '</div><div class="c"><span class="ep-spin"></span></div>'; _asstBody().appendChild(card); body = card.querySelector('.c'); }
+    if (!body) { var card = document.createElement('div'); card.className = 'ep-card'; card.innerHTML = '<div class="h">' + head + (sub ? '<span class="ep-sel-chip">' + esc(sub.slice(0, 40)) + (sub.length > 40 ? '…' : '') + '</span>' : '') + '</div><div class="c"><span class="ep-spin"></span></div>'; _asstBody().appendChild(card); window.__bwNativeMessages?.publish(card,_asstBody()); body = card.querySelector('.c'); }
     _asstBody().scrollTop = _asstBody().scrollHeight; return body;
   }
   function curChapText() { var topIdx = 0; for (var i = 0; i < secEls.length; i++) { if (secEls[i].getBoundingClientRect().bottom > 60) { topIdx = i; break; } } var el = secEls[topIdx]; return el ? (el.innerText || '').slice(0, 4000) : ''; }
@@ -2652,7 +2652,7 @@
     card.innerHTML = '<div class="ep-edit-h">✏️ AI 已高亮 ' + d.items.length + ' 处</div>' +
       '<div class="ep-edit-row"><button class="ep-asst-jump" data-idx="' + d.section + '">→ 跳到此处</button>' +
       '<button class="ep-edit-undo" data-eid="' + eid + '">↩ 撤销</button></div>';
-    _asstBody().appendChild(card); _asstBody().scrollTop = _asstBody().scrollHeight;
+    _asstBody().appendChild(card); window.__bwNativeMessages?.publish(card,_asstBody()); _asstBody().scrollTop = _asstBody().scrollHeight;
   }
 
   // 章名(给高亮列表 / 任务卡用)
@@ -2735,7 +2735,7 @@
     _epActSync(card);
     return card;
   }
-  function _epShowAction(rec) { var c = _epActionCard(rec); if (c) { _asstBody().appendChild(c); _asstBody().scrollTop = _asstBody().scrollHeight; } return c; }
+  function _epShowAction(rec) { var c = _epActionCard(rec); if (c) { _asstBody().appendChild(c); window.__bwNativeMessages?.publish(c,_asstBody()); _asstBody().scrollTop = _asstBody().scrollHeight; } return c; }
   function _epAttachActions(batch) {
     return new Promise(function (resolve, reject) {
       function send() {
@@ -2819,7 +2819,7 @@
       var card = document.createElement('div'); card.className = 'ep-msg a';
       if (!items.length) {
         card.innerHTML = '<span class="ep-asst-tool">没有可操作的高亮</span>';
-        _asstBody().appendChild(card); _asstBody().scrollTop = _asstBody().scrollHeight; return;
+        _asstBody().appendChild(card); window.__bwNativeMessages?.publish(card,_asstBody()); _asstBody().scrollTop = _asstBody().scrollHeight; return;
       }
       var h = document.createElement('div'); h.className = 'ep-hl-pick-h';
       h.textContent = '共 ' + items.length + ' 处高亮 —— 点「跳转」去看,点「删除」移除:';
@@ -2845,7 +2845,7 @@
         row.appendChild(sw); row.appendChild(tx); row.appendChild(jb); row.appendChild(del);
         card.appendChild(row);
       });
-      _asstBody().appendChild(card); _asstBody().scrollTop = _asstBody().scrollHeight;
+      _asstBody().appendChild(card); window.__bwNativeMessages?.publish(card,_asstBody()); _asstBody().scrollTop = _asstBody().scrollHeight;
     } catch (e) { dbg('showHlPicker err:' + (e && e.message)); }
   };
 

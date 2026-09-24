@@ -33,6 +33,32 @@ _ = try store.apply(batch(2,1,[],[]),scope:"book-b")
 check(store.messages.isEmpty,"clear retained stale messages")
 print("Native conversation store: ordered deltas, duplicate delivery, missing-base recovery, card updates, clear and scope isolation passed")
 
+func events(_ revision:Int,_ base:Int,_ events:[[String:Any]],_ updates:[[String:Any]],reset:Bool = false) -> [String:Any] {
+    ["contract":"reader-native-conversation-delta/2","revision":revision,"baseRevision":base,"reset":reset,"events":events,"upserts":updates]
+}
+func place(_ id:String,_ group:String = "thread",before:String? = nil,from:String? = nil) -> [String:Any] {
+    var event:[String:Any] = ["action":"place","id":id,"group":group]
+    if let before { event["before"] = before }; if let from { event["from"] = from }; return event
+}
+var lifecycle = ReaderNativeConversationStore()
+_ = try lifecycle.apply(events(1,0,[place("reply"),place("question",before:"reply")],[message("reply","流式回答"),message("question","晚到的转写")],reset:true),scope:"native")
+check(lifecycle.messages.map { $0["id"] as! String } == ["question","reply"],"late voice source reordered the conversation")
+_ = try lifecycle.apply(events(2,1,[place("reply","aborted-history"),["action":"clear","group":"aborted-history"]],[]),scope:"native")
+check(lifecycle.messages.count == 2,"aborted replay erased a matching active message")
+_ = try lifecycle.apply(events(3,2,[place("history","stage"),place("reply","stage"),place("reply","stage",before:"reply",from:"thread"),["action":"adopt","group":"stage"]],[message("history","已有记录")]),scope:"native")
+check(lifecycle.messages.map { $0["id"] as! String } == ["history","reply"],"history adoption lost the live response")
+let stableLifecycle = ReaderNativeConversationStore.fingerprint(lifecycle.messages)
+do { _ = try lifecycle.apply(events(4,3,[["action":"clear","group":"thread"],["action":"invalid"]],[]),scope:"native");fatalError("invalid event accepted") }
+catch ReaderNativeConversationStore.Failure.malformed { }
+check(ReaderNativeConversationStore.fingerprint(lifecycle.messages) == stableLifecycle,"invalid event partially cleared the history")
+_ = try lifecycle.apply(events(4,3,[["action":"remove","group":"thread","id":"reply"]],[]),scope:"native")
+check(lifecycle.messages.count == 1,"removed source remained visible")
+do { _ = try lifecycle.apply(events(5,4,[place("leak")],[message("leak","old")]),scope:"another");fatalError("old-scope lifecycle accepted") }
+catch ReaderNativeConversationStore.Failure.missingBase { }
+_ = try lifecycle.apply(events(1,0,[place("new")],[message("new","新会话")],reset:true),scope:"another")
+check(lifecycle.messages.first?["id"] as? String == "new","full source recovery retained old members")
+print("Native conversation lifecycle: late voice, atomic history adoption, cancellation, removal and scope isolation passed")
+
 func artifact(_ kind: String, _ original: [String: Any], data: [String: Any] = [:]) -> [String: Any] {
     var input = data
     input["nativeDetail"] = ["kind": kind, "title": "原件", "content": original]

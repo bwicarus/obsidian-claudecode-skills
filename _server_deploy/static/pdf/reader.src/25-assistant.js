@@ -544,7 +544,7 @@
     }
   });
   function scrollDown() { thread.scrollTop = thread.scrollHeight; }
-  function addMsg(cls, html) { var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html; thread.appendChild(d); scrollDown(); return d; }
+  function addMsg(cls, html) { var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html; thread.appendChild(d); window.__bwNativeMessages?.publish(d,thread); scrollDown(); return d; }
 
   // 视口焦点:当前与 #main 视口相交的页的字符层文字(镜像 EPUB _visibleText)。让 AI 回答/找视频/配图/拟搜索词
   // 都紧扣"用户此刻在看的这段",而非泛泛的整页/整章主题(后端 _sys_prompt 的「紧扣可见段落」指引靠它才生效)。
@@ -869,7 +869,7 @@
         row.appendChild(sw); row.appendChild(tx); row.appendChild(jb); row.appendChild(db2);
         box.appendChild(row);
       });
-      thread.appendChild(box); scrollDown();
+      thread.appendChild(box); window.__bwNativeMessages?.publish(box,thread); scrollDown();
     } catch (_) {}
   };
   // agent 画完高亮后:重新拉高亮 + 重渲所有可见页(复用 17-highlight 的模块函数,本模块同作用域可调)
@@ -926,7 +926,7 @@
       var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
       btn.setAttribute('data-eid', eid); btn.textContent = '↩ 撤销';
       card.appendChild(btn);
-      thread.appendChild(card); scrollDown();
+      thread.appendChild(card); window.__bwNativeMessages?.publish(card,thread); scrollDown();
     } catch (_) {}
   };
 
@@ -973,7 +973,7 @@
       }
       var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
       btn.setAttribute('data-eid', eid); btn.textContent = '↩ 撤销';
-      card.appendChild(btn); thread.appendChild(card); scrollDown();
+      card.appendChild(btn); thread.appendChild(card); window.__bwNativeMessages?.publish(card,thread); scrollDown();
     } catch (_) {}
   }
 
@@ -1022,7 +1022,7 @@
       var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
       btn.setAttribute('data-eid', eid); btn.textContent = '↩ 撤销';
       card.appendChild(btn);
-      thread.appendChild(card); scrollDown();
+      thread.appendChild(card); window.__bwNativeMessages?.publish(card,thread); scrollDown();
     } catch (_) {}
   }
   // 便签卡的撤销⇄重做执行(点 .asst-edit-undo 且 st.ntype==='note' 时走这;完成后重挂页面便签)
@@ -1188,7 +1188,7 @@
       else if (ev === 'gemini-paid') {   // ② 免费 Gemini 受限→本次已用付费:提示条 + 一键「以后直接用付费」(渲染器在 rc-assistant,legacy 模式退纯文字)
         try {
           var _pn = (window.RC && RC.assistant && RC.assistant.paidNotice) ? RC.assistant.paidNotice(parsed) : null;
-          if (_pn) { thread.appendChild(_pn); scrollDown(); }
+          if (_pn) { thread.appendChild(_pn); window.__bwNativeMessages?.publish(_pn,thread); scrollDown(); }
           else if (!window.__paidNoted) { window.__paidNoted = true; addMsg('asst-note', esc((parsed && parsed.text) || '免费 Gemini 额度受限,本次已使用付费档。')); scrollDown(); }
         } catch (_) {}
       }
