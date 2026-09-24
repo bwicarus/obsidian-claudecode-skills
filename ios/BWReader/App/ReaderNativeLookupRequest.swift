@@ -52,6 +52,29 @@ struct ReaderNativeLookupRequest {
         }
     }
 
+    /// Preserve the App's direct translation path before the authorized server
+    /// fallback. Cancellation must not start a new remote request.
+    func response(directTranslation: () async throws -> String,
+                  remote: () async throws -> (status: Int, data: Data)) async throws -> [String: Any] {
+        try Task.checkCancellation()
+        if mode == "translate" || mode == "example-zh" {
+            do {
+                let translated = try await directTranslation()
+                guard !translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw Failure(message: "BW_READER_TRANSLATE_EMPTY")
+                }
+                try Task.checkCancellation()
+                return try decode(status: 200, data: JSONSerialization.data(withJSONObject: ["ok": true, "zh": translated]))
+            } catch {
+                if error is CancellationError || Task.isCancelled { throw CancellationError() }
+            }
+        }
+        try Task.checkCancellation()
+        let value = try await remote()
+        try Task.checkCancellation()
+        return try decode(status: value.status, data: value.data)
+    }
+
     func decode(status: Int, data: Data) throws -> [String: Any] {
         guard (200..<300).contains(status),
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],

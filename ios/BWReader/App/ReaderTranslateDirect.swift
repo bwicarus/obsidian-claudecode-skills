@@ -29,6 +29,22 @@ actor ReaderTranslateDirectService {
     private var keyLoadedAt: Date?
     private var keyFailedAt: Date?
 
+    /// Preserve the existing bridge cache / direct translation policy for the native panel.
+    /// Uploading a reusable cache result is independent of showing the answer.
+    func cachedOrTranslate(_ text: String, target: String) async throws -> String {
+        try Task.checkCancellation()
+        let sha = Self.cacheSha(text: text, target: target)
+        if let cached = await cachedTranslation(sha: sha) {
+            try Task.checkCancellation()
+            return cached
+        }
+        try Task.checkCancellation()
+        let translated = try await translate(text, target: target)
+        try Task.checkCancellation()
+        Task { await self.storeTranslation(sha: sha, source: text, translated: translated, target: target) }
+        return translated
+    }
+
     /// 与 translate.py `_cache_path`（无 ns 形态）和桥 /reader-translate-cache 同键：
     /// sha1("zh-CN::" + text) 前 16 位。Windows 上翻过的句子 App 直接命中。
     static func cacheSha(text: String, target: String) -> String {

@@ -28,3 +28,25 @@ let entry = try full.decode(status: 200, data: JSONSerialization.data(withJSONOb
 precondition((entry["examples"] as! [Any]).count == 6 && (entry["definition"] as! String).count == 4000)
 precondition(entry["full"] as? Bool == true && entry["jp"] as? Bool == false)
 print("Native lookup: request shape, dictionary language routing, result fields and failure gates passed")
+
+var remoteCount = 0
+let direct = try await plan.response(directTranslation: { "直接翻译" }, remote: {
+    remoteCount += 1; return (500, Data())
+})
+precondition(direct["zh"] as? String == "直接翻译" && remoteCount == 0)
+let fallback = try await plan.response(directTranslation: { throw ReaderNativeLookupRequest.Failure(message: "offline") }, remote: {
+    remoteCount += 1; return (200, Data(#"{"ok":true,"zh":"后备翻译"}"#.utf8))
+})
+precondition(fallback["zh"] as? String == "后备翻译" && remoteCount == 1)
+do {
+    _ = try await plan.response(directTranslation: { throw CancellationError() }, remote: {
+        remoteCount += 1; return (500, Data())
+    })
+    preconditionFailure("cancelled lookup continued")
+} catch is CancellationError {}
+precondition(remoteCount == 1)
+let dictionary = try await full.response(directTranslation: { preconditionFailure("dictionary entered translator") }, remote: {
+    (200, try JSONSerialization.data(withJSONObject: response))
+})
+precondition(dictionary["full"] as? Bool == true)
+print("Native lookup routing: direct-first, remote fallback and cancellation passed")

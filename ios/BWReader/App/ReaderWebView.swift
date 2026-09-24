@@ -2141,9 +2141,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 guard nativeLookupTasks.count < 24 else { throw ReaderNativeLookupRequest.Failure(message: "查询正在处理中，请稍候") }
                 jobID = UUID()
                 job = Task { @MainActor in
-                    let response = try await gateway.fetchData(path: plan.path, method: plan.method, body: plan.body,
-                                                              surface: book.format == .pdf ? .pdf : .epub)
-                    return try plan.decode(status: response.status, data: response.data)
+                    try await plan.response(directTranslation: {
+                        try await ReaderTranslateDirectService.shared.cachedOrTranslate(plan.text, target: "zh-CN")
+                    }, remote: {
+                        let response = try await gateway.fetchData(path: plan.path, method: plan.method, body: plan.body,
+                                                                  surface: book.format == .pdf ? .pdf : .epub)
+                        return (response.status, response.data)
+                    })
                 }
                 nativeLookupTasks[key] = (jobID, job)
             }
@@ -2205,10 +2209,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 property: "mastered", enabled: mastered, mutation: "native-vocab-ui:" + UUID().uuidString)
             nativeLookupCache.removeAll(); nativeLookupCacheBytes = 0
             markCloudSyncDirty()
-            // Notify remaining presentation observers. This does not persist or
-            // re-run the mastery command, and does not delay the native receipt.
+            // Notify remaining presentation observers and their legacy display
+            // mirrors. They do not re-run the canonical mastery transaction,
+            // and the observation does not delay the native receipt.
             webView.callAsyncJavaScript("window.BWReaderRuntime?.vocabularyState?.importRecord(record,{source:'native'}); window.applyVocabLocalOverride?.(word,mastered,{word,surface:word,forms:[],jp});",
-                arguments: ["record": record, "word": word, "mastered": mastered, "jp": japanese], in: nil, contentWorld: .page,
+                arguments: ["record": record, "word": word, "mastered": mastered, "jp": japanese], in: nil, in: .page,
                 completionHandler: { _ in })
             return ["ok": true, "value": ["ok": true, "mastered": mastered, "jp": japanese]]
         } catch { return ["ok": false, "error": error.localizedDescription] }
