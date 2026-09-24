@@ -533,3 +533,37 @@ func testNativeDocumentSession() throws {
 }
 try testNativeDocumentSession()
 print("Native stream document session: authority advancement, ordered writes, deduplication, stale/cancelled/failed sessions and card receipts passed")
+
+func testQueuedBookCommands() throws {
+    let db = try ReaderNativeDataStore(path:":memory:"), device = try ReaderNativeDataStore(path:":memory:")
+    let writer = ReaderNativeBookStore(store:db,bookID:"queued",deviceID:"test",now:{ 900_000 })
+    let read = ReaderNativeBookProjection(store:db)
+    func command(_ id:Int,_ path:String,_ body:[String:Any]) -> [String:Any] {
+        ["url":"/pdf/api/"+path,"method":"POST","mutationId":"mut-v2-"+String(format:"%032x",id),"body":body]
+    }
+    let note = command(1,"notes",["file":"localbook:queued","id":"n_queued","anchor":["kind":"pdf","page":4],"text":"original"])
+    try db.execute("CREATE TRIGGER fail_replica BEFORE INSERT ON records WHEN NEW.collection = 'native-replication-outbox' BEGIN SELECT RAISE(ABORT, 'replica failure'); END")
+    do { _ = try writer.applyQueuedCommand(note,nativePDF:true); fatalError("partial note committed") } catch is ReaderNativeDataStore.StoreError {}
+    check(try read.state("document-notes-legacy",bookID:"queued").payload == nil,"failed replica left note committed")
+    try db.execute("DROP TRIGGER fail_replica")
+    _ = try writer.applyQueuedCommand(note,nativePDF:true)
+    let cursor = try db.cursor()
+    _ = try writer.applyQueuedCommand(note,nativePDF:true)
+    check(try db.cursor() == cursor,"lost acknowledgment duplicated local effect or replication")
+    check((try read.state("document-notes-legacy",bookID:"queued").payload as? [[String:Any]])?.count == 1,"note identity changed")
+    var changed = note; changed["body"] = ["file":"localbook:queued","anchor":["kind":"pdf","page":4],"text":"changed"]
+    do { _ = try writer.applyQueuedCommand(changed,nativePDF:true); fatalError("same ID changed content") } catch ReaderNativeBookStore.MutationError.replayConflict {}
+    let position = command(2,"reading-pos",["file":"localbook:queued","kind":"epub","pos":7])
+    _ = try writer.applyQueuedCommand(position,nativePDF:false)
+    try ReaderNativeReadingPosition.cache(document:db,device:device,bookID:"queued",deviceID:"test")
+    let index = try device.record(collection:"native-reader-positions",id:"test:reader-positions")!
+    _ = try writer.applyQueuedCommand(position,nativePDF:false)
+    try ReaderNativeReadingPosition.cache(document:db,device:device,bookID:"queued",deviceID:"test")
+    check(try device.record(collection:index.collection,id:index.id) == index,"retry rewrote same device index")
+    _ = try writer.perform(["bookID":"queued","operation":"reading-position","mutationId":"current-native","value":["kind":"pdf","pos":22,"ts":901]])
+    _ = try writer.applyQueuedCommand(command(3,"reading-pos",["file":"localbook:queued","kind":"pdf","pos":3]),nativePDF:true)
+    check((try read.state("reading-position",bookID:"queued").payload as? [String:Any])?["pos"] as? Int == 22,"old report rewound native PDF")
+    do { _ = try writer.applyQueuedCommand(command(4,"reading-pos",["file":"localbook:queued","kind":"pdf","pos":true]),nativePDF:true); fatalError("invalid position accepted") } catch ReaderNativeBookStore.MutationError.invalid {}
+}
+try testQueuedBookCommands()
+print("Native queued book commands: transactional note/replication, stable retries and EPUB/PDF position ownership passed")

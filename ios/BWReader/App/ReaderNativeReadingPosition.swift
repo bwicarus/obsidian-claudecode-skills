@@ -4,6 +4,34 @@ import CoreFoundation
 /// Device viewport geometry and the replicated page remain distinct: scrolling
 /// within a page updates only local viewport state, not the command queue.
 enum ReaderNativeReadingPosition {
+    /// Preserve the existing cross-book device index. The document position is
+    /// authoritative; re-running after an interrupted cache write is harmless.
+    static func cache(document:ReaderNativeDataStore,device:ReaderNativeDataStore,bookID:String,deviceID:String) throws {
+        guard let position = try ReaderNativeBookProjection(store:document).state("reading-position",bookID:bookID).payload as? [String:Any] else { return }
+        try device.inTransaction {
+            let collection = "native-reader-positions", id = deviceID + ":reader-positions", file = "localbook:" + bookID
+            let old = try device.record(collection:collection,id:id)
+            var positions:[String:Any] = [:]
+            if let old, !old.deleted {
+                guard let envelope = try JSONSerialization.jsonObject(with:Data(old.json.utf8)) as? [String:Any],
+                      let value = envelope["value"] as? [String:Any], value["id"] as? String == id,
+                      value["deviceId"] as? String == deviceID, let payload = value["payload"] as? [String:Any] else {
+                    throw ReaderNativeBookStore.MutationError.invalid("设备续读索引")
+                }
+                positions = payload
+            }
+            if let previous = positions[file] as? [String:Any], (previous["ts"] as? Double ?? 0) > (position["ts"] as? Double ?? 0) { return }
+            if let previous = positions[file] as? NSDictionary, previous.isEqual(to:position) { return }
+            positions[file] = position
+            let at = Int64(Date().timeIntervalSince1970 * 1000), rev = (old?.rev ?? 0) + 1
+            let value:[String:Any] = ["schema":1,"collection":collection,"id":id,"rev":rev,"updatedAt":at,"updatedBy":deviceID,"deleted":false,
+                "value":["id":id,"deviceId":deviceID,"payload":positions,"updatedAt":at]]
+            let json = String(decoding:try JSONSerialization.data(withJSONObject:value,options:.sortedKeys),as:UTF8.self)
+            _ = try device.commitWithinTransaction(record:.init(collection:collection,id:id,rev:rev,updatedAt:at,deleted:false,json:json),
+                mutationId:nil,journalJSON:nil,expectedRev:old?.rev ?? 0,now:at)
+        }
+    }
+
     static func validated(_ value:[String:Any]) throws -> [String:Any] {
         func number(_ key:String,_ range:ClosedRange<Double>,integer:Bool = false) throws -> Double {
             guard let n = value[key] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),

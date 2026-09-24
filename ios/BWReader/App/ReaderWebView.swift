@@ -3103,6 +3103,67 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return service
     }
 
+    private lazy var nativeCommandInterfaces: Result<ReaderNativeInterfaceManifest,Error> = Result { try ReaderNativeInterfaceManifest() }
+    private func flushNativeCommands(_ request: [String:Any]) async throws -> [String:Any] {
+        guard let book = currentLocalBook, let access = currentLocalBookAccess,
+              let gateway = nativeServerGateway, let deviceID = nativeReadingStoreDeviceID else { throw CancellationError() }
+        let generation = bookUserStateContextGeneration, epoch = gateway.contextRevision
+        let surface: ReaderNativeInterfaceSurface = book.format == .pdf ? .pdf : .epub
+        let manifest = try nativeCommandInterfaces.get()
+        func current() throws {
+            guard !isLoading, isTrustedReaderURL(webView.url), currentLocalBookAccess === access,
+                  bookUserStateContextGeneration == generation, gateway.contextRevision == epoch,
+                  nativeReadingStoreBookID == book.id, !Task.isCancelled else { throw CancellationError() }
+        }
+        return try await nativeCommandOutbox.flush(request,validate:current) { command in
+            try current()
+            guard let path = command["url"] as? String, let url = URLComponents(string:path),
+                  let method = command["method"] as? String, let mutation = command["mutationId"] as? String,
+                  ReaderNativeCommandOutbox.route(path,method:method),
+                  let owner = manifest.commandOwner(path:url.path,method:method,surface:surface) else { return 501 }
+            if owner == "local" {
+                let target = (command["body"] as? [String:Any])?["file"] as? String
+                    ?? url.queryItems?.first(where:{ $0.name == "file" })?.value
+                if let target, target != "localbook:" + book.id { return nil }
+            }
+            if owner == "local", book.format == .pdf {
+                guard self.nativePDFMutationCommandDepth == 0 else { return 503 }
+                let pending = try await self.nativePDFMutationActor.hasUnfinishedMutation(book:access)
+                try current()
+                guard !pending, self.nativePDFMutationCommandDepth == 0 else { return 503 }
+            }
+            if owner == "pi" {
+                let body = command["body"]
+                var bytes = Data()
+                if let body, !(body is NSNull) { bytes = try JSONSerialization.data(withJSONObject:body) }
+                let response = try await gateway.fetchData(path:path,method:method,body:bytes,surface:surface,outboxMutation:mutation)
+                try current()
+                return response.status
+            }
+            guard owner == "local" else { return 501 }
+            let store = try self.nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+            guard try store.meta("legacyImport") == "done" else { return 503 }
+            let service = ReaderNativeBookStore(store:store,bookID:book.id,deviceID:deviceID,
+                displayName:book.title,contentSHA256:self.currentLocalBookContentSHA256)
+            do { _ = try service.applyQueuedCommand(command,nativePDF:book.format == .pdf) }
+            catch ReaderNativeNoteRules.NoteError.invalid { return 400 }
+            catch ReaderNativeNoteRules.NoteError.missing { return 404 }
+            catch ReaderNativeHighlightRules.HighlightError.invalid { return 400 }
+            catch ReaderNativeHighlightRules.HighlightError.missing { return 404 }
+            catch ReaderNativeHighlightRules.HighlightError.conflict { return 409 }
+            catch ReaderNativeBookStore.MutationError.invalid { return 400 }
+            catch ReaderNativeBookStore.MutationError.replayConflict { return 409 }
+            if url.path == "/pdf/api/reading-pos" {
+                let device = try self.nativeDataStoreHost.bridge(for:"bw-reader-native-v1-device").store
+                try ReaderNativeReadingPosition.cache(document:store,device:device,bookID:book.id,deviceID:deviceID)
+            }
+            self.nativeReplicationService?.wake(); self.markCloudSyncDirty(); self.scheduleNativePDFProjectionRefresh()
+            self.webView.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('bw:native-book-committed',{detail:value})); return true;",
+                arguments:["value":["bookID":book.id]],in:nil,in:.page,completionHandler:nil)
+            return 200
+        }
+    }
+
     private func recoverNativeReviewDelivery(_ repository: ReaderNativeCardRepository, _ outbox: ReaderNativeCommandOutbox) throws {
         for item in try repository.pendingReviewDeliveries(namespace: outbox.namespace) {
             let id = item.command["mutationId"] as? String ?? ""
@@ -8342,6 +8403,13 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 return
             }
             if body["action"] as? String == "commandOutbox" {
+                if body["operation"] as? String == "flush" {
+                    Task { @MainActor in
+                        do { replyHandler(try await flushNativeCommands(body),nil) }
+                        catch { replyHandler(nil,error.localizedDescription) }
+                    }
+                    return
+                }
                 do {
                     let result = try nativeCommandOutbox.handle(body)
                     if ["status", "import"].contains(body["operation"] as? String ?? ""), let deviceID = nativeReadingStoreDeviceID {

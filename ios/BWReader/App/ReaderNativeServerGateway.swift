@@ -125,7 +125,12 @@ final class ReaderNativeServerGateway: NSObject, WKScriptMessageHandlerWithReply
     /// Swift callers use exactly the same route manifest, remote book binding
     /// and cookie policy as the former web request. This is not an unrestricted
     /// URLSession escape hatch for local book IDs or caller-provided URLs.
-    func fetchData(path: String, method: String = "GET", body: Data = Data(), surface: ReaderNativeInterfaceSurface) async throws -> ReaderNativeServerProxyBroker.DataResponse {
+    func fetchData(path: String, method: String = "GET", body: Data = Data(), surface: ReaderNativeInterfaceSurface,
+                   outboxMutation: String? = nil) async throws -> ReaderNativeServerProxyBroker.DataResponse {
+        if let outboxMutation {
+            guard outboxMutation.range(of:"^mut-v2-[a-f0-9]{32}$",options:.regularExpression) != nil,
+                  ["POST","PATCH","DELETE"].contains(method) else { throw GatewayError("原生命令编号或端点无效") }
+        }
         guard let request = Self.parse([
             "contract": Self.requestContract, "action": "fetch", "method": method, "path": path,
             "headers": ["Accept": "application/json", "Content-Type": "application/json"],
@@ -137,7 +142,12 @@ final class ReaderNativeServerGateway: NSObject, WKScriptMessageHandlerWithReply
         let epoch = scopeEpoch
         let prepared = try await prepareProxyRequest(authorized.request, authorizedEpoch: epoch)
         if let rid = authorized.registersContinuationRID { registerContinuation(rid: rid, routePath: authorized.request.routePath, epoch: epoch) }
-        return try await serverProxyBroker.data(for: prepared)
+        var transport = prepared.request
+        if let outboxMutation {
+            transport.setValue("command-outbox/2",forHTTPHeaderField:"X-BW-Command-Outbox")
+            transport.setValue(outboxMutation,forHTTPHeaderField:"X-BW-Mutation-Id")
+        }
+        return try await serverProxyBroker.data(for:.init(request:transport,scopeEpoch:prepared.scopeEpoch))
     }
 
     func streamAssistant(path: String, method: String = "POST", body: Data, surface: ReaderNativeInterfaceSurface, expectedContext: UInt64,

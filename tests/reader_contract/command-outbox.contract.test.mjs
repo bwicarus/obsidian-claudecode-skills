@@ -20,10 +20,10 @@ const ACCOUNT_A = `acct-v1-${"a".repeat(64)}`;
 const ACCOUNT_B = `acct-v1-${"b".repeat(64)}`;
 const LEGACY_KEY = "rc-outbox-v1";
 
-function nativeHarness({ failImport = false, omitAccepted = false } = {}) {
+function nativeHarness({ failImport = false, omitAccepted = false, send = async () => 200 } = {}) {
   const calls = [];
+  const sent = [];
   const stored = new Map();
-  let capture = [];
   const port = async (request) => {
     calls.push(structuredClone(request));
     const owner = request.lease.namespace;
@@ -33,20 +33,19 @@ function nativeHarness({ failImport = false, omitAccepted = false } = {}) {
       if (failImport) throw new Error("disk unavailable");
       for (const record of request.records) stored.set(record.mutationId, structuredClone(record));
       reply.accepted = omitAccepted ? [] : request.records.map((record) => record.mutationId);
-    } else if (request.operation === "capture") {
-      capture = [...stored.values()].filter((record) => record.ownerNamespace === owner);
-      reply.token = "native-batch";
-      reply.ops = capture.map(({ mutationId, url, method, body }) => ({ mutationId, url, method, body }));
-    } else if (request.operation === "ack") {
-      request.statuses.forEach((status, index) => {
-        if (status >= 200 && status < 300) stored.delete(capture[index].mutationId);
-      });
+    } else if (request.operation === "flush") {
+      reply.sent = 0;
+      for (const record of [...stored.values()].filter((record) => record.ownerNamespace === owner)) {
+        sent.push(structuredClone(record));
+        const status = await send(record);
+        if (status >= 200 && status < 300) { stored.delete(record.mutationId); reply.sent += 1; }
+      }
     }
     reply.state = { contract: "command-outbox/2", ownerNamespace: owner,
       size: [...stored.values()].filter((record) => record.ownerNamespace === owner).length, deadLetterSize: 0 };
     return reply;
   };
-  return { port, calls, stored };
+  return { port, calls, stored, sent };
 }
 
 test("App handoff waits for SQLite acceptance before removing the exact compatibility record", async () => {
@@ -59,8 +58,10 @@ test("App handoff waits for SQLite acceptance before removing the exact compatib
   assert.equal(result.ok, true);
   assert.equal(records(h.storage, ACCOUNT_A, "mutation").length, 0);
   assert.equal(native.stored.size, 0);
-  assert.equal(JSON.parse(h.requests[0].options.body).ops[0].mutationId, id);
-  assert.ok(native.calls.some((call) => call.operation === "ack"));
+  assert.equal(native.sent[0].mutationId, id);
+  assert.equal(h.requests.length, 0);
+  assert.ok(native.calls.some((call) => call.operation === "flush"));
+  assert.ok(!native.calls.some((call) => ["capture", "ack"].includes(call.operation)));
   assert.equal(h.sandbox.RC.outbox.legacySize(), 2);
 });
 
@@ -73,41 +74,44 @@ test("App native storage failure keeps original command and never invokes browse
     assert.equal((await h.sandbox.RC.outbox.flush()).ok, false);
     assert.equal(records(h.storage, ACCOUNT_A, "mutation").length, 1);
     assert.equal(h.requests.length, 0);
-    assert.ok(!native.calls.some((call) => call.operation === "capture"));
+    assert.ok(!native.calls.some((call) => call.operation === "flush"));
   }
 });
 
 test("App offline retry retains stable native mutation ID after web spool is consumed", async () => {
-  const native = nativeHarness();
   let offline = true;
-  const h = createWindow({ nativePort: native.port, fetchImpl: async (_url, options) => {
+  const native = nativeHarness({ send: async () => {
     if (offline) throw new TypeError("offline");
-    const body = JSON.parse(options.body);
-    return batchResponse(body.ownerNamespace, body.ops.map(() => 200));
+    return 200;
   } });
+  const h = createWindow({ nativePort: native.port });
   h.account.activate({ namespace: ACCOUNT_A, source: "server-session" });
   const id = h.sandbox.RC.outbox.send("review", "a", "/pdf/api/review-answer", { aid: "a" });
-  assert.equal((await h.sandbox.RC.outbox.flush()).offline, true);
+  assert.equal((await h.sandbox.RC.outbox.flush()).ok, false);
   assert.equal(records(h.storage, ACCOUNT_A, "mutation").length, 0);
   assert.equal(native.stored.has(id), true);
   offline = false;
   assert.equal((await h.sandbox.RC.outbox.flush()).ok, true);
-  assert.equal(JSON.parse(h.requests[1].options.body).ops[0].mutationId, id);
+  assert.deepEqual(native.sent.map((op) => op.mutationId), [id, id]);
+  assert.equal(h.requests.length, 0);
 });
 
-test("App stale account and malformed response cannot acknowledge a native batch", async () => {
+test("App stale account and malformed native receipt never trigger browser fallback", async () => {
   for (const changeAccount of [false, true]) {
     const native = nativeHarness();
     let h;
-    h = createWindow({ nativePort: native.port, fetchImpl: async () => {
+    h = createWindow({ nativePort: async (request) => {
+      if (request.operation !== "flush") return native.port(request);
       if (changeAccount) h.account.activate({ namespace: ACCOUNT_B, source: "server-session" });
-      return batchResponse(ACCOUNT_A, changeAccount ? [200] : []);
+      return { ok: true, contract: "command-outbox/2", ownerNamespace: ACCOUNT_A,
+        generation: request.lease.generation, sent: changeAccount ? 0 : "invalid" };
     } });
     h.account.activate({ namespace: ACCOUNT_A, source: "server-session" });
     const id = h.sandbox.RC.outbox.send("review", "a", "/pdf/api/review-answer", { aid: "a" });
     assert.equal((await h.sandbox.RC.outbox.flush()).ok, false);
     assert.equal(native.calls.some((call) => call.operation === "ack"), false);
     assert.equal(native.stored.has(id), true);
+    assert.equal(h.requests.length, 0);
   }
 });
 

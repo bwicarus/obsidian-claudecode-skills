@@ -141,6 +141,12 @@ struct ReaderNativeInterfaceManifest: Decodable {
         )
     }
 
+    func commandOwner(path: String, method: String, surface: ReaderNativeInterfaceSurface) -> String? {
+        guard let route = matchingRoute(path:path), route.status == .supported,
+              route.methods.contains(method), route.surfaces.contains(surface), route.owner != .native else { return nil }
+        return route.owner.rawValue
+    }
+
     private func matchingRoute(path: String) -> Route? {
         routes.first { route in
             switch route.match {

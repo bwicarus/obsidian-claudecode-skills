@@ -83,49 +83,16 @@
 
   async function flushNative(scope, startedEpoch) {
     await handoffNative(scope);
-    var batch = await nativeRequest(scope, 'capture');
-    if (typeof batch.token !== 'string' || !Array.isArray(batch.ops) || batch.ops.length > MAX_BATCH) {
-      throw outboxError('原生待发送批次无效', 'BW_OUTBOX_NATIVE_RECEIPT');
+    account.assertCurrent(scope.lease);
+    if (startedEpoch !== contextEpoch) throw outboxError('账户上下文已变化', 'BW_ACCOUNT_CONTEXT_STALE');
+    // Swift owns routing, transport and exact acknowledgements. This caller
+    // wakes the sender; it neither obtains originals nor relays HTTP statuses.
+    var result = await nativeRequest(scope, 'flush');
+    if (startedEpoch !== contextEpoch || !Number.isInteger(result.sent) || result.sent < 0 || result.sent > MAX_BATCH) {
+      throw outboxError('原生发送回执无效或账户已变化', 'BW_OUTBOX_NATIVE_RECEIPT');
     }
-    try {
-      if (!batch.ops.length) return { ok: true, sent: 0 };
-      account.assertCurrent(scope.lease);
-      if (startedEpoch !== contextEpoch) throw outboxError('账户上下文已变化', 'BW_ACCOUNT_CONTEXT_STALE');
-      var response;
-      try {
-        response = await originalFetch('/pdf/api/sync-batch', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin', cache: 'no-store',
-          body: JSON.stringify({ contract: CONTRACT, ownerNamespace: scope.ownerNamespace,
-            generation: scope.lease.generation, ops: batch.ops }),
-          keepalive: batch.ops.length <= 8
-        });
-      } catch (_) { return { ok: false, offline: true }; }
-      account.assertCurrent(scope.lease);
-      if (startedEpoch !== contextEpoch) throw outboxError('账户上下文已变化', 'BW_ACCOUNT_CONTEXT_STALE');
-      if (!response.ok) return { ok: false, status: response.status };
-      var data = await response.json();
-      account.assertCurrent(scope.lease);
-      if (startedEpoch !== contextEpoch || !data || data.ok !== true ||
-          data.contract !== CONTRACT || data.ownerNamespace !== scope.ownerNamespace ||
-          !Array.isArray(data.results) || data.results.length !== batch.ops.length) {
-        throw outboxError('同步回执不完整或账户已变化', 'BW_OUTBOX_NATIVE_RECEIPT');
-      }
-      var statuses = data.results.map(function (item) { return item && item.status; });
-      if (statuses.some(function (status) { return !Number.isInteger(status) || status < 0 || status > 599; })) {
-        throw outboxError('同步回执状态无效', 'BW_OUTBOX_NATIVE_RECEIPT');
-      }
-      await nativeRequest(scope, 'ack', { token: batch.token, statuses: statuses });
-      batch = null;
-      lastError = '';
-      return { ok: true, sent: statuses.length };
-    } finally {
-      if (batch) {
-        // A lost/late receipt leaves commands pending; releasing only forgets
-        // the in-memory capture. Navigation also clears captures natively.
-        try { await nativeRequest(scope, 'release', { token: batch.token }); } catch (_) {}
-      }
-    }
+    lastError = '';
+    return { ok: true, sent: result.sent };
   }
 
   function outboxError(message, code) {

@@ -100,3 +100,43 @@ try producer.acknowledge(nativeEntry, snapshot: nativeBatch, status: 200)
 try producer.enqueue(nativeCommand)
 check(try! !producer.pending().contains { $0.mutationID == nativeCommand["mutationId"] as? String },
     "已送达的原生命令不能因恢复而再次入队")
+
+@MainActor
+func testNativeSender() async throws {
+    let db = try ReaderNativeDataStore(path:":memory:")
+    let sender = ReaderNativeCommandOutboxPort(store:{ db })
+    let queue = try ReaderNativeCommandOutbox(store:db,namespace:namespace)
+    try queue.importRecords([command(30,queue:"a"),command(31,queue:"b")])
+    var calls:[String] = []
+    do {
+        _ = try await sender.flush(request("flush"),validate:{}) { op in
+            calls.append(op["mutationId"] as! String)
+            if calls.count == 2 { throw URLError(.notConnectedToInternet) }
+            // A second flush may not enter transport while the first owns it.
+            do { _ = try await sender.flush(request("flush"),validate:{}) { _ in fatalError("concurrent sender") }; fatalError("concurrent flush accepted") }
+            catch is ReaderNativeCommandOutbox.Failure {}
+            return 200
+        }
+        fatalError("offline result was discarded")
+    } catch is URLError {}
+    check(try! queue.pending().map(\.mutationID) == [command(31)["mutationId"] as! String],"successful first operation was retried or offline second was lost")
+    let retried = try await sender.flush(request("flush"),validate:{}) { op in
+        check(op["mutationId"] as? String == calls.last,"retry changed original ID")
+        try queue.enqueue(command(32,queue:"b"))
+        return 200
+    }
+    check(retried["ops"] == nil && retried["token"] == nil && retried["sent"] as? Int == 1,"native sender exposed operation bodies")
+    check(try! queue.pending().count == 1,"late receipt removed newly queued operation")
+    do {
+        _ = try await sender.flush(request("flush"),validate:{}) { _ in sender.invalidate(); return 200 }
+        fatalError("navigation accepted old response")
+    } catch is CancellationError {}
+    check(try! queue.pending().count == 1,"late response removed old account entry")
+    try queue.enqueue(command(33,queue:"other"))
+    _ = try await sender.flush(request("flush"),validate:{}) { op in
+        op["mutationId"] as? String == command(32)["mutationId"] as? String ? nil : 200
+    }
+    check(try! queue.pending().map(\.mutationID) == [command(32)["mutationId"] as! String],"deferred book blocked independent command or was deleted")
+}
+try await testNativeSender()
+print("Native send: partial success, retry identity, concurrent flush, late receipt and deferred book checks passed")

@@ -205,8 +205,7 @@ struct ReaderNativeCommandOutbox {
     }
 }
 
-/// Owns captured batches across asynchronous transport. The compatibility
-/// caller supplies HTTP results, never rows to delete. Storage is independent
+/// Owns captured batches across asynchronous native transport. Storage is independent
 /// of the disposable device cache and is partitioned by account namespace.
 final class ReaderNativeCommandOutboxPort {
     typealias Object = [String: Any]
@@ -223,8 +222,49 @@ final class ReaderNativeCommandOutboxPort {
     private let store: () throws -> ReaderNativeDataStore
     private var batches: [String: Batch] = [:]
     private var currentScope: Scope?
+    private var delivery: UUID?
     init(store: @escaping () throws -> ReaderNativeDataStore) { self.store = store }
-    func invalidate() { batches.removeAll(); currentScope = nil }
+    func invalidate() { batches.removeAll(); currentScope = nil; delivery = nil }
+
+    /// Swift sends the captured originals and consumes each definite receipt.
+    /// WebKit never provides HTTP statuses or receives the command bodies.
+    @MainActor
+    func flush(_ request: Object, validate: () throws -> Void,
+               send: (Object) async throws -> Int?) async throws -> Object {
+        guard delivery == nil else { throw ReaderNativeCommandOutbox.Failure(message:"命令仍在发送") }
+        try validate()
+        var capture = request; capture["operation"] = "capture"
+        let response = try handle(capture)
+        guard let token = response["token"] as? String, let batch = batches[token] else {
+            throw ReaderNativeCommandOutbox.Failure(message:"待发批次尚未就绪")
+        }
+        let id = UUID(); delivery = id
+        defer {
+            if delivery == id { delivery = nil }
+            batches.removeValue(forKey:token)
+        }
+        let outbox = try ReaderNativeCommandOutbox(store:store(),namespace:batch.scope.namespace)
+        var sent = 0
+        for entry in batch.selected {
+            try validate()
+            guard delivery == id, currentScope == batch.scope else { throw CancellationError() }
+            let outcome = try await send(entry.operation)
+            try validate()
+            guard delivery == id, currentScope == batch.scope else { throw CancellationError() }
+            // A different open book cannot authorize a local document write.
+            // Leave it pending without blocking unrelated account commands.
+            guard let status = outcome else { continue }
+            guard (0...599).contains(status) else { throw CancellationError() }
+            try outbox.acknowledge(entry,snapshot:batch.snapshot,status:status)
+            if (200..<300).contains(status) { sent += 1 }
+            // An offline server must not receive the rest of the batch merely
+            // to repeat the same failed connection. Original IDs stay pending.
+            if status == 0 || status == 429 || status >= 500 { break }
+        }
+        var result = response; result.removeValue(forKey:"token"); result.removeValue(forKey:"ops")
+        result["sent"] = sent; result["state"] = try outbox.status()
+        return result
+    }
 
     /// Capture the account before starting a native mutation. A late receipt
     /// remains in that account's durable queue, never the newly opened one.
@@ -257,6 +297,7 @@ final class ReaderNativeCommandOutboxPort {
             try outbox.importRecords(records)
             result["accepted"] = records.compactMap { $0["mutationId"] as? String }
         case "capture":
+            guard delivery == nil else { throw ReaderNativeCommandOutbox.Failure(message:"命令仍在发送") }
             // One outstanding batch per document. A new capture
             // abandons the older receipt token, but never its durable commands.
             batches.removeAll()

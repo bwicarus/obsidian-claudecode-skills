@@ -23,6 +23,48 @@ struct ReaderNativeBookStore {
     var contentSHA256: String? = nil
     private var projection: ReaderNativeBookProjection { .init(store: store) }
 
+    /// Replay a captured local command through the same native transaction.
+    /// The outbox ID also fences local effects and replication, so a lost
+    /// transport acknowledgement cannot create a second note or replication.
+    func applyQueuedCommand(_ command: [String:Any], nativePDF: Bool) throws -> [String:Any] {
+        guard let raw = command["url"] as? String, let url = URLComponents(string:raw),
+              let method = command["method"] as? String, let mutation = command["mutationId"] as? String,
+              mutation.range(of:"^mut-v2-[a-f0-9]{32}$",options:.regularExpression) != nil,
+              ["/pdf/api/notes","/pdf/api/highlights","/pdf/api/reading-pos"].contains(url.path) else { throw MutationError.invalid("本地待发命令") }
+        var body = command["body"] as? [String:Any] ?? [:]
+        let query = url.queryItems ?? []
+        if method == "DELETE", !query.isEmpty {
+            guard body.isEmpty, query.count == 2, Set(query.map(\.name)) == Set(["file","id"]), query.allSatisfy({ $0.value != nil }) else { throw MutationError.invalid("删除参数") }
+            body = Dictionary(uniqueKeysWithValues:query.map { ($0.name,$0.value! as Any) })
+        } else if !query.isEmpty { throw MutationError.invalid("本地请求查询参数") }
+        guard body["file"] as? String == "localbook:" + bookID else { throw MutationError.invalid("待发命令属于其他书籍") }
+        if url.path == "/pdf/api/reading-pos" {
+            guard method == "POST" else { throw MutationError.invalid("续读方法") }
+            try Self.validatePosition(body,file:"localbook:" + bookID)
+        }
+        if url.path == "/pdf/api/reading-pos", nativePDF {
+            // PDFKit owns this position. Old queued web reports observe it;
+            // they must not rewind the page or enqueue a duplicate replica.
+            guard let current = try projection.state("reading-position",bookID:bookID).payload as? [String:Any],
+                  current["kind"] as? String == "pdf" else { throw MutationError.unavailable }
+            return ["ok":true,"pos":current["pos"] ?? 1]
+        }
+        return try store.inTransaction {
+            let operation = url.path == "/pdf/api/notes" ? "note-api" : url.path == "/pdf/api/highlights" ? "highlight-api" : "position-api"
+            let receipt = try perform(["bookID":bookID,"operation":operation,"mutationId":mutation,
+                "value":["method":method,"body":body]])
+            if operation == "note-api" {
+                var outgoing = body
+                if method == "POST", let note = (receipt["result"] as? [String:Any])?["note"] as? [String:Any] {
+                    outgoing = note; outgoing["file"] = "localbook:" + bookID
+                }
+                _ = try perform(["bookID":bookID,"operation":"replication-enqueue","mutationId":mutation + ":replica",
+                    "value":["url":url.path,"method":method,"body":outgoing]])
+            }
+            return receipt
+        }
+    }
+
     func perform(_ request: [String: Any]) throws -> [String: Any] {
         guard !bookID.isEmpty, !deviceID.isEmpty, deviceID.utf16.count <= 240,
               let mutation = request["mutationId"] as? String, !mutation.isEmpty, mutation.utf16.count <= 240,
@@ -46,7 +88,7 @@ struct ReaderNativeBookStore {
                       number.doubleValue >= 0, number.doubleValue <= 9_007_199_254_740_991 else { throw MutationError.invalid("预期修订号") }
                 expected = number.int64Value
             } else {
-                guard ["reading-position", "pdf-position", "note-api", "note-create", "note-operation", "highlight-api", "highlight-edit", "assistant-actions", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
+                guard ["reading-position", "position-api", "pdf-position", "note-api", "note-create", "note-operation", "highlight-api", "highlight-edit", "assistant-actions", "replication-enqueue", "ink-operation", "ink-sync"].contains(operation) else { throw MutationError.invalid("缺少预期修订号") }
                 expected = nil
             }
             let revision: Int64
@@ -166,6 +208,17 @@ struct ReaderNativeBookStore {
             case "reading-position":
                 guard value is [String: Any] else { throw MutationError.invalid("阅读位置") }
                 revision = try writeState(operation, value: value, expected: expected, mutation: mutation, at: stamp)
+            case "position-api":
+                guard let api = value as? [String:Any], api["method"] as? String == "POST", let body = api["body"] as? [String:Any] else { throw MutationError.invalid("续读位置") }
+                try Self.validatePosition(body,file:"localbook:" + bookID)
+                let kind = body["kind"] as! String, pos = body["pos"] as! NSNumber
+                let previous = try projection.state("reading-position",bookID:bookID)
+                revision = try writeState("reading-position",value:["kind":kind,"pos":pos,"ts":stamp / 1000],
+                    expected:previous.revision,mutation:mutation + ":position",at:stamp)
+                if (previous.payload as? [String:Any])?["pos"] as? NSNumber != pos || (previous.payload as? [String:Any])?["kind"] as? String != kind {
+                    _ = try enqueueReplication(["url":"/pdf/api/reading-pos","method":"POST","body":body],mutation:mutation + ":replication",at:stamp)
+                }
+                result = ["ok":true,"pos":pos]
             case "book-languages":
                 guard let languages = value as? [String], languages.count <= 16,
                       languages.allSatisfy({ ["en", "ja", "zh", "ko", "fr", "de"].contains($0) }) else {
@@ -438,6 +491,13 @@ struct ReaderNativeBookStore {
             _ = try append(envelope("/replication/pair", "POST", pair), suffix: ":pair")
         }
         return (try append(message, suffix: ":command"), true)
+    }
+
+    private static func validatePosition(_ body:[String:Any],file:String) throws {
+        guard Set(body.keys) == Set(["file","kind","pos"]), body["file"] as? String == file,
+              let kind = body["kind"] as? String, ["pdf","epub"].contains(kind), let pos = body["pos"] as? NSNumber,
+              CFGetTypeID(pos) != CFBooleanGetTypeID(), pos.doubleValue.isFinite,
+              (0...10_000_000).contains(pos.doubleValue), pos.doubleValue.rounded() == pos.doubleValue else { throw MutationError.invalid("续读位置") }
     }
 
     private static func uuid() -> String { UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() }
