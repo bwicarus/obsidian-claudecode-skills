@@ -467,6 +467,13 @@ freezes page coordinates at release; native information-card drops can use full 
 without a hidden web card body. Focused drop tests cover Anki identity, long originals and
 failed saves. These changes still need Apple compilation and on-device gesture/visual acceptance.
 
+Apple run `35958580625` passed native data checks but rejected the phrase refresh call's
+missing device ID; that call is corrected. Phrase lookup now reads saved/mastered state
+from the native stores on both PDF and EPUB, without inheriting a dictionary headword's
+mastery. EPUB lookup consumes the visual selection after capturing its text/context, and
+card body height follows the measured Dynamic Type header. Focused regression checks passed;
+the follow-up App compilation and on-device gesture/visual acceptance remain pending.
+
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 
 The App now sends preference intent (including first legacy-mirror migration) to Swift. `ReaderNativePreferences` owns envelope construction, tombstones, causal parents for global settings, expected-revision checks, durable replay receipts and journal writes in one SQLite transaction. The existing 55-key DataRegistry allowlist generates the packaged native catalog; no second settings namespace or database is introduced. Browser/extension PreferenceStore behavior is retained. Native failures leave dirty compatibility intent and never invoke the old writer as a fallback.

@@ -302,6 +302,7 @@ struct ReaderNativePlacedCard: View {
     @State private var lastTouch = Date.distantPast
     @State private var resizing: CGSize?
     @State private var resizeStart: CGSize?
+    @State private var headerHeight: CGFloat = 44
 
     /// 「加入上下文」的控件 id 与当前选中态。
     ///
@@ -413,7 +414,7 @@ struct ReaderNativePlacedCard: View {
     /// 圆角：圆点态 13（与 .vc-card-dot 同值），其余 16（.vc-card{border-radius:16px}）。
     private var corner: CGFloat { form == "dot" ? 13 : 16 }
     private var bodyHeight: CGFloat? {
-        (resizing ?? savedSize).map { max(64, min($0.height, available.height) - 41) }
+        (resizing ?? savedSize).map { max(64, min($0.height, available.height) - headerHeight - 0.5) }
     }
 
     /// 正在拖。整张卡本身跟着手指走 —— 不再留一张淡掉的原卡在原位。
@@ -437,7 +438,7 @@ struct ReaderNativePlacedCard: View {
             .zIndex(dragging ? 100 : 0)
     }
 
-    /// 卡头 `.vc-card-hd`：12px、色调字、左距 13，最小高 40。
+    /// Dynamic Type title; the measured header leaves the remaining height for content.
     /// 右侧只放原版在这个状态下真有的那一个按钮：
     /// 词锚展开卡 = 右上角圆形垃圾桶（`.rc-note-word-open .rc-note-del`：26×26，
     /// 底 rgba(64,35,42,.82)，图标 #ffd8de）；自由卡 = 一枚同尺寸的「更多」。
@@ -484,7 +485,8 @@ struct ReaderNativePlacedCard: View {
             }
         }
         .padding(.trailing, 7)
-        .frame(minHeight: 40)
+        .frame(minHeight: 44)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
     }
 
     private var card: some View {
@@ -512,7 +514,7 @@ struct ReaderNativePlacedCard: View {
                     LongPressGesture(minimumDuration: 0.6).onEnded { _ in toggleContext() }
                 )
                 .frame(height: bodyHeight)
-                .frame(maxHeight: bodyHeight ?? max(120, min(460, min(rect.height, available.height - 40))))
+                .frame(maxHeight: bodyHeight ?? max(120, min(460, min(rect.height, available.height - headerHeight - 0.5))))
                 .overlay {
                     if let inkID = item.controls["ink"] {
                         ReaderNativeCardInkLayer(item: item, reader: reader, actionID: inkID,

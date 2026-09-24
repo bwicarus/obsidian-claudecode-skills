@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 const ROOT = new URL("../../", import.meta.url);
 const read = (p) => readFileSync(new URL(p, ROOT), "utf8").replace(/\r\n/g, "\n");
@@ -74,12 +75,32 @@ test("⑧ 选区此刻去问，不缓存", () => {
   const open = WEBVIEW.slice(WEBVIEW.indexOf("private func openEPUBLookup(mode: String) async"));
   // ⚠ 菜单从弹出到点下去之间，用户可能已经改了选择（拖把手、或点别处又重选）。
   // 拿旧的就会解释一段他没选的文字。
-  assert.match(open, /window\.__bwReaderEpubSelection\?\.\(\) \?\? null/);
+  assert.match(open, /window\.__bwReaderEpubSelection\?\.\(\{consume: true\}\) \?\? null/);
   assert.match(open, /nativeConversation\.report\("没有选中内容。"\)/, "没选中要出声");
   // context 要一起带走：一词多义看所在句，解释靠它把短选区换成整句。
   assert.match(open, /sentence: payload\["context"\] as\? String \?\? ""/);
   assert.match(EPUB, /window\.__bwReaderEpubSelection = function/);
   assert.match(EPUB, /context: String\(cur\.ctx \|\| ''\)/);
+});
+
+test("EPUB lookup consumes the visual selection after preserving its complete context", () => {
+  const start = EPUB.indexOf("window.__bwReaderEpubSelection = function");
+  const end = EPUB.indexOf("\n  };", start) + 5;
+  let clears = 0, hides = 0;
+  const context = vm.createContext({window: {getSelection: () => ({removeAllRanges: () => {clears++;}})},
+    cur: {text: "予防接種を受ける", ctx: "健康のために予防接種を受ける。", anchor: {section: 2}},
+    hideSel: () => {hides++;}});
+  vm.runInContext(EPUB.slice(start, end), context);
+  const peek = context.window.__bwReaderEpubSelection();
+  assert.equal(clears, 0);
+  const taken = context.window.__bwReaderEpubSelection({consume: true});
+  assert.equal(taken.text, peek.text);
+  assert.equal(taken.context, peek.context);
+  assert.equal(clears, 1);
+  assert.equal(hides, 1);
+  assert.equal(context.window.__bwReaderEpubSelection(), null);
+  context.cur = {text: "新しい選択", ctx: "次の文"};
+  assert.equal(context.window.__bwReaderEpubSelection().text, "新しい選択");
 });
 
 test("⑨ 取当前书用不分阅读器的那个口子", () => {

@@ -5938,10 +5938,18 @@
   // ⚠ 返回 `context` 而不只是选中串：一词多义时释义要看所在句，解释更要靠它把
   // 短选区换成整句。EPUB 这边 ctx 就是所在**块**的正文（captureSel 里算好的），
   // 比句子宽一点但绝不会更窄 —— 宁可多给上下文，也不要给 AI 一个碎词。
-  window.__bwReaderEpubSelection = function () {
+  window.__bwReaderEpubSelection = function (options) {
     if (!cur || !cur.text) return null;
-    return { text: String(cur.text).slice(0, 2000),
-             context: String(cur.ctx || '').slice(0, 1200) };
+    var selected = { text: String(cur.text).slice(0, 2000),
+                     context: String(cur.ctx || '').slice(0, 1200) };
+    if (options && options.consume === true) {
+      // Capture first, then remove only the visual selection. The separate
+      // assistant focus keeps its existing release/expiry behavior.
+      cur = {};
+      try { window.getSelection().removeAllRanges(); } catch (_) {}
+      hideSel();
+    }
+    return selected;
   };
 
   // 原生选区条的「划线」。走底座 saveHl —— 锚点解析、落库、就地上色、记住上次

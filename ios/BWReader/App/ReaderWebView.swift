@@ -2432,13 +2432,45 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func performNativeLookupCommand(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "nativeSelectionLookup", let input = command["value"] as? [String: Any],
-              let mode = input["mode"] as? String, ["translate", "example-zh", "dict-full"].contains(mode) else { return nil }
+              let mode = input["mode"] as? String, ["translate", "example-zh", "dict-full", "phrase"].contains(mode) else { return nil }
         do {
             guard !isLoading, let book = currentLocalBook, let gateway = nativeServerGateway,
                   isTrustedReaderURL(webView.url) else { throw ReaderNativeLookupRequest.Failure(message: "阅读页尚未就绪") }
             let generation = bookUserStateContextGeneration
             let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
             let languages = try ReaderNativeBookProjection(store: store).state("book-languages", bookID: book.id).payload as? [String] ?? []
+            if mode == "phrase" {
+                guard let text = input["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      text.utf16.count <= 2000, let service = nativePhraseService else {
+                    throw ReaderNativeLookupRequest.Failure(message: "词组上下文尚未就绪")
+                }
+                let japanese = ReaderNativeLookupRequest.isJapanese(text, languages: languages)
+                var value: [String: Any]
+                if japanese {
+                    // Dictionary content remains shared; the saved phrase's
+                    // identity and state belong to the native stores.
+                    let raw = try await webView.callAsyncJavaScript(
+                        "return await window.__bwNativeConversation?.perform(command);",
+                        arguments: ["command": command], in: nil, contentWorld: .page)
+                    guard let receipt = raw as? [String: Any], receipt["ok"] as? Bool == true,
+                          let content = receipt["value"] as? [String: Any] else {
+                        throw ReaderNativeLookupRequest.Failure(message: (raw as? [String: Any])?["error"] as? String ?? "词组查询失败")
+                    }
+                    value = content
+                } else {
+                    var translation = input; translation["mode"] = "translate"
+                    let receipt = await performNativeLookupCommand(["action": "nativeSelectionLookup", "value": translation])
+                    guard receipt?["ok"] as? Bool == true, let content = receipt?["value"] as? [String: Any] else {
+                        throw ReaderNativeLookupRequest.Failure(message: receipt?["error"] as? String ?? "词组查询失败")
+                    }
+                    value = content
+                }
+                for (key, state) in try await service.lookupState(text, japanese: japanese) { value[key] = state }
+                guard generation == bookUserStateContextGeneration, currentLocalBook?.id == book.id else {
+                    throw ReaderNativeLookupRequest.Failure(message: "阅读页已切换")
+                }
+                return ["ok": true, "value": value]
+            }
             let plan = try ReaderNativeLookupRequest(input, file: "localbook:" + book.id, languages: languages)
             let key = String(generation) + ":" + plan.mode + ":" + plan.path + ":" + plan.body.base64EncodedString()
             if let cached = nativeLookupCache[key] { return ["ok": true, "value": cached] }
@@ -2526,7 +2558,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // mirrors. They do not re-run the canonical mastery transaction,
             // and the observation does not delay the native receipt.
             if phrase {
-                do { _ = try await prepareNativePhraseService().read() }
+                do {
+                    try prepareNativePhraseService(deviceID: deviceID)
+                    _ = try await nativePhraseService?.read()
+                }
                 catch { showTransientNotice("掌握状态已保存，词组分词刷新待重试：" + error.localizedDescription) }
                 nativePDFDocument?.invalidateTokenization()
             }
@@ -7961,9 +7996,11 @@ extension ReaderWebViewModel: WKUIDelegate {
     /// 选择（拖了把手、或点到别处又重选）。拿旧的就会解释一段他没选的文字。
     @MainActor
     private func openEPUBLookup(mode: String) async {
+        let generation = bookUserStateContextGeneration
         let value = try? await webView.callAsyncJavaScript(
-            "return window.__bwReaderEpubSelection?.() ?? null;",
+            "return window.__bwReaderEpubSelection?.({consume: true}) ?? null;",
             arguments: [:], in: nil, contentWorld: .page)
+        guard generation == bookUserStateContextGeneration, isEPUBBook else { return }
         guard let payload = value as? [String: Any],
               let text = payload["text"] as? String, !text.isEmpty else {
             nativeConversation.report("没有选中内容。")

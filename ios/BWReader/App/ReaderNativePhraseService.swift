@@ -49,6 +49,14 @@ final class ReaderNativePhraseService {
         return ["ok": true, "phrases": snapshot.phrases, "source": "native-device", "fav": enabled]
     }
 
+    func lookupState(_ text: String, japanese: Bool) async throws -> [String: Any] {
+        _ = try await read()
+        let favorite = try phrases.read().phrases.contains(ReaderNativePhraseStore.normalize(text))
+        let mastered = try vocabulary.enabled(["kind": "phrase", "language": japanese ? "ja" : "en",
+                                               "text": text], property: "mastered")
+        return ["mode": "phrase", "phrase": true, "fav": favorite, "mastered": mastered]
+    }
+
     func wake() {
         guard effectsTask == nil else { return }
         effectsTask = Task { @MainActor [weak self] in

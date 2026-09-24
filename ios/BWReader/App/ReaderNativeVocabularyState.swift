@@ -14,6 +14,21 @@ struct ReaderNativeVocabularyState {
     let deviceID: String
     var now: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
 
+    /// Query the same semantic record that set() writes. A missing phrase
+    /// record must not inherit the dictionary headword's mastery state.
+    func enabled(_ input: [String: Any], property: String) throws -> Bool {
+        let query = try Self.normalized(input, property: property)
+        let id = query["id"] as! String
+        guard let row = try store.record(collection: Self.collection, id: id), !row.deleted else { return false }
+        let envelope = try R.object(JSONSerialization.jsonObject(with: Data(row.json.utf8)), "vocabulary envelope")
+        let value = try Self.normalized(R.object(envelope["value"], "vocabulary value"))
+        guard value["id"] as? String == id, envelope["id"] as? String == id,
+              envelope["collection"] as? String == Self.collection,
+              (envelope["rev"] as? NSNumber)?.int64Value == row.rev,
+              envelope["deleted"] as? Bool == false else { throw Failure(message: "词汇记录损坏") }
+        return value["enabled"] as? Bool == true
+    }
+
     /// Favorites and mastered phrases both remain atomic during selection.
     /// Do not add mastered phrases to the favorites collection itself.
     func tokenizationPhrases(favorites: [String]) throws -> [String] {
