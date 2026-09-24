@@ -13,7 +13,8 @@
   root.BWReaderRuntime = root.BWReaderRuntime || {};
   root.BWReaderRuntime.contextSelection = api;
   if (!root.BWReaderRuntime.contextSelections) {
-    root.BWReaderRuntime.contextSelections = api.createRegistry();
+    root.BWReaderRuntime.contextSelections = root.__bwNativeContextSelections
+      ? root.__bwNativeContextSelections.createRegistry(api) : api.createRegistry();
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';

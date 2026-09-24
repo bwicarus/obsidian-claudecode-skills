@@ -3377,7 +3377,7 @@ if (window.__bwPwaProviderOnly) return;
         limit: options.limit == null ? 8 : options.limit,
         maxText: options.maxText == null ? 2500 : options.maxText
       });
-    } catch (e) {}
+    } catch (e) { if (window.__bwNativeContextSelections) throw e; }
     var labels = Object.keys(_pins.map).sort();
     if (options.limit != null) labels = labels.slice(0, options.limit);
     var map = {}, items = [];

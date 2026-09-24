@@ -1023,6 +1023,11 @@ enum ReaderNativeConversationScript {
             if (!isReady()) return { ok: false, error: '阅读器尚未准备好' };
             if (isBusy()) return { ok: false, error: '上一条消息仍在处理中' };
             if (typeof command.text !== 'string' || !command.text.trim() || command.text.length > 32000) return { ok: false, error: '消息为空或过长' };
+            // Commit selection intent and apply native expiry before accepting
+            // the composer text, including the active-voice shortcut.
+            const sendingScope = scope;
+            await window.BWReaderRuntime?.contextSelections?.settle?.();
+            if (sendingScope !== scope || getScopeKey() !== scopeKey || isBusy()) return {ok:false, error:'会话已切换或仍在处理中'};
             const voice = voiceState();
             if (voice.busy) return { ok: false, error: '语音正在连接，请稍候再发送' };
             if (voice.active && conversationMode() === 'normal') {

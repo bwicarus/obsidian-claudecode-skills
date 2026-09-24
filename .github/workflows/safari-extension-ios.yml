@@ -285,6 +285,12 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativeConversationStore.swift ios/BWReader/Tests/NativeConversationStore/main.swift -o "$RUNNER_TEMP/native-conversation-test"
           "$RUNNER_TEMP/native-conversation-test"
 
+      - name: Verify native context selection graph and expiry
+        run: |
+          node ios/BWReader/Tests/NativeContextSelection/fixtures.cjs "$RUNNER_TEMP/native-context-selection.json"
+          xcrun swiftc ios/BWReader/App/ReaderNativeContextSelection.swift ios/BWReader/Tests/NativeContextSelection/main.swift -o "$RUNNER_TEMP/native-context-selection-test"
+          "$RUNNER_TEMP/native-context-selection-test" "$RUNNER_TEMP/native-context-selection.json"
+
       - name: Verify native card repository parity
         run: |
           node tests/native_card_fixtures.cjs "$RUNNER_TEMP/native-card-fixtures.json"

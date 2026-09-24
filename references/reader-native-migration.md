@@ -443,7 +443,18 @@ hidden thread's scroll metrics. Existing follow-up/feedback/playback actions rem
 through the compatibility action layer while it is migrated. Browser rendering is unchanged.
 Full Reader regression: 2441 passed; native source publication also verifies unchanged-body
 completion, long Markdown preservation and absence of web render/layout calls. These changes
-still need the next Apple compile; no installable full-migration build has been released.
+passed full Apple compilation in run `35955847195` (`8bcb8ee1`); no installable
+full-migration build has been released.
+
+The explicit card/image context selection graph now has a Swift owner. Native state handles
+semantic identity, parent/covers containment, stable cycle resolution and five-minute expiry;
+repeated projections do not extend the lifetime. Text selection retains its distinct existing
+40-second focus behavior. A disposable synchronous web projection remains for unmigrated
+callers, without its own timer or persistence. Sending first drains native selection intent and
+checks expiry; a failed native update blocks that snapshot instead of reusing stale web pins.
+Navigation/recovery discard the selection lease, and delayed acknowledgements cannot replace
+newer pending selections. Native/browser graph and expiry parity is checked by the Apple workflow;
+this is not yet removal of the entire conversation compatibility runtime.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

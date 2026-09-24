@@ -2729,10 +2729,23 @@
     sendBtn.disabled = !!_clearing;
   }
 
+  var _preparingNativeContext = false;
   async function send(text, opts) {
     if (streaming || _clearing) return;
+    if (_preparingNativeContext) return;
     text = (text || '').trim();
     var turnMode = _assistantMode, turnEpoch = _modeEpoch, turnChatUrl = _chatUrl(turnMode);
+    var selections = window.BWReaderRuntime && window.BWReaderRuntime.contextSelections;
+    if (selections && selections.settle) {
+      _preparingNativeContext = true;
+      try { await selections.settle(); }
+      catch (error) {
+        addMsg('asst-note', esc('上下文未准备好，消息未发送：' + (error.message || error)));
+        try { if (!ta.value) { ta.value = text; autorow(); } } catch (_) {}
+        return;
+      } finally { _preparingNativeContext = false; }
+      if (turnEpoch !== _modeEpoch || streaming || _clearing) return;
+    }
     // 66:2.1(WebRTC)通话中打字直达实时模型(输入框紫光=在此状态);消费成功=不走文字助手管线
     // 复习模式必须进入独立的持久会话，不能被实时通话旁路写回普通助手历史。
     if (turnMode === 'normal' && text && window.__vcSendText) {

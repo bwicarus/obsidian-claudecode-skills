@@ -359,6 +359,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         WeakScriptMessageHandlerWithReply?
     private var nativeServerGateway: ReaderNativeServerGateway?
     private var nativeAssistantStream: ReaderNativeAssistantStreamBridge?
+    private var nativeContextSelections: ReaderNativeContextSelectionBridge?
     private var nativePhraseService: ReaderNativePhraseService?
     private var nativeFavoritesService: ReaderNativeFavoritesService?
     private var nativeFavoritesContext: UInt64?
@@ -3205,6 +3206,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             contentController.addScriptMessageHandler(nativeAssistantStream, contentWorld: .page,
                                                        name: ReaderNativeAssistantStreamBridge.messageName)
             contentController.addUserScript(WKUserScript(source: ReaderNativeAssistantStreamBridge.script,
+                injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            let nativeContextSelections = ReaderNativeContextSelectionBridge(webView: webView,
+                trustedBaseURL: localRuntimeServer.baseURL)
+            self.nativeContextSelections = nativeContextSelections
+            contentController.addScriptMessageHandler(nativeContextSelections, contentWorld: .page,
+                name: ReaderNativeContextSelectionBridge.messageName)
+            contentController.addUserScript(WKUserScript(source: ReaderNativeContextSelectionBridge.script,
                 injectionTime: .atDocumentStart, forMainFrameOnly: true))
             let nativeServerSyncBridge = ReaderNativeServerSyncBridge(
                 webView: webView,
@@ -7613,6 +7621,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         //   页面里的线索随进程一起没了，能留下证据的只有 App 进程这一侧。
         noteWebContentTermination()
         nativeAssistantStream?.invalidate()
+        nativeContextSelections?.invalidate()
         nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
         nativeReviewImprovements?.invalidate(); nativeReviewImprovements = nil; nativeReviewImprovementsContext = nil
         invalidateNativePDFDocument(reason: "webcontent-terminated")
@@ -7689,6 +7698,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
         nativeAssistantStream?.invalidate()
+        nativeContextSelections?.invalidate()
         nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
         nativeReviewImprovements?.invalidate(); nativeReviewImprovements = nil; nativeReviewImprovementsContext = nil
         invalidateNativePDFDocument(reason: "navigation-start")
