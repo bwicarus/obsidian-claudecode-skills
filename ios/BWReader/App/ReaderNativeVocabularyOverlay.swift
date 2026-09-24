@@ -88,6 +88,7 @@ struct ReaderNativeVocabularyOverlay {
         var marks: [Mark] = [], masteredRanges: [(Int, Int)] = []
         var i = 0
         while i < chars.count {
+            if Task.isCancelled { return [] }
             guard !spacer(chars[i]), let wid = token(chars[i]), wid >= 0 else { i += 1; continue }
             let lo = i
             var end = i
@@ -117,6 +118,7 @@ struct ReaderNativeVocabularyOverlay {
         }
         var wanted: [(key: String, slug: String, language: String)] = [], seen = Set<String>()
         for row in state.records where row["enabled"] as? Bool == true {
+            if Task.isCancelled { return [] }
             let property = row["property"] as! String
             if property == "lookup" && row["kind"] as? String == "phrase" { continue }
             let slug = property == "mastered" ? "mastered" : property == "favorite" ? "seen" : "new"
@@ -137,6 +139,7 @@ struct ReaderNativeVocabularyOverlay {
             func start(_ boxes: [[Double]]) -> String? { boxes.first.map { "\($0[0]),\($0[1])" } }
             var taken = Set(marks.compactMap { start($0.row["rects"] as! [[Double]]) })
             for wanted in wanted {
+                if Task.isCancelled { return [] }
                 var offset = 0, count = 0
                 while offset < joined.length && count < 200 && marks.count < 800 {
                     let range = joined.range(of: wanted.key, options: [], range: NSRange(location: offset, length: joined.length - offset))

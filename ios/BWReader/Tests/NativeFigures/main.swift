@@ -1,12 +1,28 @@
 import Foundation
+import CoreFoundation
 typealias F = ReaderNativeFigures
 func equal(_ a: Any, _ b: Any) throws -> Bool {
-    try JSONSerialization.data(withJSONObject: a, options: [.sortedKeys,.withoutEscapingSlashes]) == JSONSerialization.data(withJSONObject: b, options: [.sortedKeys,.withoutEscapingSlashes])
+    // JSONDecoder's decimal NSNumber spelling may differ after conversion to
+    // Double even though the coordinate is identical. Identity strings remain
+    // exact and have separate IEEE-754 toFixed oracle cases below.
+    if let x = a as? NSNumber, let y = b as? NSNumber {
+        return (CFGetTypeID(x) == CFBooleanGetTypeID()) == (CFGetTypeID(y) == CFBooleanGetTypeID()) && x.doubleValue == y.doubleValue
+    }
+    if let x = a as? String, let y = b as? String { return x == y }
+    if let x = a as? [Any], let y = b as? [Any] {
+        guard x.count == y.count else { return false }
+        return try zip(x,y).allSatisfy { try equal($0.0,$0.1) }
+    }
+    if let x = a as? [String:Any], let y = b as? [String:Any] {
+        guard Set(x.keys) == Set(y.keys) else { return false }
+        return try x.allSatisfy { try equal($0.value,y[$0.key]!) }
+    }
+    return a is NSNull && b is NSNull
 }
 let fixture = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))) as! [String: Any]
 for (n, item) in (fixture["cases"] as! [[String: Any]]).enumerated() {
     let matches = try equal(F.normalized(item["figures"] as! [[String: Any]], page: 3), item["rows"]!)
-    precondition(matches, "Figure projection differs \(n)")
+    precondition(matches, "Figure projection differs \(n): \(F.normalized(item["figures"] as! [[String: Any]], page: 3)) expected \(item["rows"]!)")
 }
 for row in fixture["rounding"] as! [[Any]] {
     precondition(F.fixed3((row[0] as! NSNumber).doubleValue) == row[1] as! String, "Figure identity rounding differs \(row)")

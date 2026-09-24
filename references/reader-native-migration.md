@@ -329,3 +329,8 @@ PDF 选区、三方合并改为 Swift，以网页纯函数产生的真实结果�
 已选插图独立于有界页面缓存；消费通知带本轮附件令牌，迟到的清除不会删除后来重选的图。
 旧对话通道暂只观察数据投影，不再为 App 附件生成隐藏缩略图；完整对话协议仍待迁移。
 新增旧实现对照与跨书/重试/消费检查，随候选 Apple 构建验证；未上传可安装完整迁移包。
+
+性能路径按 Apple 的 PDFPageOverlayViewProvider 和 Improving app responsiveness 指引收口：
+生词计算移出主线程，翻页取消离屏未完成任务，派生装饰只保留有界工作集；每页请求独立
+代次避免取消旧任务时误清新任务。实机卡顿、Pencil、内存与耗电仍需在最终包上验证。
+参考：https://developer.apple.com/documentation/xcode/improving-app-responsiveness

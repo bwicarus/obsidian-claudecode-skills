@@ -204,6 +204,17 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         figures[page] = items
     }
 
+    /// Only derived decoration caches are evicted; canonical notes, strokes,
+    /// selections and explicit figure attachments keep their own lifetimes.
+    func retainPageDecorations(_ pages: Set<Int>) {
+        if vocabMarks.keys.contains(where: { !pages.contains($0) }) { vocabMarks = vocabMarks.filter { pages.contains($0.key) } }
+        if vocabSentences.keys.contains(where: { !pages.contains($0) }) { vocabSentences = vocabSentences.filter { pages.contains($0.key) } }
+        if translationSlices.keys.contains(where: { !pages.contains($0) }) { translationSlices = translationSlices.filter { pages.contains($0.key) } }
+        if furiganaEnabled.keys.contains(where: { !pages.contains($0) }) { furiganaEnabled = furiganaEnabled.filter { pages.contains($0.key) } }
+        if furiganaMastered.keys.contains(where: { !pages.contains($0) }) { furiganaMastered = furiganaMastered.filter { pages.contains($0.key) } }
+        if figures.keys.contains(where: { !pages.contains($0) }) { figures = figures.filter { pages.contains($0.key) } }
+    }
+
     /// 句子配色：与网页 `SENT_COLORS` 一一对应，按序号取模。
     /// ⚠ 顺序也要一致 —— 同一页同一句在两个表面上必须是同一个颜色，否则
     /// 「刚才那句绿的」在另一个表面上指的是别的句子。
