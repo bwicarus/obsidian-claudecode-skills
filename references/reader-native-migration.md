@@ -678,3 +678,21 @@ draft/effect coordination and account command outbox; PDF startup state and
 ReaderPC context publication still provided by compatibility code. EPUB body
 and localized video WebKit remain approved exceptions. This is not a release
 candidate and must not be described as only waiting for packaging.
+
+### Account command outbox handoff (candidate, not Apple-compiled)
+
+App command capture, coalescing, exact-revision acknowledgements and rejected
+records now use a native SQLite transport store, isolated from reclaimable
+device caches and from learning-data replication. Accepted commands retain
+small identity digests so a leftover WebKit spool cannot resurrect delivered
+operations. The compatibility send API still returns its durable mutation ID
+synchronously: its temporary spool is removed only after native import confirms
+the exact record. Native-port failures retain that spool and do not switch to
+the browser sender. Native batch receipts cannot erase later enqueues.
+
+Reader Node checks: 2483 passed, including native-handoff disk failure, offline
+retry and stale-account cases. Swift storage/receipt cases are added to the next
+consolidated Apple build, not yet run. This does not finish migration: remaining
+producers and the existing per-operation local/server dispatch adapter still
+provide the compatibility transport entry; they must not be described as fully
+Swift-owned. No App package or TestFlight upload was made.

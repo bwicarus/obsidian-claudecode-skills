@@ -268,6 +268,11 @@ jobs:
           xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeDataStoreBridge.swift ios/BWReader/Tests/NativeDataStore/main.swift -o "$RUNNER_TEMP/native-data-store-test"
           "$RUNNER_TEMP/native-data-store-test"
 
+      - name: Verify native account command outbox
+        run: |
+          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeDataStoreBridge.swift ios/BWReader/App/ReaderNativeCommandOutbox.swift ios/BWReader/Tests/NativeCommandOutbox/main.swift -o "$RUNNER_TEMP/native-command-outbox-test"
+          "$RUNNER_TEMP/native-command-outbox-test"
+
       - name: Verify native book projection
         # Reading projection uses the actual SQLite records and package codec;
         # verify data identity before compiling the full UI.

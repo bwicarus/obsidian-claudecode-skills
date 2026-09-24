@@ -148,8 +148,9 @@ final class ReaderNativeDataStore {
 
     /// Read one document's split records without decoding every other book.
     /// substr uses a bound literal prefix, so '%' and '_' are not wildcards.
-    func records(collection: String, idPrefix: String) throws -> [Record] {
-        try records(matching: "collection = ? AND substr(id, 1, length(?)) = ? ORDER BY id",
+    func records(collection: String, idPrefix: String, includeDeleted: Bool = true) throws -> [Record] {
+        try records(matching: "collection = ? AND substr(id, 1, length(?)) = ?" +
+                    (includeDeleted ? "" : " AND deleted = 0") + " ORDER BY id",
                     bind: [.text(collection), .text(idPrefix), .text(idPrefix)])
     }
 

@@ -404,6 +404,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 本机数据库。⚠ 懒开：没开启新存储的用户不该因为装了这个版本就多出一个
     /// SQLite 文件 —— 第一次真有请求进来才建。
     private lazy var nativeDataStoreHost = ReaderNativeDataStoreHost()
+    private lazy var nativeCommandOutbox = ReaderNativeCommandOutboxPort(store: { [unowned self] in
+        try self.nativeDataStoreHost.bridge(for: "bw-reader-native-v1-transport").store
+    })
     private var nativeReadingStoreBookID: String?
     private var nativeReadingStoreDeviceID: String?
     private var nativeRequestedPDFPage: Int?
@@ -3646,6 +3649,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             (() => {
               window.__BW_NATIVE_DATA_STORE__ = true;
               window.__BW_NATIVE_DATA_STORE_REQUIRED__ = true;
+              window.__BW_NATIVE_COMMAND_OUTBOX__ = true;
             })();
             """,
             injectionTime: .atDocumentStart,
@@ -7700,6 +7704,11 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 replyHandler(nil, "数据库请求来源无效")
                 return
             }
+            if body["action"] as? String == "commandOutbox" {
+                do { replyHandler(try nativeCommandOutbox.handle(body), nil) }
+                catch { replyHandler(nil, error.localizedDescription) }
+                return
+            }
             if body["action"] as? String == "readingStoreReady" {
                 guard let bookID = body["bookID"] as? String, bookID == currentLocalBook?.id,
                       let deviceID = body["deviceID"] as? String, !deviceID.isEmpty,
@@ -8217,6 +8226,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         noteWebContentTermination()
         nativeAssistantStream?.invalidate()
         nativeContextSelections?.invalidate()
+        nativeCommandOutbox.invalidate()
         nativeTurns?.invalidate()
         nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
         nativeReviewImprovements?.invalidate(); nativeReviewImprovements = nil; nativeReviewImprovementsContext = nil
@@ -8295,6 +8305,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
     ) {
         nativeAssistantStream?.invalidate()
         nativeContextSelections?.invalidate()
+        nativeCommandOutbox.invalidate()
         nativeTurns?.invalidate()
         nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
         nativeReviewImprovements?.invalidate(); nativeReviewImprovements = nil; nativeReviewImprovementsContext = nil

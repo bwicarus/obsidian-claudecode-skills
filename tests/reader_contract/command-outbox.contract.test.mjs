@@ -20,6 +20,97 @@ const ACCOUNT_A = `acct-v1-${"a".repeat(64)}`;
 const ACCOUNT_B = `acct-v1-${"b".repeat(64)}`;
 const LEGACY_KEY = "rc-outbox-v1";
 
+function nativeHarness({ failImport = false, omitAccepted = false } = {}) {
+  const calls = [];
+  const stored = new Map();
+  let capture = [];
+  const port = async (request) => {
+    calls.push(structuredClone(request));
+    const owner = request.lease.namespace;
+    const reply = { ok: true, contract: "command-outbox/2", ownerNamespace: owner,
+      generation: request.lease.generation };
+    if (request.operation === "import") {
+      if (failImport) throw new Error("disk unavailable");
+      for (const record of request.records) stored.set(record.mutationId, structuredClone(record));
+      reply.accepted = omitAccepted ? [] : request.records.map((record) => record.mutationId);
+    } else if (request.operation === "capture") {
+      capture = [...stored.values()].filter((record) => record.ownerNamespace === owner);
+      reply.token = "native-batch";
+      reply.ops = capture.map(({ mutationId, url, method, body }) => ({ mutationId, url, method, body }));
+    } else if (request.operation === "ack") {
+      request.statuses.forEach((status, index) => {
+        if (status >= 200 && status < 300) stored.delete(capture[index].mutationId);
+      });
+    }
+    reply.state = { contract: "command-outbox/2", ownerNamespace: owner,
+      size: [...stored.values()].filter((record) => record.ownerNamespace === owner).length, deadLetterSize: 0 };
+    return reply;
+  };
+  return { port, calls, stored };
+}
+
+test("App handoff waits for SQLite acceptance before removing the exact compatibility record", async () => {
+  const native = nativeHarness();
+  const h = createWindow({ nativePort: native.port });
+  h.account.activate({ namespace: ACCOUNT_A, source: "server-session" });
+  const id = h.sandbox.RC.outbox.send("review", "answer-1", "/pdf/api/review-answer", { aid: "answer-1" });
+  assert.equal(records(h.storage, ACCOUNT_A, "mutation").length, 1);
+  const result = await h.sandbox.RC.outbox.flush();
+  assert.equal(result.ok, true);
+  assert.equal(records(h.storage, ACCOUNT_A, "mutation").length, 0);
+  assert.equal(native.stored.size, 0);
+  assert.equal(JSON.parse(h.requests[0].options.body).ops[0].mutationId, id);
+  assert.ok(native.calls.some((call) => call.operation === "ack"));
+  assert.equal(h.sandbox.RC.outbox.legacySize(), 2);
+});
+
+test("App native storage failure keeps original command and never invokes browser fallback sender", async () => {
+  for (const options of [{ failImport: true }, { omitAccepted: true }]) {
+    const native = nativeHarness(options);
+    const h = createWindow({ nativePort: native.port });
+    h.account.activate({ namespace: ACCOUNT_A, source: "server-session" });
+    h.sandbox.RC.outbox.send("review", "a", "/pdf/api/review-answer", { aid: "a" });
+    assert.equal((await h.sandbox.RC.outbox.flush()).ok, false);
+    assert.equal(records(h.storage, ACCOUNT_A, "mutation").length, 1);
+    assert.equal(h.requests.length, 0);
+    assert.ok(!native.calls.some((call) => call.operation === "capture"));
+  }
+});
+
+test("App offline retry retains stable native mutation ID after web spool is consumed", async () => {
+  const native = nativeHarness();
+  let offline = true;
+  const h = createWindow({ nativePort: native.port, fetchImpl: async (_url, options) => {
+    if (offline) throw new TypeError("offline");
+    const body = JSON.parse(options.body);
+    return batchResponse(body.ownerNamespace, body.ops.map(() => 200));
+  } });
+  h.account.activate({ namespace: ACCOUNT_A, source: "server-session" });
+  const id = h.sandbox.RC.outbox.send("review", "a", "/pdf/api/review-answer", { aid: "a" });
+  assert.equal((await h.sandbox.RC.outbox.flush()).offline, true);
+  assert.equal(records(h.storage, ACCOUNT_A, "mutation").length, 0);
+  assert.equal(native.stored.has(id), true);
+  offline = false;
+  assert.equal((await h.sandbox.RC.outbox.flush()).ok, true);
+  assert.equal(JSON.parse(h.requests[1].options.body).ops[0].mutationId, id);
+});
+
+test("App stale account and malformed response cannot acknowledge a native batch", async () => {
+  for (const changeAccount of [false, true]) {
+    const native = nativeHarness();
+    let h;
+    h = createWindow({ nativePort: native.port, fetchImpl: async () => {
+      if (changeAccount) h.account.activate({ namespace: ACCOUNT_B, source: "server-session" });
+      return batchResponse(ACCOUNT_A, changeAccount ? [200] : []);
+    } });
+    h.account.activate({ namespace: ACCOUNT_A, source: "server-session" });
+    const id = h.sandbox.RC.outbox.send("review", "a", "/pdf/api/review-answer", { aid: "a" });
+    assert.equal((await h.sandbox.RC.outbox.flush()).ok, false);
+    assert.equal(native.calls.some((call) => call.operation === "ack"), false);
+    assert.equal(native.stored.has(id), true);
+  }
+});
+
 function batchResponse(ownerNamespace, statuses, status = 200) {
   return {
     ok: status >= 200 && status < 300,
@@ -61,6 +152,7 @@ function createWindow({
   clock = { value: 1_000 },
   fetchImpl,
   interactionPolicy = InteractionPolicy,
+  nativePort = null,
 } = {}) {
   const account = AccountContext.createContext();
   const requests = [];
@@ -121,6 +213,8 @@ function createWindow({
       interactionPolicy,
     },
     RC: {},
+    __BW_NATIVE_COMMAND_OUTBOX__: !!nativePort,
+    ...(nativePort ? { webkit: { messageHandlers: { bwNativeDataStore: { postMessage: nativePort } } } } : {}),
   };
   sandbox.window = sandbox;
   vm.runInContext(SOURCE, vm.createContext(sandbox), {

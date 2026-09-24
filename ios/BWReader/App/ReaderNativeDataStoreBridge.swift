@@ -193,10 +193,11 @@ struct ReaderNativeDataStoreBridge {
 
 /// 按库名持有若干个 `ReaderNativeDataStore`，并把网页递来的请求路由过去。
 ///
-/// ⚠ 为什么是**三个库**而不是每本书一个：`native-local-runtime.js` 本来就分
+/// ⚠ 用户数据保留**三个库**而不是每本书一个：`native-local-runtime.js` 本来就分
 /// global / document / device 三套（见 `createStores`），书的隔离靠记录里的
 /// `documentId`，不是靠分库。照着它分，迁移时才是一对一。
 /// device 那个库还会被整个删掉重建（回收墓碑空间），分开放才删得干净。
+/// 账户待发命令另存 transport 库，不能跟着可回收设备缓存被清除。
 ///
 /// ⚠ **库名走白名单**：名字来自网页，直接拿去拼文件路径的话，一个
 /// `../../` 就能写到沙盒里别的地方。宁可拒绝一个合法但没登记的名字，
@@ -214,7 +215,9 @@ final class ReaderNativeDataStoreHost {
     static let allowedStores: Set<String> = [
         "bw-reader-native-v1-global",
         "bw-reader-native-v1-document",
-        "bw-reader-native-v1-device"
+        "bw-reader-native-v1-device",
+        // Durable transport receipts must survive device cache reclamation.
+        "bw-reader-native-v1-transport"
     ]
 
     private let root: URL

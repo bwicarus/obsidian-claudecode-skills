@@ -30,6 +30,103 @@
   var windowTimer = null;
   var lastError = '';
   var interactionPolicyReady = null;
+  var nativeOwner = window.__BW_NATIVE_COMMAND_OUTBOX__ === true;
+  var nativeState = null;
+  var nativeHandoffTail = Promise.resolve();
+
+  // Compatibility producers still return a mutation ID synchronously. Their
+  // localStorage entry is a durable handoff spool only: remove it after SQLite
+  // confirms that exact record. App coalescing and acknowledgements are Swift
+  // owned; never fall back to the browser sender when the native port fails.
+  async function nativeRequest(scope, operation, fields) {
+    account.assertCurrent(scope.lease);
+    var handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bwNativeDataStore;
+    if (!handler || typeof handler.postMessage !== 'function') {
+      throw outboxError('原生待发送队列不可用，原命令已保留', 'BW_OUTBOX_NATIVE_UNAVAILABLE');
+    }
+    var reply = await handler.postMessage(Object.assign({
+      action: 'commandOutbox', contract: CONTRACT, operation: operation, lease: scope.lease
+    }, fields || {}));
+    account.assertCurrent(scope.lease);
+    if (!reply || reply.ok !== true || reply.contract !== CONTRACT ||
+        reply.ownerNamespace !== scope.ownerNamespace || reply.generation !== scope.lease.generation) {
+      throw outboxError('原生队列回执账户不匹配', 'BW_OUTBOX_NATIVE_RECEIPT');
+    }
+    if (reply.state && reply.state.ownerNamespace === scope.ownerNamespace) nativeState = reply.state;
+    return reply;
+  }
+
+  function handoffNative(scope) {
+    var work = nativeHandoffTail.catch(function () {}).then(async function () {
+      account.assertCurrent(scope.lease);
+      var records = scanArea(scope, MUTATION_AREA).concat(scanArea(scope, DEAD_LETTER_AREA));
+      for (var start = 0; start < records.length;) {
+        var chunk = [], bytes = 0;
+        while (start < records.length && chunk.length < 128) {
+          var length = new Blob([records[start].raw]).size;
+          if (chunk.length && bytes + length > 7 * 1024 * 1024) break;
+          chunk.push(records[start++]); bytes += length;
+        }
+        var reply = await nativeRequest(scope, 'import', {
+          records: chunk.map(function (record) { return JSON.parse(record.raw); })
+        });
+        if (!Array.isArray(reply.accepted) || chunk.some(function (record) {
+          return reply.accepted.indexOf(record.mutationId) < 0;
+        })) throw outboxError('原生队列未确认完整导入，原记录已保留', 'BW_OUTBOX_NATIVE_RECEIPT');
+        chunk.forEach(function (record) { removeExact(scope, record); });
+      }
+      if (!records.length) await nativeRequest(scope, 'status');
+    });
+    nativeHandoffTail = work;
+    return work;
+  }
+
+  async function flushNative(scope, startedEpoch) {
+    await handoffNative(scope);
+    var batch = await nativeRequest(scope, 'capture');
+    if (typeof batch.token !== 'string' || !Array.isArray(batch.ops) || batch.ops.length > MAX_BATCH) {
+      throw outboxError('原生待发送批次无效', 'BW_OUTBOX_NATIVE_RECEIPT');
+    }
+    try {
+      if (!batch.ops.length) return { ok: true, sent: 0 };
+      account.assertCurrent(scope.lease);
+      if (startedEpoch !== contextEpoch) throw outboxError('账户上下文已变化', 'BW_ACCOUNT_CONTEXT_STALE');
+      var response;
+      try {
+        response = await originalFetch('/pdf/api/sync-batch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin', cache: 'no-store',
+          body: JSON.stringify({ contract: CONTRACT, ownerNamespace: scope.ownerNamespace,
+            generation: scope.lease.generation, ops: batch.ops }),
+          keepalive: batch.ops.length <= 8
+        });
+      } catch (_) { return { ok: false, offline: true }; }
+      account.assertCurrent(scope.lease);
+      if (startedEpoch !== contextEpoch) throw outboxError('账户上下文已变化', 'BW_ACCOUNT_CONTEXT_STALE');
+      if (!response.ok) return { ok: false, status: response.status };
+      var data = await response.json();
+      account.assertCurrent(scope.lease);
+      if (startedEpoch !== contextEpoch || !data || data.ok !== true ||
+          data.contract !== CONTRACT || data.ownerNamespace !== scope.ownerNamespace ||
+          !Array.isArray(data.results) || data.results.length !== batch.ops.length) {
+        throw outboxError('同步回执不完整或账户已变化', 'BW_OUTBOX_NATIVE_RECEIPT');
+      }
+      var statuses = data.results.map(function (item) { return item && item.status; });
+      if (statuses.some(function (status) { return !Number.isInteger(status) || status < 0 || status > 599; })) {
+        throw outboxError('同步回执状态无效', 'BW_OUTBOX_NATIVE_RECEIPT');
+      }
+      await nativeRequest(scope, 'ack', { token: batch.token, statuses: statuses });
+      batch = null;
+      lastError = '';
+      return { ok: true, sent: statuses.length };
+    } finally {
+      if (batch) {
+        // A lost/late receipt leaves commands pending; releasing only forgets
+        // the in-memory capture. Navigation also clears captures natively.
+        try { await nativeRequest(scope, 'release', { token: batch.token }); } catch (_) {}
+      }
+    }
+  }
 
   function outboxError(message, code) {
     var error = new Error(message);
@@ -368,6 +465,7 @@
     var startedEpoch = contextEpoch;
     busy = true;
     try {
+      if (nativeOwner) return await flushNative(scope, startedEpoch);
       var snapshot = scanArea(scope, MUTATION_AREA);
       if (!snapshot.length) return { ok: true, sent: 0 };
       var selected = latestByQueue(snapshot).sort(compareMutation).slice(0, MAX_BATCH);
@@ -442,7 +540,7 @@
   }
 
   function beacon() {
-    if (window.__bwReaderFetch || !navigator.sendBeacon) return false;
+    if (nativeOwner || window.__bwReaderFetch || !navigator.sendBeacon) return false;
     var scope;
     try { scope = requireAccount(); } catch (_) { return false; }
     var startedEpoch = contextEpoch;
@@ -475,7 +573,12 @@
   }
 
   function areaSize(area) {
-    try { return scanArea(requireAccount(), area).length; } catch (_) { return 0; }
+    try {
+      var scope = requireAccount();
+      var staged = scanArea(scope, area).length;
+      if (!nativeOwner || !nativeState || nativeState.ownerNamespace !== scope.ownerNamespace) return staged;
+      return staged + (Number(nativeState[area === MUTATION_AREA ? 'size' : 'deadLetterSize']) || 0);
+    } catch (_) { return 0; }
   }
 
   function size() {
@@ -533,6 +636,9 @@
         method: request.method,
         body: body == null ? null : body,
         ts: Date.now()
+      });
+      if (nativeOwner) handoffNative(scope).catch(function (error) {
+        lastError = String(error && error.code || 'BW_OUTBOX_NATIVE_HANDOFF');
       });
       var count = size();
       if (count >= 20) {
@@ -601,6 +707,7 @@
   if (account && typeof account.subscribe === 'function') {
     account.subscribe(function () {
       contextEpoch += 1;
+      nativeState = null;
       if (windowTimer) { clearTimeout(windowTimer); windowTimer = null; }
       var snapshot = null;
       try { snapshot = account.snapshot(); } catch (_) {}
