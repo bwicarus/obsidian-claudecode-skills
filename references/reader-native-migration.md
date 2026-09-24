@@ -624,3 +624,18 @@ it cannot occupy the audio channel. Stale server entries refresh only while the 
 is visible. Eighteen focused Reader checks passed; the new Swift checks and App build
 remain pending. Supplemental dictionary actions, conversation/artifact effect adapters
 and the review compatibility controller are still tracked migration work.
+
+Apple run `35995805368` (`8cb78ab1`) subsequently passed all native checks and
+full App compilation. No signed App or TestFlight release was produced.
+
+The following candidate batch also routes related-word cards, contextual
+explanations, Japanese deep explanations and dictionary Anki actions through
+Swift. Related cards read live canonical notes across books and strip embedded
+dictionary/script material, with revision-based invalidation and HTML parsing
+off the UI actor. Explanation reconnects poll the original server job id rather
+than resubmitting generation. Anki operations reserve a durable operation id
+before sending and retain uncertain results across panel retries. The existing
+authorized gateway and endpoints are retained. Twenty-one focused Reader
+contracts passed; new native behavioral checks and full App compilation are
+pending. Conversation/artifact effects and review compatibility dependencies
+remain; this entry does not declare the migration or release complete.

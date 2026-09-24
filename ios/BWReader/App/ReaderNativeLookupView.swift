@@ -4,7 +4,7 @@ import SwiftUI
 /// 原生阅读区的查词 / 整段翻译结果面板。
 ///
 /// 此模型负责显示，数据由宿主路由：翻译、例句中译和完整英语词典直接走 Swift
-/// 网关；单词和词组由 Swift 整理，部分补充操作仍走共享语义接口。
+/// 网关；单词、词组、关联卡片和补充操作均由 Swift 整理。
 /// 语言判断读取当前书声明的语言，迁移时须保留原字段和后备行为。
 ///
 /// 2026-09-24 用户："词典内容也和之前不一样，少了很多元素 …… 应该在旧的基础上改动，
@@ -33,6 +33,7 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
 
     private let page: Int
     private let context: String
+    private let ankiOperation = UUID().uuidString
 
     var title: String {
         switch mode {
@@ -60,9 +61,11 @@ final class ReaderNativeLookupModel: ObservableObject, Identifiable {
     }
 
     private func lookup(_ mode: String, _ text: String, context: String? = nil) async -> [String: Any] {
-        await request([
+        var value: [String: Any] = ["text": text, "mode": mode, "page": page, "context": context ?? self.context]
+        if mode == "vocab-anki" { value["mutationId"] = ankiOperation }
+        return await request([
             "action": "nativeSelectionLookup",
-            "value": ["text": text, "mode": mode, "page": page, "context": context ?? self.context],
+            "value": value,
         ])
     }
 

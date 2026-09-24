@@ -2455,9 +2455,79 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeLookupCache: [String: [String: Any]] = [:]
     private var nativeLookupCacheBytes = 0
     private var nativeLookupTasks: [String: (id: UUID, task: Task<[String: Any], Error>)] = [:]
+    private var nativeBoundWordCards: ReaderNativeWordCards?
     private var nativeWordLookupEntries: [String: [String: Any]] = [:]
     private var nativeWordLookupOrder: [String] = []
     private var nativeWordLookupCacheLoaded = false
+
+    private func nativeSupplementalLookup(_ input: [String: Any], book: ReaderLocalBookRecord,
+                                          gateway: ReaderNativeServerGateway) async throws -> [String: Any] {
+        let mode = input["mode"] as? String ?? ""
+        let word = (input["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !word.isEmpty, word.utf16.count <= 2000, !word.contains("\0") else {
+            throw ReaderNativeLookupRequest.Failure(message: "BW_READER_LOOKUP_TEXT")
+        }
+        let context = String((input["context"] as? String ?? "").prefix(320))
+        let generation = bookUserStateContextGeneration, gatewayContext = gateway.contextRevision
+        let surface: ReaderNativeInterfaceSurface = book.format == .pdf ? .pdf : .epub
+        let check: @MainActor () throws -> Void = { [weak self] in
+            guard let self, self.bookUserStateContextGeneration == generation,
+                  self.currentLocalBook?.id == book.id, gateway.contextRevision == gatewayContext else { throw CancellationError() }
+        }
+        if mode == "word-cards" {
+            let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+            guard try store.meta("legacyImport") == "done" else { throw ReaderNativeLookupRequest.Failure(message: "卡片库尚未就绪") }
+            if nativeBoundWordCards == nil { nativeBoundWordCards = ReaderNativeWordCards(store: store) }
+            let cards = try await nativeBoundWordCards!.lookup(lemma: word, word: context.isEmpty ? word : context)
+            try check()
+            return ["mode": mode, "cards": cards]
+        }
+        if mode == "vocab-anki" {
+            let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-device").store
+            guard try store.meta("legacyImport") == "done" else { throw ReaderNativeLookupRequest.Failure(message: "本机数据尚未就绪") }
+            let operation = input["mutationId"] as? String ?? ""
+            let service = ReaderNativeLookupMutation(read: { try store.meta($0) }, write: { try store.putMeta($0, json: $1) }, send: { body in
+                try check()
+                let reply = try await gateway.fetchData(path: "/pdf/api/vocab-anki", method: "POST", body: body, surface: surface)
+                return .init(status: reply.status, data: reply.data)
+            })
+            let result = try await service.run(word: word, operation: operation)
+            try check()
+            return result
+        }
+        let key = String(generation) + ":" + mode + ":" + String(decoding: try JSONSerialization.data(withJSONObject: [word, context]), as: UTF8.self)
+        let job: Task<[String: Any], Error>, jobID: UUID
+        if let running = nativeLookupTasks[key] { job = running.task; jobID = running.id }
+        else {
+            guard nativeLookupTasks.count < 24 else { throw ReaderNativeLookupRequest.Failure(message: "查询正在处理中，请稍候") }
+            let plan = try ReaderNativeLookupStream.Plan(mode: mode, text: word, context: context)
+            jobID = UUID()
+            job = Task { @MainActor in
+                let stream = ReaderNativeLookupStream(connect: { response, chunk in
+                    try await gateway.streamAssistant(path: plan.path, method: plan.method, body: plan.body,
+                        surface: surface, expectedContext: gatewayContext, onResponse: response, onChunk: chunk)
+                }, poll: {
+                    try await check()
+                    let response = try await gateway.fetchData(path: plan.resultPath, surface: surface)
+                    guard (200..<300).contains(response.status) else {
+                        if (400..<500).contains(response.status), response.status != 408, response.status != 429 {
+                            throw ReaderNativeLookupStream.Failure(message: "解释结果读取被拒绝")
+                        }
+                        throw URLError(.badServerResponse)
+                    }
+                    return response.data
+                })
+                let body = try await stream.run()
+                try check()
+                return ["mode": plan.mode, "text": plan.text, "body": body]
+            }
+            nativeLookupTasks[key] = (jobID, job)
+        }
+        defer { if nativeLookupTasks[key]?.id == jobID { nativeLookupTasks.removeValue(forKey: key) } }
+        let result = try await job.value
+        try check()
+        return result
+    }
 
     private func nativeWordEntry(_ input: [String: Any], book: ReaderLocalBookRecord,
                                  languages: [String], gateway: ReaderNativeServerGateway) async throws -> [String: Any] {
@@ -2563,11 +2633,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func performNativeLookupCommand(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "nativeSelectionLookup", let input = command["value"] as? [String: Any],
-              let mode = input["mode"] as? String, ["translate", "example-zh", "dict", "dict-full", "phrase"].contains(mode) else { return nil }
+              let mode = input["mode"] as? String,
+              ["translate", "example-zh", "dict", "dict-full", "phrase", "word-cards", "jp-ai", "explain", "vocab-anki"].contains(mode) else { return nil }
         do {
             guard !isLoading, let book = currentLocalBook, let gateway = nativeServerGateway,
                   isTrustedReaderURL(webView.url) else { throw ReaderNativeLookupRequest.Failure(message: "阅读页尚未就绪") }
             let generation = bookUserStateContextGeneration
+            if ["word-cards", "jp-ai", "explain", "vocab-anki"].contains(mode) {
+                return ["ok": true, "value": try await nativeSupplementalLookup(input, book: book, gateway: gateway)]
+            }
             let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
             let languages = try ReaderNativeBookProjection(store: store).state("book-languages", bookID: book.id).payload as? [String] ?? []
             if mode == "dict" {

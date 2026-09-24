@@ -140,12 +140,12 @@ final class ReaderNativeServerGateway: NSObject, WKScriptMessageHandlerWithReply
         return try await serverProxyBroker.data(for: prepared)
     }
 
-    func streamAssistant(path: String, body: Data, surface: ReaderNativeInterfaceSurface, expectedContext: UInt64,
+    func streamAssistant(path: String, method: String = "POST", body: Data, surface: ReaderNativeInterfaceSurface, expectedContext: UInt64,
                          onResponse: ReaderNativeAssistantStream.Response,
                          onChunk: ReaderNativeAssistantStream.Chunk) async throws {
         guard expectedContext == scopeEpoch else { throw ReaderNativeAssistantStream.Failure("对话的书籍关联已改变") }
         guard let request = Self.parse([
-            "contract": Self.requestContract, "action": "fetch", "method": "POST", "path": path,
+            "contract": Self.requestContract, "action": "fetch", "method": method, "path": path,
             "headers": ["Accept": "text/event-stream", "Content-Type": "application/json"],
             "bodyEncoding": "base64", "body": body.base64EncodedString()
         ]), let policy = interfaceManifest?.piRoutePolicy(path: request.routePath, method: request.method, surface: surface) else {

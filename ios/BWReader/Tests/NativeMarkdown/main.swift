@@ -1,5 +1,28 @@
 import Foundation
 
+func wordCardRecord(_ notes: [[String: Any]]) throws -> String {
+    String(decoding: try JSONSerialization.data(withJSONObject: ["value": ["payload": notes]]), as: UTF8.self)
+}
+do {
+    func note(_ cid: String, _ word: String, _ content: String, _ created: Int) -> [String: Any] {
+        ["created": created, "html": ["cid": cid, "label": word, "content": content, "bind": ["kind": "page-chars", "text": word]]]
+    }
+    let records = try [wordCardRecord([
+        note("later", "漢 字", "<b>含义</b><span class='rc-note-dict'>重复字典</span><script>bad()</script>", 20),
+        note("ignore", "別", "不相关", 5), note("earlier", "漢字", "旧内容", 10)
+    ]), wordCardRecord([note("other-book", "漢字", "另一本书", 15)])]
+    let result = try ReaderNativeWordCards.project(records, lemma: "漢字", word: "漢 字")
+    precondition(result.map(\.cid) == ["earlier", "other-book", "later"])
+    precondition(result.last?.text == "含义", "embedded dictionary/scripts leaked into related card")
+    let changed = try ReaderNativeWordCards.project([wordCardRecord([note("earlier", "別", "改绑", 10)])], lemma: "漢字", word: "漢字")
+    precondition(changed.isEmpty, "old word binding survived live note edit")
+    let sameID = try ReaderNativeWordCards.project([wordCardRecord([
+        note("same", "漢字", "旧版本", 10), note("same", "別", "新版本", 20)
+    ])], lemma: "漢字", word: "漢字")
+    precondition(sameID.isEmpty, "stale duplicate cid projected")
+}
+print("Native related cards: cross-book identity, live content, rebinding, order and embedded-content filtering passed")
+
 let protectedCases: [(String, [String])] = [
     (#"式 \(x^2\) と \[\frac{a}{b}\]"#, ["x^2", #"\frac{a}{b}"#]),
     (#"a $x+1$ b $$\sum_i x_i$$"#, ["x+1", #"\sum_i x_i"#]),

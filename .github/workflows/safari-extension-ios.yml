@@ -336,6 +336,7 @@ jobs:
           cp ios/BWReader/App/ReaderNativeInlineMedia.swift ios/BWReader/App/ReaderNativeMediaRoute.swift "$RUNNER_TEMP/native-markdown-checks/"
           cp ios/BWReader/App/ReaderNativeAnkiProjection.swift "$RUNNER_TEMP/native-markdown-checks/"
           cp ios/BWReader/App/ReaderNativeReviewFaces.swift "$RUNNER_TEMP/native-markdown-checks/"
+          cp ios/BWReader/App/ReaderNativeWordCards.swift ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeLookupRequest.swift "$RUNNER_TEMP/native-markdown-checks/"
           swift run --package-path "$RUNNER_TEMP/native-markdown-checks" NativeMarkdownChecks
 
       - name: Verify native EPUB archive reads
@@ -367,6 +368,8 @@ jobs:
         run: |
           xcrun swiftc ios/BWReader/App/ReaderNativeLookupRequest.swift ios/BWReader/App/ReaderNativeWordLookup.swift ios/BWReader/Tests/NativeLookupRequest/main.swift -o "$RUNNER_TEMP/native-lookup-test"
           "$RUNNER_TEMP/native-lookup-test"
+          xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantStream.swift ios/BWReader/App/ReaderNativeLookupRequest.swift ios/BWReader/App/ReaderNativeLookupStream.swift ios/BWReader/App/ReaderNativeLookupMutation.swift ios/BWReader/Tests/NativeLookupSupplement/main.swift -o "$RUNNER_TEMP/native-lookup-supplement-test"
+          "$RUNNER_TEMP/native-lookup-supplement-test"
 
       - name: Verify native vocabulary state parity
         run: |
