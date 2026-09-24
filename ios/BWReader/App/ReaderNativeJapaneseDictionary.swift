@@ -17,15 +17,19 @@ final class ReaderNativeJapaneseDictionary {
 
     func clear() { resources.removeAllObjects() }
 
-    private func resource(_ path: String) throws -> Object {
+    private func resource(_ path: String) throws -> NSDictionary {
         guard path == "manifest.json" || path == "kanji.json" || Self.matches(path, #"^shards/[a-f0-9]{1,6}\.json$"#) else { throw InvalidResource() }
-        if let cached = resources.object(forKey: path as NSString) { return cached as! Object }
+        if let cached = resources.object(forKey: path as NSString) { return cached }
         let bytes = try read(path)
-        guard let value = try JSONSerialization.jsonObject(with: bytes) as? Object else { throw InvalidResource() }
+        // JSON keys use exact Unicode code units. A Swift String-keyed map
+        // merges canonical equivalents such as 漢 / 漢, making which entry
+        // survives depend on hash iteration. Keep literal Foundation keys for
+        // dictionary indexes; only fixed-schema entry fields become Swift maps.
+        guard let value = try JSONSerialization.jsonObject(with: bytes) as? NSDictionary else { throw InvalidResource() }
         // Cost includes an allowance for decoded strings and Foundation objects.
         // Oversized shards are used for this lookup only, never kept indefinitely.
         if bytes.count <= 6 * 1024 * 1024 {
-            resources.setObject(value as NSDictionary, forKey: path as NSString, cost: bytes.count * 4)
+            resources.setObject(value, forKey: path as NSString, cost: bytes.count * 4)
         }
         return value
     }
@@ -199,7 +203,7 @@ final class ReaderNativeJapaneseDictionary {
             guard let metadata = shards[key] as? Object else { continue }
             let shard = try resource(metadata["path"] as? String ?? "shards/\(key).json")
             guard shard["contract"] as? String == "bw-jmdict-shard/3", shard["key"] as? String == key,
-                  let entries = shard["entries"] as? [Object], let exact = shard["exact"] as? Object else { throw InvalidResource() }
+                  let entries = shard["entries"] as? [Object], let exact = shard["exact"] as? NSDictionary else { throw InvalidResource() }
             let found = (exact[candidate] as? [Int] ?? []).compactMap { entries.indices.contains($0) ? entries[$0] : nil }
             guard !found.isEmpty else { continue }
             let rank = ["lemma":4, "reading":3, "form":2, "rare-reading":1, "other":0]
@@ -241,7 +245,7 @@ final class ReaderNativeJapaneseDictionary {
             else { marks.append("活用→原形") }
         }
         let chars = Self.unique(lemma.unicodeScalars.map(String.init).filter { Self.matches($0, "[㐀-鿿]") })
-        var kanji: Object = [:]
+        var kanji = NSDictionary()
         if !chars.isEmpty { kanji = try resource("kanji.json") }
         let accent: Any
         if let n = entry["accent"] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue.isFinite, n.doubleValue.rounded() == n.doubleValue { accent = n } else { accent = NSNull() }

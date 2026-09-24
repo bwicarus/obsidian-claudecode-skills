@@ -35,6 +35,13 @@ for test in fixture["lookups"] as! [[String: Any]] {
     try equal(dictionary.lookup(term, legacy: legacy), test["expected"]!, "lookup \(legacy): " + term)
 }
 dictionary.clear(); reads.removeAll()
+for _ in 0..<40 {
+    dictionary.clear()
+    let result = try dictionary.lookup("漢字")
+    let keys = (result["kanji"] as? [[String: Any]] ?? []).compactMap { $0["kanji"] as? String }
+    precondition(keys.map { Array($0.utf16) } == ["漢", "字"].map { Array($0.utf16) }, "literal 漢 dictionary key replaced by canonical-equivalent 漢")
+}
+dictionary.clear(); reads.removeAll()
 _ = try dictionary.lookup("日本語")
 let first = reads
 _ = try dictionary.lookup("日本語")
