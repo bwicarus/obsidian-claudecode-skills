@@ -60,6 +60,7 @@ if (window.__bwPwaProviderOnly) return;
   var _ratingCommitBusy = 0;
   var _presentationNotice = '';
   var _nativeQueueLease = '';
+  var _nativeDraftLease = '';
 
   function _nativeReviewUI() { return window.__BW_NATIVE_CONVERSATION_DATA__ === true; }
   function _nativeQueuePort() {
@@ -70,6 +71,13 @@ if (window.__bwPwaProviderOnly) return;
     if (!port) throw new Error('原生复习入口不可用');
     var response = await port.postMessage({ action: 'reviewQueue', request: Object.assign({ operation: operation }, values || {}) });
     if (!response || response.ok !== true) throw new Error(response && response.error || '原生复习请求未完成');
+    return response.value;
+  }
+  async function _nativeImprovementCall(operation, values) {
+    var port = _nativeQueuePort();
+    if (!port) throw new Error('原生草稿入口不可用');
+    var response = await port.postMessage({ action: 'reviewImprovement', request: Object.assign({ operation: operation }, values || {}) });
+    if (!response || response.ok !== true) throw new Error(response && response.error || '原生草稿请求未完成');
     return response.value;
   }
 
@@ -1164,6 +1172,10 @@ if (window.__bwPwaProviderOnly) return;
   function _invalidateCardRequests(clearPreview) {
     _draftRequestEpoch += 1;
     _commitRequestEpoch += 1;
+    if (_nativeReviewUI() && _nativeDraftLease) {
+      var previousLease = _nativeDraftLease; _nativeDraftLease = '';
+      _nativeImprovementCall('cancel', { lease: previousLease }).catch(function () {});
+    }
     if (clearPreview !== false) {
       _draftState = null;
       _commitState = Object.create(null);
@@ -3212,12 +3224,6 @@ if (window.__bwPwaProviderOnly) return;
     var requestEpoch = ++_draftRequestEpoch;
     _commitRequestEpoch += 1;
     _improveExpanded = true;
-    var payload = _draftPayload(
-      target,
-      Object.assign({}, card),
-      pairs.slice(),
-      _improveMode
-    );
     _draftState = {
       ok: false,
       error: '正在生成草稿…',
@@ -3228,10 +3234,22 @@ if (window.__bwPwaProviderOnly) return;
     _commitState = Object.create(null);
     render();
     try {
+      if (_nativeReviewUI()) {
+        _nativeDraftLease = window.crypto.randomUUID();
+        var nativePrepared = await _nativeImprovementCall('prepare', {
+          lease: _nativeDraftLease, contextKey: _contextCacheKey + ':' + _scopeMode,
+          cardKey: cardKey, card: _cardForAssistant(card), pairs: pairs,
+          target: target, verbosity: _improveMode
+        });
+        if (!_cardRequestCurrent(requestEpoch, cardKey, 'draft')) return;
+        _draftState = nativePrepared.draft;
+        _commitState = nativePrepared.commits || Object.create(null);
+        render(); return;
+      }
       var response = await fetch('/api/assistant/card-improvement-draft', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(_draftPayload(target, Object.assign({}, card), pairs.slice(), _improveMode))
       });
       if (!_cardRequestCurrent(requestEpoch, cardKey, 'draft')) return;
       var data = await response.json();
@@ -3261,7 +3279,7 @@ if (window.__bwPwaProviderOnly) return;
   async function _commitDraft(target, confirmation) {
     if (!_draftState || !_draftState.ok || !_draftState.draft_id) return;
     if (_anyCommitBusy() ||
-        (_commitState[target] && _commitState[target].ok)) return;
+        (_commitState[target] && (_commitState[target].ok || _commitState[target].unknown))) return;
     var draft = _draftState;
     var draftId = String(draft.draft_id);
     var cardKey = String(draft._card_key || _cardKey(_current()));
@@ -3274,6 +3292,16 @@ if (window.__bwPwaProviderOnly) return;
     _commitState[target] = { busy: true, ok: false, message: '' };
     render();
     try {
+      if (_nativeReviewUI()) {
+        var nativeCommitted = await _nativeImprovementCall('commit', {
+          lease: _nativeDraftLease, contextKey: _contextCacheKey + ':' + _scopeMode,
+          cardKey: cardKey, target: target, draftId: draftId, confirmed: !!nativeConfirmed
+        });
+        if (!_cardRequestCurrent(requestEpoch, cardKey, 'commit') || !_draftState || String(_draftState.draft_id || '') !== draftId) return;
+        _draftState = nativeCommitted.draft;
+        _commitState = nativeCommitted.commits || Object.create(null);
+        render(); return;
+      }
       var response = await fetch('/api/assistant/card-improvement-commit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

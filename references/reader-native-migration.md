@@ -379,7 +379,21 @@ to Swift and applies divider/replacement/provenance rules with SwiftSoup and the
 GFM parser. A bounded cache reuses unchanged faces; original card content and scheduling IDs
 are never rewritten. Native state publication and flip/undo no longer create even detached web
 face nodes. Source navigation and the review action reducer remain compatibility operations;
-the native parser and full App build for this follow-up still require Apple verification.
+the native parser and full App build passed Apple verification in `35950646876` (`29eaf8cf`).
+
+Review improvement preparation and explicit confirmation now go through a native owner using
+the existing server routes, frozen draft IDs, original entity/index and selected answer pairs.
+Changing card, scope or verbosity cancels/discards an obsolete preview. A commit reserves a
+receipt in the existing device store before dispatch; known success is reused, while an unknown
+outcome is never silently submitted again, including after reload. A late confirmed receipt is
+saved even when its original view has left. The web adapter currently still mirrors the resulting
+state and manages navigation/staged ratings; it does not run a second improvement request.
+Local Reader checks: 2438 passed. New native receipt/cancellation cases and full App compilation
+are pending the next Apple build. No new installable full-migration package has been produced.
+
+User direction (2026-09-24): preserve functional equivalence during migration; discuss potential
+architecture upgrades and user-visible consolidation/removal before implementing them. Purely
+duplicate internal implementations may be consolidated under the approved native ownership.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

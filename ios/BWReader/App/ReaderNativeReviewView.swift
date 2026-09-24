@@ -278,7 +278,7 @@ struct ReaderNativeReviewView: View {
                         let result = commits[target] ?? [:]
                         Button(target == "anki" ? "确认写入 Anki 新卡" : "确认更新原笔记") {
                             confirmation = ReviewDraftConfirmation(target: target, draftID: draft["draft_id"] as? String ?? "", cardID: current["id"] as? String ?? "", contextKey: state["contextKey"] as? String ?? "")
-                        }.disabled(saving || result["busy"] as? Bool == true || result["ok"] as? Bool == true)
+                        }.disabled(saving || result["busy"] as? Bool == true || result["ok"] as? Bool == true || result["unknown"] as? Bool == true)
                         if let message = result["message"] as? String, !message.isEmpty {
                             Text(message).font(.caption).foregroundStyle(result["ok"] as? Bool == true ? ReaderNativeTheme.accent : .red)
                                 .textSelection(.enabled)

@@ -2490,6 +2490,57 @@ test('failed native queue is visible and never starts legacy acquisition', async
   assert.deepEqual(fixture.calls, []);
 });
 
+test('App review improvements use native frozen previews and receipts without legacy fetch', async () => {
+  const calls = [];
+  let failPrepare = false;
+  const h = harness({ context: { file: 'localbook:book', page: 4 },
+    fetchImpl() { assert.fail('App must not run the browser improvement writer'); },
+    async nativeQueue({ action, request }) {
+      if (action === 'reviewQueue') {
+        if (request.operation === 'load') return { ok: true, value: { request: request.request, kind: 'load',
+          snapshot: { ts: Date.now(), client_context_key: request.contextKey, due_total: 1, related_total: 1,
+            cards: [{ id: 123, entity_id: 'entity-original', entity_index: 2, question: '原题', answer: '原答案' }], completed_ids: [], index: 0 } } };
+        return { ok: true, value: null };
+      }
+      assert.equal(action, 'reviewImprovement');
+      calls.push(structuredClone(request));
+      if (request.operation === 'cancel') return { ok: true };
+      if (failPrepare) return { ok: false, error: '原生服务不可用' };
+      const draft = { ok: true, draft_id: 'frozen-native-draft', _card_key: request.cardKey,
+        targets: ['anki'], drafts: { cards: [{ front: '新题', back: '新答案' }] } };
+      return { ok: true, value: { draft, commits: request.operation === 'commit'
+        ? { anki: { ok: false, unknown: true, message: '写入待确认' } } : {} } };
+    }
+  });
+  h.RC.review.setMode(true); await h.RC.review.load();
+  const answer = h.document.createElement('div'); h.thread.appendChild(answer);
+  const choices = h.RC.review.presentationSelections(answer, { question: '追问', text: '第一段\n\n第二段' });
+  const act = (key, extra = {}) => {
+    const state = h.RC.review.presentationState();
+    return h.RC.review.performNativeInteraction({ key, contextKey: state.contextKey, cardId: state.current?.id || '', ...extra });
+  };
+  await act('selectAnswer', { selectionId: choices[1].id });
+  await act('prepareDraft', { target: 'anki' });
+  assert.equal(calls[0].operation, 'prepare');
+  assert.equal(calls[0].card.entity_id, 'entity-original');
+  assert.equal(calls[0].card.entity_index, 2);
+  assert.equal(calls[0].pairs[0].answer, '第一段');
+  assert.ok(calls[0].lease);
+  await act('commitDraft', { target: 'anki', draftId: 'frozen-native-draft', confirmed: true });
+  assert.equal(calls[1].lease, calls[0].lease);
+  assert.equal(h.RC.review.presentationState().commits.anki.unknown, true);
+  await act('commitDraft', { target: 'anki', draftId: 'frozen-native-draft', confirmed: true });
+  assert.equal(calls.filter(x => x.operation === 'commit').length, 1, 'unknown commit must not dispatch again');
+  await act('improveMode', { value: 'concise' });
+  await settleAsync();
+  assert.equal(calls[2].operation, 'cancel');
+  assert.equal(calls[2].lease, calls[0].lease);
+  failPrepare = true;
+  await act('prepareDraft', { target: 'anki' });
+  assert.match(h.RC.review.presentationState().draft.error, /原生服务不可用/);
+  assert.equal(h.calls.length, 0);
+});
+
 test('native local review publishes semantic Markdown and cloze data without calling the web parser', async () => {
   const fixture = harness({ context: { file: 'localbook:book', page: 4 },
     markdownImpl() { assert.fail('Swift owns native Markdown'); },

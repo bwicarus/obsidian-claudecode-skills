@@ -365,6 +365,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeReviewQueue: ReaderNativeReviewQueue?
     private var nativeReviewQueueContext: UInt64?
     private var nativeReviewQueueGatewayContext: UInt64?
+    private var nativeReviewImprovements: ReaderNativeReviewImprovements?
+    private var nativeReviewImprovementsContext: UInt64?
+    private var nativeReviewImprovementsGatewayContext: UInt64?
     private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
     private var nativeServerRemoteLibraryCancellable: AnyCancellable?
     private var nativeServerSyncBridge: ReaderNativeServerSyncBridge?
@@ -2503,6 +2506,32 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 completionHandler: { _ in })
             return ["ok": true, "value": ["ok": true, "mastered": mastered, "jp": japanese]]
         } catch { return ["ok": false, "error": error.localizedDescription] }
+    }
+
+    private func prepareNativeReviewImprovements() throws -> ReaderNativeReviewImprovements {
+        guard let book = currentLocalBook, let gateway = nativeServerGateway else {
+            throw ReaderNativeReviewImprovements.Failure(message: "草稿服务尚未连接")
+        }
+        let generation = bookUserStateContextGeneration, context = gateway.contextRevision
+        if let service = nativeReviewImprovements, nativeReviewImprovementsContext == generation,
+           nativeReviewImprovementsGatewayContext == context { return service }
+        nativeReviewImprovements?.invalidate()
+        let device = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-device").store
+        guard try device.meta("legacyImport") == "done" else {
+            throw ReaderNativeReviewImprovements.Failure(message: "本机数据尚未完成导入")
+        }
+        let surface: ReaderNativeInterfaceSurface = book.format == .epub ? .epub : .pdf
+        let service = ReaderNativeReviewImprovements(fetch: { [weak self] path, body in
+            guard let self, self.bookUserStateContextGeneration == generation,
+                  self.nativeServerGateway?.contextRevision == context else { throw CancellationError() }
+            let result = try await gateway.fetchData(path: path, method: "POST", body: body, surface: surface)
+            // Persist a received commit receipt even after navigating away.
+            // The owner separately fences whether it can still publish it.
+            return .init(status: result.status, data: result.data)
+        }, read: { try device.meta($0) }, write: { try device.putMeta($0, json: $1) })
+        nativeReviewImprovements = service; nativeReviewImprovementsContext = generation
+        nativeReviewImprovementsGatewayContext = context
+        return service
     }
 
     private func prepareNativeReviewQueue() throws -> ReaderNativeReviewQueue {
@@ -7230,6 +7259,29 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 }
                 return
             }
+            if body["action"] as? String == "reviewImprovement" {
+                Task { @MainActor [weak self] in
+                    do {
+                        guard let self, let request = body["request"] as? [String: Any],
+                              let operation = request["operation"] as? String else {
+                            throw ReaderNativeReviewImprovements.Failure(message: "草稿请求无效")
+                        }
+                        if operation == "cancel" {
+                            self.nativeReviewImprovements?.invalidate(request["lease"] as? String ?? "")
+                            replyHandler(["ok": true], nil); return
+                        }
+                        let service = try self.prepareNativeReviewImprovements()
+                        let value: [String: Any]
+                        switch operation {
+                        case "prepare": value = try await service.prepare(request)
+                        case "commit": value = try await service.commit(request)
+                        default: throw ReaderNativeReviewImprovements.Failure(message: "未知草稿操作")
+                        }
+                        replyHandler(["ok": true, "value": value], nil)
+                    } catch { replyHandler(["ok": false, "error": error.localizedDescription], nil) }
+                }
+                return
+            }
             if body["action"] as? String == "reviewQueue" {
                 Task { @MainActor [weak self] in
                     do {
@@ -7552,6 +7604,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         noteWebContentTermination()
         nativeAssistantStream?.invalidate()
         nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
+        nativeReviewImprovements?.invalidate(); nativeReviewImprovements = nil; nativeReviewImprovementsContext = nil
         invalidateNativePDFDocument(reason: "webcontent-terminated")
         nativeConversation.resetForNavigation()
         webContentProcessNeedsReload = true
@@ -7627,6 +7680,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
     ) {
         nativeAssistantStream?.invalidate()
         nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
+        nativeReviewImprovements?.invalidate(); nativeReviewImprovements = nil; nativeReviewImprovementsContext = nil
         invalidateNativePDFDocument(reason: "navigation-start")
         nativeLookupTasks.values.forEach { $0.task.cancel() }
         nativeLookupTasks.removeAll()
