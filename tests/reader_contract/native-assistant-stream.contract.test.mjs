@@ -44,3 +44,18 @@ test('unknown native outcome does not start browser fetch or resubmit',async()=>
   const assistant=readFileSync(new URL('../../_server_deploy/static/pdf/rc-assistant.js',import.meta.url),'utf8');
   assert.match(assistant,/if \(window\.__bwNativeAssistantStream\)[\s\S]+?\} else while \(!done && !aborted\)/);
 });
+
+test('native history adapter retains status and payload; failure does not retry the web transport', async()=>{
+  const calls=[];
+  const window={webkit:{messageHandlers:{bwNativeAssistantStream:{async postMessage(command){
+    calls.push(command);
+    if(command.operation==='clear') throw new Error('unknown clear');
+    return {ok:false,status:401,body:'{"ok":false}'};
+  }}}}}; window.top=window;
+  vm.runInNewContext(script,{window,crypto:{randomUUID}});
+  const response=await window.__bwNativeAssistantHistory.request('/api/assistant/history','read','normal');
+  assert.equal(response.status,401); assert.equal(response.ok,false);
+  assert.deepEqual(JSON.parse(JSON.stringify(await response.json())),{ok:false});
+  await assert.rejects(window.__bwNativeAssistantHistory.request('/api/assistant/clear','clear','normal'),/unknown clear/);
+  assert.equal(calls.length,2);
+});

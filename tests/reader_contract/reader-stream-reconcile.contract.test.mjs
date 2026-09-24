@@ -52,7 +52,8 @@ function harness() {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(turns, sandbox);
-  vm.runInContext(events + '\nthis.event = onHistoryEvent;', sandbox);
+  const historyReader = assistant.slice(assistant.indexOf('    function _readHistory('), assistant.indexOf('  var streaming'));
+  vm.runInContext(historyReader + events + '\nthis.event = onHistoryEvent;', sandbox);
   return { sandbox, tc: sandbox.RC.turnCard, thread, stage, calls, timers, event: sandbox.event, cardRenders: () => renderCards };
 }
 const message = (id, content, role = 'assistant', parts) => ({ turn_id: id, role, content, ...(parts ? { parts } : {}) });

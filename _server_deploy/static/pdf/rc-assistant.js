@@ -1001,6 +1001,15 @@
     }
     function _clearUrl(mode) { return _modeNorm(mode || _assistantMode) === 'review' ? '/api/assistant/clear' : _NORMAL_CLEARURL; }
 
+    // Swift owns App history transport/lifecycle. Remaining replay consumers
+    // receive data, never retry an unknown native operation through web fetch.
+    function _readHistory(mode) {
+      mode = _modeNorm(mode || _assistantMode);
+      return window.__bwNativeAssistantHistory
+        ? window.__bwNativeAssistantHistory.request(_historyUrl(mode), 'read', mode)
+        : fetch(_historyUrl(mode));
+    }
+
 
   var streaming = false;   // 对话历史由服务端保存,前端不再持本地数组
 
@@ -2686,7 +2695,7 @@
     mode = _modeNorm(mode || _assistantMode);
     if (epoch != null && epoch !== _modeEpoch) return null;
     try {
-      var r = await fetch(_historyUrl(mode));
+      var r = await _readHistory(mode);
       var d = await r.json();
       if (epoch != null && epoch !== _modeEpoch) return null;
       if (d && d.ok && d.messages && d.messages.length) {
@@ -3476,7 +3485,9 @@
       clearOpts.body = JSON.stringify({ assistant_mode: 'review' });
     }
     try {
-      var clearResponse = await fetch(_clearUrl(clearMode), clearOpts);
+      var clearResponse = window.__bwNativeAssistantHistory
+        ? await window.__bwNativeAssistantHistory.request(_clearUrl(clearMode), 'clear', clearMode)
+        : await fetch(_clearUrl(clearMode), clearOpts);
       if (!clearResponse || clearResponse.ok === false) throw new Error('clear failed');
       var clearResult = null;
       try { clearResult = await clearResponse.json(); } catch (_) {}
@@ -3962,7 +3973,7 @@
     if (!ids.length) return;
     var mode = _assistantMode, epoch = _modeEpoch;
     _legacyTurnInFlight = true;
-    fetch(_historyUrl(mode)).then(function (r) {
+    _readHistory(mode).then(function (r) {
       if (!r || r.ok === false) throw new Error('history request failed');
       return r.json();
     }).then(function (data) {
@@ -4200,7 +4211,7 @@
     var histToken = ++_historyEpoch, modeEpoch = _modeEpoch;
     var liveVersion = RC.turnCard && RC.turnCard.streamVersion ? RC.turnCard.streamVersion() : 0;
     _historyLoadCount++;
-    return fetch(historyScope).then(function (r) {
+    return _readHistory(mode).then(function (r) {
       if (!r || r.ok === false) {
         var requestError = new Error('history request failed');
         requestError.status = Number(r && r.status) || 0;

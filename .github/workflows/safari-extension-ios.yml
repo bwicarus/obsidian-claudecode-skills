@@ -367,6 +367,11 @@ jobs:
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantStream.swift ios/BWReader/Tests/NativeAssistantStream/main.swift -o "$RUNNER_TEMP/native-assistant-stream-test"
           "$RUNNER_TEMP/native-assistant-stream-test"
 
+      - name: Verify native assistant history lifecycle
+        run: |
+          xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantHistory.swift ios/BWReader/Tests/NativeAssistantHistory/main.swift -o "$RUNNER_TEMP/native-assistant-history-test"
+          "$RUNNER_TEMP/native-assistant-history-test"
+
       - name: Verify native Japanese dictionary parity
         run: |
           node ios/BWReader/Tests/NativeJapaneseDictionary/fixtures.mjs "$RUNNER_TEMP/native-dictionary-fixtures.json"

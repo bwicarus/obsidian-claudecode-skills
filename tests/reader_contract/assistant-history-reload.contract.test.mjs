@@ -136,7 +136,7 @@ function historyHarness(fetchImpl) {
     "  function reloadHistory"
   );
   vm.runInNewContext(
-    `${source}\nthis.loadHistoryForTest = loadHistory; this.historyTurnIdForTest = _historyTurnId;`,
+    `${section(ASSISTANT, '    function _readHistory(', '  var streaming')}\n${source}\nthis.loadHistoryForTest = loadHistory; this.historyTurnIdForTest = _historyTurnId;`,
     sandbox,
     {
     filename: "assistant-history-reload-harness.js",
@@ -238,7 +238,7 @@ function coordinatorHarness(fetchImpl) {
     "  var _liveSeen = {};",
     "  pane.dataset.assistantMode"
   );
-  vm.runInNewContext(source, sandbox, { filename: "assistant-history-coordinator-harness.js" });
+  vm.runInNewContext(section(ASSISTANT, '    function _readHistory(', '  var streaming') + source, sandbox, { filename: "assistant-history-coordinator-harness.js" });
   return { sandbox, clock, thread };
 }
 

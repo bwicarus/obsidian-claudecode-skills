@@ -16,6 +16,8 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     private var sequences: [String: Int] = [:]
     private var activeWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var observer: NSObjectProtocol?
+    private var history: ReaderNativeAssistantHistory?
+    private var historyContext: UInt64?
 
     init(webView: WKWebView, trustedBaseURL: URL, gateway: ReaderNativeServerGateway) {
         self.webView = webView; self.trustedBaseURL = trustedBaseURL; self.gateway = gateway
@@ -33,6 +35,9 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     }
 
     func invalidate() {
+        let previousHistory = history
+        history = nil; historyContext = nil
+        Task { await previousHistory?.invalidate() }
         epoch = UUID(); tasks.values.forEach { $0.cancel() }; tasks.removeAll(); sequences.removeAll()
         let pending = activeWaiters; activeWaiters.removeAll()
         pending.values.forEach { $0.resume(throwing: CancellationError()) }
@@ -72,6 +77,10 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         if command["action"] as? String == "cancel" {
             tasks[id]?.cancel(); replyHandler(["ok": true], nil); return
         }
+        if command["action"] as? String == "history" {
+            performHistory(command, surface: requestedSurface, replyHandler: replyHandler)
+            return
+        }
         guard command["action"] as? String == "start", tasks.isEmpty,
               let path = command["path"] as? String,
               path == "/api/assistant/chat" || (requestedSurface == .epub && path == "/pdf/api/epub-assistant"),
@@ -104,6 +113,45 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                 else { replyHandler(nil, error.localizedDescription) }
             }
         }
+    }
+
+    private func performHistory(_ command: [String: Any], surface: ReaderNativeInterfaceSurface,
+                                replyHandler: @escaping (Any?, String?) -> Void) {
+        do {
+            guard let path = command["path"] as? String, let operation = command["operation"] as? String,
+                  let mode = command["mode"] as? String else {
+                throw ReaderNativeAssistantHistory.Failure(message: "历史请求参数缺失")
+            }
+            let route = try ReaderNativeAssistantHistory.route(path, operation: operation, mode: mode)
+            let lease = epoch, context = gateway.contextRevision
+            if history == nil || historyContext != context {
+                let previous = history
+                Task { await previous?.invalidate() }
+                historyContext = context
+                history = ReaderNativeAssistantHistory { [weak self] path, method, body in
+                    guard let self else { throw CancellationError() }
+                    return try await self.fetchHistory(path: path, method: method, body: body, surface: surface, lease: lease, context: context)
+                }
+            }
+            let history = history!
+            Task { @MainActor [weak self] in
+                do {
+                    let response = try await (operation == "read" ? history.read(route) : history.clear(route))
+                    guard let self, self.epoch == lease, self.gateway.contextRevision == context else { throw CancellationError() }
+                    replyHandler(["ok": (200..<300).contains(response.status), "status": response.status,
+                                  "body": String(decoding: response.body, as: UTF8.self)], nil)
+                } catch { replyHandler(nil, error.localizedDescription) }
+            }
+        } catch { replyHandler(nil, error.localizedDescription) }
+    }
+
+    private func fetchHistory(path: String, method: String, body: Data, surface: ReaderNativeInterfaceSurface,
+                              lease: UUID, context: UInt64) async throws -> ReaderNativeAssistantHistory.Response {
+        guard epoch == lease, gateway.contextRevision == context else { throw CancellationError() }
+        let response = try await gateway.fetchData(path: path, method: method, body: body, surface: surface)
+        try Task.checkCancellation()
+        guard epoch == lease, gateway.contextRevision == context else { throw CancellationError() }
+        return .init(status: response.status, body: response.data)
     }
 
     private func connect(_ body: Data, path: String, surface: ReaderNativeInterfaceSurface, lease: UUID, gatewayContext: UInt64,
@@ -148,6 +196,13 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
       const handler = window.webkit?.messageHandlers?.bwNativeAssistantStream;
       if (!handler) return;
       const active = new Map();
+      window.__bwNativeAssistantHistory = {
+        async request(path, operation, mode) {
+          const result = await handler.postMessage({version:1, action:'history', id:crypto.randomUUID(), path, operation, mode});
+          if (!result || !Number.isInteger(result.status) || typeof result.body !== 'string') throw new Error('原生历史未获确认');
+          return {ok:result.ok === true, status:result.status, json:async () => JSON.parse(result.body)};
+        }
+      };
       function abortError() { const e = new Error('对话已停止'); e.name = 'AbortError'; return e; }
       window.__bwNativeAssistantStream = {
         async run(path, body, consume, signal) {

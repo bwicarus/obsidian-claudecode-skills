@@ -1960,6 +1960,9 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
 /// route and can serve only bytes that passed the signed bundle manifest.
 @MainActor
 final class ReaderLocalRuntimeServer {
+    nonisolated static func requestBridgeMirror(_ object: [String: Any]) async throws -> [String: Any] {
+        try await ReaderLocalHTTPHandler.requestBridgeMirror(object)
+    }
     static let port: UInt16 = 43_129
     static let host = "127.0.0.1"
     static let origin = "http://127.0.0.1:43129"
