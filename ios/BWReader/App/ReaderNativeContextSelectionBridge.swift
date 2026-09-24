@@ -20,6 +20,31 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
         expiry?.cancel(); expiry = nil; session = nil; sequence = 0
         state = ReaderNativeContextSelection()
     }
+    func selectReview(_ id: String, cardKey: String, on: Bool, validate: () throws -> Void) async throws -> [[String: Any]] {
+        guard let session, let webView, let current = document(webView.url) else {
+            throw ReaderNativeContextSelection.Failure(message: "复习上下文尚未就绪")
+        }
+        // Existing message producers may still have queued registrations. Drain
+        // that ordered channel before acting on the native graph, rather than
+        // rereading a DOM node or reconstructing an answer from its label.
+        let ready = try await webView.callAsyncJavaScript(
+            "if (!window.BWReaderRuntime?.contextSelections?.settle) return false; await window.BWReaderRuntime.contextSelections.settle(); return true;",
+            arguments: [:], in: nil, contentWorld: .page)
+        guard ready as? Bool == true, self.session == session, document(webView.url) == current else {
+            throw ReaderNativeContextSelection.Failure(message: "复习上下文已切换")
+        }
+        try validate()
+        try state.selectReview(id, cardKey: cardKey, on: on, now: ProcessInfo.processInfo.systemUptime)
+        scheduleExpiry()
+        let accepted = try await webView.callAsyncJavaScript(
+            "return window.__bwNativeContextSelections?.accept(payload) === true;",
+            arguments: ["payload": ["session": session, "state": state.projection]], in: nil, contentWorld: .page)
+        guard accepted as? Bool == true, self.session == session, document(webView.url) == current else {
+            throw ReaderNativeContextSelection.Failure(message: "选中状态已更新，界面需重新读取")
+        }
+        try validate()
+        return state.reviewPairs(cardKey: cardKey)
+    }
     private func document(_ url: URL?) -> URL? {
         guard let url, url.scheme == trustedBaseURL.scheme, url.host == trustedBaseURL.host,
               url.port == trustedBaseURL.port, url.path.hasPrefix(trustedBaseURL.path),
@@ -185,6 +210,12 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
               do { observed = queue; await observed; } while (observed !== queue);
               if (error) throw error;
               return registry.snapshot();
+            },
+            reviewPairs(cardKey) {
+              if (error) throw error;
+              if (pending || !current) return [];
+              const pairs = current.reviewPairs || {};
+              return Object.prototype.hasOwnProperty.call(pairs, cardKey) ? JSON.parse(JSON.stringify(pairs[cardKey])) : [];
             },
             snapshot(options = {}) {
               if (error) throw error;

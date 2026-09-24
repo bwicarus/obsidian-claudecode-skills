@@ -14,7 +14,8 @@ function setup(options = {}) {
     selected:[...ids].filter(id=>{server.id=id;return run('BWReaderRuntime.contextSelections.isSelected(id)');}),
     selectedRecords:[...ids].filter(id=>{server.id=id;return run('BWReaderRuntime.contextSelections.isSelected(id)');})
       .map(id=>{server.id=id;return run('BWReaderRuntime.contextSelections.get(id)');}),
-    snapshot:run('BWReaderRuntime.contextSelections.snapshot({maxText:Number.MAX_SAFE_INTEGER})')}));
+    snapshot:run('BWReaderRuntime.contextSelections.snapshot({maxText:Number.MAX_SAFE_INTEGER})'),
+    reviewPairs: options.reviewPairs || {}}));
   const context = vm.createContext({console,crypto:{randomUUID:()=> 'session-test'},
     CustomEvent:class {constructor(type,init){this.type=type;this.detail=init?.detail;}},
     dispatchEvent:e=>events.push(e),
@@ -97,6 +98,19 @@ test('a definitely rejected media operation does not poison subsequent text sele
   s.invoke('select',{id:'next',text:'next selection'});await s.invoke('settle');
   assert.deepEqual(s.value().items.map(x=>x.id),['next']);
   assert.equal(s.events.some(x=>x.type==='rc:context-selection-error'),false);
+});
+
+test('review pairs come from the native graph and cannot expose stale selections while a mutation is pending',async()=>{
+  const options={reviewPairs:{card:[{question:'原问题',answer:'仅所选段落',selection_ids:['one'],card:{entity_id:'entity'}}]}};
+  const s=setup(options); await s.invoke('settle');
+  const read=()=>JSON.parse(JSON.stringify(s.invoke('reviewPairs','card')));
+  assert.equal(read()[0].answer,'仅所选段落');
+  const leaked=read();leaked[0].answer='改坏副本';assert.equal(read()[0].answer,'仅所选段落');
+  const release=s.hold();s.invoke('select',{id:'one',text:'new'});
+  assert.deepEqual(read(),[]);
+  options.reviewPairs={};release();await s.invoke('settle');
+  assert.deepEqual(read(),[]);
+  assert.deepEqual(JSON.parse(JSON.stringify(s.invoke('reviewPairs','other-card'))),[]);
 });
 
 test('pending changes do not get overwritten by old acknowledgements and settle waits for them',async()=>{

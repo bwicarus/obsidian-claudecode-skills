@@ -202,3 +202,31 @@ try await MainActor.run {
         do { try ReaderNativeAnkiProjection.validateImage(source); preconditionFailure("unsafe media accepted: \(source)") } catch is ReaderNativeAnkiProjection.Failure {}
     }
 }
+
+do {
+    var selection = ReaderNativeContextSelection(expireMs: 1000)
+    func answer(_ id: String, _ text: String, index: Int, card: String = "card-a", parent: String = "", covers: [String] = []) -> [String: Any] {
+        ["id": id, "text": text, "label": id, "parentId": parent, "covers": covers,
+         "kind": index < 0 ? "review-answer" : "review-answer-segment", "source": [:],
+         "meta": ["review_mode": true, "card_key": card, "question": "为什么？", "answer_id": "answer",
+            "segment_index": index, "card": ["entity_id": card]]]
+    }
+    for record in [answer("answer", "完整第一段\n\n完整第二段", index: -1, covers: ["p1", "p2"]),
+                   answer("p1", "完整第一段", index: 0, parent: "answer"),
+                   answer("p2", "完整第二段", index: 1, parent: "answer"),
+                   answer("other", "其他卡的回答", index: -1, card: "card-b")] {
+        try selection.apply(["operation": "upsert", "id": record["id"]!, "record": record], now: 0)
+    }
+    try selection.selectReview("p2", cardKey: "card-a", on: true, now: 0)
+    try selection.selectReview("p1", cardKey: "card-a", on: true, now: 0)
+    precondition(selection.reviewPairs(cardKey: "card-a").first?["answer"] as? String == "完整第一段\n\n完整第二段")
+    try selection.selectReview("answer", cardKey: "card-a", on: true, now: 0)
+    precondition(selection.reviewPairs(cardKey: "card-a").first?["selection_ids"] as? [String] == ["answer"], "整条回答须覆盖段落，不能重复拼入")
+    try selection.selectReview("answer", cardKey: "card-a", on: false, now: 0.2)
+    precondition(selection.reviewPairs(cardKey: "card-a").first?["selection_ids"] as? [String] == ["p1", "p2"], "取消整条后保留此前选中的段落")
+    do { try selection.selectReview("other", cardKey: "card-a", on: true, now: 0.2); preconditionFailure("其他卡不能被当前操作选中") }
+    catch is ReaderNativeContextSelection.Failure {}
+    precondition(selection.reviewPairs(cardKey: "card-b").isEmpty)
+    selection.expire(now: 1.1)
+    precondition(selection.reviewPairs(cardKey: "card-a").isEmpty, "过期的回答不能带入草稿")
+}

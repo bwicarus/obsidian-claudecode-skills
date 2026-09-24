@@ -3312,6 +3312,9 @@
   function selectedPairs() {
     if (!_mode) return [];
     var registry = _registry();
+    if (_nativeReviewUI() && registry && typeof registry.reviewPairs === 'function') {
+      return registry.reviewPairs(_cardKey(_current()));
+    }
     var items = [];
     if (registry && typeof registry.snapshot === 'function') {
       try {
@@ -3436,6 +3439,12 @@
 
   async function _prepareDraft(target) {
     if ((_draftState && _draftState.busy) || _anyCommitBusy()) return;
+    if (_nativeReviewUI() && _registry() && typeof _registry().settle === 'function') {
+      var beforeCard = _cardKey(_current()), beforeContext = _contextCacheKey;
+      try { await _registry().settle(); }
+      catch (error) { _toast(String(error && error.message || '选中内容尚未就绪')); return; }
+      if (!_mode || beforeCard !== _cardKey(_current()) || beforeContext !== _contextCacheKey) return;
+    }
     var pairs = selectedPairs();
     if (!pairs.length) {
       _toast('请先在下方复习对话中选用一条回答或具体段落');
@@ -4201,6 +4210,9 @@
       notice: _presentationNotice,
     };
     if (native) Object.assign(state, native);
+    // Selection expiry can advance independently of the queue cursor. Never
+    // reuse an older selectedPairs field from a queue-presentation receipt.
+    if (native) state.selectedPairs = selectedPairs();
     return JSON.parse(JSON.stringify(state));
   }
 
@@ -4315,8 +4327,11 @@
   RC.review = {
     acceptNativePresentation: function (state) {
       if (!_nativeReviewUI() || !state || state.lease !== _nativeQueueLease ||
+          !Number.isSafeInteger(state.revision) || !['concise', 'verbose'].includes(state.improveMode) ||
           state.index !== _idx || state.count !== _queue.length ||
           JSON.stringify(state.queueIds) !== JSON.stringify(_queue.map(_stableCardId))) return false;
+      if (_nativeQueuePresentation && state.revision <= _nativeQueuePresentation.revision) return false;
+      if (_improveMode !== state.improveMode) _invalidateCardRequests(true);
       _acceptNativeReviewState(state);
       _publishPresentation();
       return true;

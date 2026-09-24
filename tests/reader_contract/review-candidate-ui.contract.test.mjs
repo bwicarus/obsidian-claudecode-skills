@@ -2500,6 +2500,10 @@ test('native review never mounts a hidden workspace or pager; reveal, stage and 
   assert.equal(fixture.RC.review.acceptNativePresentation({ ...nativePresentation, lease: 'other' }), false);
   assert.equal(fixture.RC.review.acceptNativePresentation({ ...nativePresentation, index: 1 }), false);
   assert.equal(fixture.RC.review.acceptNativePresentation({ ...nativePresentation, queueIds: ['wrong-card'] }), false);
+  assert.equal(fixture.RC.review.acceptNativePresentation({ ...nativePresentation, improveMode: 'concise' }), false,
+    'a stale mode receipt must not invalidate a newer preview');
+  assert.equal(fixture.RC.review.acceptNativePresentation({ ...nativePresentation, revision: ++nativeRevision, improveMode: 'concise' }), true);
+  assert.equal(fixture.RC.review.presentationState().improveMode, 'concise');
   await fixture.RC.review.answer(3);
   assert.equal(fixture.RC.review.presentationState().canUndo, true);
   assert.equal(fixture.RC.review.presentationState().count, 0);

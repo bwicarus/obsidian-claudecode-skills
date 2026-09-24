@@ -140,9 +140,58 @@ struct ReaderNativeContextSelection {
         }
         return ["contract": "context-selection/1", "items": items]
     }
+    /// Review selection uses the same expiry and parent/child exclusion graph
+    /// as message attachments. It never depends on a hidden answer element.
+    mutating func selectReview(_ itemID: String, cardKey: String, on: Bool, now: TimeInterval) throws {
+        let itemID = try checkedID(itemID)
+        guard !cardKey.isEmpty, let record = records[key(itemID)],
+              ["review-answer", "review-answer-segment"].contains(record["kind"] as? String ?? ""),
+              let meta = record["meta"] as? [String: Any], meta["review_mode"] as? Bool == true,
+              let expected = meta["card_key"] as? String, key(expected) == key(cardKey) else {
+            throw Failure(message: "回答已更新或属于另一张复习卡")
+        }
+        try apply(["operation": "select", "id": itemID, "on": on], now: now)
+    }
+
+    func reviewPairs(cardKey: String) -> [[String: Any]] {
+        guard !cardKey.isEmpty else { return [] }
+        struct Group {
+            let question: String
+            let card: [String: Any]
+            var parts: [(Double, String)] = []
+            var ids: [String] = []
+        }
+        var groups: [Data: Group] = [:]
+        for record in snapshot(maxText: 20_000, limit: 120)["items"] as? [[String: Any]] ?? [] {
+            guard let meta = record["meta"] as? [String: Any], meta["review_mode"] as? Bool == true,
+                  key(meta["card_key"] as? String ?? "") == key(cardKey),
+                  ["review-answer", "review-answer-segment"].contains(record["kind"] as? String ?? ""),
+                  let id = record["id"] as? String else { continue }
+            let answer = key(meta["answer_id"] as? String ?? id)
+            var group = groups[answer] ?? Group(question: meta["question"] as? String ?? "", card: meta["card"] as? [String: Any] ?? [:])
+            let index = (meta["segment_index"] as? NSNumber)?.doubleValue ?? 0
+            group.parts.append((index.isFinite ? index : 0, record["text"] as? String ?? ""))
+            group.ids.append(id); groups[answer] = group
+        }
+        return sorted(Set(groups.keys)).compactMap { answer in
+            let group = groups[answer]!
+            // Equal indices retain snapshot order, like the original stable sort.
+            let text = group.parts.enumerated().sorted {
+                $0.element.0 == $1.element.0 ? $0.offset < $1.offset : $0.element.0 < $1.element.0
+            }.map { $0.element.1 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return ["question": group.question, "answer": text, "selection_ids": group.ids, "card": group.card]
+        }
+    }
     var projection: [String: Any] {
-        ["revision": revision, "selected": sorted(selected).map(id),
+        var pairs: [String: [[String: Any]]] = [:]
+        for record in selected.compactMap({ records[$0] }) {
+            guard let meta = record["meta"] as? [String: Any], meta["review_mode"] as? Bool == true,
+                  let cardKey = meta["card_key"] as? String, pairs[cardKey] == nil else { continue }
+            pairs[cardKey] = reviewPairs(cardKey: cardKey)
+        }
+        return ["revision": revision, "selected": sorted(selected).map(id),
          "selectedRecords": sorted(selected).compactMap { records[$0] },
-         "snapshot": snapshot(maxText: Int.max)]
+         "snapshot": snapshot(maxText: Int.max), "reviewPairs": pairs]
     }
 }

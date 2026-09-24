@@ -696,3 +696,20 @@ consolidated Apple build, not yet run. This does not finish migration: remaining
 producers and the existing per-operation local/server dispatch adapter still
 provide the compatibility transport entry; they must not be described as fully
 Swift-owned. No App package or TestFlight upload was made.
+
+### Native review selections and mode changes (candidate)
+
+The native answer/paragraph buttons now apply an explicit selection state to
+the Swift context graph. They validate the current queue lease and card identity
+after pending registrations settle, without consulting a hidden message node.
+Answer grouping, whole-answer coverage, segment order and expiry use that graph;
+draft preparation waits for its committed state. The compatibility adapter reads
+the resulting pairs rather than regrouping native selections. Stale mode
+receipts cannot clear a newer draft; a current verbosity change invalidates the
+native preview and its compatibility projection.
+
+Reader Node checks: 2484 passed. Swift pair/coverage/expiry cases are queued for
+the consolidated Apple build and are not yet run. Registration still comes from
+the remaining conversation adapter; review mode/load/rating effect coordination,
+conversation orchestration and startup/PC context integration remain unfinished.
+No new App build, signed package or TestFlight upload is available.

@@ -41,7 +41,7 @@ struct ReaderNativeConversationMessageView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(message.reviewSelections) { item in
                             Button {
-                                Task { await model.performReview("selectAnswer", values: ["selectionId": item.id]) }
+                                Task { await model.performReview("selectAnswer", values: ["selectionId": item.id, "enabled": !item.selected]) }
                             } label: {
                                 HStack(alignment: .top, spacing: 8) {
                                     Image(systemName: item.selected ? "checkmark.circle.fill" : "circle")

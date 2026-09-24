@@ -3242,7 +3242,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func performNativeReviewPresentation(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "reviewAction", let value = command["value"] as? [String: Any],
-              let key = value["key"] as? String, ["reveal", "expanded"].contains(key) else { return nil }
+              let key = value["key"] as? String, ["reveal", "expanded", "improveMode", "selectAnswer"].contains(key) else { return nil }
         do {
             guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
                   let queue = nativeReviewQueue, nativeConversation.review["active"] as? Bool == true,
@@ -3252,9 +3252,33 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                   let lease = value["contextKey"] as? String, lease == nativeConversation.review["lease"] as? String else {
                 throw ReaderNativeReviewQueue.Failure(message: "复习界面尚未就绪或正在保存")
             }
-            if key == "reveal" { _ = try queue.presentedCard(lease: lease, cardID: value["cardId"] as? String ?? "") }
+            let cardID = value["cardId"] as? String ?? ""
+            if key != "expanded" { _ = try queue.presentedCard(lease: lease, cardID: cardID) }
+            if key == "selectAnswer" {
+                guard let selections = nativeContextSelections, let id = value["selectionId"] as? String,
+                      let enabled = value["enabled"] as? Bool,
+                      nativeConversation.messages.contains(where: { $0.reviewSelections.contains(where: { $0.id == id }) }) else {
+                    throw ReaderNativeReviewQueue.Failure(message: "回答已更新，请重新选择")
+                }
+                let generation = bookUserStateContextGeneration, scope = nativeConversation.scope
+                let gatewayContext = nativeServerGateway?.contextRevision
+                let pairs = try await selections.selectReview(id, cardKey: cardID, on: enabled, validate: { [weak self] in
+                    guard let self, !Task.isCancelled, !self.isLoading, self.nativeConversation.scope == scope,
+                          self.bookUserStateContextGeneration == generation, self.nativeServerGateway?.contextRevision == gatewayContext,
+                          self.nativeConversation.review["active"] as? Bool == true else { throw CancellationError() }
+                    _ = try queue.presentedCard(lease: lease, cardID: cardID)
+                })
+                var state = queue.presentation(); state["selectedPairs"] = pairs
+                nativeConversation.acceptReviewPresentation(state)
+                webView.callAsyncJavaScript("return window.RC?.review?.acceptNativePresentation?.(state) === true;",
+                    arguments: ["state": state], in: nil, in: .page, completionHandler: nil)
+                return ["ok": true, "value": state]
+            }
             var input = value; input["lease"] = lease
             let state = try queue.interact(input)
+            if key == "improveMode", nativeConversation.review["improveMode"] as? String != state["improveMode"] as? String {
+                nativeReviewImprovements?.invalidate()
+            }
             nativeConversation.acceptReviewPresentation(state)
             // Compatibility code observes the completed state. It must not
             // call back into Swift or render another hidden card face.
