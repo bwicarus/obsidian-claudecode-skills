@@ -12,6 +12,8 @@ do {
         note("ignore", "別", "不相关", 5), note("earlier", "漢字", "旧内容", 10)
     ]), wordCardRecord([note("other-book", "漢字", "另一本书", 15)])]
     let result = try ReaderNativeWordCards.project(records, lemma: "漢字", word: "漢 字")
+    let index = try ReaderNativeWordCards.makeIndex([("a", records[0]), ("b", records[1])])
+    precondition(index["漢字"] == Set(["a", "b"]) && index["別"] == Set(["a"]))
     precondition(result.map(\.cid) == ["earlier", "other-book", "later"])
     precondition(result.last?.text == "含义", "embedded dictionary/scripts leaked into related card")
     let changed = try ReaderNativeWordCards.project([wordCardRecord([note("earlier", "別", "改绑", 10)])], lemma: "漢字", word: "漢字")
