@@ -307,10 +307,16 @@ struct ReaderNativeFavoritesPanelLayer: View {
                     Text("服务器保存未确认").font(.system(size: 10)).foregroundStyle(.orange)
                 }
                 if !item.preview.isEmpty {
-                    ReaderNativeRichDocument(content: item.preview, format: item.previewFormat,
-                        imageModel: reader.nativeConversation,
-                        font: .preferredFont(forTextStyle: level == 0 ? .body : .subheadline),
-                        color: ReaderNativeCardInk.text)
+                    Group {
+                        if item.previewFormat == "html" {
+                            ReaderNativeCardHTML(html: item.preview, onSelection: { _ in }, imageModel: reader.nativeConversation)
+                        } else {
+                            ReaderNativeRichDocument(content: item.preview, format: item.previewFormat,
+                                imageModel: reader.nativeConversation,
+                                font: .preferredFont(forTextStyle: level == 0 ? .body : .subheadline),
+                                color: ReaderNativeCardInk.text)
+                        }
+                    }
                         .frame(maxHeight: level == 0 ? 230 : level == 1 ? 70 : 24, alignment: .top)
                         .clipped()
                         // This is a drag/tap preview; text selection must not steal the dock gesture.

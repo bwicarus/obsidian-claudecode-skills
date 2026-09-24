@@ -535,7 +535,10 @@ reads/writes the existing device preference record and requests subtitles throug
 registered gateway. Video note edits retain the original ID and other playback fields.
 YouTube embed identity uses the installed app's bundle ID, per the official WebView
 guidance (https://developers.google.com/youtube/terms/required-minimum-functionality).
-This stage is awaiting Apple compilation and physical-device playback validation.
+Apple run `35964904274` (`6617b60e`) passed the native checks and complete App compilation.
+Physical-device playback remains unverified. Legacy video cards in favorites and pinned
+HTML also resolve their existing YouTube thumbnail identity into the localized player;
+unresolved originals remain visible rather than being silently removed.
 
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 

@@ -104,7 +104,7 @@ private struct ReaderNativePageCardFact: View {
 
 /// 原版渲染器产出的卡片 HTML → 按 class 分派成原生块。
 @MainActor
-private struct ReaderNativeCardHTML: View {
+struct ReaderNativeCardHTML: View {
     let html: String
     let onSelection: (String) -> Void
     var inlineImages: [String:String] = [:]
@@ -182,13 +182,14 @@ private enum ReaderNativeCardHTMLParser {
                 pending += (try? node.outerHtml()) ?? ""
                 continue
             }
-            let videoButtons = (try? element.select(".vc-vg-play[data-video-id]").array()) ?? []
+            let videoButtons = (try? element.select(".vc-vg-play").array()) ?? []
             if !videoButtons.isEmpty {
                 flush()
                 for button in videoButtons {
-                    if let video = ReaderNativeVideo(["id":(try? button.attr("data-video-id")) ?? "",
-                        "src":(try? button.attr("data-video-src")) ?? "yt", "title":(try? button.attr("data-video-title")) ?? "视频"]) {
+                    if let video = video(button) {
                         result.append(.video(video))
+                    } else {
+                        result.append(.rich((try? button.parent()?.outerHtml()) ?? "视频播放身份缺失"))
                     }
                 }
             } else if element.hasClass("vc-dict-sec") || element.hasClass("rc-note-dict") {
@@ -212,6 +213,28 @@ private enum ReaderNativeCardHTMLParser {
     private static func text(_ element: Element?) -> String {
         guard let element else { return "" }
         return ((try? element.text()) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func video(_ button: Element) -> ReaderNativeVideo? {
+        var id = (try? button.attr("data-video-id")) ?? ""
+        var source = (try? button.attr("data-video-src")) ?? ""
+        var title = (try? button.attr("data-video-title")) ?? ""
+        var cell = button.parent()
+        while let item = cell, !item.hasClass("vc-ig-cell") { cell = item.parent() }
+        if title.isEmpty { title = text(try? cell?.select(".vc-ig-t").first()) }
+        if id.isEmpty, let image = try? cell?.select(".vc-ig-img").first() {
+            let original = (try? image.attr("data-source-url")) ?? ""
+            let raw = original.isEmpty ? ((try? image.attr("src")) ?? "") : original
+            var parts = URLComponents(string: raw)
+            if parts?.path == "/pdf/api/img-proxy", let nested = parts?.queryItems?.first(where: { $0.name == "url" })?.value { parts = URLComponents(string: nested) }
+            let path = parts?.path.split(separator: "/").map(String.init) ?? []
+            if ["i.ytimg.com", "img.youtube.com"].contains(parts?.host ?? ""), path.count >= 2, path[0] == "vi" {
+                id = path[1]; source = "yt"
+            }
+        }
+        var value: [String:Any] = ["id":id,"title":title.isEmpty ? "视频" : title]
+        if !source.isEmpty { value["src"] = source }
+        return ReaderNativeVideo(value)
     }
 
     /// `.rc-note-dict`：词头（词 + 音调）、若干说明行、释义、例句。

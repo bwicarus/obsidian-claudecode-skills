@@ -643,7 +643,7 @@ enum ReaderNativeConversationScript {
         return items.flatMap((item, index) => {
           if (excludedPlacementNodes.has(item.root)) return [];
           const group = flashGroup(item.root), structured = item.root.__vcCard;
-          const supported = !!group || structured && ['fact', 'general', 'weather', 'news', 'images'].includes(structured.kind) ||
+          const supported = !!group || structured && ['fact', 'general', 'weather', 'news', 'images', 'videos'].includes(structured.kind) ||
             typeof item.raw === 'string' && !/<(?:iframe|video|audio|img|svg|canvas|script|button|input|select|textarea)\b/i.test(item.raw);
           item.root.toggleAttribute('data-bw-native-placement', supported);
           if (!supported) return [];
