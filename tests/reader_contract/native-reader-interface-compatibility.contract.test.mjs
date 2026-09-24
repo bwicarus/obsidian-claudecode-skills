@@ -175,7 +175,11 @@ test("native Reader interface manifest has a strict non-overlapping schema", () 
       "description", "match", "methods", "owner", "path",
       "remoteBook", "status", "surfaces",
     ]);
-    assert.match(route.path, /^\/(?:pdf\/api|api\/assistant)\/[A-Za-z0-9._~:@%+\/-]*$/);
+    if (route.path === '/api/voice/task-status') {
+      assert.equal(route.match, 'exact'); assert.equal(route.owner, 'pi'); assert.deepEqual(route.methods, ['GET']);
+    } else {
+      assert.match(route.path, /^\/(?:pdf\/api|api\/assistant)\/[A-Za-z0-9._~:@%+\/-]*$/);
+    }
     assert.notEqual(route.path, "/pdf/api/");
     assert.notEqual(route.path, "/api/assistant/");
     assert.ok(["exact", "segment"].includes(route.match));

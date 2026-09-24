@@ -9,7 +9,7 @@ function setup(prepareReply = {ok:true}) {
   const requests=[]; let resolve,reject;
   const pending = new Promise((a,b)=>{resolve=a;reject=b});
   const window={webkit:{messageHandlers:{bwNativeAssistantStream:{postMessage(command){
-    requests.push(command); return command.action === 'start' ? pending : Promise.resolve(command.action === 'prepare' ? prepareReply : {ok:true});
+    requests.push(command); return ['start','watchTask'].includes(command.action) ? pending : Promise.resolve(command.action === 'prepare' ? prepareReply : {ok:true});
   }}}}}; window.top=window;
   vm.runInNewContext(script,{window,crypto:{randomUUID}});
   return {api:window.__bwNativeAssistantStream,requests,resolve,reject};
@@ -83,6 +83,41 @@ test('native stream consumes structured events once and waits for native complet
   assert.equal(api.accept({...batch,sequence:3}).ok,false);
   resolve({ok:true,status:'done'});assert.equal(await result,'done');
   assert.equal(api.accept({...batch,sequence:2}).ok,false);
+});
+
+test('native task watch joins duplicate requests, consumes in order and retires its callback', async()=>{
+  const {api,requests,resolve}=setup(), snapshots=[];
+  const pending=api.watchTask('cli','task-1',value=>snapshots.push(value));
+  assert.equal(api.watchTask('cli','task-1',()=>{throw new Error('duplicate consumer');}),pending);
+  await Promise.resolve();
+  assert.equal(requests.length,1); assert.equal(requests[0].action,'watchTask');
+  const id=requests[0].id, first={id,sequence:1,snapshot:{ok:true,status:'running'}};
+  assert.equal(api.acceptTask(first).ok,true);assert.equal(api.acceptTask(first).ok,true);
+  assert.equal(api.acceptTask({...first,sequence:3}).ok,false);
+  assert.equal(snapshots.length,1);
+  assert.equal(api.acceptTask({id,sequence:2,snapshot:{ok:true,status:'done',result:{undo_id:'same'}}}).ok,true);
+  resolve({ok:true,status:'done'});assert.equal(await pending,'done');
+  assert.equal(api.acceptTask({...first,sequence:3}).ok,false);
+  assert.equal(snapshots.length,2);
+});
+
+test('native task consumers retain result and undo controls without starting browser polling', async()=>{
+  const source=readFileSync(new URL('../../_server_deploy/static/pdf/rc-assistant.js',import.meta.url),'utf8');
+  const start=source.indexOf('  function trackTask('), end=source.indexOf('\n  }',start)+4;
+  const line={innerHTML:'',textContent:''}, actions=[],notifications=[];
+  const runtime={window:{__bwNativeAssistantStream:{async watchTask(kind,id,consume){
+    assert.equal(kind,'write');assert.equal(id,'task-1');
+    consume({ok:true,status:'running',step:'saving'});
+    consume({ok:true,status:'done',result:{undo_id:'same-undo'},speak:'saved',client_actions:[{fn:'refresh'}]});
+    return 'done';
+  }}},HOST:{},addMsg:()=>line,esc:x=>x,runActions:x=>actions.push(...x),notify:(...x)=>notifications.push(x),scrollDown(){},
+  fetch(){throw new Error('web fetch invoked');},setTimeout(){throw new Error('web timer invoked');}};
+  vm.runInNewContext(source.slice(start,end)+'\nglobalThis.track=trackTask;',runtime);
+  await runtime.track('task-1','save');
+  assert.match(line.innerHTML,/same-undo/);assert.equal(actions.length,1);assert.equal(notifications.length,1);
+  const manifest=JSON.parse(readFileSync(new URL('../../ios/BWReader/native_reader_interface_manifest.json',import.meta.url),'utf8'));
+  const routes=manifest.routes.filter(x=>x.path.startsWith('/api/voice/'));
+  assert.deepEqual(routes.map(x=>[x.path,x.match,x.methods]),[['/api/voice/task-status','exact',['GET']]]);
 });
 
 test('native response projection drives display and voice without browser parsing or reveal layout',()=>{

@@ -158,7 +158,9 @@
       var path = validObject ? route.path : '';
       var identity = validObject ? String(route.match) + ':' + String(path) : '';
       var canonical = typeof path === 'string' &&
-        /^\/(?:pdf\/api|api\/assistant)\/(?:[A-Za-z0-9._~:@%+*-]+\/)*[A-Za-z0-9._~:@%+*-]*$/.test(path) &&
+        (/^\/(?:pdf\/api|api\/assistant)\/(?:[A-Za-z0-9._~:@%+*-]+\/)*[A-Za-z0-9._~:@%+*-]*$/.test(path) ||
+          path === '/api/voice/task-status' && route.match === 'exact' && route.owner === 'pi' &&
+          Array.isArray(route.methods) && route.methods.length === 1 && route.methods[0] === 'GET') &&
         path !== '/pdf/api/' && path !== '/api/assistant/' &&
         path.indexOf('//') < 0 && path.indexOf('\\') < 0;
       var routeKeys = validObject ? Object.keys(route).sort().join(',') : '';

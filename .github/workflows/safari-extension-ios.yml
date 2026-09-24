@@ -398,6 +398,11 @@ jobs:
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantStream.swift ios/BWReader/App/ReaderNativeAssistantTurn.swift ios/BWReader/App/ReaderNativeAssistantHistory.swift ios/BWReader/Tests/NativeAssistantHistory/main.swift -o "$RUNNER_TEMP/native-assistant-history-test"
           "$RUNNER_TEMP/native-assistant-history-test"
 
+      - name: Verify native task tracking lifecycle
+        run: |
+          xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeTaskMonitor.swift ios/BWReader/Tests/NativeTaskMonitor/main.swift -o "$RUNNER_TEMP/native-task-monitor-test"
+          "$RUNNER_TEMP/native-task-monitor-test"
+
       - name: Verify native favorites ownership
         run: |
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeFavoritesService.swift ios/BWReader/Tests/NativeFavorites/main.swift -o "$RUNNER_TEMP/native-favorites-test"

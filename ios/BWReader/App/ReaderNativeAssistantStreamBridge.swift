@@ -15,6 +15,9 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     private var tasks: [String: Task<Void, Never>] = [:]
     private var sequences: [String: Int] = [:]
     private var turns: [String: ReaderNativeAssistantTurn] = [:]
+    private var watchers: [String: Task<Void, Never>] = [:]
+    private var watcherKeys: [String: String] = [:]
+    private var watchedEffectCounts: [String: Int] = [:]
     private var activeWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var observer: NSObjectProtocol?
     private var history: ReaderNativeAssistantHistory?
@@ -32,6 +35,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     deinit {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         tasks.values.forEach { $0.cancel() }
+        watchers.values.forEach { $0.cancel() }
         activeWaiters.values.forEach { $0.resume(throwing: CancellationError()) }
     }
 
@@ -40,6 +44,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         history = nil; historyContext = nil
         Task { await previousHistory?.invalidate() }
         epoch = UUID(); tasks.values.forEach { $0.cancel() }; tasks.removeAll(); sequences.removeAll(); turns.removeAll()
+        watchers.values.forEach { $0.cancel() }; watchers.removeAll(); watcherKeys.removeAll(); watchedEffectCounts.removeAll()
         let pending = activeWaiters; activeWaiters.removeAll()
         pending.values.forEach { $0.resume(throwing: CancellationError()) }
     }
@@ -77,6 +82,9 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         }
         if command["action"] as? String == "cancel" {
             tasks[id]?.cancel(); replyHandler(["ok": true], nil); return
+        }
+        if command["action"] as? String == "watchTask" {
+            watchTask(command, id: id, surface: requestedSurface, replyHandler: replyHandler); return
         }
         if command["action"] as? String == "history" {
             performHistory(command, surface: requestedSurface, replyHandler: replyHandler)
@@ -124,6 +132,83 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                 else { replyHandler(nil, error.localizedDescription) }
             }
         }
+    }
+
+    private func watchTask(_ command: [String: Any], id: String, surface: ReaderNativeInterfaceSurface,
+                           replyHandler: @escaping (Any?, String?) -> Void) {
+        do {
+            guard let taskID = command["taskID"] as? String,
+                  let rawKind = command["kind"] as? String, let kind = ReaderNativeTaskMonitor.Kind(rawValue: rawKind),
+                  watchers.count < 32 else { throw ReaderNativeTaskMonitor.Failure(message: "后台任务追踪参数无效或任务过多") }
+            let path = try ReaderNativeTaskMonitor.path(taskID: taskID), key = rawKind + ":" + taskID
+            guard watcherKeys[key] == nil else { throw ReaderNativeTaskMonitor.Failure(message: "后台任务已在追踪") }
+            // Do not evict an effect receipt then silently replay its actions.
+            guard watchedEffectCounts[taskID] != nil || watchedEffectCounts.count < 1024 else {
+                throw ReaderNativeTaskMonitor.Failure(message: "任务回执已满，请重新打开阅读器")
+            }
+            watcherKeys[key] = id
+            let lease = epoch, context = gateway.contextRevision
+            watchers[id] = Task { @MainActor [weak self] in
+                guard let self else { replyHandler(nil, "任务追踪已关闭"); return }
+                defer { if self.epoch == lease { self.watchers.removeValue(forKey: id); self.watcherKeys.removeValue(forKey: key); self.sequences.removeValue(forKey: id) } }
+                do {
+                    let monitor = ReaderNativeTaskMonitor(kind: kind, fetch: { [weak self] in
+                        guard let self else { throw CancellationError() }
+                        return try await self.fetchTask(path, surface: surface, lease: lease, context: context)
+                    }, deliver: { [weak self] data in
+                        guard let self else { throw CancellationError() }
+                        try await self.deliverTask(data, id: id, taskID: taskID, lease: lease, context: context)
+                    })
+                    let outcome = try await monitor.run()
+                    guard self.epoch == lease, self.gateway.contextRevision == context else { throw CancellationError() }
+                    replyHandler(["ok": true, "status": outcome.rawValue], nil)
+                } catch {
+                    if Task.isCancelled || self.epoch != lease || self.gateway.contextRevision != context {
+                        replyHandler(["ok": true, "status": "aborted"], nil)
+                    } else { replyHandler(nil, error.localizedDescription) }
+                }
+            }
+        } catch { replyHandler(nil, error.localizedDescription) }
+    }
+
+    private func fetchTask(_ path: String, surface: ReaderNativeInterfaceSurface, lease: UUID, context: UInt64) async throws -> Data {
+        try await whenActive()
+        guard epoch == lease, gateway.contextRevision == context else { throw CancellationError() }
+        let response: ReaderNativeServerProxyBroker.DataResponse
+        do { response = try await gateway.fetchData(path: path, method: "GET", body: Data(), surface: surface) }
+        catch {
+            try Task.checkCancellation()
+            guard epoch == lease, gateway.contextRevision == context else { throw CancellationError() }
+            if (error as NSError).domain == NSURLErrorDomain { throw error }
+            throw ReaderNativeTaskMonitor.Failure(message: error.localizedDescription)
+        }
+        try Task.checkCancellation()
+        guard epoch == lease, gateway.contextRevision == context else { throw CancellationError() }
+        if response.status == 401 || response.status == 403 { throw ReaderNativeTaskMonitor.Failure(message: "后台任务查询未获授权") }
+        if response.status >= 500 || response.status == 429 { throw URLError(.badServerResponse) }
+        return response.data
+    }
+
+    private func deliverTask(_ data: Data, id: String, taskID: String, lease: UUID, context: UInt64) async throws {
+        try Task.checkCancellation()
+        guard epoch == lease, gateway.contextRevision == context, let webView,
+              var snapshot = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CancellationError() }
+        if let actions = snapshot["client_actions"] as? [Any] {
+            let count = watchedEffectCounts[taskID, default: 0]
+            guard actions.count >= count else { throw ReaderNativeTaskMonitor.Failure(message: "后台任务的操作序列已改变，请核对结果") }
+            snapshot["client_actions"] = actions.enumerated().map { $0.offset < count ? NSNull() : $0.element }
+            // Reserve before the JS acknowledgement: an unknown delivery may
+            // have executed its mutation and must not be replayed on reattach.
+            watchedEffectCounts[taskID] = actions.count
+        }
+        let next = (sequences[id] ?? 0) + 1
+        let result = try await webView.callAsyncJavaScript("return window.__bwNativeAssistantStream?.acceptTask(payload);",
+            arguments: ["payload": ["id": id, "sequence": next, "snapshot": snapshot]], in: nil, contentWorld: .page)
+        guard epoch == lease, gateway.contextRevision == context, let ack = result as? [String: Any],
+              ack["ok"] as? Bool == true, ack["sequence"] as? Int == next else {
+            throw ReaderNativeTaskMonitor.Failure(message: "任务更新未获确认，未重复执行操作")
+        }
+        sequences[id] = next
     }
 
     private func performHistory(_ command: [String: Any], surface: ReaderNativeInterfaceSurface,
@@ -213,7 +298,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
       if (window !== window.top || window.__bwNativeAssistantStream) return;
       const handler = window.webkit?.messageHandlers?.bwNativeAssistantStream;
       if (!handler) return;
-      const active = new Map();
+      const active = new Map(), watching = new Map(), watchKeys = new Map();
       window.__bwNativeAssistantHistory = {
         async request(path, operation, mode) {
           const result = await handler.postMessage({version:1, action:'history', id:crypto.randomUUID(), path, operation, mode});
@@ -233,6 +318,26 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
       };
       function abortError() { const e = new Error('对话已停止'); e.name = 'AbortError'; return e; }
       window.__bwNativeAssistantStream = {
+        watchTask(kind, taskID, consume) {
+          const key = kind + ':' + taskID;
+          if (watchKeys.has(key)) return watchKeys.get(key);
+          const id = crypto.randomUUID(), entry = {consume, sequence:0};
+          watching.set(id, entry);
+          const result = Promise.resolve().then(() => handler.postMessage({version:1, action:'watchTask', id, kind, taskID}))
+            .then(reply => { if (!reply?.ok) throw new Error('任务追踪未完成'); return reply.status; })
+            .finally(() => { watching.delete(id); watchKeys.delete(key); });
+          watchKeys.set(key, result);
+          return result;
+        },
+        acceptTask(payload) {
+          const entry = watching.get(payload?.id);
+          if (!entry || !Number.isSafeInteger(payload.sequence)) return {ok:false};
+          if (payload.sequence === entry.sequence) return {ok:true,sequence:entry.sequence};
+          if (payload.sequence !== entry.sequence + 1 || !payload.snapshot) return {ok:false};
+          entry.sequence = payload.sequence;
+          entry.consume(payload.snapshot);
+          return {ok:true,sequence:entry.sequence};
+        },
         async prepare(body) {
           const result = await handler.postMessage({version: 1, action: 'prepare', id: crypto.randomUUID(), body});
           if (!result?.ok || !result.body?.rid || !result.body?.turn_id || !result.body?.context) throw new Error('对话上下文未准备好');

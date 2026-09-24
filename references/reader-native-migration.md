@@ -509,6 +509,16 @@ Native composer commands also wait for local send acceptance after context prepa
 without waiting for the streamed answer. Preparation failure retains the draft and reports
 the actual error; a successful local acceptance does not claim server delivery.
 
+History presentation and local send acceptance passed Apple run `35961414240`
+(`acd37bad`). Delegated-task polling now has a native lifecycle, bounded read-only retries,
+foreground suspension and cancellation when its document context changes. Unchanged
+snapshots do not repeat delivery; cumulative client effects retain their indices and are
+reserved before acknowledgement, so an uncertain delivery is not replayed. The existing
+task-status GET is explicitly registered in the shared native interface manifest; unrelated
+voice endpoints are not admitted. Result and undo controls remain connected through the
+compatibility effect adapter. All 2459 Reader Node checks passed; Apple compilation of
+this task-monitor stage is pending. No installable migration release has been published.
+
 Follow-up: the PDF reading-settings panel now reads canonical preference/book records and performs native writes for toggles, grammar display, palettes, languages and crop. Figure settings use the existing native server gateway; a failed remote read leaves local settings usable and disables only the unavailable figure control. The small remaining observer updates legacy presentation state after committed results, without saving/fetching/rendering hidden pages. Earlier compatibility intents are drained before an explicit settings action, with uncertain writes surfaced instead of overwritten. Native crop commands persist through the shared PDFKit viewport owner and restore the previous visible crop when position persistence fails. Book-language/crop records retain their existing IDs and CAS/replay semantics. Focused JavaScript checks: 228 passed; native book-setting rollback/CAS tests are included in Apple verification. Settings still share a temporary observer with the unfinished conversation/EPUB migration.
 
 The App now sends preference intent (including first legacy-mirror migration) to Swift. `ReaderNativePreferences` owns envelope construction, tombstones, causal parents for global settings, expected-revision checks, durable replay receipts and journal writes in one SQLite transaction. The existing 55-key DataRegistry allowlist generates the packaged native catalog; no second settings namespace or database is introduced. Browser/extension PreferenceStore behavior is retained. Native failures leave dirty compatibility intent and never invoke the old writer as a fallback.

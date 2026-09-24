@@ -164,7 +164,9 @@ struct ReaderNativeInterfaceManifest: Decodable {
             guard identities.insert(identity).inserted,
                   Self.isCanonicalPath(route.path),
                   route.path.hasPrefix("/pdf/api/")
-                    || route.path.hasPrefix("/api/assistant/"),
+                    || route.path.hasPrefix("/api/assistant/")
+                    || (route.path == "/api/voice/task-status" && route.match == .exact
+                        && route.owner == .pi && route.methods == ["GET"]),
                   route.path != "/pdf/api/",
                   route.path != "/api/assistant/",
                   !route.methods.isEmpty,

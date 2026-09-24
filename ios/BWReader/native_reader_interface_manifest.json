@@ -575,6 +575,21 @@
       "description": "Ask the Windows Codex thread to organize one voice turn into a reusable skill (user-initiated only)."
     },
     {
+      "path": "/api/voice/task-status",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "GET"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Read an existing delegated task; never start or resubmit it."
+    },
+    {
       "path": "/pdf/api/active-reading",
       "match": "exact",
       "owner": "pi",

@@ -3410,11 +3410,8 @@ if (window.__bwPwaProviderOnly) return;
     if (!id) return;
     var line = addMsg('asst-a', '<span class="asst-tool">⏳ ' + esc(label || '处理') + '中…</span>');
     var n = 0;
-    (function poll() {
-      if (n++ > 120) { line.innerHTML = '<span class="asst-tool">⌛ ' + esc(label) + ':等太久了</span>'; return; }
-      fetch('/api/voice/task-status?id=' + encodeURIComponent(id)).then(function (r) { return r.json(); }).then(function (d) {
-        if (!d || !d.ok) { return; }
-        if (d.status === 'running') { if (d.step) line.innerHTML = '<span class="asst-tool">⏳ ' + esc(d.step) + '…</span>'; setTimeout(poll, 2000); return; }
+    function showTask(d) {
+        if (d.status === 'running') { if (d.step) line.innerHTML = '<span class="asst-tool">⏳ ' + esc(d.step) + '…</span>'; return false; }
         if (d.status === 'done') {
           try { if (d.client_actions && d.client_actions.length) runActions(d.client_actions); } catch (_) {}   // 任务附带的客户端副作用(如生词下划线刷新)
           var uid = d.result && d.result.undo_id;
@@ -3427,6 +3424,18 @@ if (window.__bwPwaProviderOnly) return;
           notify('阅读助手 ✓', d.speak || '任务完成');
         } else { line.innerHTML = '✗ ' + esc(d.error || '没办成'); }
         scrollDown();
+        return true;
+    }
+    if (window.__bwNativeAssistantStream?.watchTask) {
+      return window.__bwNativeAssistantStream.watchTask('write', id, showTask).then(function (outcome) {
+        if (outcome === 'timeout' || outcome === 'missing') line.textContent = (label || '任务') + '：未收到完成回执，请核对结果';
+      }).catch(function (error) { line.textContent = '任务追踪失败：' + (error.message || error); });
+    }
+    (function poll() {
+      if (n++ > 120) { line.innerHTML = '<span class="asst-tool">⌛ ' + esc(label) + ':等太久了</span>'; return; }
+      fetch('/api/voice/task-status?id=' + encodeURIComponent(id)).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d || !d.ok) return;
+        if (!showTask(d)) setTimeout(poll, 2000);
       }).catch(function () { setTimeout(poll, 3000); });
     })();
   }

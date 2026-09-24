@@ -1043,23 +1043,7 @@
       }
       return out;
     }
-    (function poll() {
-      if (n++ > 600) {
-        try { RC.turnCard.status(tid, '等太久了，没等到结果', true); RC.turnCard.freezeDraft(tid);
-          RC.turnCard.cliPart(tid, { label: label + '(超时)', error: '等太久了' }); } catch (_) {}
-        return;
-      }
-      fetch('/api/voice/task-status?id=' + encodeURIComponent(taskId)).then(function (r) { return r.json(); }).then(function (d) {
-        if (!d || !d.ok) {
-          _miss++;   // 连续拿不到任务(服务重启后任务丢失)→ 12s 就收尾报错,别空转 15 分钟(审查实锤)
-          if (_miss >= 8) {
-            try { RC.turnCard.status(tid, '任务丢失(服务可能重启了),重发一次即可', true); RC.turnCard.freezeDraft(tid);
-              RC.turnCard.cliPart(tid, { label: label + '(任务丢失)', error: '服务重启' }); } catch (_) {}
-            return;
-          }
-          setTimeout(poll, 1500); return;
-        }
-        _miss = 0;
+    function showSnapshot(d) {
         var steps = d.steps || [];
         // 进度 → 标题下面一行;结果 → body 增量渲(#52/#57);工具 → 运行中就进【流程】(#5:流程不再空)。
         try { RC.turnCard.status(tid, (d.step || '规划中') + (steps.length ? ('  ·  已用 ' + steps.length + ' 个工具') : ''), false); } catch (_) {}
@@ -1078,9 +1062,29 @@
               error: d.status === 'error' ? (d.error || '失败') : '' });
             _applyNewCAs(d.client_actions);   // 收尾补一次(done 时才出现的 client_action)
           } catch (_) {}
-          return;
+          return true;
         }
-        setTimeout(poll, 1500);
+        return false;
+    }
+    function stopWaiting(message, suffix) {
+      try { RC.turnCard.status(tid, message, true); RC.turnCard.freezeDraft(tid);
+        RC.turnCard.cliPart(tid, {label:label + (suffix || ''),error:message}); } catch (_) {}
+    }
+    if (window.__bwNativeAssistantStream?.watchTask) {
+      return window.__bwNativeAssistantStream.watchTask('cli', taskId, showSnapshot).then(function (outcome) {
+        if (outcome === 'timeout') stopWaiting('等太久了，没等到结果', '(超时)');
+        else if (outcome === 'missing') stopWaiting('任务丢失(服务可能重启了),请核对结果', '(任务丢失)');
+      }).catch(function (error) { stopWaiting('任务追踪失败：' + (error.message || error)); });
+    }
+    (function poll() {
+      if (n++ > 600) { stopWaiting('等太久了，没等到结果', '(超时)'); return; }
+      fetch('/api/voice/task-status?id=' + encodeURIComponent(taskId)).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d || !d.ok) {
+          if (++_miss >= 8) { stopWaiting('任务丢失(服务可能重启了),重发一次即可', '(任务丢失)'); return; }
+          setTimeout(poll, 1500); return;
+        }
+        _miss = 0;
+        if (!showSnapshot(d)) setTimeout(poll, 1500);
       }).catch(function () { setTimeout(poll, 2000); });
     })();
   }

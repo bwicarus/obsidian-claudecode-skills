@@ -208,7 +208,7 @@ NATIVE_INTERFACE_SCAN_EXCLUDED_RESOURCES = {
     "static/qa/mathjax-full.js",
 }
 NATIVE_INTERFACE_ROUTE_LITERAL = re.compile(
-    r'''(?P<quote>['"`])(?P<path>/(?:pdf/api|api/assistant)/'''
+    r'''(?P<quote>['"`])(?P<path>/api/voice/task-status|/(?:pdf/api|api/assistant)/'''
     r'''(?:[A-Za-z0-9._~:@%+*-]+/)*[A-Za-z0-9._~:@%+*-]*)'''
 )
 NATIVE_INTERFACE_SWIFT_CONSUMERS = (
@@ -412,6 +412,7 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
 }
 
 NATIVE_INTERFACE_SERVER_SOURCES = (
+    (ROOT / "_server_deploy" / "voice.py", "/api/voice"),
     (ROOT / "_server_deploy" / "assistant.py", "/api/assistant"),
     (ROOT / "_server_deploy" / "pdf_reader.py", "/pdf"),
     (ROOT / "_server_deploy" / "epub_assistant.py", "/pdf"),
@@ -627,7 +628,8 @@ def validate_native_interface_manifest(
         description = route.get("description")
         if (
             not isinstance(path, str)
-            or not re.fullmatch(
+            or not (path == "/api/voice/task-status" and match == "exact"
+                    and owner == "pi" and methods == ["GET"]) and not re.fullmatch(
                 r"/(?:pdf/api|api/assistant)/(?:[A-Za-z0-9._~:@%+-]+/)*"
                 r"[A-Za-z0-9._~:@%+-]*",
                 path,
@@ -1406,7 +1408,7 @@ def _canonical_flask_route(
     if not relative.startswith("/"):
         return None
     path = prefix.rstrip("/") + relative
-    if not path.startswith(("/pdf/api/", "/api/assistant/")):
+    if not path.startswith(("/pdf/api/", "/api/assistant/")) and path != "/api/voice/task-status":
         return None
     if "<" not in path:
         return path, "exact"
