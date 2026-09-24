@@ -3618,7 +3618,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     method = "POST"; body = ["name":name,"item":target]
                 }
             } else if operation != "load" { throw ReaderNativeBookStore.MutationError.invalid("收藏操作") }
-            let response = try await gateway.fetchData(path:"/pdf/api/favorites",method:method,body:try body.map { try ReaderNativeCardRules.bytes($0) },surface:.pdf)
+            let response = try await gateway.fetchData(path:"/pdf/api/favorites",method:method,body:try body.map { try ReaderNativeCardRules.bytes($0) } ?? Data(),surface:.pdf)
             try current()
             guard gateway.contextRevision == context, (200..<300).contains(response.status),
                   var result = try JSONSerialization.jsonObject(with:response.data) as? [String:Any], result["ok"] as? Bool == true else {

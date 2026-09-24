@@ -247,7 +247,7 @@ precondition(settledDelivery.isEmpty, "score replay recreated an acknowledged de
 func testStandaloneRating() throws {
     let db = try ReaderNativeDataStore(path:":memory:")
     let repo = ReaderNativeCardRepository(store:db,deviceID:"test",now:{ 9000 })
-    let gid = "card_standalone"
+    let gid = "card_cafeba12"
     _ = try repo.perform(["operation":"registerDraft","arguments":[["gid":gid,"cards":[["front":"Q","back":"A"]],"source":["kind":"test","sourceId":"source"]]],"mutationId":"new"])
     _ = try repo.perform(["operation":"saveConfirmedCard","arguments":[["gid":gid,"cardIndex":0]],"mutationId":"confirm"])
     _ = try repo.perform(["operation":"patchState","arguments":[gid,0,["exactState":["_st":"learn","_showBack":true,"card_id":123,"_ratingUnavailable":false]]],"mutationId":"ready"])

@@ -84,7 +84,7 @@ let mediaMessage: O = ["id":"media","nativeTurnRef":["tid":"media","revision":me
 let historyBefore = try JSONSerialization.data(withJSONObject:store.historyPayload(tid:"media",mode:"normal",file:"book",page:1,absorb:[])!,options:[.sortedKeys])
 try store.removeMedia(card:mediaCard,index:1)
 let mediaResolved = try store.conversationMessage(mediaMessage)
-let mediaVisible = ((((mediaResolved["parts"] as! [O])[0]["data"] as! O)["nativeDetail"] as! O)["content"] as! O
+let mediaVisible = (((mediaResolved["parts"] as! [O])[0]["data"] as! O)["nativeDetail"] as! O)["content"] as! O
 let visibleItems = (mediaVisible["data"] as! O)["items"] as! [O]
 check(visibleItems[0]["_gone"] == nil && visibleItems[1]["_gone"] as? Int == 1,"media removal hid the wrong original slot")
 let historyAfter = try JSONSerialization.data(withJSONObject:store.historyPayload(tid:"media",mode:"normal",file:"book",page:1,absorb:[])!,options:[.sortedKeys])
@@ -113,7 +113,7 @@ let operationPartID = (operationState["parts"] as! [O])[0]["_nativeID"]!
 let redone = output(try run("operationState",["parts":[["id":operationPartID,"items":[["index":0,"id":"restored-highlight","undone":false,"gone":false]]]]],tid:"operations"),id:"operations")
 let operationMessage = try store.conversationMessage(["id":"operations","nativeTurnRef":["tid":"operations","revision":(redone["presentation"] as! O)["revision"]!],
     "parts":[["id":"operations-part","data":["nativeTurnPart":["id":operationPartID]]]]])
-let operationOriginal = ((((operationMessage["parts"] as! [O])[0]["data"] as! O)["nativeDetail"] as! O)["content"] as! O
+let operationOriginal = (((operationMessage["parts"] as! [O])[0]["data"] as! O)["nativeDetail"] as! O)["content"] as! O
 let operationItem = (operationOriginal["items"] as! [O])[0]
 check(operationItem["id"] as? String == "restored-highlight" && operationItem["pdf_page"] as? Int == 4 && operationItem["text"] as? String == "原文","redo lost the replacement identity or changed its source anchor")
 print("Native turns: live/final reconciliation, invocation dedupe, independent drafts, rename, progress, atomic rejection and stable card identity passed")

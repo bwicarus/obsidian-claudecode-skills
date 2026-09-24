@@ -493,21 +493,21 @@ func testNativeDocumentSession() throws {
     check((session.authority["revisions"] as? O)?["notes"] as? Int64 == 2,"stream retained stale authority")
     let cursor = try db.cursor()
     do { _ = try session.commit([event([note("1")])],sequence:1,bookMutation:writer.perform,pageCard:noCard); fatalError("duplicate batch accepted") }
-    catch ReaderNativeAssistantEdits.Failure {}
+    catch is ReaderNativeAssistantEdits.Failure {}
     check(try db.cursor() == cursor,"duplicate native stream wrote again")
     let frozen = try make()
     _ = try session.commit([event([note("3")])],sequence:2,bookMutation:writer.perform,pageCard:noCard)
     do { _ = try frozen.commit([event([note("4")])],sequence:1,bookMutation:writer.perform,pageCard:noCard); fatalError("stale authority overwrote data") }
     catch let e as ReaderNativeAssistantEdits.Failure { check(e.conflict,"wrong revision failure") }
     do { _ = try frozen.commit([],sequence:1,bookMutation:writer.perform,pageCard:noCard); fatalError("failed batch retried") }
-    catch ReaderNativeAssistantEdits.Failure {}
+    catch is ReaderNativeAssistantEdits.Failure {}
     let malformed = try make(), before = try db.cursor()
     do { _ = try malformed.commit([event([note("5")]),["name":"actions","data":"{}"]],sequence:1,bookMutation:writer.perform,pageCard:noCard); fatalError("invalid frame committed") }
-    catch ReaderNativeAssistantEdits.Failure {}
+    catch is ReaderNativeAssistantEdits.Failure {}
     check(try db.cursor() == before,"malformed second frame made a partial write")
     session.close()
     do { _ = try session.commit([],sequence:3,bookMutation:writer.perform,pageCard:noCard); fatalError("closed session used") }
-    catch ReaderNativeAssistantEdits.Failure {}
+    catch is ReaderNativeAssistantEdits.Failure {}
 
     var authority = try read.assistantSnapshot(bookID:bookID,surface:"pdf")
     authority["page_cards"] = ["old":"numbering"]
@@ -529,7 +529,7 @@ func testNativeDocumentSession() throws {
     check((receipt["changes"] as? [O])?.count == 1,"canonical card observation lost")
     let mixed = try make()
     do { _ = try mixed.commit([event([card,note("6")])],sequence:1,bookMutation:{ _ in fatalError("mixed book wrote") },pageCard:{ _ in fatalError("mixed saga wrote") }); fatalError("mixed saga accepted") }
-    catch ReaderNativeAssistantEdits.Failure {}
+    catch is ReaderNativeAssistantEdits.Failure {}
 }
 try testNativeDocumentSession()
 print("Native stream document session: authority advancement, ordered writes, deduplication, stale/cancelled/failed sessions and card receipts passed")
@@ -578,7 +578,7 @@ func testNativeReadingBootAndContext() throws {
     let original = try db.record(collection:"native-document-highlights",id:"boot:document-highlights")
     try db.execute("CREATE TRIGGER fail_split BEFORE INSERT ON records WHEN NEW.collection = 'native-document-highlights-split-meta' BEGIN SELECT RAISE(ABORT, 'split failure'); END")
     do { try writer.prepareHighlightsOnBoot(); fatalError("partial split saved") } catch is ReaderNativeDataStore.StoreError {}
-    check(try db.records(collection:"native-document-highlights-items").isEmpty,"split failure left items")
+    check(try db.records(collection:"native-document-highlights-items",idPrefix:"").isEmpty,"split failure left items")
     try db.execute("DROP TRIGGER fail_split")
     try writer.prepareHighlightsOnBoot()
     let cursor = try db.cursor()

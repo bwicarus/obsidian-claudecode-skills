@@ -22,7 +22,10 @@ enum ReaderNativePageCardHTML {
         }
         // Preserve inline whitespace. Pretty-printing here would change stored
         // text and replay fingerprints merely because an edit was retried.
-        let clean = try SwiftSoup.clean(document.body()?.html() ?? "", "", allowed, document.outputSettings()) ?? ""
+        // Protocol validation needs a base URI even when relative URLs must
+        // stay relative. Without it SwiftSoup drops local /pdf/api/asset srcs.
+        // preserveRelativeLinks keeps the original path; this host is never fetched.
+        let clean = try SwiftSoup.clean(document.body()?.html() ?? "", "https://reader.invalid/", allowed, document.outputSettings()) ?? ""
         let safe = try SwiftSoup.parseBodyFragment(clean)
         safe.outputSettings().prettyPrint(pretty:false)
         var texts:[String] = [], nodes:[Node] = safe.body().map { [$0] } ?? []

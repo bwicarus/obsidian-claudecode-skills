@@ -155,7 +155,7 @@ enum ReaderNativeCardPresentation {
             }
             result["nativeCardActions"] = ids
         }
-        guard !ids.isEmpty else { return data }
+        // Read-only cards still need faces and status when they have no actions.
         for key in ["state", "editable", "pending"] { result[key] = state[key] }
         result["live"] = true
         result["faces"] = presentation["faces"]; result["notice"] = presentation["notice"]
