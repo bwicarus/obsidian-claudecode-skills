@@ -64,6 +64,7 @@
   var _nativeNavigationWork = null;
   var _nativeTransitionFence = null;
   var _nativeRatingCommitWork = null;
+  var _nativeScoreObserved = new Set();
   var _nativeReconcileWork = Promise.resolve();
   var _nativeQueuePresentation = null;
 
@@ -2283,7 +2284,7 @@
   // Transitional effects barrier only. The native queue chooses and persists
   // the target from its own records; this adapter never submits another save.
   async function _prepareNativeTransition(command) {
-    if (!_nativeReviewUI() || !command || !command.id || !['select','rate','undo','reveal'].includes(command.key) || command.lease !== _nativeQueueLease) throw new Error('复习轮次已切换');
+    if (!_nativeReviewUI() || !command || !command.id || !['select','rate','undo','reveal','delete'].includes(command.key) || command.lease !== _nativeQueueLease) throw new Error('复习轮次已切换');
     var epoch = _queueRequestEpoch, contextKey = _contextCacheKey;
     function current() {
       return _mode && !_queueBusy && epoch === _queueRequestEpoch && contextKey === _contextCacheKey &&
@@ -2293,7 +2294,7 @@
     if (_nativeStageWork) await _nativeStageWork;
     if (!current()) throw new Error('当前复习卡已变化');
     var staged = !!_stagedRating;
-    var flush = command.key === 'select' || command.key === 'reveal';
+    var flush = command.key === 'select' || command.key === 'reveal' || command.key === 'delete';
     var committed = flush ? await _commitStagedRating(command.key === 'reveal' ? 'show-answer' : 'card-change') : false;
     await Promise.all([_cacheWriteChain, _nativeReconcileWork]);
     if (!current() || _ratingCommitBusy || flush && staged && committed === false) throw new Error('评分尚未保存，未切换卡片');
@@ -2320,12 +2321,13 @@
           !Array.isArray(result.snapshot.cards) || result.snapshot.client_context_key !== _contextCacheKey ||
           JSON.stringify(state.queueIds) !== JSON.stringify(result.snapshot.cards.map(_stableCardId))) return false;
       var key = fence.key, stage = result.stage;
-      if (!['select','rate','undo','reveal'].includes(key) || ['rate','undo'].includes(key) && (!stage || !stage.card ||
+      if (!['select','rate','undo','reveal','delete'].includes(key) || ['rate','undo'].includes(key) && (!stage || !stage.card ||
           stage.nativeQueueLease !== _nativeQueueLease || !stage.nativeStageID)) return false;
       if (key === 'undo' && (!_stagedRating || _stagedRating.nativeStageID !== stage.nativeStageID)) return false;
       var changed = ['rate','undo'].includes(key) || result.changed === true;
       if (changed) {
         _rememberAndDeactivateSelections();
+        if (key === 'delete') _invalidateCardRequests(true);
         _applyQueueSnapshot(result.snapshot);
       }
       if (key === 'rate') {
@@ -2340,7 +2342,16 @@
       render();
       if (changed) {
         _activateCurrentSelections(); _scheduleDecorate();
-        _notifyAssistant(key === 'rate' ? 'card-rating-staged' : key === 'undo' ? 'rating-restored' : 'card-change');
+        _notifyAssistant(key === 'rate' ? 'card-rating-staged' : key === 'undo' ? 'rating-restored' : key === 'delete' ? 'card-deleted' : 'card-change');
+      }
+      if (key === 'delete') {
+        try {
+          if (result.record && result.removed && window.RC && RC.flashcard && RC.flashcard.acceptNativeRecord) {
+            RC.flashcard.acceptNativeRecord(result.record, result.removed.cardIndex, 'del');
+          }
+          if (result.removed) window.dispatchEvent(new CustomEvent('rc:learning-card-removed', {detail:result.removed}));
+        } catch (_) { /* A failed observer cannot undo the committed deletion. */ }
+        _toast('已删除当前卡片');
       }
       if (key === 'undo') _toast('已回到上一张卡，请重新选择评分');
       _publishPresentation();
@@ -2882,11 +2893,73 @@
     }
   }
 
+  function _commitNativeScore(stage) {
+    _stagedRating = null; _ratingCommitBusy += 1;
+    if (_mode) render();
+    var work = Promise.resolve().then(async function () {
+      var result = await _nativeQueueCall('commitRating', {lease:stage.nativeQueueLease,stageId:stage.nativeStageID});
+      if (!result || typeof result.ok !== 'boolean' || !result.stage || result.stage.nativeStageID !== stage.nativeStageID) {
+        throw new Error('评分缺少对应操作的回执，未重新计分');
+      }
+      var current = stage.contextKey === _contextCacheKey && stage.nativeQueueLease === _nativeQueueLease;
+      if (current && result.projectionPending) _stagedRating = stage;
+      if (current) {
+        if (result.snapshot) {
+          _rememberAndDeactivateSelections(); _invalidateCardRequests(true);
+          _applyQueueSnapshot(result.snapshot);
+        }
+        if (result.state) _acceptNativeReviewState(result.state);
+        if (!result.queued) delete _ratingPending[stage.pendingKey];
+        _patchSharedCard(stage.card, {_st:!result.ok || stage.ease === 1 && !result.queued ? 'learn' : 'done',
+          _showBack:!result.ok || stage.ease !== 1, _next:result.next || null,
+          _ratingPending:result.queued === true, _syncPending:result.queued === true}, result.ok ? 'review-accepted' : 'review-reverted');
+        render(); _activateCurrentSelections(); _scheduleDecorate();
+        _notifyAssistant(result.ok ? result.queued ? 'card-rating-queued' : 'card-rated-native' : 'rating-restored');
+      }
+      // Observers update projections only. Score, scheduler, durable history,
+      // event production and retry enrollment have already run in Swift.
+      if (result.ok && !_nativeScoreObserved.has(stage.nativeStageID)) {
+        _nativeScoreObserved.add(stage.nativeStageID);
+        if (_nativeScoreObserved.size > 128) _nativeScoreObserved.delete(_nativeScoreObserved.values().next().value);
+        try {
+          if (result.record && window.RC && RC.flashcard && RC.flashcard.acceptNativeRecord) {
+            RC.flashcard.acceptNativeRecord(result.record, stage.card._localReview.cardIndex, 'rate');
+          }
+          if (result.local) window.dispatchEvent(new CustomEvent('rc:learning-card-rated', {detail:{
+            entityId:stage.card._localReview.gid,cardIndex:stage.card._localReview.cardIndex,ease:stage.ease,
+            aid:result.event.aid,reviewedAt:result.event.reviewedAt,projections:stage.card._localReview.projections || {},
+            record:result.record,source:'review'}}));
+          if (result.event && window.BWReaderRuntime && BWReaderRuntime.reportActivity) BWReaderRuntime.reportActivity({review:Object.assign({
+            key:String(result.event.id || '').replace(/^revlog:/,'')},result.event)});
+          if (window.RC && RC.outbox) RC.outbox.flush();
+        } catch (_) {}
+      }
+      if (current && (result.warning || !result.ok || result.queued)) {
+        _toast(result.warning || result.error || '评分已入队，恢复后自动同步');
+      }
+      return result.ok && !result.projectionPending;
+    }).catch(function (error) {
+      // The native owner may already have committed. Preserve this operation
+      // id so a retry reads its receipt instead of creating another score.
+      if (stage.contextKey === _contextCacheKey && stage.nativeQueueLease === _nativeQueueLease) {
+        _stagedRating = stage; _toast(String(error && error.message || error));
+      }
+      return false;
+    }).finally(function () {
+      _ratingCommitBusy = Math.max(0,_ratingCommitBusy - 1);
+      if (_nativeRatingCommitWork === work) _nativeRatingCommitWork = null;
+      _publishPresentation();
+    });
+    _nativeRatingCommitWork = work;
+    return work;
+  }
+
   function _commitStagedRating(reason) {
     if (_nativeStageWork) return _nativeStageWork.then(function () { return _commitStagedRating(reason); });
     if (_nativeRatingCommitWork) return _nativeRatingCommitWork;
     var stage = _stagedRating;
     if (!stage) return Promise.resolve(false);
+    if (_nativeReviewUI() && window.__BW_NATIVE_REVIEW_CONTROL__) return _commitNativeScore(stage);
     _stagedRating = null;
     _ratingCommitBusy += 1;
     if (_mode) render();
@@ -3963,6 +4036,16 @@
 
   function _deleteCurrentCard(confirmation) {
     var card = _current();
+    if (_nativeReviewUI() && window.__BW_NATIVE_REVIEW_CONTROL__) {
+      var kind = _presentationState().deleteKind;
+      if (!card || !kind) return Promise.resolve(false);
+      var explicit = confirmation && confirmation.cardKey === _cardKey(card) && confirmation.kind === kind;
+      if (!explicit && !window.confirm(kind === 'anki-note'
+        ? '删除当前 Anki note？同一 note 生成的全部 Anki 卡都会删除。'
+        : '删除当前这一张卡？同批其他卡不会受影响。')) return Promise.resolve(false);
+      return _nativeQueueCall('deleteCurrent', {lease:_nativeQueueLease,cardId:_stableCardId(card),kind:kind,confirmed:true})
+        .catch(function (error) { _toast(String(error && error.message || '删除未获确认')); return false; });
+    }
     var local = card && card._localReview;
     var repository = _cardRepository();
     if (card && !local && _legacyReviewNoteId(card)) {
@@ -4559,6 +4642,7 @@
 
   RC.review = {
     prepareNativeLifecycle: _prepareNativeLifecycle,
+    observeNativeNotice: _toast,
     observeNativeLifecycle: _observeNativeLifecycle,
     prepareNativeImprovement: _prepareNativeImprovement,
     observeNativeImprovement: _observeNativeImprovement,

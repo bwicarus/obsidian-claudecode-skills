@@ -135,6 +135,14 @@ struct ReaderNativeCommandOutbox {
         }
         return value["mutationId"] as! String
     }
+    func prepareCommand(_ input: Object) throws -> Object {
+        var record = input
+        record["contract"] = Self.contract; record["ownerNamespace"] = namespace
+        record["recordType"] = "mutation"; record.removeValue(forKey: "mutationId")
+        let hash = SHA256.hash(data: try bytes(record)).map { String(format: "%02x", $0) }.joined()
+        record["mutationId"] = "mut-v2-" + String(hash.prefix(32))
+        return try checked(record)
+    }
     func entries() throws -> [Entry] {
         try store.records(collection: Self.collection, idPrefix: namespace + ":", includeDeleted: false).compactMap { row in
             guard !row.deleted else { return nil }
@@ -214,8 +222,18 @@ final class ReaderNativeCommandOutboxPort {
     }
     private let store: () throws -> ReaderNativeDataStore
     private var batches: [String: Batch] = [:]
+    private var currentScope: Scope?
     init(store: @escaping () throws -> ReaderNativeDataStore) { self.store = store }
-    func invalidate() { batches.removeAll() }
+    func invalidate() { batches.removeAll(); currentScope = nil }
+
+    /// Capture the account before starting a native mutation. A late receipt
+    /// remains in that account's durable queue, never the newly opened one.
+    func productionQueue() throws -> ReaderNativeCommandOutbox {
+        guard let scope = currentScope else {
+            throw ReaderNativeCommandOutbox.Failure(message: "账户待发送队列尚未就绪")
+        }
+        return try ReaderNativeCommandOutbox(store: store(), namespace: scope.namespace)
+    }
 
     func handle(_ request: Object) throws -> Object {
         guard request["contract"] as? String == ReaderNativeCommandOutbox.contract,
@@ -269,6 +287,7 @@ final class ReaderNativeCommandOutboxPort {
         default: throw ReaderNativeCommandOutbox.Failure(message: "未知待发送队列操作")
         }
         result["state"] = try outbox.status()
+        currentScope = scope
         return result
     }
 }

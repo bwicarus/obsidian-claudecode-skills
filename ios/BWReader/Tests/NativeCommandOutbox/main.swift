@@ -85,3 +85,18 @@ check(try! ReaderNativeCommandOutbox(store: reopened, namespace: namespace).pend
     "退出与设备缓存回收不能清掉未送达命令")
 host.closeAll()
 print("native command outbox checks passed")
+fails("未登记账户不能生产命令") { _ = try port.productionQueue() }
+_ = try port.handle(request("status"))
+let producer = try port.productionQueue()
+let nativeInput: [String: Any] = ["queueKey": "rev:stable-aid", "url": "/pdf/api/review-answer", "method": "POST",
+    "body": ["aid": "stable-aid", "card_id": 7, "ease": 3], "ts": 100]
+let nativeCommand = try producer.prepareCommand(nativeInput)
+check(try! producer.prepareCommand(nativeInput)["mutationId"] as? String == nativeCommand["mutationId"] as? String,
+    "重启恢复必须使用同一原生命令编号")
+try producer.enqueue(nativeCommand)
+let nativeBatch = try producer.pending()
+let nativeEntry = nativeBatch.first { $0.mutationID == nativeCommand["mutationId"] as? String }!
+try producer.acknowledge(nativeEntry, snapshot: nativeBatch, status: 200)
+try producer.enqueue(nativeCommand)
+check(try! !producer.pending().contains { $0.mutationID == nativeCommand["mutationId"] as? String },
+    "已送达的原生命令不能因恢复而再次入队")

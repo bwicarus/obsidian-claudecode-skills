@@ -310,7 +310,7 @@ struct ReaderNativeCardRepository {
     }
 
     private func commitReview(_ input: [String: Any], mutation: String, at: Int64) throws -> [String: Any] {
-        try R.fields(input, ["gid", "cardIndex", "entityRev", "stateRev", "aid", "ease", "reviewedAt", "file", "ankiCardId"], "review command")
+        try R.fields(input, ["gid", "cardIndex", "entityRev", "stateRev", "aid", "ease", "reviewedAt", "file", "ankiCardId", "delivery"], "review command")
         let id = try R.id(input["gid"]), index = try R.integer(input["cardIndex"], "cardIndex")
         let aid = try R.text(input["aid"], "aid", 256, required: true)
         let reviewedAt = try R.integer(input["reviewedAt"], "reviewedAt"), ease = try R.integer(input["ease"], "ease")
@@ -355,7 +355,47 @@ struct ReaderNativeCardRepository {
         _ = try store.commitWithinTransaction(record: .init(collection: historyCollection, id: historyID, rev: 1,
             updatedAt: at, deleted: false, json: String(decoding: R.bytes(history), as: UTF8.self)),
             mutationId: historyID, journalJSON: nil, expectedRev: 0, now: at)
+        // The event and any Anki projection are durable with the score itself.
+        // Handoff to the separate transport database can then be retried after
+        // a crash without generating another score or a new mutation identity.
+        if let delivery = input["delivery"] {
+            guard let commands = delivery as? [[String: Any]], commands.count <= 2 else { throw R.fail("INPUT", "复习投递命令无效") }
+            for command in commands {
+                guard command["contract"] as? String == "command-outbox/2",
+                      let owner = command["ownerNamespace"] as? String, owner.range(of: "^acct-v1-[a-f0-9]{64}$", options: .regularExpression) != nil,
+                      let mutationID = command["mutationId"] as? String, mutationID.range(of: "^mut-v2-[a-f0-9]{32}$", options: .regularExpression) != nil,
+                      command["method"] as? String == "POST", command["recordType"] as? String == "mutation",
+                      let url = command["url"] as? String, ["/pdf/api/review-event", "/pdf/api/review-answer"].contains(url),
+                      let body = command["body"] as? [String: Any], body["aid"] as? String == aid else {
+                    throw R.fail("INPUT", "复习投递身份或端点不匹配")
+                }
+                let deliveryID = historyID + ":" + mutationID
+                _ = try store.commitWithinTransaction(record: .init(collection: "native-review-delivery", id: deliveryID,
+                    rev: 1, updatedAt: at, deleted: false, json: String(decoding: R.bytes(command), as: UTF8.self)),
+                    mutationId: nil, journalJSON: nil, expectedRev: 0, now: at)
+            }
+        }
         return patched
+    }
+
+    func pendingReviewDeliveries(namespace: String) throws -> [(id: String, command: [String: Any])] {
+        try store.records(collection: "native-review-delivery", idPrefix: "", includeDeleted: false).compactMap { row in
+            guard !row.deleted, let command = try JSONSerialization.jsonObject(with: Data(row.json.utf8)) as? [String: Any] else {
+                throw R.fail("CORRUPT", "复习投递记录损坏")
+            }
+            guard command["ownerNamespace"] as? String == namespace else { return nil }
+            return (id: row.id, command: command)
+        }
+    }
+
+    func acknowledgeReviewDelivery(id: String, mutationID: String) throws {
+        try store.inTransaction {
+            guard let row = try store.record(collection: "native-review-delivery", id: id), !row.deleted else { return }
+            guard let command = try JSONSerialization.jsonObject(with: Data(row.json.utf8)) as? [String: Any],
+                  command["mutationId"] as? String == mutationID else { throw R.fail("CONFLICT", "复习投递回执不匹配") }
+            _ = try store.commitWithinTransaction(record: .init(collection: row.collection, id: row.id, rev: row.rev + 1,
+                updatedAt: now(), deleted: true, json: row.json), mutationId: nil, journalJSON: nil, expectedRev: row.rev, now: now())
+        }
     }
 
     /// A delayed Anki interval may refine only the exact local review it was

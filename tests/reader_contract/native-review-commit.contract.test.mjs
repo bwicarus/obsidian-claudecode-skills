@@ -9,6 +9,28 @@ const Repository = require('../../_server_deploy/static/reader-runtime/card-repo
 const source = readFileSync(new URL('../../_server_deploy/static/pdf/rc-review.js', import.meta.url), 'utf8');
 const commit = source.slice(source.indexOf('  function _commitLocalRating('), source.indexOf('  function _restoreRejectedAnswer('));
 
+test('App scoring sends only its stage identity and observes the native result without scheduling or another event submission', async () => {
+  const stage={nativeStageID:'one',nativeQueueLease:'lease',contextKey:'book',pendingKey:'p',ease:3,
+    card:{_localReview:{gid:'group',cardIndex:0}}};
+  const calls=[], events=[];
+  const r={window:{RC:{},dispatchEvent:e=>events.push(e)},RC:{},CustomEvent:class {constructor(type){this.type=type;}},
+    _nativeScoreObserved:new Set(),_mode:true,_stagedRating:stage,_ratingCommitBusy:0,_nativeRatingCommitWork:null,
+    _contextCacheKey:'book',_nativeQueueLease:'lease',_ratingPending:{p:true},
+    _nativeQueueCall:async(...args)=>{calls.push(args);return {ok:true,stage,local:true,
+      record:{id:'group'},event:{aid:'native-review:one',reviewedAt:10},snapshot:{cards:[]},state:{}};},
+    _rememberAndDeactivateSelections(){},_invalidateCardRequests(){},_applyQueueSnapshot(){},_acceptNativeReviewState(){},
+    _patchSharedCard(){},render(){},_activateCurrentSelections(){},_scheduleDecorate(){},_notifyAssistant(){},_publishPresentation(){},_toast(){},
+    _commitLocalRating:()=>assert.fail('web scheduler must not run'),_reportReviewEvent:()=>assert.fail('event already in native outbox')};
+  vm.createContext(r);vm.runInContext(source.slice(source.indexOf('  function _commitNativeScore('),source.indexOf('  function _commitStagedRating(')),r);
+  assert.equal(await r._commitNativeScore(stage),true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['commitRating',{lease:'lease',stageId:'one'}]]);
+  assert.equal(r._ratingPending.p,undefined);assert.equal(r._ratingCommitBusy,0);assert.equal(events.length,1);
+  assert.equal(await r._commitNativeScore(stage),true);assert.equal(events.length,1,'receipt replay published the effect twice');
+  r._nativeQueueCall=async()=>{throw Error('lost bridge reply');};
+  assert.equal(await r._commitNativeScore(stage),false);
+  assert.equal(r._stagedRating,stage,'retry must keep the original operation id');
+});
+
 function harness(repository) {
   const events = [];
   const context = vm.createContext({ _cardRepository: () => repository, _answerAid: () => 'answer-1',

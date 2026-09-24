@@ -16,6 +16,14 @@ final class ReaderNativeReviewQueue {
     private let read: () throws -> String?
     private let write: (String) throws -> Void
     private let fetch: Fetch
+    private let removeLocal: ((Object) throws -> Object)?
+    private let readReceipt: ((String) throws -> String?)?
+    private let writeReceipt: ((String, String) throws -> Void)?
+    private let score: ((Object) async throws -> Object)?
+    private var deleting = false
+    private var scoring: [String: Task<Object, Never>] = [:]
+    private var scored: [String: Object] = [:]
+    private var scoreOrder: [String] = []
     private let now: () -> Double
     private var lease = ""
     private var contextKey = ""
@@ -38,8 +46,14 @@ final class ReaderNativeReviewQueue {
 
     init(local: @escaping () throws -> Object, read: @escaping () throws -> String?,
          write: @escaping (String) throws -> Void, fetch: @escaping Fetch,
-         now: @escaping () -> Double = { Date().timeIntervalSince1970 * 1000 }) {
+         now: @escaping () -> Double = { Date().timeIntervalSince1970 * 1000 },
+         removeLocal: ((Object) throws -> Object)? = nil,
+         readReceipt: ((String) throws -> String?)? = nil,
+         writeReceipt: ((String, String) throws -> Void)? = nil,
+         score: ((Object) async throws -> Object)? = nil) {
         self.local = local; self.read = read; self.write = write; self.fetch = fetch; self.now = now
+        self.removeLocal = removeLocal; self.readReceipt = readReceipt; self.writeReceipt = writeReceipt
+        self.score = score
     }
     func invalidate() {
         task?.cancel(); task = nil; lease = ""; contextKey = ""; identity = Data(); stagedRating = nil
@@ -123,11 +137,122 @@ final class ReaderNativeReviewQueue {
     /// visible queue, not a second card snapshot assembled by the web adapter.
     func improvementInput(lease expected: String, cardID: String) throws -> Object {
         let card = try presentedCard(lease: expected, cardID: cardID)
-        guard stagedRating == nil, takenRatings.isEmpty else {
+        guard !deleting, stagedRating == nil, takenRatings.isEmpty else {
             throw Failure(message: "请先保存上一张卡的评分")
         }
         return ["contextKey": contextKey + ":" + scope, "cardKey": cardID,
                 "card": ReaderNativeReviewCards.assistant(card), "verbosity": improveMode]
+    }
+
+    /// Delete the confirmed canonical item. Remote note deletion is reserved
+    /// durably before dispatch; an uncertain result cannot be retried under a
+    /// new operation id after switching cards or restarting the App.
+    func deleteCurrent(lease expected: String, cardID: String, kind: String, confirmed: Bool) async throws -> Object {
+        let card = try presentedCard(lease: expected, cardID: cardID)
+        guard confirmed, !kind.isEmpty, ReaderNativeReviewCards.deleteKind(card) == kind else {
+            throw Failure(message: "请确认当前卡片及删除范围")
+        }
+        guard !deleting, stagedRating == nil, takenRatings.isEmpty else {
+            throw Failure(message: "上一张卡的操作尚未完成，未执行删除")
+        }
+        deleting = true
+        defer { deleting = false }
+        var result: Object = ["deleted": true, "kind": kind]
+        var noteID: Int64?
+        if kind == "reader-card" {
+            guard let local = card["_localReview"] as? Object, let removeLocal,
+                  let gid = local["gid"] as? String, !gid.isEmpty else {
+                throw Failure(message: "Reader 卡片缺少本机身份")
+            }
+            let index = try ReaderNativeCardRules.integer(local["cardIndex"], "card index")
+            let revision = try ReaderNativeCardRules.integer(local["stateRev"], "state revision")
+            guard index >= 0, revision > 0 else { throw Failure(message: "Reader 卡片版本无效") }
+            let record = try removeLocal(["gid": gid, "cardIndex": index, "stateRev": revision,
+                "mutationId": "review-remove:\(gid):\(index):\(revision)"])
+            guard record["id"] as? String == gid,
+                  ((record["states"] as? Object)?[String(index)] as? Object)?["removed"] as? Bool == true else {
+                throw Failure(message: "删除未取得对应卡片的保存回执，请核实后再操作")
+            }
+            result["record"] = record
+            result["removed"] = ["entityId": gid, "cardIndex": index,
+                "stateRev": record["stateRev"] ?? revision, "record": record,
+                "projections": local["projections"] ?? [:], "source": "review"] as Object
+        } else {
+            let id = try ReaderNativeCardRules.integer(card["note_id"] ?? card["noteId"], "Anki note id")
+            guard id > 0, let readReceipt, let writeReceipt else {
+                throw Failure(message: "Anki 删除记录尚未就绪")
+            }
+            noteID = id
+            let receiptKey = "native-review-delete-note:\(id)"
+            if let text = try readReceipt(receiptKey) {
+                guard text.utf8.count <= 8 * 1024 * 1024,
+                      let receipt = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? Object,
+                      try ReaderNativeCardRules.integer(receipt["noteId"], "receipt note") == id,
+                      receipt["status"] as? String == "succeeded", let value = receipt["result"] as? Object else {
+                    throw Failure(message: "上次删除结果待确认，未重复发送；请核对 Anki 中的实际内容")
+                }
+                result["remote"] = value
+            } else {
+                let mutationID = "review-delete:" + UUID().uuidString
+                var receipt: Object = ["noteId": id, "mutationId": mutationID, "status": "pending"]
+                try writeReceipt(receiptKey, String(decoding: Self.bytes(receipt), as: UTF8.self))
+                do {
+                    let response = try await fetch("/pdf/api/anki-card-operation", "POST",
+                        Self.bytes(["operation": "delete-notes", "mutationId": mutationID, "noteIds": [id]]))
+                    guard (200..<300).contains(response.status), response.data.count <= 8 * 1024 * 1024,
+                          let value = try JSONSerialization.jsonObject(with: response.data) as? Object,
+                          value["ok"] as? Bool == true else {
+                        throw Failure(message: "Anki 未返回成功回执")
+                    }
+                    receipt["status"] = "succeeded"; receipt["result"] = value
+                    // Keep the real receipt even if the visible book changed.
+                    try writeReceipt(receiptKey, String(decoding: Self.bytes(receipt), as: UTF8.self))
+                    result["remote"] = value
+                } catch {
+                    throw Failure(message: "删除结果待确认，未自动重试：" + error.localizedDescription)
+                }
+            }
+        }
+        // A completed mutation does not authorize overwriting a later queue.
+        guard expected == lease, !cancelled, var snapshot = activeSnapshot else { return result }
+        if let record = result["record"] as? Object, let gid = record["id"] as? String {
+            do {
+                let updated = try reconcile(id: gid, record: record, request: expected)
+                result["snapshot"] = updated["snapshot"]; result["changed"] = true
+                return result
+            } catch {
+                throw Failure(message: "删除已完成，但复习队列未保存；请重新读取，勿重复删除：" + error.localizedDescription)
+            }
+        }
+        var cards = snapshot["cards"] as! [Object], index = snapshot["index"] as! Int
+        var due = snapshot["due_total"] as! Int
+        var removedIDs = Set<String>()
+        for offset in cards.indices.reversed() {
+            let item = cards[offset]
+            let matches: Bool
+            if let noteID {
+                matches = item["_localReview"] == nil &&
+                    (try? ReaderNativeCardRules.integer(item["note_id"] ?? item["noteId"], "note")) == noteID
+            } else { matches = ReaderNativeReviewCards.stableID(item) == cardID }
+            if !matches { continue }
+            removedIDs.insert(ReaderNativeReviewCards.stableID(item))
+            removedIDs.insert(ReaderNativeCardRules.string(item["id"]))
+            cards.remove(at: offset)
+            if offset < index { index -= 1 }
+            if (item["_localReview"] as? Object)?["wasDue"] as? Bool == true || item["_localReview"] == nil {
+                due = max(0, due - 1)
+            }
+        }
+        snapshot["cards"] = cards; snapshot["index"] = max(0, min(index, cards.count - 1))
+        snapshot["due_total"] = due
+        snapshot["completed_ids"] = (snapshot["completed_ids"] as? [Any] ?? []).filter {
+            !removedIDs.contains(ReaderNativeCardRules.string($0))
+        }
+        do { try save(snapshot, request: expected) }
+        catch { throw Failure(message: "删除已完成，但复习队列未保存；请重新读取，勿重复删除：" + error.localizedDescription) }
+        showingAnswer = false
+        result["snapshot"] = snapshot; result["changed"] = true
+        return result
     }
 
     func stageCurrentRating(lease expected: String, cardID: String, stageID: String, ease: Any) throws -> Object {
@@ -165,7 +290,7 @@ final class ReaderNativeReviewQueue {
     /// Presentation actions are validated against the same card and queue lease
     /// as rating. Neither a web callback nor an old button can reveal a new card.
     func interact(_ input: Object) throws -> Object {
-        guard input["lease"] as? String == lease, !lease.isEmpty, !cancelled,
+        guard !deleting, input["lease"] as? String == lease, !lease.isEmpty, !cancelled,
               let key = input["key"] as? String else { throw Failure(message: "复习界面已切换") }
         let source = try commandSnapshot(input)
         let cards = source["cards"] as! [Object], index = source["index"] as! Int
@@ -212,7 +337,7 @@ final class ReaderNativeReviewQueue {
                     return ["ok": false, "retryable": false, "status": response.status, "error": "评分回执过大，结果待确认"]
                 }
                 let value = (try? JSONSerialization.jsonObject(with: response.data)) as? Object ?? [:]
-                if (200..<300).contains(response.status), value["ok"] as? Bool != false {
+                if (200..<300).contains(response.status), value["ok"] as? Bool == true {
                     return ["ok": true, "value": value]
                 }
                 return ["ok": false, "status": response.status,
@@ -276,7 +401,7 @@ final class ReaderNativeReviewQueue {
     }
 
     func selectCard(_ input: Object) throws -> Object {
-        guard input["lease"] as? String == lease, !lease.isEmpty, !cancelled,
+        guard !deleting, input["lease"] as? String == lease, !lease.isEmpty, !cancelled,
               stagedRating == nil,
               let currentCard = input["current"] as? Object,
               let targetCard = input["target"] as? Object else {
@@ -305,7 +430,7 @@ final class ReaderNativeReviewQueue {
               let card = input["card"] as? Object,
               let cardKey = input["cardKey"] as? String, !cardKey.isEmpty, cardKey.utf16.count <= 1024,
               input["revealed"] as? Bool == true, showingAnswer else { throw Failure(message: "请在当前卡片显示答案后评分") }
-        guard stagedRating == nil, takenRatings.isEmpty else { throw Failure(message: "上一张卡的评分尚未处理") }
+        guard !deleting, stagedRating == nil, takenRatings.isEmpty else { throw Failure(message: "上一张卡的操作尚未处理") }
         var source = try commandSnapshot(input)
         let before = source
         guard source["client_context_key"] as? String == contextKey else { throw Failure(message: "复习内容已切换") }
@@ -329,7 +454,7 @@ final class ReaderNativeReviewQueue {
         source["index"] = min(index, max(0, cards.count - 1))
         if dueDecremented { source["due_total"] = max(0, (source["due_total"] as! Int) - 1) }
         source["native_queue_lease"] = lease
-        let stage: Object = ["nativeStageID": id, "nativeQueueLease": lease, "card": card, "ease": ease,
+        let stage: Object = ["nativeStageID": id, "nativeQueueLease": lease, "card": card, "ease": ease, "reviewedAt": floor(now()),
             "pendingKey": contextKey + ":" + cardKey + ":" + String(index), "originalIndex": index,
             "contextKey": contextKey, "dueDecremented": dueDecremented, "completedAdded": completedAdded,
             "completedBefore": completedBefore, "snapshot": source]
@@ -350,6 +475,77 @@ final class ReaderNativeReviewQueue {
     func completeRating(_ input: Object) {
         guard input["lease"] as? String == lease, let id = input["stageId"] as? String else { return }
         takenRatings.removeValue(forKey: id)
+    }
+
+    /// One native effect submission per staged action. Compatibility callers
+    /// supply only the stage id; the card, score and timestamp remain canonical.
+    func commitRating(lease expected: String, stageID: String) async throws -> Object {
+        let key = expected + ":" + stageID
+        if var receipt = scored[key] {
+            if receipt["projectionPending"] as? Bool == true, let stage = receipt["stage"] as? Object {
+                let updated = projectScore(receipt, stage: stage, expected: expected, stageID: stageID)
+                scored[key] = updated; return updated
+            }
+            if expected == lease, !cancelled {
+                receipt["snapshot"] = activeSnapshot; receipt["state"] = presentation()
+            }
+            return receipt
+        }
+        if let pending = scoring[key] { return await pending.value }
+        guard let score, expected == lease, !cancelled, !deleting else { throw Failure(message: "评分服务尚未就绪或轮次已切换") }
+        let stage = try takeRating(lease: expected, stageID: stageID)
+        let work = Task<Object, Never> { [self] in
+            var result: Object
+            do {
+                // Persist the already staged removal before an external write.
+                // A restart must not present an uncertain answered card again.
+                guard let snapshot = activeSnapshot, try save(snapshot, request: expected) else { throw Failure(message: "评分队列未保存") }
+                result = try await score(stage)
+                guard result["ok"] as? Bool != nil else { throw Failure(message: "评分缺少执行回执") }
+            } catch { result = ["ok": false, "error": error.localizedDescription] }
+            return projectScore(result, stage: stage, expected: expected, stageID: stageID)
+        }
+        scoring[key] = work
+        let receipt = await work.value
+        scoring.removeValue(forKey: key); scored[key] = receipt
+        scoreOrder.append(key)
+        while scoreOrder.count > 128 {
+            let oldest = scoreOrder.removeFirst()
+            if scored[oldest]?["projectionPending"] as? Bool != true { scored.removeValue(forKey: oldest) }
+        }
+        return receipt
+    }
+
+    private func projectScore(_ receipt: Object, stage: Object, expected: String, stageID: String) -> Object {
+        var result = receipt
+        result["stage"] = stage
+        guard expected == lease, !cancelled else { return result }
+        result.removeValue(forKey: "projectionPending")
+        do {
+            if result["ok"] as? Bool == false {
+                let restored = try restoreRating(["lease": expected, "stageId": stageID, "revealed": true])
+                result["snapshot"] = restored["snapshot"]
+            } else {
+                if let record = result["record"] as? Object, let gid = record["id"] as? String {
+                    _ = try reconcile(id: gid, record: record, request: expected)
+                }
+                if let card = stage["card"] as? Object, card["_localReview"] == nil,
+                   (stage["ease"] as? NSNumber)?.intValue == 1, result["queued"] as? Bool != true,
+                   var snapshot = activeSnapshot {
+                    var cards = snapshot["cards"] as! [Object]
+                    if !cards.contains(where: { ReaderNativeReviewCards.stableID($0) == ReaderNativeReviewCards.stableID(card) }) { cards.append(card) }
+                    snapshot["cards"] = cards
+                    try save(snapshot, request: expected)
+                }
+                result["snapshot"] = activeSnapshot
+                completeRating(["lease": expected, "stageId": stageID])
+            }
+        } catch {
+            result["projectionPending"] = true
+            result["warning"] = "评分回执已保留，队列需重新读取：" + error.localizedDescription
+        }
+        result["state"] = presentation()
+        return result
     }
 
     func restoreRating(_ input: Object) throws -> Object {
@@ -527,7 +723,7 @@ final class ReaderNativeReviewQueue {
             throw Failure(message: "复习请求缺少上下文或轮次")
         }
         guard try Self.bytes(context).count <= 32 * 1024 else { throw Failure(message: "复习上下文过大") }
-        guard stagedRating == nil, takenRatings.isEmpty else { throw Failure(message: "评分尚未保存，未替换复习队列") }
+        guard !deleting, stagedRating == nil, takenRatings.isEmpty else { throw Failure(message: "复习操作尚未保存，未替换队列") }
         let rejectedCards = input["rejectedCards"] as? [Object] ?? []
         guard rejectedCards.count <= 200, try Self.bytes(["cards": rejectedCards]).count <= 8 * 1024 * 1024 else {
             throw Failure(message: "待恢复评分记录无效")

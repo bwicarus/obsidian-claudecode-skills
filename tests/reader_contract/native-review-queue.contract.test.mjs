@@ -131,3 +131,44 @@ test('browser fallback retains local due-before-new ordering', async () => {
   assert.equal(result.cards[0].front, 'due');
   assert.equal(result.cards[1].front, 'new');
 });
+
+test('native deletion waits for scoring and publishes a committed removal once without another write', async () => {
+  const code = source.slice(source.indexOf('  async function _prepareNativeTransition('), source.indexOf('  function _selectNativeCard('));
+  const events=[], cards=[{id:'one'},{id:'two'}];
+  const r={_nativeReviewUI:()=>true,_nativeQueueLease:'lease',_queueRequestEpoch:1,_contextCacheKey:'context',
+    _mode:true,_queueBusy:false,_nativeNavigationWork:null,_nativeTransitionFence:null,_nativeStageWork:null,
+    _stagedRating:{nativeStageID:'pending'},_ratingCommitBusy:0,_cacheWriteChain:Promise.resolve(),_nativeReconcileWork:null,
+    _queue:cards,_idx:0,_nativeQueuePresentation:{revision:1},_stableCardId:c=>c.id,
+    _current:()=>r._queue[r._idx],_commitStagedRating:async()=>false,
+    _rememberAndDeactivateSelections(){},_invalidateCardRequests(){},
+    _applyQueueSnapshot:s=>{r._idx=s.index;r._queue=s.cards;},_acceptNativeReviewState:s=>{r._nativeQueuePresentation=s;},
+    render(){},_activateCurrentSelections(){},_scheduleDecorate(){},_notifyAssistant(){},_publishPresentation(){},_toast(){},
+    CustomEvent:class {constructor(type,init){this.type=type;this.detail=init.detail;}},window:{dispatchEvent:e=>events.push(e)},
+    _saveChangedQueue:()=>assert.fail('native removal already saved the queue')};
+  vm.createContext(r);vm.runInContext(code,r);
+  const command={id:'delete',key:'delete',lease:'lease',cardId:'one'};
+  await assert.rejects(r._prepareNativeTransition(command),/评分尚未保存/);
+  assert.equal(r._nativeNavigationWork,null);
+  r._commitStagedRating=async()=>{r._stagedRating=null;return true;};
+  const fence=await r._prepareNativeTransition(command);
+  const receipt={fence,result:{changed:true,snapshot:{cards:[cards[1]],index:0,client_context_key:'context'},
+    removed:{entityId:'group',cardIndex:0,source:'review'}},state:{lease:'lease',revision:2,queueIds:['two']}};
+  assert.equal(r._observeNativeTransition(receipt),true);
+  assert.equal(r._current().id,'two');assert.equal(events.length,1);
+  assert.equal(events[0].type,'rc:learning-card-removed');
+  assert.equal(r._observeNativeTransition(receipt),false);assert.equal(events.length,1);
+});
+
+test('App deletion sends a confirmed identity to Swift, never a card body or repository command', async () => {
+  const calls=[];
+  const r={_current:()=>({id:'one'}),_cardKey:c=>c.id,_stableCardId:c=>c.id,_nativeReviewUI:()=>true,
+    _presentationState:()=>({deleteKind:'anki-note'}),_nativeQueueLease:'lease',
+    window:{__BW_NATIVE_REVIEW_CONTROL__:true,confirm:()=>false},
+    _nativeQueueCall:async(...args)=>{calls.push(args);return true;},_toast(){},
+    _cardRepository:()=>assert.fail('Swift owns deletion')};
+  vm.createContext(r);vm.runInContext(source.slice(source.indexOf('  function _deleteCurrentCard('),source.indexOf('  function _legacyReviewNoteId(')),r);
+  assert.equal(await r._deleteCurrentCard(),false);
+  assert.equal(calls.length,0);
+  assert.equal(await r._deleteCurrentCard({cardKey:'one',kind:'anki-note'}),true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['deleteCurrent',{lease:'lease',cardId:'one',kind:'anki-note',confirmed:true}]]);
+});

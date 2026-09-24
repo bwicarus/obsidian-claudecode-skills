@@ -11,6 +11,13 @@ typealias Q = ReaderNativeReviewQueue
     var stamp = 10_000_000.0
     var status = 200
     var transportError: Error?
+    var receipts: [String: String] = [:]
+    var failReceipt = false
+    var removedInputs: [Q.Object] = []
+    var removedRecord: Q.Object = [:]
+    var scoreCalls = 0, holdScore = false, failAfterScore = false
+    var heldScore: CheckedContinuation<Void, Never>?
+    var scoreResult: Q.Object = ["ok": true]
     lazy var service = Q(local: { [self] in
         if failLocal { throw Q.Failure(message: "repository unavailable") }; return local
     }, read: { [self] in cache }, write: { [self] text in
@@ -22,7 +29,17 @@ typealias Q = ReaderNativeReviewQueue
         if method == "POST" ? failPost : failGet { throw Q.Failure(message: "offline") }
         if let transportError { throw transportError }
         return .init(status: status, data: try JSONSerialization.data(withJSONObject: value))
-    }, now: { [self] in stamp })
+    }, now: { [self] in stamp }, removeLocal: { [self] input in
+        removedInputs.append(input); return removedRecord
+    }, readReceipt: { [self] in receipts[$0] }, writeReceipt: { [self] key, value in
+        if failReceipt { throw Q.Failure(message: "receipt disk full") }; receipts[key] = value
+    }, score: { [self] stage in
+        scoreCalls += 1
+        precondition((stage["reviewedAt"] as? NSNumber)?.doubleValue == floor(stamp))
+        if holdScore { holdScore = false; await withCheckedContinuation { heldScore = $0 } }
+        if failAfterScore { failSave = true }
+        return scoreResult
+    })
     func input(scope: String = "current", page: Int = 4, force: Bool = true) -> Q.Object {
         ["request": UUID().uuidString, "contextKey": "ctx-book-\(page)", "context": ["file": "localbook:book", "page": page], "scope": scope, "force": force]
     }
@@ -341,6 +358,106 @@ typealias Q = ReaderNativeReviewQueue
         canonical["deleted"] = true
         _ = try editing.service.reconcile(id: "card_abcd", record: canonical, request: editLease)
         precondition(editing.service.presentation()["count"] as? Int == 0)
-        print("Native review acquisition, reversible staging and failure recovery passed")
+        let deletion = Fixture()
+        deletion.reply["cards"] = [["id": 70, "note_id": 7, "question": "one"],
+            ["id": 71, "note_id": 7, "question": "sibling"], ["id": 80, "note_id": 8, "question": "other"]]
+        let deleteInput = deletion.input(scope: "all"), deleteLease = deleteInput["request"] as! String
+        _ = try await deletion.service.load(deleteInput)
+        do { _ = try await deletion.service.deleteCurrent(lease: deleteLease, cardID: "anki_card_70", kind: "reader-card", confirmed: true); preconditionFailure("wrong delete range") } catch {}
+        do { _ = try await deletion.service.deleteCurrent(lease: deleteLease, cardID: "anki_card_70", kind: "anki-note", confirmed: false); preconditionFailure("unconfirmed delete") } catch {}
+        deletion.failReceipt = true
+        do { _ = try await deletion.service.deleteCurrent(lease: deleteLease, cardID: "anki_card_70", kind: "anki-note", confirmed: true); preconditionFailure("sent without reservation") } catch {}
+        precondition(deletion.calls.count == 1)
+        deletion.failReceipt = false; deletion.reply = ["ok": true]
+        let removed = try await deletion.service.deleteCurrent(lease: deleteLease, cardID: "anki_card_70", kind: "anki-note", confirmed: true)
+        let remaining = (removed["snapshot"] as! Q.Object)["cards"] as! [Q.Object]
+        precondition(remaining.count == 1 && remaining[0]["id"] as? Int == 80)
+        precondition(deletion.calls.count == 2)
+        let uncertain = Fixture(); uncertain.reply["cards"] = [["id": 90, "note_id": 9, "question": "unknown"]]
+        let uncertainInput = uncertain.input(scope: "all"), uncertainLease = uncertainInput["request"] as! String
+        _ = try await uncertain.service.load(uncertainInput)
+        uncertain.reply = [:]
+        for _ in 0..<2 {
+            do { _ = try await uncertain.service.deleteCurrent(lease: uncertainLease, cardID: "anki_card_90", kind: "anki-note", confirmed: true); preconditionFailure("unknown delete succeeded") } catch {}
+        }
+        precondition(uncertain.calls.count == 2 && uncertain.service.presentation()["count"] as? Int == 1)
+        let restarted = Fixture(); restarted.receipts = uncertain.receipts
+        restarted.reply["cards"] = [["id": 90, "note_id": 9, "question": "unknown"]]
+        let restartInput = restarted.input(scope: "all")
+        _ = try await restarted.service.load(restartInput)
+        do { _ = try await restarted.service.deleteCurrent(lease: restartInput["request"] as! String, cardID: "anki_card_90", kind: "anki-note", confirmed: true); preconditionFailure("restart resubmitted unknown delete") } catch {}
+        precondition(restarted.calls.count == 1)
+        let localDelete = Fixture()
+        let group: Q.Object = ["id": "card_group", "entityRev": 1, "stateRev": 2,
+            "cards": [["type": "basic", "front": "one", "back": "a"], ["type": "basic", "front": "two", "back": "b"]],
+            "states": ["0": ["phase": "confirmed"], "1": ["phase": "confirmed"]]]
+        localDelete.local = ["hasLocalCards": true, "dueTotal": 0, "entries": (0..<2).map { index -> Q.Object in
+            ["record": group, "card": (group["cards"] as! [Q.Object])[index],
+             "state": ["phase": "confirmed"], "cardIndex": index, "due": false]
+        }]
+        localDelete.removedRecord = group
+        localDelete.removedRecord["stateRev"] = 3
+        localDelete.removedRecord["states"] = ["0": ["phase": "confirmed", "removed": true], "1": ["phase": "confirmed"]]
+        let localDeleteInput = localDelete.input()
+        _ = try await localDelete.service.load(localDeleteInput)
+        let localRemoved = try await localDelete.service.deleteCurrent(lease: localDeleteInput["request"] as! String,
+            cardID: "card_group_i0", kind: "reader-card", confirmed: true)
+        let sibling = ((localRemoved["snapshot"] as! Q.Object)["cards"] as! [Q.Object]).first!
+        precondition(ReaderNativeReviewCards.stableID(sibling) == "card_group_i1")
+        precondition((sibling["_localReview"] as! Q.Object)["stateRev"] as? Int == 3, "sibling kept an obsolete group revision")
+        precondition(localDelete.calls.isEmpty && localDelete.removedInputs.count == 1)
+        let lateDelete = Fixture(); lateDelete.reply["cards"] = [["id": 100, "note_id": 10, "question": "late"]]
+        let lateInput = lateDelete.input(scope: "all"), lateLease = lateInput["request"] as! String
+        _ = try await lateDelete.service.load(lateInput)
+        lateDelete.hold = true; lateDelete.reply = ["ok": true]
+        let deleting = Task { try await lateDelete.service.deleteCurrent(lease: lateLease, cardID: "anki_card_100", kind: "anki-note", confirmed: true) }
+        while lateDelete.held == nil { await Task.yield() }
+        do { _ = try await lateDelete.service.load(lateDelete.input()); preconditionFailure("load discarded in-flight deletion") } catch {}
+        lateDelete.service.cancel(lateLease)
+        lateDelete.held?.resume(); lateDelete.held = nil
+        let lateResult = try await deleting.value
+        precondition(lateResult["deleted"] as? Bool == true && lateResult["snapshot"] == nil)
+        precondition(lateDelete.receipts.values.contains { $0.contains("succeeded") }, "late success receipt was lost")
+        func scoreStage(_ value: Fixture, ease: Int = 3) async throws -> (String, String) {
+            let input = value.input(scope: "all"), lease = input["request"] as! String, id = UUID().uuidString
+            _ = try await value.service.load(input)
+            _ = try value.service.revealCurrent(lease: lease, cardID: "anki_card_7")
+            _ = try value.service.stageCurrentRating(lease: lease, cardID: "anki_card_7", stageID: id, ease: ease)
+            return (lease, id)
+        }
+        let effects = Fixture(); effects.holdScore = true
+        let (effectLease, effectID) = try await scoreStage(effects, ease: 1)
+        let firstScore = Task { try await effects.service.commitRating(lease: effectLease, stageID: effectID) }
+        while effects.heldScore == nil { await Task.yield() }
+        let joinedScore = Task { try await effects.service.commitRating(lease: effectLease, stageID: effectID) }
+        await Task.yield()
+        do { _ = try await effects.service.load(effects.input()); preconditionFailure("load dropped in-flight score") } catch {}
+        effects.heldScore?.resume(); effects.heldScore = nil
+        let effectResult = try await firstScore.value, joinedResult = try await joinedScore.value
+        precondition(effectResult["ok"] as? Bool == true && joinedResult["ok"] as? Bool == true && effects.scoreCalls == 1)
+        precondition(effects.service.presentation()["count"] as? Int == 1, "again must requeue once after acceptance")
+        _ = try await effects.service.commitRating(lease: effectLease, stageID: effectID)
+        precondition(effects.scoreCalls == 1)
+        let rejection = Fixture(); rejection.scoreResult = ["ok": false, "error": "stale scheduler"]
+        let (rejectLease, rejectID) = try await scoreStage(rejection)
+        let rejected = try await rejection.service.commitRating(lease: rejectLease, stageID: rejectID)
+        precondition(rejected["ok"] as? Bool == false && rejection.service.presentation()["count"] as? Int == 1)
+        let afterScore = Fixture(); afterScore.failAfterScore = true
+        let (afterLease, afterID) = try await scoreStage(afterScore, ease: 1)
+        let incomplete = try await afterScore.service.commitRating(lease: afterLease, stageID: afterID)
+        precondition(incomplete["ok"] as? Bool == true && incomplete["projectionPending"] as? Bool == true)
+        afterScore.failSave = false
+        let repaired = try await afterScore.service.commitRating(lease: afterLease, stageID: afterID)
+        precondition(repaired["projectionPending"] == nil && afterScore.scoreCalls == 1)
+        precondition(afterScore.service.presentation()["count"] as? Int == 1)
+        let beforeScore = Fixture()
+        let (beforeLease, beforeID) = try await scoreStage(beforeScore)
+        beforeScore.failSave = true
+        let notSent = try await beforeScore.service.commitRating(lease: beforeLease, stageID: beforeID)
+        precondition(notSent["ok"] as? Bool == false && beforeScore.scoreCalls == 0)
+        beforeScore.failSave = false
+        _ = try await beforeScore.service.commitRating(lease: beforeLease, stageID: beforeID)
+        precondition(beforeScore.service.presentation()["count"] as? Int == 1 && beforeScore.scoreCalls == 0)
+        print("Native review acquisition, reversible staging, deletion and failure recovery passed")
     }
 }

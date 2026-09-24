@@ -2976,9 +2976,159 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // Queue loads have their own lease check. A score already sent
             // keeps its actual receipt even after the visible book changes.
             return .init(status: result.status, data: result.data)
+        }, removeLocal: { [weak self] input in
+            try check()
+            let receipt = try ReaderNativeCardRepository(store: global, deviceID: deviceID).perform([
+                "operation": "removeCard", "arguments": [input["gid"]!, input["cardIndex"]!,
+                    ["ifStateRev": input["stateRev"]!]], "mutationId": input["mutationId"]!])
+            guard let record = receipt["result"] as? [String: Any] else {
+                throw ReaderNativeReviewQueue.Failure(message: "删除缺少保存回执")
+            }
+            self?.nativeConversation.acceptCardRecord(record)
+            self?.markCloudSyncDirty()
+            self?.scheduleNativePDFProjectionRefresh()
+            return record
+        }, readReceipt: { try device.meta($0) }, writeReceipt: { try device.putMeta($0, json: $1) }, score: { [weak self] stage in
+            try check()
+            guard let self else { throw CancellationError() }
+            return try await self.commitNativeReviewScore(stage)
         })
         nativeReviewQueue = service; nativeReviewQueueContext = generation; nativeReviewQueueGatewayContext = gatewayContext
         return service
+    }
+
+    private func recoverNativeReviewDelivery(_ repository: ReaderNativeCardRepository, _ outbox: ReaderNativeCommandOutbox) throws {
+        for item in try repository.pendingReviewDeliveries(namespace: outbox.namespace) {
+            let id = item.command["mutationId"] as? String ?? ""
+            let status = try repository.store.meta("native-review-delivery-status:" + id)
+            // A request that may already have reached Anki is not a new offline
+            // command. Keep it for reconciliation, without generating a retry.
+            if status == "pending" { continue }
+            if status != "succeeded" { _ = try outbox.enqueue(item.command) }
+            try repository.acknowledgeReviewDelivery(id: item.id, mutationID: id)
+        }
+    }
+
+    private func commitNativeReviewScore(_ stage: [String: Any]) async throws -> [String: Any] {
+        typealias O = [String: Any]
+        guard let card = stage["card"] as? O, let stageID = stage["nativeStageID"] as? String,
+              UUID(uuidString: stageID) != nil, let book = currentLocalBook,
+              let deviceID = nativeReadingStoreDeviceID, let gateway = nativeServerGateway else { throw CancellationError() }
+        let ease = try ReaderNativeCardRules.integer(stage["ease"], "ease")
+        let stamp = try ReaderNativeCardRules.integer(stage["reviewedAt"], "reviewedAt")
+        let aid = "native-review:" + stageID, file = "localbook:" + book.id
+        let scope = nativeConversation.scope, generation = bookUserStateContextGeneration
+        let surface: ReaderNativeInterfaceSurface = book.format == .epub ? .epub : .pdf
+        let global = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+        let repository = ReaderNativeCardRepository(store: global, deviceID: deviceID)
+        let outbox = try nativeCommandOutbox.productionQueue()
+        func command(_ type: String, _ key: String, _ path: String, _ body: O) throws -> O {
+            try outbox.prepareCommand(["queueKey": type + ":" + key, "url": path, "method": "POST", "body": body, "ts": stamp])
+        }
+        func submit(_ payload: O) async -> O {
+            do {
+                let response = try await gateway.fetchData(path: "/pdf/api/review-answer", method: "POST",
+                    body: ReaderNativeCardRules.bytes(payload), surface: surface)
+                let result = response.data.count <= 8 * 1024 * 1024
+                    ? (try? JSONSerialization.jsonObject(with: response.data)) as? O : nil
+                if (200..<300).contains(response.status), result?["ok"] as? Bool == true { return ["ok": true, "result": result!] }
+                return ["ok": false, "retryable": [408,429,502,503,504].contains(response.status),
+                    "rejected": (400..<500).contains(response.status) && ![408,409,429].contains(response.status),
+                    "error": result?["error"] as? String ?? "评分未获确认（HTTP \(response.status)）"]
+            } catch {
+                let error = error as NSError
+                return ["ok": false, "retryable": error.domain == NSURLErrorDomain && error.code != NSURLErrorCancelled,
+                    "error": error.localizedDescription]
+            }
+        }
+        if let local = card["_localReview"] as? O, let gid = local["gid"] as? String {
+            let index = try ReaderNativeCardRules.integer(local["cardIndex"], "cardIndex")
+            let externalID = (card["_legacyExternalCardId"] as? NSNumber)?.int64Value ?? Int64(ReaderNativeCardRules.string(card["_legacyExternalCardId"])) ?? 0
+            let event: O = ["id": "revlog:\(gid):\(index):\(aid)", "source": "reader", "file": file,
+                "aid": aid, "gid": gid, "index": index, "ease": ease, "reviewedAt": stamp,
+                "ankiCardId": externalID > 0 ? String(externalID) : ""]
+            var deliveries = [try command("revlog", event["id"] as! String, "/pdf/api/review-event", event)]
+            let payload: O = ["aid": aid, "card_id": externalID, "ease": ease]
+            let projection = externalID > 0 ? try command("rev", aid, "/pdf/api/review-answer", payload) : nil
+            if let projection { deliveries.append(projection) }
+            let input: O = ["gid": gid, "cardIndex": index, "entityRev": local["entityRev"] ?? NSNull(),
+                "stateRev": local["stateRev"] ?? NSNull(), "aid": aid, "ease": ease, "reviewedAt": stamp,
+                "file": file, "ankiCardId": externalID > 0 ? String(externalID) : "", "delivery": deliveries]
+            let receipt = try repository.perform(["operation": "commitReview", "arguments": [input], "mutationId": "review:\(gid):\(index):\(aid)"])
+            guard let record = receipt["result"] as? O,
+                  let review = ((record["states"] as? O)?[String(index)] as? O)?["review"] as? O else {
+                throw ReaderNativeReviewQueue.Failure(message: "评分缺少已保存的状态")
+            }
+            nativeConversation.acceptCardRecord(record); markCloudSyncDirty(); scheduleNativePDFProjectionRefresh()
+            var outcome: O = ["ok": true, "record": record, "event": event, "local": true]
+            do {
+                if let projection, let id = projection["mutationId"] as? String,
+                   try global.meta("native-review-delivery-status:" + id) == nil {
+                    try global.putMeta("native-review-delivery-status:" + id, json: "pending")
+                    Task { @MainActor [weak self] in
+                        let response = await submit(payload)
+                        do {
+                            if response["ok"] as? Bool == true {
+                                try global.putMeta("native-review-delivery-status:" + id, json: "succeeded")
+                                if let next = (response["result"] as? O)?["next"] as? O {
+                                    let refined = try repository.perform(["operation": "adoptReviewSchedule", "arguments": [[
+                                        "gid": gid, "cardIndex": index, "aid": aid, "reviewedAt": stamp, "next": next,
+                                        "expectedReview": review, "entityRev": record["entityRev"]!]],
+                                        "mutationId": "review-schedule:\(gid):\(index):\(aid)"])
+                                    if let changed = (refined["result"] as? O)?["record"] as? O,
+                                       let self, self.bookUserStateContextGeneration == generation {
+                                        self.nativeConversation.acceptCardRecord(changed); self.markCloudSyncDirty()
+                                    }
+                                }
+                            } else if response["retryable"] as? Bool == true {
+                                try global.putMeta("native-review-delivery-status:" + id, json: "queued")
+                            }
+                            try self?.recoverNativeReviewDelivery(repository, outbox)
+                            if response["ok"] as? Bool != true, let self, self.nativeConversation.scope == scope,
+                               self.bookUserStateContextGeneration == generation {
+                                let text = response["retryable"] as? Bool == true ? "本地评分已保存，Anki 更新等待同步" : "本地评分已保存，Anki 更新结果待核实，未重复提交"
+                                self.webView.callAsyncJavaScript("window.RC?.review?.observeNativeNotice?.(text);",
+                                    arguments: ["text": text], in: nil, in: .page, completionHandler: nil)
+                            }
+                        } catch { self?.postClientLog("原生复习投递待恢复：" + error.localizedDescription) }
+                    }
+                }
+                try recoverNativeReviewDelivery(repository, outbox)
+            } catch { outcome["warning"] = "本地评分已保存，投递记录已保留待恢复：" + error.localizedDescription }
+            return outcome
+        }
+        let cardID = try ReaderNativeCardRules.integer(card["id"], "Anki card id")
+        guard cardID > 0 else { throw ReaderNativeReviewQueue.Failure(message: "Anki 卡片编号无效") }
+        let key = "native-review-external:\(cardID)"
+        if let text = try global.meta(key), let prior = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? O {
+            if prior["aid"] as? String == aid, let result = prior["result"] as? O { return result }
+            if prior["status"] as? String == "pending" {
+                return ["ok": false, "error": "上一评分结果待核实，未重新计分"]
+            }
+        }
+        try global.putMeta(key, json: String(decoding: ReaderNativeCardRules.bytes(["aid": aid, "status": "pending"]), as: UTF8.self))
+        let payload: O = ["aid": aid, "card_id": cardID, "ease": ease]
+        let response = await submit(payload)
+        let event: O = ["id": "revlog:pi:\(cardID):\(aid)", "source": "reader", "file": file,
+            "aid": aid, "ease": ease, "reviewedAt": stamp, "ankiCardId": String(cardID), "queue": "pi"]
+        var result: O = ["ok": response["ok"] as? Bool == true, "error": response["error"] ?? ""]
+        if response["ok"] as? Bool == true { result["next"] = (response["result"] as? O)?["next"] ?? [:] }
+        else if response["retryable"] as? Bool == true {
+            do { _ = try outbox.enqueue(command("rev", aid, "/pdf/api/review-answer", payload)); result["ok"] = true; result["queued"] = true }
+            catch { result["error"] = "评分未入队：" + error.localizedDescription }
+        }
+        if result["ok"] as? Bool == true {
+            do { _ = try outbox.enqueue(command("revlog", event["id"] as! String, "/pdf/api/review-event", event)) }
+            catch { result["warning"] = "评分已处理，学习事件尚未送入队列：" + error.localizedDescription }
+            result["event"] = event
+        }
+        // Unknown results remain reserved across relaunch; the same stage can
+        // read its receipt, while a fresh score cannot blindly replace it.
+        do {
+            try global.putMeta(key, json: String(decoding: ReaderNativeCardRules.bytes(["aid": aid,
+                "status": result["ok"] as? Bool == true || response["retryable"] as? Bool == true || response["rejected"] as? Bool == true ? "settled" : "pending", "result": result]), as: UTF8.self))
+        } catch { result["warning"] = "评分结果已收到，本机回执保存待确认：" + error.localizedDescription }
+        return result
     }
 
     private func prepareNativeFavoritesService() throws -> ReaderNativeFavoritesService {
@@ -3387,7 +3537,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func performNativeReviewTransition(_ command: [String:Any]) async -> [String:Any]? {
         guard command["action"] as? String == "reviewAction", let value = command["value"] as? [String:Any],
-              let key = value["key"] as? String, ["select","rate","undo","reveal"].contains(key) else { return nil }
+              let key = value["key"] as? String, ["select","rate","undo","reveal","delete"].contains(key) else { return nil }
         do {
             let scope = nativeConversation.scope, generation = bookUserStateContextGeneration
             let gatewayContext = nativeServerGateway?.contextRevision
@@ -3403,6 +3553,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 try queue.validateVisibleCard(lease:lease,cardID:cardID)
             }
             try current()
+            if key == "delete" {
+                let card = try queue.presentedCard(lease: lease, cardID: cardID)
+                guard value["confirmed"] as? Bool == true,
+                      value["kind"] as? String == ReaderNativeReviewCards.deleteKind(card) else {
+                    throw ReaderNativeReviewQueue.Failure(message: "请确认当前卡片的删除范围")
+                }
+            }
             let navigationID = UUID().uuidString
             var stageObserved = false
             defer {
@@ -3430,9 +3587,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             case "rate": result = try queue.stageCurrentRating(lease:lease,cardID:cardID,stageID:navigationID,ease:value["ease"] ?? NSNull())
             case "undo": result = try queue.undoCurrentRating(lease:lease,cardID:cardID)
             case "reveal": result = try queue.revealCurrent(lease:lease,cardID:cardID)
+            case "delete": result = try await queue.deleteCurrent(lease: lease, cardID: cardID,
+                kind: value["kind"] as? String ?? "", confirmed: value["confirmed"] as? Bool == true)
             default:
                 guard let targetID = value["targetId"] as? String else { throw ReaderNativeReviewQueue.Failure(message:"未指定目标复习卡") }
                 result = try queue.navigate(lease:lease,currentID:cardID,targetID:targetID)
+            }
+            guard nativeReviewQueue === queue, bookUserStateContextGeneration == generation,
+                  nativeServerGateway?.contextRevision == gatewayContext, nativeConversation.scope == scope else {
+                throw ReaderNativeReviewQueue.Failure(message: "操作已处理，界面已切换；请读取当前状态，未重复发送")
             }
             let state = queue.presentation()
             if ["rate","undo"].contains(key) || result["changed"] as? Bool == true { nativeReviewImprovements?.invalidate() }
@@ -8057,7 +8220,18 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 return
             }
             if body["action"] as? String == "commandOutbox" {
-                do { replyHandler(try nativeCommandOutbox.handle(body), nil) }
+                do {
+                    let result = try nativeCommandOutbox.handle(body)
+                    if ["status", "import"].contains(body["operation"] as? String ?? ""), let deviceID = nativeReadingStoreDeviceID {
+                        do {
+                            let global = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+                            if try global.meta("legacyImport") == "done" {
+                                try recoverNativeReviewDelivery(ReaderNativeCardRepository(store: global, deviceID: deviceID), nativeCommandOutbox.productionQueue())
+                            }
+                        } catch { postClientLog("本机评分已保留，投递稍后恢复：" + error.localizedDescription) }
+                    }
+                    replyHandler(result, nil)
+                }
                 catch { replyHandler(nil, error.localizedDescription) }
                 return
             }
@@ -8202,6 +8376,16 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                             return
                         }
                         let service = try self.prepareNativeReviewQueue()
+                        if operation == "deleteCurrent" {
+                            let result = await self.performNativeReviewTransition(["action": "reviewAction", "scope": self.nativeConversation.scope,
+                                "value": ["key": "delete", "contextKey": request["lease"] ?? "", "cardId": request["cardId"] ?? "",
+                                    "kind": request["kind"] ?? "", "confirmed": request["confirmed"] as? Bool == true]])
+                            guard result?["ok"] as? Bool == true else {
+                                throw ReaderNativeReviewQueue.Failure(message: result?["error"] as? String ?? "删除尚未完成")
+                            }
+                            replyHandler(true, nil)
+                            return
+                        }
                         let value: Any
                         switch operation {
                         case "load": value = try await service.load(request)
@@ -8209,6 +8393,12 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                         case "stageRating": value = try service.stageRating(request)
                         case "selectCard": value = try service.selectCard(request)
                         case "answer": value = try await service.answer(request)
+                        case "commitRating":
+                            let result = try await service.commitRating(lease: request["lease"] as? String ?? "", stageID: request["stageId"] as? String ?? "")
+                            if self.nativeReviewQueue === service, let state = result["state"] as? [String: Any] {
+                                self.nativeConversation.acceptReviewPresentation(state)
+                            }
+                            value = result
                         case "undoRating": value = try service.undoRating(request)
                         case "interact": value = try service.interact(request)
                         case "reconcile":

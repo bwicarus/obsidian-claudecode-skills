@@ -219,3 +219,27 @@ missingEvent["expectedReview"] = newestReview; missingEvent["reviewedAt"] = 7000
 do { _ = try ui.perform(adopt(missingEvent, "missing-event")); preconditionFailure("unproven interval written") }
 catch let error as R.Failure { precondition(error.code == "BW_CARD_REPOSITORY_CONFLICT") }
 print("Native Anki schedule refinement: seconds/days, counters, replay and stale rating fences passed")
+var deliveryRating = newerRating
+deliveryRating["aid"] = "delivery-rating"; deliveryRating["reviewedAt"] = 8000; deliveryRating["stateRev"] = newerRecord["stateRev"]!
+let deliveryNamespace = "acct-v1-" + String(repeating: "a", count: 64)
+let deliveryMutation = "mut-v2-" + String(repeating: "b", count: 32)
+deliveryRating["delivery"] = [["contract": "command-outbox/2", "ownerNamespace": deliveryNamespace, "mutationId": deliveryMutation,
+    "recordType": "mutation", "queueKey": "revlog:delivery-rating", "method": "POST", "url": "/pdf/api/review-event",
+    "body": ["aid": "delivery-rating"], "ts": 8000]]
+try localStore.execute("CREATE TRIGGER fail_delivery BEFORE INSERT ON records WHEN NEW.collection = 'native-review-delivery' BEGIN SELECT RAISE(ABORT, 'forced delivery failure'); END")
+do { _ = try ui.perform(rating(deliveryRating, "delivery-rating")); preconditionFailure("score committed without its delivery record") }
+catch is ReaderNativeDataStore.StoreError {}
+let noDeliveryScore = try ui.load(gid)!
+precondition(R.same(noDeliveryScore, newerRecord))
+try localStore.execute("DROP TRIGGER fail_delivery")
+_ = try ui.perform(rating(deliveryRating, "delivery-rating"))
+let pendingDelivery = try ui.pendingReviewDeliveries(namespace: deliveryNamespace)
+precondition(pendingDelivery.count == 1)
+let wrongAccountDelivery = try ui.pendingReviewDeliveries(namespace: "another-account")
+precondition(wrongAccountDelivery.isEmpty)
+do { try ui.acknowledgeReviewDelivery(id: pendingDelivery[0].id, mutationID: "wrong"); preconditionFailure("wrong delivery acknowledged") }
+catch let error as R.Failure { precondition(error.code == "BW_CARD_REPOSITORY_CONFLICT") }
+try ui.acknowledgeReviewDelivery(id: pendingDelivery[0].id, mutationID: deliveryMutation)
+_ = try ui.perform(rating(deliveryRating, "delivery-rating"))
+let settledDelivery = try ui.pendingReviewDeliveries(namespace: deliveryNamespace)
+precondition(settledDelivery.isEmpty, "score replay recreated an acknowledged delivery")
