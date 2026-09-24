@@ -70,7 +70,7 @@
       store: storeName,
       cardRepositoryCall: storeName === 'bw-reader-native-v1-global' ? function (operation, args, deviceId) {
         var optionIndex = operation === 'patchState' ? 3 : operation === 'recordAnkiReceipt' ? 4 :
-          ['registerDraft', 'saveConfirmedCard', 'tombstone', 'importLegacyBatch'].indexOf(operation) >= 0 ? 1 : 2;
+          ['registerDraft', 'saveConfirmedCard', 'tombstone', 'importLegacyBatch', 'commitReview'].indexOf(operation) >= 0 ? 1 : 2;
         var options = args[optionIndex] || {};
         var mutationId = options.mutationId != null ? String(options.mutationId).trim() :
           ('native-card:' + Date.now().toString(36) + ':' + root.crypto.randomUUID());

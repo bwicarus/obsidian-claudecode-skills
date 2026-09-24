@@ -2318,35 +2318,40 @@ if (window.__bwPwaProviderOnly) return;
     }
     var aid = _answerAid();
     var reviewedAt = Date.now();
-    // ★ 先把这次复习**作为事件**记下来（2026-08-18 用户要求"统一学习进度"的第一步）。
-    //   在此之前，本地评分在写入的瞬间就把 (卡, 时刻, 评分) 永久销毁了：
-    //   本地卡库存的是状态不是事件（REVIEW_FIELDS 里没有历史位，ease 只留最后一次），
-    //   而 Anki 那边只有解析得出 cardId 的卡才投影得过去 —— 大部分评分既不进 Anki
-    //   也不留痕迹。
-    //   这里只记录，**不改任何调度行为**：下面 patchState 那套 LWW 原样不动。
-    //   走 outbox 是因为它天然 at-least-once + 服务端按 mutationId 幂等，离线也不丢；
-    //   而且 reviewedAt 记的是**真实复习时刻** —— answerCards 传不了时间戳，
-    //   离线补投会被 Anki 记成"补投那一刻"，日志里才有真相。
-    _reportReviewEvent(local.gid + ':' + local.cardIndex + ':' + aid, {
-      aid: aid,
-      gid: local.gid,
-      index: local.cardIndex,
-      ease: ease,
-      reviewedAt: reviewedAt,
-      ankiCardId: card && card._legacyExternalCardId
-        ? String(card._legacyExternalCardId) : ''
-    });
-    var nextReview = _scheduledLocalReview(local.review, ease, reviewedAt);
-    return repository.patchState(local.gid, local.cardIndex, {
-      review: nextReview
-    }, {
-      mutationId: 'review:' + local.gid + ':' + local.cardIndex + ':' + aid
-    }).then(function (patched) {
+    // Native scheduling, state and durable history commit in one transaction.
+    // Publish the account-scoped event only after that commit succeeds; a
+    // rejected rating must not appear in learning progress or external Anki.
+    var reviewOptions = { mutationId: 'review:' + local.gid + ':' + local.cardIndex + ':' + aid };
+    function browserCommit() {
+      return repository.patchState(local.gid, local.cardIndex, {
+        review: _scheduledLocalReview(local.review, ease, reviewedAt)
+      }, reviewOptions);
+    }
+    var commit = typeof repository.commitReview === 'function'
+      ? Promise.resolve(repository.commitReview({ gid: local.gid, cardIndex: local.cardIndex,
+          entityRev: local.entityRev, stateRev: local.stateRev, aid: aid, ease: ease, reviewedAt: reviewedAt,
+          file: String(window.UP_FILE || RC.file || ''), ankiCardId: String(card._legacyExternalCardId || '') }, reviewOptions))
+          .then(function (nativeRecord) {
+            // Only browser repositories return null. A rejected native write
+            // must restore the card, never run through the old write path.
+            return nativeRecord || browserCommit();
+          })
+      : browserCommit();
+    return Promise.resolve(commit).then(function (patched) {
       var patchedState = patched && patched.states &&
         patched.states[String(local.cardIndex)];
       if (!patchedState || !patchedState.review) {
         throw new Error('本地卡库未返回已保存的复习状态');
       }
+      _reportReviewEvent(local.gid + ':' + local.cardIndex + ':' + aid, {
+        aid: aid,
+        gid: local.gid,
+        index: local.cardIndex,
+        ease: ease,
+        reviewedAt: reviewedAt,
+        ankiCardId: card && card._legacyExternalCardId
+          ? String(card._legacyExternalCardId) : ''
+      });
       if (answerContextKey === _contextCacheKey) {
         var snapshot = _currentQueueSnapshot();
         _saveLocal(snapshot, function () {

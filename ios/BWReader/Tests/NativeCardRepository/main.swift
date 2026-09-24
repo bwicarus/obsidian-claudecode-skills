@@ -131,3 +131,52 @@ let queueCursorAfter = try queueStore.cursor()
 precondition(queueCursorAfter == queueCursor, "reading review queue wrote mutations")
 do { _ = try queueRepo.reviewQueue(limit: 201); preconditionFailure("unbounded queue accepted") } catch is R.Failure {}
 print("Native review queue: stable ordering, exact due boundary, states, limits and read-only transaction passed")
+
+for item in fixture["schedules"] as! [[String: Any]] {
+    let actual = try ReaderNativeCardRepository.scheduledReview(item["previous"] as! [String: Any],
+        ease: item["ease"] as! Int, reviewedAt: (item["reviewedAt"] as! NSNumber).int64Value)
+    precondition(R.same(actual, item["result"]!), "native scheduling differs from browser")
+}
+let ratingRecord = try ui.load(gid)!
+let ratingInput: [String: Any] = ["gid": gid, "cardIndex": 0, "entityRev": ratingRecord["entityRev"]!,
+    "stateRev": ratingRecord["stateRev"]!, "aid": "rating-a", "ease": 3, "reviewedAt": 6000,
+    "file": "localbook:test", "ankiCardId": ""]
+func rating(_ input: [String: Any], _ mutation: String) -> [String: Any] {
+    ["operation": "commitReview", "arguments": [input], "mutationId": mutation]
+}
+let beforeRatingCursor = try localStore.cursor()
+try localStore.execute("CREATE TRIGGER fail_rating BEFORE INSERT ON records WHEN NEW.collection = 'native-review-history' BEGIN SELECT RAISE(ABORT, 'forced history failure'); END")
+do { _ = try ui.perform(rating(ratingInput, "review-a")); preconditionFailure("partial rating committed") }
+catch is ReaderNativeDataStore.StoreError {}
+let ratingRollback = try ui.load(gid)!, rollbackRatingCursor = try localStore.cursor()
+precondition(R.same(ratingRollback, ratingRecord) && rollbackRatingCursor == beforeRatingCursor)
+let failedRatingReceipt = try localStore.mutationResult(mutationId: "native-card-command:review-a")
+precondition(failedRatingReceipt == nil)
+try localStore.execute("DROP TRIGGER fail_rating")
+let rated = try ui.perform(rating(ratingInput, "review-a"))["result"] as! [String: Any]
+let ratedState = (rated["states"] as! [String: Any])["0"] as! [String: Any]
+let schedule = ratedState["review"] as! [String: Any]
+precondition((schedule["reps"] as! NSNumber).intValue == 1 && (schedule["dueAt"] as! NSNumber).int64Value == 86406000)
+let ratingCursor = try localStore.cursor()
+_ = try ui.perform(rating(ratingInput, "review-a"))
+_ = try ui.perform(rating(ratingInput, "another-transport"))
+let duplicateCursor = try localStore.cursor()
+precondition(duplicateCursor == ratingCursor, "rating replay incremented schedule or journal")
+let histories = try localStore.records(collection: "native-review-history", idPrefix: "")
+precondition(histories.count == 1)
+let journal = try localStore.journal(after: beforeRatingCursor, limit: 100)
+precondition(!journal.contains { $0.json.contains("native-review-history") }, "local history leaked into sync journal")
+var conflictingRating = ratingInput; conflictingRating["ease"] = 4
+var staleRating = ratingInput; staleRating["aid"] = "stale-rating"
+for (input, code) in [(conflictingRating, "MUTATION_REUSED"), (staleRating, "CONFLICT")] {
+    do { _ = try ui.perform(rating(input, "reject-" + code)); preconditionFailure("invalid rating committed") }
+    catch let error as R.Failure { precondition(error.code == "BW_CARD_REPOSITORY_" + code) }
+}
+var removedRating = ratingInput; removedRating["cardIndex"] = 1; removedRating["aid"] = "removed-rating"
+do { _ = try ui.perform(rating(removedRating, "reject-removed")); preconditionFailure("removed card rated") }
+catch let error as R.Failure { precondition(error.code == "BW_CARD_REPOSITORY_TRANSITION") }
+var staleEntity = ratingInput
+staleEntity["aid"] = "stale-entity"; staleEntity["entityRev"] = 999; staleEntity["stateRev"] = rated["stateRev"]!
+do { _ = try ui.perform(rating(staleEntity, "reject-entity")); preconditionFailure("stale content rated") }
+catch let error as R.Failure { precondition(error.code == "BW_CARD_REPOSITORY_CONFLICT") }
+print("Native ratings: scheduling parity, atomic history, rollback, retry and revision fences passed")

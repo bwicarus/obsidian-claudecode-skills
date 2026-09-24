@@ -157,6 +157,9 @@ struct ReaderNativeCardRepository {
         if operation == "interact" {
             return try interact(R.object(arg(0), "card interaction"), mutation: mutation, at: at)
         }
+        if operation == "commitReview" {
+            return try commitReview(R.object(arg(0), "review command"), mutation: mutation, at: at)
+        }
         if operation == "importLegacyBatch" {
             return try importLegacy(arg(0), options: arg(1) as? [String: Any] ?? [:], mutation: mutation, at: at)
         }
@@ -288,6 +291,70 @@ struct ReaderNativeCardRepository {
         }
         return try load(id)!
     }
+    /// Keep the existing local scheduling rule. Only the execution location
+    /// changes: current revisions, schedule and the review event commit together.
+    static func scheduledReview(_ previous: [String: Any], ease: Int, reviewedAt: Int64) throws -> [String: Any] {
+        guard (1...4).contains(ease), reviewedAt >= 0 else { throw R.fail("INPUT", "评分或复习时刻无效") }
+        let prior = try R.number(previous["intervalDays"] ?? 0, "intervalDays")
+        var interval = ease == 1 ? 0 : ease == 2 ? max(1, prior > 0 ? prior * 1.2 : 1)
+            : ease == 3 ? max(1, prior > 0 ? prior * 2.5 : 1) : max(4, prior > 0 ? prior * 3.5 : 4)
+        interval = (interval * 100).rounded(.toNearestOrAwayFromZero) / 100
+        let due = Double(reviewedAt) + (ease == 1 ? 600_000 : (interval * 86_400_000).rounded(.toNearestOrAwayFromZero))
+        return try R.review(["status": ease == 1 ? "relearning" : "review", "dueAt": due,
+            "lastReviewedAt": reviewedAt, "intervalDays": interval, "ease": ease,
+            "reps": R.number(previous["reps"] ?? 0, "reps") + 1,
+            "lapses": R.number(previous["lapses"] ?? 0, "lapses") + (ease == 1 ? 1 : 0)])
+    }
+
+    private func commitReview(_ input: [String: Any], mutation: String, at: Int64) throws -> [String: Any] {
+        try R.fields(input, ["gid", "cardIndex", "entityRev", "stateRev", "aid", "ease", "reviewedAt", "file", "ankiCardId"], "review command")
+        let id = try R.id(input["gid"]), index = try R.integer(input["cardIndex"], "cardIndex")
+        let aid = try R.text(input["aid"], "aid", 256, required: true)
+        let reviewedAt = try R.integer(input["reviewedAt"], "reviewedAt"), ease = try R.integer(input["ease"], "ease")
+        guard (1...4).contains(ease) else { throw R.fail("INPUT", "评分无效") }
+        let digest = SHA256.hash(data: try R.bytes([id, index, aid])).map { String(format: "%02x", $0) }.joined()
+        let historyID = "native-review:" + digest, historyCollection = "native-review-history"
+        let fingerprint = SHA256.hash(data: try R.bytes(input)).map { String(format: "%02x", $0) }.joined()
+        guard let current = try load(id), let cards = current["cards"] as? [[String: Any]], index < cards.count,
+              let states = current["states"] as? [String: Any], let state = states[String(index)] as? [String: Any] else {
+            throw R.fail("NOT_FOUND", "复习卡片已删除")
+        }
+        if let previous = try store.record(collection: historyCollection, id: historyID) {
+            let saved = try R.object(JSONSerialization.jsonObject(with: Data(previous.json.utf8)), "review history")
+            guard (saved["value"] as? [String: Any])?["fingerprint"] as? String == fingerprint else {
+                throw R.fail("MUTATION_REUSED", "同一复习编号已有不同评分")
+            }
+            return current
+        }
+        guard state["phase"] as? String == "confirmed", state["removed"] as? Bool != true,
+              (state["flags"] as? [String: Any])?["archived"] as? Bool != true else { throw R.fail("TRANSITION", "当前卡片不能复习") }
+        let previous = state["review"] as? [String: Any] ?? [:]
+        guard !["unavailable", "suspended", "buried"].contains(previous["status"] as? String ?? "new") else {
+            throw R.fail("TRANSITION", "当前卡片已暂停复习")
+        }
+        let entityRev = try R.integer(input["entityRev"], "entityRev"), stateRev = try R.integer(input["stateRev"], "stateRev")
+        guard try R.integer(current["entityRev"], "current entityRev") == entityRev,
+              R.integer(current["stateRev"], "current stateRev") == stateRev else {
+            throw R.fail("CONFLICT", "卡片或复习状态已更新，请刷新后评分")
+        }
+        let options: [String: Any] = ["ifEntityRev": entityRev, "ifStateRev": stateRev]
+        let next = try Self.scheduledReview(previous, ease: Int(ease), reviewedAt: reviewedAt)
+        let patched = try execute("patchState", args: [id, index, ["review": next], options], mutation: mutation + ":rating", at: at) as! [String: Any]
+        let event: [String: Any] = ["id": "revlog:" + id + ":" + String(index) + ":" + aid,
+            "source": "reader", "file": try R.text(input["file"] ?? "", "file", 4096), "aid": aid,
+            "gid": id, "index": index, "ease": ease, "reviewedAt": reviewedAt,
+            "ankiCardId": try R.text(input["ankiCardId"] ?? "", "ankiCardId", 256)]
+        let history: [String: Any] = ["schema": 1, "collection": historyCollection, "id": historyID,
+            "rev": 1, "updatedAt": at, "updatedBy": deviceID, "deleted": false,
+            "value": ["fingerprint": fingerprint, "event": event]]
+        // Local recovery history is not a new sync collection. Existing account-
+        // scoped event delivery consumes the committed review as before.
+        _ = try store.commitWithinTransaction(record: .init(collection: historyCollection, id: historyID, rev: 1,
+            updatedAt: at, deleted: false, json: String(decoding: R.bytes(history), as: UTF8.self)),
+            mutationId: historyID, journalJSON: nil, expectedRev: 0, now: at)
+        return patched
+    }
+
     /// Direct Swift UI actions share the repository transaction, including the
     /// exact-state compatibility projection. A stale visible card cannot write
     /// over a newer card or turn an already confirmed card back into a draft.

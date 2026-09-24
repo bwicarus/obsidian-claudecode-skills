@@ -1771,6 +1771,9 @@
       reviewQueue: function (options) {
         return nativeOwner ? nativeCommand('reviewQueue', [options || {}]) : Promise.resolve(null);
       },
+      commitReview: function (input, options) {
+        return nativeOwner ? nativeCommand('commitReview', [input, options || {}]) : Promise.resolve(null);
+      },
       subscribe: subscribe,
       tombstone: tombstone,
       status: function () {
@@ -1823,6 +1826,7 @@
     load: delegate('load'),
     snapshot: delegate('snapshot'),
     reviewQueue: delegate('reviewQueue'),
+    commitReview: delegate('commitReview'),
     tombstone: delegate('tombstone'),
     subscribe: function (listener, query) {
       return defaultRepository().subscribe(listener, query);

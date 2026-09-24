@@ -3,6 +3,19 @@
 const fs = require('node:fs');
 const D = require('../_server_deploy/static/reader-runtime/data-store.js');
 const C = require('../_server_deploy/static/reader-runtime/card-repository.js');
+const vm = require('node:vm');
+const reviewSource = fs.readFileSync(require.resolve('../_server_deploy/static/pdf/rc-review.js'), 'utf8');
+const scheduler = vm.createContext({});
+vm.runInContext(reviewSource.slice(reviewSource.indexOf('  function _scheduledLocalReview('),
+  reviewSource.indexOf('  function _externalScheduleFrom(')), scheduler);
+const schedules = [];
+for (const intervalDays of [0, 0.01, 1, 1.235, 30, 123.125]) {
+  for (const ease of [1, 2, 3, 4]) {
+    const previous = { intervalDays, reps: 7, lapses: 2 }, reviewedAt = 1790000000123;
+    schedules.push({ previous, ease, reviewedAt,
+      result: scheduler._scheduledLocalReview(previous, ease, reviewedAt) });
+  }
+}
 const cases = [];
 function normalize(operation, inputs) {
   for (const input of inputs) {
@@ -90,5 +103,5 @@ const scenarios = [
     }
     sequences.push(sequence);
   }
-  fs.writeFileSync(process.argv[2], JSON.stringify({ cases, sequences }));
+  fs.writeFileSync(process.argv[2], JSON.stringify({ cases, sequences, schedules }));
 })();
