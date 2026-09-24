@@ -1,11 +1,6 @@
-// 生词下划线画到原生正文上，但**判据只留一份**。
-//
-// 「这个词该不该画」不是一句 label 判断：它牵涉共享仓库的掌握事实、
-// `__vocabOverride` 的本地覆盖、`__masteredLocal` 兜底，以及服务端
-// `label_slug='mastered'` 的收敛顺序。复制到原生那侧必然漂移，表现是
-// 「同一个词网页上不画、原生上画」—— 而这种不一致没人会立刻发现。
-//
-// 所以：判据抽成 `_vocabMarksForDisplay` 供两边共用，原生只负责画。
+// 浏览器保留原判据；App 的数据投影已迁到 Swift。
+// Swift 行为由 NativeVocabularyOverlay 的真实 JS oracle 对照验证。
+// 这里保留浏览器入口、坐标/配色与原生接线检查。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -66,15 +61,14 @@ test("③ 原生只画，颜色与粗细跟 CSS 同源", () => {
   assert.match(DOCUMENT, /y: rect\.maxY/);
 });
 
-test("④ 壳只搬运，不在这侧判该不该画", () => {
+test("④ 原生读取和过滤本机数据，不再让网页查询或计算页面叠层", () => {
   const refresh = body(WEBVIEW, "private func refreshNativePageOverlays(force: Bool = false)",
                        "/// 把可见页的屏幕矩形推给墨迹层");
-  assert.match(refresh, /__bwReaderPageOverlay/);
-  // ⚠ 判据 = 决定"该不该画"的那几个表达式。壳**搬运** masteredFuri 是对的
-  //   （原生要用它跳过已掌握的词），所以不能把这个词本身算成违规 ——
-  //   第一版就是这么误伤的。禁的是判断本身。
-  assert.doesNotMatch(code(refresh), /__vocabOverride|__masteredLocal|label_slug ===?/,
-    "判据不该出现在壳这侧");
+  assert.doesNotMatch(code(refresh), /__bwReaderPageOverlay|_vocabMarksForDisplay\(/);
+  assert.match(refresh, /document\.sourceCharacters\(page:/);
+  assert.match(refresh, /ReaderNativeVocabularyOverlay\.localMarks\(/);
+  assert.match(refresh, /ReaderNativeVocabularyOverlay\.visible\(/);
+  assert.match(refresh, /nativeOverlayGeneration == generation/);
   assert.match(refresh, /position\.visiblePages/, "只取可见页");
   assert.match(refresh, /r\[0\] \/ size\.width/, "点坐标要换成归一化，viewRect 才能算");
   // 翻页后要重取，否则新页没有下划线。

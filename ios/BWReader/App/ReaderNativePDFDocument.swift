@@ -473,7 +473,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let raw = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any] ?? [:]
         return ["ok": true, "page": page, "chars": raw["chars"] ?? [],
                 "pageWidth": value.pageWidth, "pageHeight": value.pageHeight,
-                "revision": value.engineRevision + ":" + value.geometryDigest,
+                "revision": NativeBookOCRBridge.pageRevision(value),
                 "source": value.source?.rawValue ?? "embedded",
                 "characterGeometry": value.characterGeometry.rawValue,
                 "layout": raw["layout"] ?? NSNull()]

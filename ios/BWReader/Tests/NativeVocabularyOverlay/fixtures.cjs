@@ -52,10 +52,10 @@ for (let run = 0; run < 80; run++) {
   definitions.push({chars:chars(words),records:[...records.values()]});
 }
 const cases = definitions.map(input => {
-  const context = vm.createContext({console});
+  const context = vm.createContext({console, Buffer, TextEncoder});
   vm.runInContext(vocab, context);
   const state = context.BWReaderRuntime.vocabularyState;
-  input.records.forEach(r => state.importRecord(r));
+  input.records.forEach(r => { if (!state.importRecord(r)) throw new Error('oracle record was not installed'); });
   context.root = context; context.window = context;
   vm.runInContext(algorithms + merge + lookup + visible, context);
   const local = context.localVocabMarks(input.chars);

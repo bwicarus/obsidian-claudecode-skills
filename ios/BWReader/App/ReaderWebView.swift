@@ -738,86 +738,47 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         Task { @MainActor [weak self] in self?.mountNativePDFDocument() }
     }
 
-    /// 取可见页的**页面叠加数据**（生词下划线 + 已掌握词面集），交给原生正文画。
-    ///
-    /// ⚠ **只取数据**：「哪些词该画下划线」「哪些词不注音」牵涉共享仓库的掌握事实、
-    /// 本地覆盖和服务端 label 的收敛顺序，判据留在网页那侧一处
-    /// （`_vocabMarksForDisplay` / `mastered_furi`）。复制过来必然漂移。
-    /// 一次取数同时服务两者：分两次会多打一次请求，还可能拿到不一致的快照。
-    /// 已经取过叠加数据的页（换文档即清）。`force` = 数据可能变了（点了阅读工具、标了生词），
-    /// 可见页全部重取；否则只取新露出来的页。
+    /// Visible-page vocabulary is projected from native character data and the
+    /// original local vocabulary store. Cached/server enrichment follows without
+    /// delaying local rendering or creating hidden web page layers.
     private var nativeOverlayPages: Set<Int> = []
     private weak var nativeOverlayDocument: ReaderNativePDFDocument?
+    private let nativeVocabularyOverlayStore = ReaderNativePageOverlayStore()
+    private var nativeOverlayGeneration: UInt64 = 0
+    private var nativeOverlayVocabularyGeneration: UInt64?
+    private var nativeVocabularyEnrichmentTasks: [Int: Task<Void, Never>] = [:]
 
     private func refreshNativePageOverlays(force: Bool = false) {
         guard let document = nativePDFDocument else { return }
-        if nativeOverlayDocument !== document || force {
+        let vocabularyGeneration = (try? nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store)?.generation(collection: ReaderNativeVocabularyState.collection)
+        if nativeOverlayDocument !== document || force || vocabularyGeneration != nativeOverlayVocabularyGeneration {
             nativeOverlayDocument = document
+            nativeOverlayVocabularyGeneration = vocabularyGeneration
             nativeOverlayPages = []
+            nativeOverlayGeneration &+= 1
+            nativeVocabularyEnrichmentTasks.values.forEach { $0.cancel() }
+            nativeVocabularyEnrichmentTasks = [:]
         }
         for page in document.position.visiblePages.prefix(8) where !nativeOverlayPages.contains(page) {
             nativeOverlayPages.insert(page)
+            let generation = nativeOverlayGeneration
             Task { @MainActor [weak self, weak document] in
                 guard let self, let document else { return }
-                let value = try? await self.webView.callAsyncJavaScript(
-                    "return await window.__bwReaderPageOverlay?.(page);",
-                    arguments: ["page": page], in: nil, contentWorld: .page)
-                // 跨过 await 后文档可能已经换了：身份要重新确认一次。
-                guard self.nativePDFDocument === document else { return }
-                // 没取到（页面数据还没就绪 / 这一页的字符尺寸还没到）：别记成"取过了"，
-                // 下次停下来再取 —— 否则这一页的下划线整个会话都不出来。
-                guard let payload = value as? [String: Any],
-                      let size = document.characterPageSize(page) else {
-                    if self.nativeOverlayDocument === document { self.nativeOverlayPages.remove(page) }
-                    return
-                }
                 do {
-                    let rows = payload["vocabMarks"] as? [[String: Any]] ?? []
-                    let marks: [ReaderNativePDFDocument.VocabMark] = rows.compactMap { row in
-                        guard let slug = row["label_slug"] as? String,
-                              let rects = row["rects"] as? [[Double]] else { return nil }
-                        // 点坐标 → 归一化，viewRect 才能换算。与高亮同一口径。
-                        let boxes = rects.compactMap { r -> CGRect? in
-                            guard r.count == 4, size.width > 0, size.height > 0 else { return nil }
-                            return CGRect(x: r[0] / size.width, y: r[1] / size.height,
-                                          width: (r[2] - r[0]) / size.width,
-                                          height: (r[3] - r[1]) / size.height)
-                        }
-                        guard !boxes.isEmpty else { return nil }
-                        return .init(slug: slug, rects: boxes)
-                    }
-                    document.setVocabMarks(marks, page: page)
-                    // masteredFuri 为 null 表示振假名整体关着 —— 那时一个都不画，
-                    // 跟"这一页没有已掌握的词"不是一回事。
-                    let mastered = payload["masteredFuri"] as? [String]
-                    document.setFuriganaMastered(mastered, enabled: mastered != nil, page: page)
-                    let sentences = (payload["vocabSentences"] as? [[String: Any]] ?? [])
-                        .enumerated().compactMap { index, row -> ReaderNativePDFDocument.VocabSentence? in
-                            guard let text = row["text"] as? String, !text.isEmpty,
-                                  let rects = row["rects"] as? [[Double]] else { return nil }
-                            let boxes = rects.compactMap { r -> CGRect? in
-                                guard r.count == 4, size.width > 0, size.height > 0 else { return nil }
-                                return CGRect(x: r[0] / size.width, y: r[1] / size.height,
-                                              width: (r[2] - r[0]) / size.width,
-                                              height: (r[3] - r[1]) / size.height)
-                            }
-                            guard !boxes.isEmpty else { return nil }
-                            // id 要带页码：不同页的第 0 句不能撞成同一个。
-                            return .init(id: "\(page):\(index)", index: index, page: page,
-                                         text: text, rects: boxes)
-                        }
-                    document.setVocabSentences(sentences, page: page)
-                    // 搜索跳转后要亮的那个词。网页那侧取走即清，所以只会亮一次。
-                    if let query = payload["searchQuery"] as? String, !query.isEmpty {
-                        document.highlightSearchHits(query: query, page: page)
+                    try await self.loadNativeVocabularyOverlay(page: page, document: document, generation: generation)
+                } catch {
+                    if self.nativePDFDocument === document, self.nativeOverlayGeneration == generation {
+                        self.nativeOverlayPages.remove(page)
+                        self.postClientLog("native-page-overlay: " + error.localizedDescription)
                     }
                 }
+                guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation else { return }
                 // 整页翻译（译页）：另一次调用，因为它自带开关且要出网取译文，
                 // 塞进 page-overlay 会让关着译页的常规刷新也等它一遍。
                 let slices = try? await self.webView.callAsyncJavaScript(
                     "return await window.__bwReaderPageTranslateSlices?.(page);",
                     arguments: ["page": page], in: nil, contentWorld: .page)
-                guard self.nativePDFDocument === document,
+                guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation,
                       let size = document.characterPageSize(page) else { return }
                 let rows = (slices as? [[String: Any]] ?? []).compactMap {
                     row -> ReaderNativePDFDocument.TranslationSlice? in
@@ -838,7 +799,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 let figures = try? await self.webView.callAsyncJavaScript(
                     "return await window.__bwReaderPageFigures?.(page);",
                     arguments: ["page": page], in: nil, contentWorld: .page)
-                guard self.nativePDFDocument === document else { return }
+                guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation else { return }
                 let items = (figures as? [[String: Any]] ?? []).compactMap {
                     row -> ReaderNativePDFDocument.Figure? in
                     guard let id = row["id"] as? String, !id.isEmpty,
@@ -857,6 +818,123 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                                  attached: row["attached"] as? Bool == true)
                 }
                 document.setFigures(items, page: page)
+            }
+        }
+    }
+
+    private func applyNativeVocabularyOverlay(_ payload: [String: Any], page: Int,
+                                               document: ReaderNativePDFDocument) {
+        guard let size = document.characterPageSize(page) else { return }
+        let rows = payload["vocabMarks"] as? [[String: Any]] ?? []
+        let marks: [ReaderNativePDFDocument.VocabMark] = rows.compactMap { row in
+            guard let slug = row["label_slug"] as? String,
+                  let rects = row["rects"] as? [[Double]] else { return nil }
+            // 点坐标 → 归一化，viewRect 才能换算。与高亮同一口径。
+            let boxes = rects.compactMap { r -> CGRect? in
+                guard r.count == 4, r.allSatisfy(\.isFinite), r[2] > r[0], r[3] > r[1], size.width > 0, size.height > 0 else { return nil }
+                return CGRect(x: r[0] / size.width, y: r[1] / size.height,
+                              width: (r[2] - r[0]) / size.width,
+                              height: (r[3] - r[1]) / size.height)
+            }
+            guard !boxes.isEmpty else { return nil }
+            return .init(slug: slug, rects: boxes)
+        }
+        document.setVocabMarks(marks, page: page)
+        // masteredFuri 为 null 表示振假名整体关着 —— 那时一个都不画，
+        // 跟"这一页没有已掌握的词"不是一回事。
+        let mastered = payload["masteredFuri"] as? [String]
+        document.setFuriganaMastered(mastered, enabled: mastered != nil, page: page)
+        let sentences = (payload["vocabSentences"] as? [[String: Any]] ?? [])
+            .enumerated().compactMap { index, row -> ReaderNativePDFDocument.VocabSentence? in
+                guard let text = row["text"] as? String, !text.isEmpty,
+                      let rects = row["rects"] as? [[Double]] else { return nil }
+                let boxes = rects.compactMap { r -> CGRect? in
+                    guard r.count == 4, r.allSatisfy(\.isFinite), r[2] > r[0], r[3] > r[1], size.width > 0, size.height > 0 else { return nil }
+                    return CGRect(x: r[0] / size.width, y: r[1] / size.height,
+                                  width: (r[2] - r[0]) / size.width,
+                                  height: (r[3] - r[1]) / size.height)
+                }
+                guard !boxes.isEmpty else { return nil }
+                // id 要带页码：不同页的第 0 句不能撞成同一个。
+                return .init(id: "\(page):\(index)", index: index, page: page,
+                             text: text, rects: boxes)
+            }
+        document.setVocabSentences(sentences, page: page)
+        // 搜索跳转后要亮的那个词。网页那侧取走即清，所以只会亮一次。
+        if let query = payload["searchQuery"] as? String, !query.isEmpty {
+            document.highlightSearchHits(query: query, page: page)
+        }
+    }
+
+    private func loadNativeVocabularyOverlay(page: Int, document: ReaderNativePDFDocument, generation: UInt64) async throws {
+        guard let book = currentLocalBook, nativeReadingStoreBookID == book.id,
+              let deviceID = nativeReadingStoreDeviceID else { throw NativeBookOCRError.pageUnavailable }
+        let source = try await document.sourceCharacters(page: page)
+        guard nativePDFDocument === document, nativeOverlayGeneration == generation,
+              let chars = source["chars"] as? [[String: Any]], let revision = source["revision"] as? String,
+              document.characterPageSize(page) != nil else { throw NativeBookOCRError.pageUnavailable }
+        let global = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store
+        let local = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+        guard try global.meta("legacyImport") == "done", try local.meta("legacyImport") == "done" else {
+            throw ReaderNativeVocabularyState.Failure(message: "本地状态尚未就绪")
+        }
+        // These small presentation inputs remain observed until preferences and
+        // search command ownership are migrated. No page fetch, char scan, word
+        // filtering, rectangle calculation or hidden rendering runs in the web.
+        let raw = try await webView.callAsyncJavaScript("""
+            return {vocabulary:typeof _vocabUnderlineEnabled==='function'?_vocabUnderlineEnabled():true,
+                    ruby:typeof _rubyEnabled==='function'?_rubyEnabled():false,
+                    overrides:Object.fromEntries(window.__vocabOverride||[]),
+                    mastered:Array.from(window.__masteredLocal||[]),
+                    searchQuery:typeof _takePendingSearchQuery==='function'?_takePendingSearchQuery(page):''};
+            """, arguments: ["page": page], in: nil, contentWorld: .page)
+        guard nativePDFDocument === document, nativeOverlayGeneration == generation,
+              let flags = raw as? [String: Any] else { throw ReaderBookUserStateWebAdapterError.contextChanged }
+        let index = try nativeVocabularyOverlayStore.vocabulary(global)
+        let marks = ReaderNativeVocabularyOverlay.localMarks(chars, state: index)
+        let cached = try? ReaderNativePageOverlayStore.cached(local, bookID: book.id, page: page, revision: revision)
+        func payload(_ enrichment: [String: Any]?, search: Bool) -> [String: Any] {
+            let combined = ReaderNativeVocabularyOverlay.merge(marks, enrichment?["vocab_marks"] as? [[String: Any]] ?? [])
+            let filtered = ReaderNativeVocabularyOverlay.visible(combined, state: index,
+                overrides: flags["overrides"] as? [String: Bool] ?? [:], legacyMastered: Set(flags["mastered"] as? [String] ?? []))
+            return ["vocabMarks": flags["vocabulary"] as? Bool != false ? filtered : [],
+                "masteredFuri": flags["ruby"] as? Bool == true ? Array((enrichment?["mastered_furi"] as? [String] ?? []).prefix(4000)) as Any : NSNull(),
+                "vocabSentences": Array((enrichment?["vocab_sentences"] as? [[String: Any]] ?? []).prefix(64)),
+                "searchQuery": search ? flags["searchQuery"] as? String ?? "" : ""]
+        }
+        applyNativeVocabularyOverlay(payload(cached, search: true), page: page, document: document)
+        guard let gateway = nativeServerGateway else { return }
+        var url = URLComponents(); url.path = "/pdf/api/page-overlay"
+        url.queryItems = [URLQueryItem(name: "file", value: "localbook:" + book.id), URLQueryItem(name: "page", value: String(page))]
+        guard let path = url.string else { return }
+        let vocabularyGeneration = global.generation(collection: ReaderNativeVocabularyState.collection)
+        nativeVocabularyEnrichmentTasks[page]?.cancel()
+        nativeVocabularyEnrichmentTasks[page] = Task { @MainActor [weak self, weak document] in
+            guard let self, let document else { return }
+            defer { if self.nativeOverlayGeneration == generation { self.nativeVocabularyEnrichmentTasks.removeValue(forKey: page) } }
+            do {
+                let response = try await gateway.fetchData(path: path, surface: .pdf)
+                try Task.checkCancellation()
+                guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation,
+                      (200..<300).contains(response.status),
+                      let raw = try JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+                      let entry = ReaderNativePageOverlayStore.normalized(raw, page: page, revision: revision,
+                          savedAt: Date().timeIntervalSince1970 * 1000) else { return }
+                // Text/OCR replacement can keep the same document object. Check
+                // the content revision again before displaying or caching boxes.
+                let current = try await document.sourceCharacters(page: page)
+                guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation,
+                      current["revision"] as? String == revision, !Task.isCancelled else { return }
+                if global.generation(collection: ReaderNativeVocabularyState.collection) == vocabularyGeneration {
+                    self.applyNativeVocabularyOverlay(payload(entry, search: false), page: page, document: document)
+                } else { self.refreshNativePageOverlays(force: true) }
+                try ReaderNativePageOverlayStore.save(entry, store: local, bookID: book.id, deviceID: deviceID)
+            } catch {
+                // Network-only enrichment is optional: leave the local and
+                // persisted cached projection visible, without a web retry.
+                if !(error is CancellationError), !Task.isCancelled {
+                    self.postClientLog("native-overlay-enrichment: " + error.localizedDescription)
+                }
             }
         }
     }
@@ -1638,6 +1716,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeInkSurfaceTask = nil
         nativeProjectionRefreshTask?.cancel()
         nativeProjectionRefreshTask = nil
+        nativeOverlayGeneration &+= 1
+        nativeVocabularyEnrichmentTasks.values.forEach { $0.cancel() }
+        nativeVocabularyEnrichmentTasks = [:]
+        nativeOverlayPages = []
+        nativeOverlayDocument = nil
         nativePDFNavigationBridge?.invalidate()
         activeNativePDFDocument?.onSelection = nil
         activeNativePDFDocument?.onGeometry = nil

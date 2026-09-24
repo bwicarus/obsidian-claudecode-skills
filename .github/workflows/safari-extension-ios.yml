@@ -342,7 +342,7 @@ jobs:
       - name: Verify native vocabulary overlay parity
         run: |
           node ios/BWReader/Tests/NativeVocabularyOverlay/fixtures.cjs "$RUNNER_TEMP/native-vocabulary-overlay-fixtures.json"
-          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeVocabularyState.swift ios/BWReader/App/ReaderNativeVocabularyOverlay.swift ios/BWReader/Tests/NativeVocabularyOverlay/main.swift -o "$RUNNER_TEMP/native-vocabulary-overlay-test"
+          xcrun swiftc ios/BWReader/App/ReaderNativeDataStore.swift ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeVocabularyState.swift ios/BWReader/App/ReaderNativeVocabularyOverlay.swift ios/BWReader/App/ReaderNativePageOverlayStore.swift ios/BWReader/Tests/NativeVocabularyOverlay/main.swift -o "$RUNNER_TEMP/native-vocabulary-overlay-test"
           "$RUNNER_TEMP/native-vocabulary-overlay-test" "$RUNNER_TEMP/native-vocabulary-overlay-fixtures.json"
 
       - name: Verify native Japanese dictionary parity

@@ -54,6 +54,12 @@ final class ReaderNativeDataStore {
 
     private var handle: OpaquePointer?
     private let path: String
+    private var collectionGenerations: [String: UInt64] = [:]
+
+    /// In-memory read-model invalidation, including inbound writes that do not
+    /// enter the outgoing journal. A rolled-back attempt may invalidate a cache
+    /// unnecessarily, but can never leave a stale cache marked as current.
+    func generation(collection: String) -> UInt64 { collectionGenerations[collection, default: 0] }
 
     /// `path` 传 `":memory:"` 可以开一个内存库 —— 测试用。
     init(path: String) throws {
@@ -279,6 +285,7 @@ final class ReaderNativeDataStore {
                 .int(record.updatedAt), .int(record.deleted ? 1 : 0), .text(record.json)
             ])
 
+        collectionGenerations[record.collection, default: 0] &+= 1
         var next: Int64 = 0
         if let journalJSON {
             next = try self.cursor() + 1

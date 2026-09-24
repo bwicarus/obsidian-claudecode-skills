@@ -1102,7 +1102,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         return String(Int64(status.updatedAt.timeIntervalSince1970 * 1_000))
     }
 
-    private static func pageRevision(
+    static func pageRevision(
         _ value: NativeBookOCRPageCharacters
     ) -> String {
         let encoder = JSONEncoder()

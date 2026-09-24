@@ -11,3 +11,39 @@ for (index, item) in (fixture["cases"] as! [[String: Any]]).enumerated() {
     precondition(R.same(O.visible(combined, state: state), item["visible"]!), "overlay filter differs at \(index)")
 }
 print("Native vocabulary overlay matches token, alias, nested mastery and geometry merge oracle")
+
+let store = try ReaderNativeDataStore(path: ":memory:")
+let cache = ReaderNativePageOverlayStore()
+let v = ReaderNativeVocabularyState(store: store, deviceID: "test")
+_ = try v.set(["key": "word", "language": "en"], property: "lookup", enabled: true, mutation: "first")
+let first = try cache.vocabulary(store)
+precondition(first.enabled(["key":"word", "language":"en"], "lookup"))
+let record = try store.records(collection: "vocabulary-state", limit: 10, offset: 0).first!
+var envelope = try JSONSerialization.jsonObject(with: Data(record.json.utf8)) as! [String: Any]
+var value = envelope["value"] as! [String: Any]; value["enabled"] = false
+envelope["value"] = value; envelope["rev"] = record.rev + 1
+let cursor = try store.cursor()
+try store.commit(record: .init(collection: record.collection, id: record.id, rev: record.rev+1, updatedAt: 1234,
+    deleted: false, json: String(decoding: R.bytes(envelope), as: UTF8.self)), mutationId: nil,
+    journalJSON: nil, expectedRev: record.rev, now: 1234)
+let next = try cache.vocabulary(store), nextCursor = try store.cursor()
+precondition(nextCursor == cursor && !next.enabled(["key":"word", "language":"en"], "lookup"), "inbound update left a stale native projection")
+for page in 1...27 {
+    let entry = ReaderNativePageOverlayStore.normalized(["ok":true, "vocab_marks":[], "mastered_furi":["既知"], "cv":"server"],
+        page:page, revision:"text:\(page)", savedAt:Double(page))!
+    try ReaderNativePageOverlayStore.save(entry, store:store, bookID:"one", deviceID:"test")
+}
+let oldest = try ReaderNativePageOverlayStore.cached(store, bookID:"one", page:1, revision:"text:1")
+let latest = try ReaderNativePageOverlayStore.cached(store, bookID:"one", page:27, revision:"text:27")
+let changed = try ReaderNativePageOverlayStore.cached(store, bookID:"one", page:27, revision:"new-text")
+let otherBook = try ReaderNativePageOverlayStore.cached(store, bookID:"two", page:27, revision:"text:27")
+precondition(oldest == nil && latest != nil && changed == nil && otherBook == nil)
+let before = try store.record(collection: ReaderNativePageOverlayStore.cacheCollection, id:"one:" + ReaderNativePageOverlayStore.cacheKind)!
+try store.execute("CREATE TRIGGER reject_cache BEFORE INSERT ON records WHEN NEW.collection = 'native-page-overlay-enrichment-cache-v1' BEGIN SELECT RAISE(ABORT, 'cache failed'); END")
+do {
+    try ReaderNativePageOverlayStore.save(ReaderNativePageOverlayStore.normalized(["ok":true],page:28,revision:"text:28",savedAt:28)!, store:store,bookID:"one",deviceID:"test")
+    preconditionFailure("failed cache write accepted")
+} catch is ReaderNativeDataStore.StoreError {}
+let after = try store.record(collection: before.collection, id:before.id)!
+precondition(after.json == before.json, "failed enrichment overwrote the offline cache")
+print("Native overlay cache: bounded, revision/book isolation, inbound invalidation and rollback passed")
