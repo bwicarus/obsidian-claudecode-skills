@@ -750,9 +750,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativePageTranslationTasks: [Int: Task<Void, Never>] = [:]
     private var nativePageTranslationCache: [String: [[String: Any]]] = [:]
     private var nativePageTranslationCacheBytes = 0
+    private let nativeFigures = ReaderNativeFigures()
+    private var nativeFigureTasks: [Int: Task<Void, Never>] = [:]
+    private var nativeFigurePending: Set<Int> = []
 
     private func refreshNativePageOverlays(force: Bool = false) {
         guard let document = nativePDFDocument else { return }
+        if let bookID = currentLocalBook?.id, bookID != nativeFigures.bookID {
+            nativeFigures.open(bookID); nativeFigurePending.removeAll()
+        }
         let vocabularyGeneration = (try? nativeDataStoreHost.bridge(for: "bw-reader-native-v1-global").store)?.generation(collection: ReaderNativeVocabularyState.collection)
         if nativeOverlayDocument !== document || force || vocabularyGeneration != nativeOverlayVocabularyGeneration {
             nativeOverlayDocument = document
@@ -763,8 +769,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             nativeVocabularyEnrichmentTasks = [:]
             nativePageTranslationTasks.values.forEach { $0.cancel() }
             nativePageTranslationTasks = [:]
+            nativeFigureTasks.values.forEach { $0.cancel() }
+            nativeFigureTasks = [:]
         }
-        for page in document.position.visiblePages.prefix(8) where !nativeOverlayPages.contains(page) {
+        for page in document.position.visiblePages.prefix(8) where !nativeOverlayPages.contains(page) || (nativeFigurePending.contains(page) && nativeFigureTasks[page] == nil) {
             nativeOverlayPages.insert(page)
             let generation = nativeOverlayGeneration
             Task { @MainActor [weak self, weak document] in
@@ -780,32 +788,103 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     }
                 }
                 guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation else { return }
-                // 插图：徽标 + 图框 + 已生成好的描述。本书没开「插图描述」时网页那侧
-                // 直接回空（不拉端点、不烧 AI），所以这里也就是一个空数组。
-                let figures = try? await self.webView.callAsyncJavaScript(
-                    "return await window.__bwReaderPageFigures?.(page);",
-                    arguments: ["page": page], in: nil, contentWorld: .page)
+                // A figures-only page may have no text/OCR, so this path must
+                // remain independent of the character-layer result above.
+                let enabled = try? await self.webView.callAsyncJavaScript(
+                    "return window.__figBookOn===true;", arguments: [:], in: nil, contentWorld: .page)
                 guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation else { return }
-                let items = (figures as? [[String: Any]] ?? []).compactMap {
-                    row -> ReaderNativePDFDocument.Figure? in
-                    guard let id = row["id"] as? String, !id.isEmpty,
-                          let box = row["box"] as? [Double], box.count == 4,
-                          box[2] > box[0], box[3] > box[1] else { return nil }
-                    let badge = (row["badge"] as? [Double]).flatMap {
-                        $0.count == 2 ? CGPoint(x: $0[0], y: $0[1]) : nil
-                    }
-                    return .init(id: id, page: page,
-                                 box: CGRect(x: box[0], y: box[1],
-                                             width: box[2] - box[0], height: box[3] - box[1]),
-                                 badge: badge,
-                                 caption: row["caption"] as? String ?? "",
-                                 desc: row["desc"] as? String ?? "",
-                                 group: row["group"] as? Bool == true,
-                                 attached: row["attached"] as? Bool == true)
-                }
-                document.setFigures(items, page: page)
+                self.startNativeFigures(enabled: enabled as? Bool == true, page: page, document: document, generation: generation)
             }
         }
+    }
+
+    private func displayNativeFigures(page: Int, document: ReaderNativePDFDocument) {
+        let items = (nativeFigures.figures(page: page) ?? []).compactMap { row -> ReaderNativePDFDocument.Figure? in
+            guard let id = row["id"] as? String, let box = row["box"] as? [Double], box.count == 4 else { return nil }
+            let badge = (row["badge"] as? [Double]).map { CGPoint(x: $0[0], y: $0[1]) }
+            return .init(id: id, page: page, box: CGRect(x: box[0], y: box[1], width: box[2] - box[0], height: box[3] - box[1]),
+                badge: badge, caption: row["caption"] as? String ?? "", desc: row["desc"] as? String ?? "",
+                group: row["group"] as? Bool == true, attached: row["attached"] as? Bool == true)
+        }
+        document.setFigures(items, page: page)
+    }
+
+    private func startNativeFigures(enabled: Bool, page: Int, document: ReaderNativePDFDocument, generation: UInt64) {
+        nativeFigureTasks[page]?.cancel(); nativeFigureTasks.removeValue(forKey: page)
+        guard enabled else { document.setFigures([], page: page); return }
+        if nativeFigures.figures(page: page) != nil {
+            displayNativeFigures(page: page, document: document)
+            if !nativeFigurePending.contains(page) { return }
+        }
+        guard let gateway = nativeServerGateway, let bookID = currentLocalBook?.id else { return }
+        var url = URLComponents(); url.path = "/pdf/api/page-figures"
+        url.queryItems = [URLQueryItem(name: "file", value: "localbook:" + bookID), URLQueryItem(name: "page", value: String(page))]
+        guard let path = url.string else { return }
+        nativeFigureTasks[page] = Task { @MainActor [weak self, weak document] in
+            guard let self, let document else { return }
+            defer { if self.nativeOverlayGeneration == generation { self.nativeFigureTasks.removeValue(forKey: page) } }
+            do {
+                for attempt in 0..<9 {
+                    try Task.checkCancellation()
+                    guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation,
+                          self.currentLocalBook?.id == bookID, document.position.visiblePages.contains(page) else { return }
+                    let response = try await gateway.fetchData(path: path, surface: .pdf)
+                    try Task.checkCancellation()
+                    guard self.nativePDFDocument === document, self.nativeOverlayGeneration == generation,
+                          self.currentLocalBook?.id == bookID else { return }
+                    guard (200..<300).contains(response.status),
+                          let raw = try JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
+                        throw ReaderNativeFigures.Failure(message: "插图获取失败")
+                    }
+                    let pending = try self.nativeFigures.accept(raw, page: page)
+                    if pending { self.nativeFigurePending.insert(page) } else { self.nativeFigurePending.remove(page) }
+                    self.displayNativeFigures(page: page, document: document)
+                    if !pending || attempt == 8 { return }
+                    try await Task.sleep(nanoseconds: 4_500_000_000)
+                }
+            } catch {
+                if !(error is CancellationError), !Task.isCancelled, self.nativeOverlayGeneration == generation {
+                    self.nativeOverlayPages.remove(page)
+                    self.postClientLog("native-figures: " + error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func nativeFigureProjection() throws -> [String: Any] {
+        guard let bookID = currentLocalBook?.id, nativeFigures.bookID == bookID,
+              nativeReadingStoreBookID == bookID else { throw ReaderNativeBookStore.MutationError.unavailable }
+        let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+        let ink = try ReaderNativeBookProjection(store: store).state("ink", bookID: bookID).payload as? [String: [[String: Any]]] ?? [:]
+        return nativeFigures.projection(ink: ink)
+    }
+
+    private func publishNativeFigureProjection() {
+        guard let payload = try? nativeFigureProjection() else { return }
+        webView.callAsyncJavaScript(ReaderNativeFigureBridge.source, arguments: ["payload": payload], in: nil, in: .page,
+            completionHandler: { _ in })
+    }
+
+    private func performNativeFigureCommand(_ command: [String: Any]) async -> [String: Any]? {
+        guard command["action"] as? String == "nativeFigureAttach", currentLocalBook?.format == .pdf else { return nil }
+        guard let document = nativePDFDocument, let value = command["value"] as? [String: Any],
+              let page = value["page"] as? Int, let id = value["id"] as? String, let desired = value["attached"] as? Bool,
+              (command["scope"] == nil || command["scope"] as? String == nativeConversation.scope),
+              !isLoading, isTrustedReaderURL(webView.url), currentLocalBook?.id == nativeFigures.bookID else {
+            return ["ok": false, "error": "阅读页已切换"]
+        }
+        do {
+            let attached = try nativeFigures.setAttached(desired, id: id, page: page)
+            // Install the exact committed selection before reporting success.
+            // No hidden thumbnails or a second attachment writer are created.
+            let projected = try await webView.callAsyncJavaScript(ReaderNativeFigureBridge.source,
+                arguments: ["payload": try nativeFigureProjection()], in: nil, contentWorld: .page)
+            guard nativePDFDocument === document, projected as? Bool == true else {
+                throw ReaderNativeFigures.Failure(message: "图已选中，但助手上下文未就绪，请刷新后重试")
+            }
+            displayNativeFigures(page: page, document: document)
+            return ["ok": true, "value": ["attached": attached]]
+        } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
     private func applyNativeVocabularyOverlay(_ payload: [String: Any], page: Int,
@@ -1091,6 +1170,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         if !changes.isEmpty {
             let domains = try ReaderNativeBookProjection(store:store).exportReadingDomains(bookID:book.id)
             try document.applyOverlays(domains,bookID:book.id,contentSHA256:digest)
+            if nativeFigures.hasAttachments { publishNativeFigureProjection() }
             markCloudSyncDirty()
         }
         resumeNativeInkSync(business)
@@ -1762,6 +1842,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeVocabularyEnrichmentTasks = [:]
         nativePageTranslationTasks.values.forEach { $0.cancel() }
         nativePageTranslationTasks = [:]
+        nativeFigureTasks.values.forEach { $0.cancel() }
+        nativeFigureTasks = [:]
         nativeOverlayPages = []
         nativeOverlayDocument = nil
         nativePDFNavigationBridge?.invalidate()
@@ -2055,9 +2137,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     /// 点图徽标 → 原生描述面板。描述文本随图一起取过来了，这里不再回网页问一次。
     func openNativeFigurePanel(_ figure: ReaderNativePDFDocument.Figure) {
-        let panel = ReaderNativeFigureModel(figure: figure) { [weak self] command in
-            await self?.requestNativeConversationCommand(command)
-                ?? ["ok": false, "error": "阅读页已关闭"]
+        let document = nativePDFDocument
+        let panel = ReaderNativeFigureModel(figure: figure) { [weak self, weak document] command in
+            guard let self, let document, self.nativePDFDocument === document else { return ["ok": false, "error": "阅读页已关闭"] }
+            return await self.requestNativeConversationCommand(command)
         }
         // 带入状态变了，正文上那个持久绿框和徽标颜色要跟着变。
         panel.onAttachChanged = { [weak self] attached in
@@ -2346,6 +2429,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
+        if let result = await performNativeFigureCommand(command) { return result }
         if let result = await performNativeVocabularyCommand(command) { return result }
         if let result = await performNativeLookupCommand(command) { return result }
         if let result = await performNativeCardCommand(command) { return result }
@@ -2752,6 +2836,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                             self.nativeVocabularyEnrichmentTasks = [:]
                             self.nativePageTranslationTasks.values.forEach { $0.cancel() }
                             self.nativePageTranslationTasks = [:]
+                            self.nativeFigureTasks.values.forEach { $0.cancel() }
+                            self.nativeFigureTasks = [:]
                             self.nativeOverlayPages = []
                             self.scheduleNativeInkSurfacePublish()
                         }
@@ -6414,6 +6500,18 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                   isTrustedReaderURL(message.frameInfo.request.url),
                   let body = message.body as? [String: Any],
                   body["version"] as? Int == 1 else { return }
+            if body["type"] as? String == "figure-consumed" {
+                guard body["file"] as? String == "localbook:" + nativeFigures.bookID,
+                      let epoch = body["epoch"] as? String, let tokens = body["tokens"] as? [String],
+                      tokens.count <= 128, tokens.allSatisfy({ $0.count <= 64 }) else { return }
+                if nativeFigures.consume(epoch: epoch, tokens: tokens) {
+                    if let document = nativePDFDocument {
+                        for page in document.figures.keys { displayNativeFigures(page: page, document: document) }
+                    }
+                    publishNativeFigureProjection()
+                }
+                return
+            }
             nativeConversation.receive(body)
             if nativeHTMLNotesEnabled, let values = body["nativePinnedCards"] as? [String], Set(values) != nativeHTMLPinned {
                 nativeHTMLPinned = Set(values)

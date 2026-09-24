@@ -3,8 +3,8 @@ import SwiftUI
 /// 插图描述面板（点图徽标弹出）。
 ///
 /// 描述文本是**服务端早就生成好的**（夜间 figures-describe 那条流水线），这里既不
-/// 生成也不排版判断，只显示 + 提供「带入助手」。带入与否的权威仍在网页那侧的
-/// `window.__figAttached`（它是助手上下文的实际来源），所以按钮只发起、由回执回写。
+/// 生成也不排版判断，只显示 + 提供「带入助手」。Swift 持有选择；面板收到确认后
+/// 更新按钮。发送明确的目标状态，使上下文投影中断后的重试不会反向取消选择。
 @MainActor
 final class ReaderNativeFigureModel: ObservableObject, Identifiable {
     let id: String
@@ -38,7 +38,7 @@ final class ReaderNativeFigureModel: ObservableObject, Identifiable {
         defer { busy = false }
         let receipt = await request([
             "action": "nativeFigureAttach",
-            "value": ["id": id, "page": page],
+            "value": ["id": id, "page": page, "attached": !attached],
         ])
         guard receipt["ok"] as? Bool == true else {
             error = receipt["error"] as? String ?? "带入失败，请重试。"

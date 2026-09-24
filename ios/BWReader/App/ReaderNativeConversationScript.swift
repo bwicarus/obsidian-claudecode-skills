@@ -411,12 +411,17 @@ enum ReaderNativeConversationScript {
       }
       function selectedAttachments() {
         const registry = window.BWReaderRuntime?.contextSelections;
-        if (!registry?.snapshot || !thread) return [];
-        return (registry.snapshot({ maxText: 180 }).items || []).map(item => ({
+        if (!thread) return [];
+        const figures = window.__bwNativeFigureProjection ? (window.__figAttached || []).map(item => ({
+          id: scope + ':figure:' + item.token, title: text(item.caption, 160) || '插图 · p' + item.page,
+          text: text(item.desc, 180), kind: 'figure',
+          removeId: registerAction('figure-remove:' + item.token, thread, () => window.__bwNativeConsumeFigures?.([item.token]))
+        })) : [];
+        return figures.concat((registry?.snapshot?.({ maxText: 180 }).items || []).map(item => ({
           id: scope + ':context:' + hash(item.id), title: text(item.label, 160) || '已选内容',
           text: text(item.text, 180), kind: text(item.kind, 80),
           removeId: registerAction('context-remove:' + item.id, thread, () => registry.deselect(item.id))
-        }));
+        })));
       }
       function pagePlacements(items) {
         const owner = rc().stickynote;
@@ -1538,7 +1543,7 @@ enum ReaderNativeConversationScript {
         if (!thread || !thread.isConnected || records.some(record => Array.from(record.addedNodes).some(node => node.nodeType === 1 && (['asst-thread', 'asst-input', 'asst-computer', 'asst-call'].includes(node.id) || node.querySelector?.('#asst-thread,#asst-input,#asst-computer,#asst-call'))))) schedule();
       });
       mountObserver.observe(document.documentElement, { childList: true, subtree: true });
-      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:native-document-position', 'bw-native-computer-voice-state'].forEach(name => window.addEventListener(name, schedule));
+      ['DOMContentLoaded', 'popstate', 'hashchange', 'bw:native-local-runtime-ready', 'rc:native-document-position', 'bw-native-computer-voice-state', 'bw-native-figure-projection'].forEach(name => window.addEventListener(name, schedule));
       ['rc:assistant-mode-changed','rc:review-presentation-changed','rc:placement-changed','rc:favorites-changed','rc:flashcard-state-changed'].forEach(name => window.addEventListener(name,scheduleMessages));
       window.addEventListener('scroll', schedule, { capture: true, passive: true });
       window.addEventListener('resize', schedule, { passive: true });

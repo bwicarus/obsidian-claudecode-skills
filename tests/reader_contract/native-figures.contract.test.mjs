@@ -2,7 +2,7 @@
 //
 // 接管后 .fig-layer 一个都没有（页面不在 DOM 里），徽标、图区命中层、持久选中高亮
 // 全都失去宿主 —— 本书开了「插图描述」也什么都看不见。数据本来就是归一坐标，
-// 所以原生直接画，判据（哪张图、描述文本、带入与否）仍然只在网页那一处。
+// Swift 获取描述并持有附件；网页只观察上下文投影，浏览器原路径继续保留。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -29,13 +29,16 @@ test("① 本书没开插图描述就一张都不出（不拉端点、不烧 AI�
   assert.match(READER, /__bwReaderPageFigures/, "改完 reader.src 要拼合");
 });
 
-test("② 带入与否的权威在网页，原生只发起", () => {
+test("② App 插图数据与附件由原生管理，浏览器仍用自身入口", () => {
   const attach = body(SRC, "window.__bwReaderFigureAttach = async function",
                       "function schedulePoll");
   assert.match(attach, /_toggleFig\(fig, page\)/, "复用长按 toggle 的同一条路");
   assert.match(attach, /window\.__figAttached/, "回执给真实状态");
-  // ⚠ 面板不许本地先翻：__figAttached 就是助手上下文的来源，本地先翻会和
-  // 助手实际看到的东西对不上。
+  assert.doesNotMatch(WEBVIEW, /return await window\.__bwReaderPageFigures/);
+  assert.match(WEBVIEW, /performNativeFigureCommand\(command\)/);
+  assert.match(WEBVIEW, /nativeFigures\.setAttached\(desired/);
+  assert.match(WEBVIEW, /ReaderNativeFigureBridge\.source/);
+  // UI receipt still follows native commit and context projection.
   const toggle = body(PANEL, "func toggleAttach() async", "var paragraphs");
   assert.match(toggle, /attached = \(receipt\["value"\] as\? \[String: Any\]\)\?\["attached"\]/);
   assert.doesNotMatch(code(toggle), /^\s*attached\.toggle\(\)/m);
