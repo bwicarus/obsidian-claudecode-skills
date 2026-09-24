@@ -3312,7 +3312,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             let navigationID = UUID().uuidString
             var stageObserved = false
             defer {
-                if key == "rate" && !stageObserved { queue.discardRating(lease:lease,stageID:navigationID) }
+                if key == "rate" && !stageObserved {
+                    queue.discardRating(lease:lease,stageID:navigationID)
+                    if nativeReviewQueue === queue, bookUserStateContextGeneration == generation,
+                       nativeConversation.scope == scope {
+                        nativeConversation.acceptReviewPresentation(queue.presentation())
+                    }
+                }
                 webView.callAsyncJavaScript("window.RC?.review?.finishNativeTransition?.(id);",
                     arguments:["id":navigationID],in:nil,in:.page,completionHandler:nil)
             }
