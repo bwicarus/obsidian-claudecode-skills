@@ -122,8 +122,37 @@ typealias Q = ReaderNativeReviewQueue
         precondition(ReaderNativeCardRules.same(navigationSnapshot["cards"]!, selectedSnapshot["cards"]!))
         var staleTarget = navigationRequest; staleTarget["target"] = ["id": 8, "question": "changed"]
         do { _ = try navigation.service.selectCard(staleTarget); preconditionFailure("changed card selected") } catch {}
+        let navigationLease = navigationInput["request"] as! String
+        let firstID = ReaderNativeReviewCards.stableID(navigationCards[0]), secondID = ReaderNativeReviewCards.stableID(navigationCards[1])
+        do { _ = try navigation.service.navigate(lease:navigationLease,currentID:firstID,targetID:secondID); preconditionFailure("old native button changed the queue") } catch {}
+        navigation.failSave = true
+        let savedNavigation = navigation.cache
+        do { _ = try navigation.service.navigate(lease:navigationLease,currentID:secondID,targetID:firstID); preconditionFailure("native navigation ignored disk failure") } catch {}
+        precondition(navigation.cache == savedNavigation)
+        navigation.failSave = false
+        let byID = try navigation.service.navigate(lease:navigationLease,currentID:secondID,targetID:firstID)
+        precondition((byID["snapshot"] as? Q.Object)?["index"] as? Int == 0)
+        do { _ = try navigation.service.navigate(lease:navigationLease,currentID:firstID,targetID:"missing"); preconditionFailure("unknown card selected") } catch {}
         navigation.service.invalidate()
         do { _ = try navigation.service.selectCard(navigationRequest); preconditionFailure("stale scope selected") } catch {}
+        let nativeScoring = Fixture()
+        let nativeLoad = try await nativeScoring.service.load(nativeScoring.input(scope:"all"))
+        let nativeLease = nativeLoad["request"] as! String
+        let nativeCard = (nativeLoad["snapshot"] as! Q.Object)["cards"] as! [Q.Object]
+        let nativeID = ReaderNativeReviewCards.stableID(nativeCard[0])
+        let nativeStage = UUID().uuidString, nativeBefore = nativeScoring.cache
+        do { _ = try nativeScoring.service.stageCurrentRating(lease:nativeLease,cardID:nativeID,stageID:nativeStage,ease:3); preconditionFailure("hidden answer rated") } catch {}
+        _ = try nativeScoring.service.interact(["lease":nativeLease,"cardId":nativeID,"key":"reveal"])
+        let nativeRated = try nativeScoring.service.stageCurrentRating(lease:nativeLease,cardID:nativeID,stageID:nativeStage,ease:3)
+        precondition(nativeScoring.cache == nativeBefore && nativeScoring.calls.count == 1)
+        precondition(((nativeRated["snapshot"] as! Q.Object)["cards"] as! [Q.Object]).isEmpty)
+        try nativeScoring.service.validateVisibleCard(lease:nativeLease,cardID:"")
+        nativeScoring.failSave = true
+        do { _ = try nativeScoring.service.undoCurrentRating(lease:nativeLease,cardID:""); preconditionFailure("failed undo accepted") } catch {}
+        nativeScoring.failSave = false
+        let nativeUndone = try nativeScoring.service.undoCurrentRating(lease:nativeLease,cardID:"")
+        precondition(((nativeUndone["snapshot"] as! Q.Object)["cards"] as! [Q.Object]).count == 1)
+        precondition(nativeScoring.calls.count == 1,"staging/undo called external scheduler")
         let loaded = try await scoring.service.load(scoring.input())
         let scoreLease = loaded["request"] as! String
         var scoreSnapshot = loaded["snapshot"] as! Q.Object

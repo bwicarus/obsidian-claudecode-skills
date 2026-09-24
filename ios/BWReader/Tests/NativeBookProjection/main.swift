@@ -468,3 +468,68 @@ let changedVideo = videoChange.body["video"] as! [String:Any]
 check(changedVideo["start"] as? Int == 8 && changedVideo["end"] as? Int == 19 && changedVideo["src"] as? String == "yt", "video patch destroyed prior playback fields")
 do { _ = try ReaderNativeNoteActions.request(["id":"video-note","action":"video","changes":["id":"different"]],note:originalVideo,file:book,now:900); fatalError("stale video replaced") }
 catch ReaderNativeNoteRules.NoteError.invalid {}
+
+// Streaming commits use the same real database/undo owners, with one frozen
+// authority advanced only by successful receipts. No JavaScript mutation hop.
+func testNativeDocumentSession() throws {
+    typealias O = [String:Any]
+    let db = try ReaderNativeDataStore(path:":memory:"), bookID = "stream-book"
+    let writer = ReaderNativeBookStore(store:db,bookID:bookID,deviceID:"test",now:{ 800_000 })
+    let read = ReaderNativeBookProjection(store:db)
+    func make() throws -> ReaderNativeAssistantDocumentSession {
+        try .init(id:UUID().uuidString,authority:read.assistantSnapshot(bookID:bookID,surface:"pdf"))
+    }
+    func event(_ actions:[Any]) throws -> O {
+        ["name":"actions","data":String(decoding:try JSONSerialization.data(withJSONObject:actions),as:UTF8.self)]
+    }
+    func note(_ c:String) -> O {
+        ["fn":"_assistEdit","args":[["type":"note","op":"create","native_operation_id":"npdf_"+String(repeating:c,count:24),
+            "items":[["id":"note_"+c,"note":["id":"note_"+c,"anchor":["kind":"pdf","page":3],"text":"kept original"]]]]]]
+    }
+    let noCard: (O) throws -> O = { _ in fatalError("unexpected page-card saga") }
+    let session = try make()
+    _ = try session.commit([event([note("1")]),event([note("2")])],sequence:1,bookMutation:writer.perform,pageCard:noCard)
+    check((try read.state("document-notes-legacy",bookID:bookID).payload as? [O])?.count == 2,"native stream lost sequential writes")
+    check((session.authority["revisions"] as? O)?["notes"] as? Int64 == 2,"stream retained stale authority")
+    let cursor = try db.cursor()
+    do { _ = try session.commit([event([note("1")])],sequence:1,bookMutation:writer.perform,pageCard:noCard); fatalError("duplicate batch accepted") }
+    catch ReaderNativeAssistantEdits.Failure {}
+    check(try db.cursor() == cursor,"duplicate native stream wrote again")
+    let frozen = try make()
+    _ = try session.commit([event([note("3")])],sequence:2,bookMutation:writer.perform,pageCard:noCard)
+    do { _ = try frozen.commit([event([note("4")])],sequence:1,bookMutation:writer.perform,pageCard:noCard); fatalError("stale authority overwrote data") }
+    catch let e as ReaderNativeAssistantEdits.Failure { check(e.conflict,"wrong revision failure") }
+    do { _ = try frozen.commit([],sequence:1,bookMutation:writer.perform,pageCard:noCard); fatalError("failed batch retried") }
+    catch ReaderNativeAssistantEdits.Failure {}
+    let malformed = try make(), before = try db.cursor()
+    do { _ = try malformed.commit([event([note("5")]),["name":"actions","data":"{}"]],sequence:1,bookMutation:writer.perform,pageCard:noCard); fatalError("invalid frame committed") }
+    catch ReaderNativeAssistantEdits.Failure {}
+    check(try db.cursor() == before,"malformed second frame made a partial write")
+    session.close()
+    do { _ = try session.commit([],sequence:3,bookMutation:writer.perform,pageCard:noCard); fatalError("closed session used") }
+    catch ReaderNativeAssistantEdits.Failure {}
+
+    var authority = try read.assistantSnapshot(bookID:bookID,surface:"pdf")
+    authority["page_cards"] = ["old":"numbering"]
+    let cards = try ReaderNativeAssistantDocumentSession(id:UUID().uuidString,authority:authority)
+    let card: O = ["fn":"_assistEdit","args":[["type":"page-card","op":"edit","expected_id":"original-placement",
+        "item":["large":"private saga before/after"]]]]
+    var calls = 0
+    let receipt = try cards.commit([event([card])],sequence:1,bookMutation:{ _ in fatalError("wrong writer") },pageCard:{ request in
+        check((request["expectedState"] as? O)?["page_cards"] != nil,"number authority removed before validation")
+        calls += 1
+        return ["ok":true,"changes":[["collection":"card-entities","record":["id":"original-gid"]]],
+            "result":["revision":4,"receipt":["contract":"reader-native-page-card-action/1"]]]
+    })
+    let output = receipt["events"] as! [O]
+    let actions = try JSONSerialization.jsonObject(with:Data((output[0]["data"] as! String).utf8)) as! [O]
+    let safe = (actions[0]["args"] as! [O])[0]
+    check((safe["item"] as? O)?["id"] as? String == "original-placement" && (safe["item"] as? O)?.count == 1,"saga snapshots leaked to UI")
+    check(cards.authority["page_cards"] == nil && calls == 1,"page numbering not invalidated")
+    check((receipt["changes"] as? [O])?.count == 1,"canonical card observation lost")
+    let mixed = try make()
+    do { _ = try mixed.commit([event([card,note("6")])],sequence:1,bookMutation:{ _ in fatalError("mixed book wrote") },pageCard:{ _ in fatalError("mixed saga wrote") }); fatalError("mixed saga accepted") }
+    catch ReaderNativeAssistantEdits.Failure {}
+}
+try testNativeDocumentSession()
+print("Native stream document session: authority advancement, ordered writes, deduplication, stale/cancelled/failed sessions and card receipts passed")

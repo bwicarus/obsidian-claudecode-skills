@@ -15790,19 +15790,25 @@
     }
     return {ok:true};
   }
-  function beginNativeAssistantSession(id, input, path) {
+  function beginNativeAssistantSession(id, input, path, nativeCommit) {
     if (!/^[0-9a-f-]{36}$/i.test(String(id || '')) || nativeAssistantSessions.size ||
         !input || typeof input !== 'object' || Array.isArray(input) || !input.rid ||
         (path !== '/api/assistant/chat' && !(nativeInterfaceSurface === 'epub' && path === '/pdf/api/epub-assistant'))) {
       return Promise.reject(new RuntimeError('助手书籍会话无效或已有会话', 'BW_NATIVE_ASSISTANT_SESSION'));
     }
-    var session = {closed:false,writer:null,authority:null,sequence:0,failed:false,busy:false};
+    var session = {closed:false,writer:null,authority:null,sequence:0,failed:false,busy:false,nativeCommit:nativeCommit === true};
     nativeAssistantSessions.set(id, session);
     return bootPromise.then(function () {
       if (session.closed) throw new RuntimeError('助手请求已取消','BW_NATIVE_ASSISTANT_SESSION');
+      if (session.nativeCommit && (nativeInterfaceSurface !== 'pdf' || !nativeBookWrites)) {
+        throw new RuntimeError('原生 PDF 写入接管未准备好','BW_NATIVE_ASSISTANT_SESSION');
+      }
       var request = {method:'POST',body:JSON.stringify(input)};
       if (nativeInterfaceSurface === 'pdf') {
         session.writer = acquireNativePDFWriterLease('native-assistant-stream');
+        // Swift reads one authoritative SQLite snapshot plus native character
+        // geometry. Keep only the existing file-operation lease in this adapter.
+        if (session.nativeCommit) return {body:input,snapshot:null};
         return nativePDFRequestBody(path, request, 'context', session.writer);
       }
       return nativeEPUBGenericRequestBody(path, request, 'context');
@@ -15812,7 +15818,7 @@
       // The older EPUB endpoint expects context.file in addition to the
       // generic file_rel field. Both carry the same frozen local identity.
       if (path === '/pdf/api/epub-assistant') prepared.body.context.file = localFileRef();
-      return {ok:true,body:prepared.body};
+      return {ok:true,body:prepared.body,file:localFileRef(),commitOwner:session.nativeCommit ? 'swift' : 'adapter'};
     }).catch(function (error) {
       if (nativeAssistantSessions.get(id) === session) endNativeAssistantSession(id);
       throw error;
@@ -15820,7 +15826,7 @@
   }
   function commitNativeAssistantEvents(id, sequence, events) {
     var session = nativeAssistantSessions.get(id);
-    if (!session || session.closed || session.failed || session.busy || !session.authority ||
+    if (!session || session.nativeCommit || session.closed || session.failed || session.busy || !session.authority ||
         sequence !== session.sequence + 1 || !Array.isArray(events) || events.length > 10000) {
       return Promise.reject(new RuntimeError('助手事件已过期或重复，未再次执行','BW_NATIVE_ASSISTANT_SESSION'));
     }
@@ -15848,9 +15854,28 @@
       .finally(function () { session.busy = false; });
   }
 
+  // Observation only: Swift already committed these exact changes. Keep the
+  // book-file writer lease until stream completion, but never write again here.
+  function observeNativeAssistantCommit(id, receipt) {
+    var session = nativeAssistantSessions.get(id);
+    if (!session || !session.nativeCommit || session.closed || session.failed ||
+        !receipt || receipt.ok !== true || receipt.file !== localFileRef() ||
+        !Number.isSafeInteger(receipt.sequence) || !Array.isArray(receipt.changes)) return {ok:false};
+    if (receipt.sequence === session.sequence) return {ok:true};
+    if (receipt.sequence !== session.sequence + 1) return {ok:false};
+    assertNativePDFWriterLease(session.writer);
+    session.sequence = receipt.sequence;
+    try {
+      if (stores.global && typeof stores.global.observeCommitted === 'function') stores.global.observeCommitted(receipt.changes);
+      if (receipt.pageCardsChanged === true) announceLocalNotesChanged('native-page-card');
+      return {ok:true};
+    } catch (error) { session.failed = true; throw error; }
+  }
+
   var api = {
     beginAssistantSession: beginNativeAssistantSession,
     commitAssistantEvents: commitNativeAssistantEvents,
+    observeAssistantCommit: observeNativeAssistantCommit,
     endAssistantSession: endNativeAssistantSession,
     contract: CONTRACT,
     owner: 'native-app',

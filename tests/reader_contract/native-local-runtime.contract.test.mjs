@@ -4349,6 +4349,34 @@ test("native assistant session freezes authority and commits before exposing str
   await assert.rejects(api.commitAssistantEvents(id,3,[]));
 });
 
+test("Swift-owned assistant preparation skips web reads and commits only observe receipts in the adapter", async () => {
+  const commands = [];
+  const state = {contract:'reader-native-pdf-assistant-state/1',file:DEFAULT_LOCAL_FILE,
+    revisions:{highlights:0,notes:0,ink:0,user_pages:0},highlights:[],notes:[],ink:{},user_pages:[]};
+  const result = await harness({interfaceManifest:withGenericAssistantRoutesSupported(),nativeBookReply(message) {
+    commands.push(message);
+    assert.equal(message.action,'bookAssistantSnapshot','observation must not initiate another write');
+    return Promise.resolve({ok:true,snapshot:clone(state)});
+  }});
+  const api = result.context.BWReaderRuntime.nativeLocalRuntime;
+  const id = '11111111-1111-4111-8111-111111111111';
+  const prepared = await api.beginAssistantSession(id,{rid:'native-write',context:{}},'/api/assistant/chat',true);
+  assert.equal(prepared.commitOwner,'swift');
+  assert.equal(prepared.file,DEFAULT_LOCAL_FILE);
+  assert.deepEqual(JSON.parse(JSON.stringify(prepared.body)),{rid:'native-write',context:{}});
+  await assert.rejects(api.commitAssistantEvents(id,1,[{name:'actions',data:'[]'}]));
+  const receipt = {ok:true,sequence:1,file:DEFAULT_LOCAL_FILE,changes:[],pageCardsChanged:true};
+  assert.equal(api.observeAssistantCommit(id,{...receipt,file:'localbook:another'}).ok,false);
+  assert.equal(api.observeAssistantCommit(id,{...receipt,sequence:2}).ok,false);
+  assert.equal(api.observeAssistantCommit(id,receipt).ok,true);
+  assert.equal(api.observeAssistantCommit(id,receipt).ok,true);
+  assert.equal(api.observeAssistantCommit(id,{...receipt,sequence:2}).ok,true);
+  api.endAssistantSession(id);
+  assert.equal(api.observeAssistantCommit(id,{...receipt,sequence:3}).ok,false);
+  assert.equal(commands.length,0,'Swift prepares the snapshot directly without another web store request');
+  assert.equal(result.pageTextMessages.length,0,'no hidden page text lookup');
+});
+
 test("failed native assistant commit is terminal and canceled preparation releases its writer", async () => {
   let releaseSnapshot, fail=false, writes=0;
   const result = await harness({interfaceManifest:withGenericAssistantRoutesSupported(),nativeBookReply(message) {

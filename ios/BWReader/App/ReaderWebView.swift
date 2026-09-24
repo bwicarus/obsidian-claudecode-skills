@@ -2357,6 +2357,57 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
+    private func performNativePageCard(_ request: [String:Any], bookID: String, deviceID: String) throws -> [String:Any] {
+        let document = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+        let global = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-global").store
+        let documentCursor = try document.cursor(), globalCursor = try global.cursor()
+        defer {
+            if (try? document.cursor()) != documentCursor || (try? global.cursor()) != globalCursor {
+                scheduleNativePDFProjectionRefresh(); markCloudSyncDirty()
+                nativeReplicationService?.wake()
+                // A direct edit or interrupted saga can commit an
+                // entity without returning a placement receipt.
+                // Refresh native faces from those committed rows,
+                // including when the following book write failed.
+                let changes = (try? global.journal(after:globalCursor,limit:4096)) ?? []
+                var changedIDs = Set<String>()
+                for change in changes {
+                    guard let value = try? JSONSerialization.jsonObject(with:Data(change.json.utf8)) as? [String:Any],
+                          value["collection"] as? String == ReaderNativeCardRepository.entities,
+                          let record = value["record"] as? [String:Any], let id = record["id"] as? String else { continue }
+                    changedIDs.insert(id)
+                }
+                let repository = ReaderNativeCardRepository(store:global,deviceID:deviceID)
+                for id in changedIDs {
+                    if let result = try? repository.perform(["operation":"load","arguments":[id]]),
+                       let record = result["result"] as? [String:Any] { nativeConversation.acceptCardRecord(record) }
+                }
+            }
+        }
+        guard try global.meta("legacyImport") == "done" else { throw ReaderNativePageCardActions.F("卡片数据库尚未准备好") }
+        let receipt = try ReaderNativePageCardActions(
+            book:.init(store:document,bookID:bookID,deviceID:deviceID),
+            repository:.init(store:global,deviceID:deviceID),sanitizeHTML:ReaderNativePageCardHTML.sanitize).perform(request)
+        if let result = receipt["result"] as? [String:Any], let journal = result["receipt"] as? [String:Any],
+           let entity = journal["entity"] as? [String:Any], let id = entity["id"] as? String,
+           let record = try ReaderNativeCardRepository(store:global,deviceID:deviceID).perform(["operation":"load","arguments":[id]])["result"] as? [String:Any] {
+            nativeConversation.acceptCardRecord(record)
+        }
+        return receipt
+    }
+
+    private func performNativeBookMutation(_ request: [String:Any], bookID: String, deviceID: String) throws -> [String:Any] {
+        let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+        let receipt = try ReaderNativeBookStore(store: store, bookID: bookID, deviceID: deviceID,
+            displayName: currentLocalBook?.title, contentSHA256: currentLocalBookContentSHA256).perform(request)
+        nativeReplicationService?.wake()
+        if request["operation"] as? String != "replication-enqueue" {
+            scheduleNativePDFProjectionRefresh()
+            markCloudSyncDirty()
+        }
+        return receipt
+    }
+
     private func scheduleNativePDFProjectionRefresh() {
         guard nativePDFDocument != nil else { return }
         guard nativeProjectionRefreshTask == nil else { return }
@@ -3240,9 +3291,67 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { return ["ok": false, "error": error.localizedDescription] }
     }
 
+    private func performNativeReviewTransition(_ command: [String:Any]) async -> [String:Any]? {
+        guard command["action"] as? String == "reviewAction", let value = command["value"] as? [String:Any],
+              let key = value["key"] as? String, ["select","rate","undo","reveal"].contains(key) else { return nil }
+        do {
+            let scope = nativeConversation.scope, generation = bookUserStateContextGeneration
+            let gatewayContext = nativeServerGateway?.contextRevision
+            guard command["scope"] as? String == scope, let queue = nativeReviewQueue,
+                  let lease = value["contextKey"] as? String, let cardID = value["cardId"] as? String else { throw CancellationError() }
+            func current() throws {
+                guard !Task.isCancelled, !isLoading, isTrustedReaderURL(webView.url),
+                      nativeConversation.scope == scope, bookUserStateContextGeneration == generation,
+                      nativeServerGateway?.contextRevision == gatewayContext,
+                      nativeReviewQueueContext == generation, nativeReviewQueueGatewayContext == gatewayContext,
+                      nativeReviewQueue === queue, nativeConversation.review["active"] as? Bool == true,
+                      nativeConversation.review["loading"] as? Bool != true else { throw CancellationError() }
+                try queue.validateVisibleCard(lease:lease,cardID:cardID)
+            }
+            try current()
+            let navigationID = UUID().uuidString
+            var stageObserved = false
+            defer {
+                if key == "rate" && !stageObserved { queue.discardRating(lease:lease,stageID:navigationID) }
+                webView.callAsyncJavaScript("window.RC?.review?.finishNativeTransition?.(id);",
+                    arguments:["id":navigationID],in:nil,in:.page,completionHandler:nil)
+            }
+            let prepared = try await webView.callAsyncJavaScript(
+                "return await window.RC?.review?.prepareNativeTransition?.(command);",
+                arguments:["command":["id":navigationID,"key":key,"lease":lease,"cardId":cardID]],in:nil,contentWorld:.page)
+            try current()
+            guard let fence = prepared as? [String:Any], fence["ok"] as? Bool == true,
+                  fence["id"] as? String == navigationID, fence["key"] as? String == key,
+                  fence["lease"] as? String == lease, fence["cardId"] as? String == cardID else {
+                throw ReaderNativeReviewQueue.Failure(message:"复习操作尚未完成，未切换卡片")
+            }
+            let result: [String:Any]
+            switch key {
+            case "rate": result = try queue.stageCurrentRating(lease:lease,cardID:cardID,stageID:navigationID,ease:value["ease"] ?? NSNull())
+            case "undo": result = try queue.undoCurrentRating(lease:lease,cardID:cardID)
+            case "reveal": result = try queue.revealCurrent(lease:lease,cardID:cardID)
+            default:
+                guard let targetID = value["targetId"] as? String else { throw ReaderNativeReviewQueue.Failure(message:"未指定目标复习卡") }
+                result = try queue.navigate(lease:lease,currentID:cardID,targetID:targetID)
+            }
+            let state = queue.presentation()
+            if ["rate","undo"].contains(key) || result["changed"] as? Bool == true { nativeReviewImprovements?.invalidate() }
+            nativeConversation.acceptReviewPresentation(state)
+            let observed = try await webView.callAsyncJavaScript(
+                "return window.RC?.review?.observeNativeTransition?.(receipt) === true;",
+                arguments:["receipt":["fence":fence,"result":result,"state":state]],in:nil,contentWorld:.page)
+            guard bookUserStateContextGeneration == generation, nativeConversation.scope == scope,
+                  observed as? Bool == true else {
+                throw ReaderNativeReviewQueue.Failure(message:"复习位置已保存，但界面状态已改变，请重新读取队列")
+            }
+            stageObserved = true
+            return ["ok":true,"value":state]
+        } catch { return ["ok":false,"error":error.localizedDescription] }
+    }
+
     private func performNativeReviewPresentation(_ command: [String: Any]) async -> [String: Any]? {
         guard command["action"] as? String == "reviewAction", let value = command["value"] as? [String: Any],
-              let key = value["key"] as? String, ["reveal", "expanded", "improveMode", "selectAnswer"].contains(key) else { return nil }
+              let key = value["key"] as? String, ["expanded", "improveMode", "selectAnswer"].contains(key) else { return nil }
         do {
             guard !isLoading, isTrustedReaderURL(webView.url), command["scope"] as? String == nativeConversation.scope,
                   let queue = nativeReviewQueue, nativeConversation.review["active"] as? Bool == true,
@@ -3330,6 +3439,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func requestNativeConversationCommand(_ command: [String: Any]) async -> [String: Any] {
         if let result = await performNativeArtifactCommand(command) { return result }
+        if let result = await performNativeReviewTransition(command) { return result }
         if let result = await performNativeReviewPresentation(command) { return result }
         if let result = await performNativeReviewSource(command) { return result }
         if command["action"] as? String == "settingsRead", command["section"] as? String == "computer" {
@@ -3737,6 +3847,34 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             )
             let nativeAssistantStream = ReaderNativeAssistantStreamBridge(webView: webView,
                 trustedBaseURL: localRuntimeServer.baseURL, gateway: nativeServerGateway)
+            nativeAssistantStream.preparePDFBody = { [weak self] input in
+                guard let self, let document = self.nativePDFDocument, let bookID = self.nativeReadingStoreBookID,
+                      bookID == self.currentLocalBook?.id, self.currentLocalBook?.format == .pdf,
+                      self.nativeReadingStoreDeviceID != nil else { throw CancellationError() }
+                let generation = self.bookUserStateContextGeneration, gatewayContext = self.nativeServerGateway?.contextRevision
+                var sources: [Int:[String:Any]] = [:]
+                for page in ReaderNativePDFContext.pages(input["context"] as? [String:Any] ?? [:]) {
+                    // Optional geometry failure does not fabricate numbering.
+                    // The complete book snapshot remains available for reading.
+                    sources[page] = try? await document.sourceCharacters(page:page)
+                    guard !Task.isCancelled, self.nativePDFDocument === document,
+                          self.bookUserStateContextGeneration == generation,
+                          self.nativeServerGateway?.contextRevision == gatewayContext else { throw CancellationError() }
+                }
+                let store = try self.nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
+                let authority = try ReaderNativeBookProjection(store:store).assistantSnapshot(bookID:bookID,surface:"pdf")
+                return try ReaderNativePDFContext.prepare(input,authority:authority,sources:sources)
+            }
+            nativeAssistantStream.commitPDFEvents = { [weak self] session, events, sequence in
+                guard let self, self.currentLocalBook?.format == .pdf,
+                      session.bookID == self.nativeReadingStoreBookID, session.bookID == self.currentLocalBook?.id,
+                      let deviceID = self.nativeReadingStoreDeviceID else { throw CancellationError() }
+                return try session.commit(events,sequence:sequence,bookMutation: { request in
+                    try self.performNativeBookMutation(request,bookID:session.bookID,deviceID:deviceID)
+                }, pageCard: { request in
+                    try self.performNativePageCard(request,bookID:session.bookID,deviceID:deviceID)
+                })
+            }
             self.nativeAssistantStream = nativeAssistantStream
             contentController.addScriptMessageHandler(nativeAssistantStream, contentWorld: .page,
                                                        name: ReaderNativeAssistantStreamBridge.messageName)
@@ -7953,41 +8091,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     replyHandler(nil,"页面卡片书籍上下文已改变"); return
                 }
                 do {
-                    let document = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
-                    let global = try nativeDataStoreHost.bridge(for:"bw-reader-native-v1-global").store
-                    let documentCursor = try document.cursor(), globalCursor = try global.cursor()
-                    defer {
-                        if (try? document.cursor()) != documentCursor || (try? global.cursor()) != globalCursor {
-                            scheduleNativePDFProjectionRefresh(); markCloudSyncDirty()
-                            nativeReplicationService?.wake()
-                            // A direct edit or interrupted saga can commit an
-                            // entity without returning a placement receipt.
-                            // Refresh native faces from those committed rows,
-                            // including when the following book write failed.
-                            let changes = (try? global.journal(after:globalCursor,limit:4096)) ?? []
-                            var changedIDs = Set<String>()
-                            for change in changes {
-                                guard let value = try? JSONSerialization.jsonObject(with:Data(change.json.utf8)) as? [String:Any],
-                                      value["collection"] as? String == ReaderNativeCardRepository.entities,
-                                      let record = value["record"] as? [String:Any], let id = record["id"] as? String else { continue }
-                                changedIDs.insert(id)
-                            }
-                            let repository = ReaderNativeCardRepository(store:global,deviceID:deviceID)
-                            for id in changedIDs {
-                                if let result = try? repository.perform(["operation":"load","arguments":[id]]),
-                                   let record = result["result"] as? [String:Any] { nativeConversation.acceptCardRecord(record) }
-                            }
-                        }
-                    }
-                    guard try global.meta("legacyImport") == "done" else { throw ReaderNativePageCardActions.F("卡片数据库尚未准备好") }
-                    let receipt = try ReaderNativePageCardActions(
-                        book:.init(store:document,bookID:bookID,deviceID:deviceID),
-                        repository:.init(store:global,deviceID:deviceID),sanitizeHTML:ReaderNativePageCardHTML.sanitize).perform(request)
-                    if let result = receipt["result"] as? [String:Any], let journal = result["receipt"] as? [String:Any],
-                       let entity = journal["entity"] as? [String:Any], let id = entity["id"] as? String,
-                       let record = try ReaderNativeCardRepository(store:global,deviceID:deviceID).perform(["operation":"load","arguments":[id]])["result"] as? [String:Any] {
-                        nativeConversation.acceptCardRecord(record)
-                    }
+                    let receipt = try performNativePageCard(request,bookID:bookID,deviceID:deviceID)
                     replyHandler(receipt,nil)
                 } catch let error as ReaderNativePageCardActions.F {
                     replyHandler(["ok":false,"code":"BW_NATIVE_PDF_ASSISTANT_ACTION","status":error.conflict ? 409 : 400,"error":error.localizedDescription],nil)
@@ -8016,14 +8120,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                     return
                 }
                 do {
-                    let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
-                    let receipt = try ReaderNativeBookStore(store: store, bookID: bookID, deviceID: deviceID,
-                        displayName: currentLocalBook?.title, contentSHA256: currentLocalBookContentSHA256).perform(request)
-                    nativeReplicationService?.wake()
-                    if request["operation"] as? String != "replication-enqueue" {
-                        scheduleNativePDFProjectionRefresh()
-                        markCloudSyncDirty()
-                    }
+                    let receipt = try performNativeBookMutation(request,bookID:bookID,deviceID:deviceID)
                     replyHandler(receipt, nil)
                 } catch let error as ReaderNativeAssistantEdits.Failure {
                     replyHandler(["ok":false,"code":"BW_NATIVE_PDF_ASSISTANT_ACTION","status":error.conflict ? 409 : 400,"error":error.localizedDescription],nil)

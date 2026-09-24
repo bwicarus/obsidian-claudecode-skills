@@ -111,6 +111,31 @@ final class ReaderNativeReviewQueue {
         return try currentCard(context: contextKey, cardID: cardID)
     }
 
+    func validateVisibleCard(lease expected: String, cardID: String) throws {
+        guard !cancelled, !lease.isEmpty, lease == expected,
+              let cards = activeSnapshot?["cards"] as? [Object], let index = activeSnapshot?["index"] as? Int,
+              (cards.indices.contains(index) ? ReaderNativeReviewCards.stableID(cards[index]) : "") == cardID else {
+            throw Failure(message:"当前复习卡已变化")
+        }
+    }
+
+    func stageCurrentRating(lease expected: String, cardID: String, stageID: String, ease: Any) throws -> Object {
+        let card = try presentedCard(lease:expected,cardID:cardID)
+        return try stageRating(["lease":expected,"stageId":stageID,"card":card,
+            "cardKey":cardID,"revealed":showingAnswer,"ease":ease])
+    }
+
+    func undoCurrentRating(lease expected: String, cardID: String) throws -> Object {
+        try validateVisibleCard(lease:expected,cardID:cardID)
+        guard let stageID = stagedRating?["nativeStageID"] as? String else { throw Failure(message:"当前没有可撤回的暂存评分") }
+        return try undoRating(["lease":expected,"stageId":stageID])
+    }
+
+    func revealCurrent(lease expected: String, cardID: String) throws -> Object {
+        _ = try interact(["lease":expected,"key":"reveal","cardId":cardID])
+        return ["snapshot":activeSnapshot!,"changed":false]
+    }
+
     func presentation() -> Object {
         presentationRevision += 1
         let cards = activeSnapshot?["cards"] as? [Object] ?? []
@@ -229,6 +254,16 @@ final class ReaderNativeReviewQueue {
 
     /// Change only the active card, preserving queue order, original identities
     /// and completed IDs. Persistence must succeed before the UI advances.
+    func navigate(lease expected: String, currentID: String, targetID: String) throws -> Object {
+        let current = try presentedCard(lease:expected,cardID:currentID)
+        guard takenRatings.isEmpty, let cards = activeSnapshot?["cards"] as? [Object] else {
+            throw Failure(message:"评分仍在保存，请稍后切换")
+        }
+        let matches = cards.filter { ReaderNativeReviewCards.stableID($0) == targetID }
+        guard matches.count == 1 else { throw Failure(message:"目标复习卡已更新或不唯一") }
+        return try selectCard(["lease":expected,"current":current,"target":matches[0]])
+    }
+
     func selectCard(_ input: Object) throws -> Object {
         guard input["lease"] as? String == lease, !lease.isEmpty, !cancelled,
               stagedRating == nil,

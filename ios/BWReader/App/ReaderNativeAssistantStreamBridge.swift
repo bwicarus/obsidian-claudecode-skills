@@ -15,6 +15,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     private var tasks: [String: Task<Void, Never>] = [:]
     private var sequences: [String: Int] = [:]
     private var bookActionSequences: [String: Int] = [:]
+    private var documents: [String: ReaderNativeAssistantDocumentSession] = [:]
     private var turns: [String: ReaderNativeAssistantTurn] = [:]
     private var watchers: [String: Task<Void, Never>] = [:]
     private var watcherKeys: [String: String] = [:]
@@ -25,6 +26,8 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     private var historyContext: UInt64?
     var beforeHistoryClear: ((String) async throws -> UUID)?
     var afterHistoryClear: ((String,UUID,Bool) -> Void)?
+    var commitPDFEvents: ((ReaderNativeAssistantDocumentSession, [[String:Any]], Int) throws -> [String:Any])?
+    var preparePDFBody: (([String:Any]) async throws -> [String:Any])?
 
     init(webView: WKWebView, trustedBaseURL: URL, gateway: ReaderNativeServerGateway) {
         self.webView = webView; self.trustedBaseURL = trustedBaseURL; self.gateway = gateway
@@ -43,6 +46,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     }
 
     func invalidate() {
+        documents.values.forEach { $0.close() }; documents.removeAll()
         let previousHistory = history
         history = nil; historyContext = nil
         Task { await previousHistory?.invalidate() }
@@ -124,7 +128,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                     guard let self else { throw CancellationError() }
                     // Sequence advancement and consumer delivery share the UI
                     // actor; a rejected/unknown delivery never resumes effects.
-                    try await self.deliver(events, id: id, lease: lease)
+                    try await self.deliver(events, id: id, lease: lease, gatewayContext: gatewayContext)
                 })
                 let result = try await stream.run()
                 await self.endDocumentSession(id: id)
@@ -274,21 +278,34 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                                           onResponse: onResponse, onChunk: onChunk)
     }
 
-    private func deliver(_ events: [ReaderNativeAssistantEvent], id: String, lease: UUID) async throws {
+    private func deliver(_ events: [ReaderNativeAssistantEvent], id: String, lease: UUID, gatewayContext: UInt64) async throws {
         try Task.checkCancellation()
-        guard epoch == lease, let webView, surface(webView.url) != nil else { throw CancellationError() }
+        guard epoch == lease, gateway.contextRevision == gatewayContext, let webView, surface(webView.url) != nil else { throw CancellationError() }
         let next = (sequences[id] ?? 0) + 1
         guard var turn = turns[id] else { throw CancellationError() }
         let batch = try ReaderNativeAssistantEventBatch(events)
         var receipts: [ReaderNativeAssistantEvent] = []
+        var nativeCommit: [String:Any]?
         if !batch.actions.isEmpty {
             // The document adapter has its own mutation sequence. Skipping a
             // text-only batch must not create a gap or advance a write receipt.
             let actionSequence = (bookActionSequences[id] ?? 0) + 1
-            let committed = try await webView.callAsyncJavaScript(
-                "return await window.BWReaderRuntime?.nativeLocalRuntime?.commitAssistantEvents(id,sequence,events);",
-                arguments:["id":id,"sequence":actionSequence,"events":batch.actions.map { ["name":$0.name,"data":$0.data] }], in:nil, contentWorld:.page)
-            guard epoch == lease, let receipt = committed as? [String:Any], receipt["ok"] as? Bool == true,
+            let actionEvents = batch.actions.map { ["name":$0.name,"data":$0.data] }
+            let committed: Any?
+            if let document = documents[id] {
+                guard let commitPDFEvents else { throw ReaderNativeAssistantStream.Failure("原生 PDF 写入入口未准备好") }
+                // Synchronous on the UI actor: navigation/cancellation cannot
+                // interleave with the existing SQLite transaction owners.
+                let result = try commitPDFEvents(document,actionEvents,actionSequence)
+                nativeCommit = result
+                committed = result
+            } else {
+                guard surface(webView.url) == .epub else { throw ReaderNativeAssistantStream.Failure("原生 PDF 会话已关闭") }
+                committed = try await webView.callAsyncJavaScript(
+                    "return await window.BWReaderRuntime?.nativeLocalRuntime?.commitAssistantEvents(id,sequence,events);",
+                    arguments:["id":id,"sequence":actionSequence,"events":actionEvents], in:nil, contentWorld:.page)
+            }
+            guard epoch == lease, gateway.contextRevision == gatewayContext, let receipt = committed as? [String:Any], receipt["ok"] as? Bool == true,
                   receipt["sequence"] as? Int == actionSequence, let values = receipt["events"] as? [[String:Any]] else {
                 throw ReaderNativeAssistantStream.Failure("本机改动未确认，未显示完成或重复执行")
             }
@@ -302,10 +319,14 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         let projected: [[String: Any]] = try batch.committed(receipts).map { event in
             return ["name": event.name, "data": event.data, "state": try turn.consume(event)]
         }
+        var payload: [String:Any] = ["id":id,"sequence":next,"events":projected]
+        if var nativeCommit {
+            nativeCommit.removeValue(forKey:"events")
+            payload["documentCommit"] = nativeCommit
+        }
         let result = try await webView.callAsyncJavaScript(
             "const receipt = window.__bwNativeAssistantStream?.accept(payload); await window.RC?.turnCard?.settle?.(); return receipt;",
-            arguments: ["payload": ["id": id, "sequence": next,
-                                    "events": projected]],
+            arguments: ["payload": payload],
             in: nil, contentWorld: .page)
         guard epoch == lease, let ack = result as? [String: Any], ack["ok"] as? Bool == true,
               ack["sequence"] as? Int == next else { throw ReaderNativeAssistantStream.Failure("对话接收状态已改变，未重复执行事件") }
@@ -315,20 +336,35 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
 
     private func beginDocumentSession(id: String, body: [String:Any], path: String, lease: UUID) async throws -> Data {
         guard epoch == lease, let webView else { throw CancellationError() }
+        let nativePDF = surface(webView.url) == .pdf
+        if nativePDF && (commitPDFEvents == nil || preparePDFBody == nil) { throw ReaderNativeAssistantStream.Failure("原生 PDF 入口未准备好") }
         let response = try await webView.callAsyncJavaScript(
-            "return await window.BWReaderRuntime?.nativeLocalRuntime?.beginAssistantSession(id,body,path);",
-            arguments:["id":id,"body":body,"path":path],in:nil,contentWorld:.page)
+            "return await window.BWReaderRuntime?.nativeLocalRuntime?.beginAssistantSession(id,body,path,nativePDF);",
+            arguments:["id":id,"body":body,"path":path,"nativePDF":nativePDF],in:nil,contentWorld:.page)
         try Task.checkCancellation()
         guard epoch == lease, let value = response as? [String:Any], value["ok"] as? Bool == true,
-              let prepared = value["body"] as? [String:Any], prepared["rid"] as? String == body["rid"] as? String,
+              var prepared = value["body"] as? [String:Any], prepared["rid"] as? String == body["rid"] as? String,
               prepared["turn_id"] as? String == body["turn_id"] as? String,
               JSONSerialization.isValidJSONObject(prepared) else { throw ReaderNativeAssistantStream.Failure("助手书籍上下文未准备好") }
+        if nativePDF {
+            guard value["commitOwner"] as? String == "swift", let preparePDFBody else {
+                throw ReaderNativeAssistantStream.Failure("原生 PDF 写入接管未确认")
+            }
+            prepared = try await preparePDFBody(prepared)
+            try Task.checkCancellation()
+            guard epoch == lease, prepared["rid"] as? String == body["rid"] as? String,
+                  prepared["turn_id"] as? String == body["turn_id"] as? String,
+                  let context = prepared["context"] as? [String:Any], let authority = context["native_local_state"] as? [String:Any],
+                  authority["file"] as? String == value["file"] as? String else { throw CancellationError() }
+            documents[id] = try ReaderNativeAssistantDocumentSession(id:id,authority:authority)
+        }
         let data = try JSONSerialization.data(withJSONObject:prepared)
         guard data.count <= 8 * 1024 * 1024 else { throw ReaderNativeAssistantStream.Failure("助手书籍上下文过大，未截断发送") }
         return data
     }
 
     private func endDocumentSession(id: String) async {
+        documents.removeValue(forKey:id)?.close()
         guard let webView else { return }
         _ = try? await webView.callAsyncJavaScript("return window.BWReaderRuntime?.nativeLocalRuntime?.endAssistantSession(id);",
             arguments:["id":id],in:nil,contentWorld:.page)

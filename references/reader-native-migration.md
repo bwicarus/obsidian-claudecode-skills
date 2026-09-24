@@ -733,3 +733,31 @@ passed. Swift projection/order checks are queued for the final consolidated
 Apple build, not yet run. Conversation ordering/action registration, document
 mutation adapters, review orchestration and startup/PC-context integration
 still retain compatibility code. No new App package or TestFlight upload.
+
+### PDF request preparation and direct document commits (candidate)
+
+The native assistant stream now reads the PDF authority snapshot and source
+characters directly. Swift builds optional card numbering and missing passage
+text without web page/context reads or rasterization. Native visible markers
+share its source-space numbering; the existing row/last-line ordering is stable
+under viewport zoom. Missing geometry omits the complete numbering projection,
+not the canonical notes or an invented anchor. The temporary web adapter only
+holds the existing file-operation lease during the stream.
+
+PDF action batches invoke the existing native book transaction and page-card
+saga directly, retaining their original operation IDs and version checks.
+Receipts update the compatibility observers; they cannot cause a second write.
+Malformed batches, interrupted sessions and unknown receipts stop execution.
+
+Review selection, score staging, undo and reveal commands resolve the visible
+card in the native queue. The compatibility effects barrier drains earlier
+work; reveal/navigation still submit the previous pending score first. A failed
+flush does not reveal the next answer. Staging remains reversible and does not
+submit a score; failed undo retains its stage for retry.
+
+Focused and full Reader Node checks passed; generated vendor and offline App
+resources are current. New Swift transaction/context/review checks are queued
+for the final consolidated Apple build, not yet run. Remaining scope includes
+conversation command/event registration, review effect/mode coordination,
+PDF startup imports and ReaderPC context publication. EPUB body and localized
+video WebKit remain approved exceptions. No signed App or TestFlight upload.

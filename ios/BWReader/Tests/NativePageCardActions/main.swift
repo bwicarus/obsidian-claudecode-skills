@@ -89,3 +89,38 @@ var changedRequest = directInput; changedRequest["replacement"] = ["cards":[["ty
 do { _ = try engine.perform(["operation":"direct","input":changedRequest,"projection":pageView]); fatalError("direct operation collision accepted") }
 catch let e as ReaderNativeAssistantEdits.Failure { check(e.conflict,"wrong direct collision error") }
 print("Native page-card saga: atomic placement, interrupted entity commit recovery, replay, undo/redo, metadata and conflicts passed")
+
+// Assistant preparation uses original character indexes and the same marker
+// order as the native page, without rendering or querying a web text layer.
+let characterSource: O = ["pageWidth":300,"pageHeight":400,"source":"embedded","chars":[
+    ["c":"左","x0":10,"y0":10,"x1":20,"y1":20,"bk":0],
+    ["c":"右","x0":70,"y0":10,"x1":80,"y1":20,"bk":0],
+    ["c":"下","x0":10,"y0":70,"x1":20,"y1":80,"bk":1]]]
+func contextNote(_ id: String, index: Int, text: String) -> O {
+    ["id":id,"anchor":["kind":"pdf","page":7],"html":["content":"<b>" + text + "</b>",
+        "bind":["kind":"page-chars","page":7,"from":index,"to":index,"text":text]]]
+}
+let contextNotes: [O] = [contextNote("lower",index:2,text:"下"),contextNote("right",index:1,text:"右"),
+    contextNote("left",index:0,text:"左"),["id":"free","anchor":["kind":"pdf","page":7],
+        "card":["cards":[["q":"<b>問い</b>","a":"答え"]]]]]
+let contextState: O = ["contract":"reader-native-pdf-assistant-state/1","file":"localbook:book",
+    "revisions":["notes":12,"highlights":0,"ink":0,"user_pages":0],"notes":contextNotes,
+    "highlights":[],"ink":[:],"user_pages":[]]
+let contextInput: O = ["rid":"same-request","turn_id":"same-turn","context":["page":7,"selected_text":"右"]]
+let preparedContext = try ReaderNativePDFContext.prepare(contextInput,authority:contextState,sources:[7:characterSource])
+let selectedContext = preparedContext["context"] as! O
+let preparedState = selectedContext["native_local_state"] as! O
+let contextProjection = preparedState["page_cards"] as! O
+let contextRows = (contextProjection["pages"] as! O)["7"] as! [O]
+check(contextRows.compactMap { $0["id"] as? String } == ["left","right","lower","free"],"native marker order differs from assistant numbering")
+check(contextRows[1]["number"] as? Int == 2 && contextRows[3]["number"] is NSNull,"unbound card acquired a numbered anchor")
+check(contextRows[3]["text"] as? String == "問い / 答え","legacy q/a face content was lost")
+check(Set((contextRows[0]["bind"] as! O).keys) == ["kind","page","from","to","text"],"binding no longer matches the server contract")
+check(selectedContext["selected_text"] as? String == "右" && preparedContext["turn_id"] as? String == "same-turn","preparation replaced request identity or selection")
+check((selectedContext["visible_text"] as? String ?? "").contains("左"),"native source text was omitted")
+var partial = contextInput; partial["context"] = ["page":7,"pages":[7,8],"visible_text":"original selected passage"]
+let partialContext = try ReaderNativePDFContext.prepare(partial,authority:contextState,sources:[7:characterSource])["context"] as! O
+check((partialContext["native_local_state"] as! O)["page_cards"] == nil,"partial page map falsely claimed complete numbering")
+check(partialContext["visible_text"] as? String == "original selected passage","existing passage was replaced")
+check(ReaderNativePDFContext.pages(["pages":[7,"7",0,"bad",8],"page":9]) == [7,8,9],"page list admitted invalid or duplicate entries")
+print("Native PDF context: source geometry, numbering, original identities, legacy faces and missing-source behavior passed")

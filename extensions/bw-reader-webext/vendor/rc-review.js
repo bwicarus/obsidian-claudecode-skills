@@ -63,6 +63,7 @@ if (window.__bwPwaProviderOnly) return;
   var _nativeDraftLease = '';
   var _nativeStageWork = null;
   var _nativeNavigationWork = null;
+  var _nativeTransitionFence = null;
   var _nativeRatingCommitWork = null;
   var _nativeReconcileWork = Promise.resolve();
   var _nativeQueuePresentation = null;
@@ -2211,6 +2212,74 @@ if (window.__bwPwaProviderOnly) return;
     panel.appendChild(reviewControls);
   }
 
+  // Transitional effects barrier only. The native queue chooses and persists
+  // the target from its own records; this adapter never submits another save.
+  async function _prepareNativeTransition(command) {
+    if (!_nativeReviewUI() || !command || !command.id || !['select','rate','undo','reveal'].includes(command.key) || command.lease !== _nativeQueueLease) throw new Error('复习轮次已切换');
+    var epoch = _queueRequestEpoch, contextKey = _contextCacheKey;
+    function current() {
+      return _mode && !_queueBusy && epoch === _queueRequestEpoch && contextKey === _contextCacheKey &&
+        command.lease === _nativeQueueLease && command.cardId === (_current() ? _stableCardId(_current()) : '');
+    }
+    if (_nativeNavigationWork) await _nativeNavigationWork;
+    if (_nativeStageWork) await _nativeStageWork;
+    if (!current()) throw new Error('当前复习卡已变化');
+    var staged = !!_stagedRating;
+    var flush = command.key === 'select' || command.key === 'reveal';
+    var committed = flush ? await _commitStagedRating(command.key === 'reveal' ? 'show-answer' : 'card-change') : false;
+    await Promise.all([_cacheWriteChain, _nativeReconcileWork]);
+    if (!current() || _ratingCommitBusy || flush && staged && committed === false) throw new Error('评分尚未保存，未切换卡片');
+    _nativeNavigationWork = new Promise(function (resolve) { _nativeTransitionFence = {id:command.id,release:resolve}; });
+    _publishPresentation();
+    return {ok:true,id:command.id,key:command.key,lease:_nativeQueueLease,epoch:epoch,contextKey:contextKey,cardId:command.cardId};
+  }
+
+  function _finishNativeTransition(id) {
+    if (!_nativeTransitionFence || _nativeTransitionFence.id !== id) return;
+    var release = _nativeTransitionFence.release;
+    _nativeTransitionFence = null; _nativeNavigationWork = null;
+    release(); _publishPresentation();
+  }
+
+  function _observeNativeTransition(receipt) {
+    var fence = receipt && receipt.fence, result = receipt && receipt.result, state = receipt && receipt.state;
+    if (!fence || !_nativeTransitionFence || _nativeTransitionFence.id !== fence.id) return false;
+    try {
+      if (!_nativeReviewUI() || !_mode || !state || !result || !result.snapshot ||
+          fence.lease !== _nativeQueueLease || fence.epoch !== _queueRequestEpoch || fence.contextKey !== _contextCacheKey ||
+          fence.cardId !== (_current() ? _stableCardId(_current()) : '') || state.lease !== _nativeQueueLease ||
+          !Number.isSafeInteger(state.revision) || _nativeQueuePresentation && state.revision <= _nativeQueuePresentation.revision ||
+          !Array.isArray(result.snapshot.cards) || result.snapshot.client_context_key !== _contextCacheKey ||
+          JSON.stringify(state.queueIds) !== JSON.stringify(result.snapshot.cards.map(_stableCardId))) return false;
+      var key = fence.key, stage = result.stage;
+      if (!['select','rate','undo','reveal'].includes(key) || ['rate','undo'].includes(key) && (!stage || !stage.card ||
+          stage.nativeQueueLease !== _nativeQueueLease || !stage.nativeStageID)) return false;
+      if (key === 'undo' && (!_stagedRating || _stagedRating.nativeStageID !== stage.nativeStageID)) return false;
+      var changed = ['rate','undo'].includes(key) || result.changed === true;
+      if (changed) {
+        _rememberAndDeactivateSelections();
+        _applyQueueSnapshot(result.snapshot);
+      }
+      if (key === 'rate') {
+        _stagedRating = stage; _ratingPending[stage.pendingKey] = true;
+        _patchSharedCard(stage.card, { _st:'done', _showBack:true, _ratingPending:true, _syncPending:false }, 'review-pending');
+      } else if (key === 'undo') {
+        _stagedRating = null; delete _ratingPending[stage.pendingKey];
+        _patchSharedCard(stage.card, { _st:'learn', _showBack:true, _next:stage.card._next || null,
+          _ratingPending:false, _syncPending:false }, 'review-staged-restored');
+      }
+      _acceptNativeReviewState(state);
+      render();
+      if (changed) {
+        _activateCurrentSelections(); _scheduleDecorate();
+        _notifyAssistant(key === 'rate' ? 'card-rating-staged' : key === 'undo' ? 'rating-restored' : 'card-change');
+      }
+      if (key === 'undo') _toast('已回到上一张卡，请重新选择评分');
+      _publishPresentation();
+      return true;
+    } finally { _finishNativeTransition(fence.id); }
+  }
+
   function _selectNativeCard(index, reason) {
     if (_nativeNavigationWork) return _nativeNavigationWork;
     if (_nativeStageWork) return _nativeStageWork.then(function () { return _selectNativeCard(index, reason); });
@@ -4328,6 +4397,9 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   RC.review = {
+    prepareNativeTransition: _prepareNativeTransition,
+    observeNativeTransition: _observeNativeTransition,
+    finishNativeTransition: _finishNativeTransition,
     acceptNativePresentation: function (state) {
       if (!_nativeReviewUI() || !state || state.lease !== _nativeQueueLease ||
           !Number.isSafeInteger(state.revision) || !['concise', 'verbose'].includes(state.improveMode) ||

@@ -46,6 +46,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     struct CardMarker: Identifiable {
         let id: String
         let rects: [CGRect]
+        var number = 0
         /// 分类色调 —— 原版 `WORD_CARD_TONES`（rc-stickynote）四选一。
         let tone: UIColor
         /// 这张卡正展开着（原版 `.pgmark.on`：描边加深 + 外晕）。
@@ -500,6 +501,7 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                 "pageWidth": value.pageWidth, "pageHeight": value.pageHeight,
                 "revision": NativeBookOCRBridge.pageRevision(value),
                 "source": value.source?.rawValue ?? "embedded",
+                "engine_revision": value.engineRevision,
                 "characterGeometry": value.characterGeometry.rawValue,
                 "layout": raw["layout"] ?? NSNull()]
     }
@@ -849,7 +851,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     /// （2026-09-22 用户连报两次："没跟紧画面而是有延迟还卡顿"、"还是有残影，
     /// 而且点击后根本打不开卡片"）。
     func cardMarkers(page: Int) -> [CardMarker] {
-        notes.compactMap { note -> CardMarker? in
+        guard let characters = characterPages[page] else { return [] }
+        let markers = notes.compactMap { note -> CardMarker? in
             guard let id = note["id"] as? String,
                   let payload = note["card"] as? [String: Any] ?? note["html"] as? [String: Any],
                   let bind = payload["bind"] as? [String: Any],
@@ -864,6 +867,14 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             return CardMarker(id: id, rects: value.rects,
                               tone: ReaderNativeMarkerStyle.tone(payload, slot: slot),
                               open: openCardIDs.contains(id))
+        }
+        let boxes = markers.map { marker in marker.rects.map { rect in
+            CGRect(x:rect.minX * characters.pageWidth,y:rect.minY * characters.pageHeight,
+                   width:rect.width * characters.pageWidth,height:rect.height * characters.pageHeight)
+            }
+        }
+        return ReaderNativePDFContext.ordered(boxes).enumerated().map { number,index in
+            var marker = markers[index]; marker.number = number + 1; return marker
         }
     }
 
@@ -1886,18 +1897,10 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
 
     /// 点中了哪个锁定框。⚠ 命中范围放宽 6pt：一行字的框只有十几点高，
     /// 按原尺寸判定基本点不中。
-    /// 本页序号：按被锚词的**顶边**先行后列排 —— 照原版 `_renumberMarks`。
-    /// 同行判据取行高一半（至少 6pt），固定阈值会把同一行判成上下关系。
+    /// Use the source-space order also sent to the assistant. Viewport scaling
+    /// must not change the identity addressed by a visible number.
     private func numberedMarkers() -> [(ReaderNativePDFDocument.CardMarker, Int)] {
-        let placed: [(ReaderNativePDFDocument.CardMarker, CGRect)] = cardMarkers.compactMap { marker in
-            guard let last = marker.rects.last, let box = project?(last) else { return nil }
-            return (marker, box)
-        }
-        let tolerance = max(6, (placed.map { $0.1.height }.max() ?? 0) * 0.5)
-        let sorted = placed.sorted { a, b in
-            abs(a.1.minY - b.1.minY) > tolerance ? a.1.minY < b.1.minY : a.1.minX < b.1.minX
-        }
-        return sorted.enumerated().map { ($0.element.0, $0.offset + 1) }
+        cardMarkers.map { ($0,$0.number) }
     }
 
     private func cardMarkerAt(_ point: CGPoint) -> String? {
