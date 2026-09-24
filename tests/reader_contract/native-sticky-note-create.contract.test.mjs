@@ -65,7 +65,7 @@ test("④ 保留的网页兼容命令过两道闸，参数有界", () => {
   assert.match(handler, /Number\.isSafeInteger\(value\.page\) && value\.page < 1|Number\.isSafeInteger\(value\.page\)/);
   assert.match(handler, /value\.x >= 0 && value\.x <= 1/);
   const allow = WEBVIEW.slice(WEBVIEW.indexOf("let allowed: Set<String>"),
-                              WEBVIEW.indexOf("guard let action = command[\"action\"]"));
+                              WEBVIEW.indexOf("guard let action = command[\"action\"]", WEBVIEW.indexOf("let allowed: Set<String>")));
   assert.match(allow, /"nativeCreateNote"/);
   const keys = SCRIPT.slice(SCRIPT.indexOf("const parameterKeys"),
                             SCRIPT.indexOf("const action = command.action;"));

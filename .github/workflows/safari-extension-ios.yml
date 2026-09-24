@@ -367,15 +367,15 @@ jobs:
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantStream.swift ios/BWReader/Tests/NativeAssistantStream/main.swift -o "$RUNNER_TEMP/native-assistant-stream-test"
           "$RUNNER_TEMP/native-assistant-stream-test"
 
-        - name: Verify native assistant history lifecycle
+      - name: Verify native assistant history lifecycle
         run: |
           xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeAssistantHistory.swift ios/BWReader/Tests/NativeAssistantHistory/main.swift -o "$RUNNER_TEMP/native-assistant-history-test"
-            "$RUNNER_TEMP/native-assistant-history-test"
+          "$RUNNER_TEMP/native-assistant-history-test"
 
-        - name: Verify native favorites ownership
-          run: |
-            xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeFavoritesService.swift ios/BWReader/Tests/NativeFavorites/main.swift -o "$RUNNER_TEMP/native-favorites-test"
-            "$RUNNER_TEMP/native-favorites-test"
+      - name: Verify native favorites ownership
+        run: |
+          xcrun swiftc -parse-as-library ios/BWReader/App/ReaderNativeCardRules.swift ios/BWReader/App/ReaderNativeFavoritesService.swift ios/BWReader/Tests/NativeFavorites/main.swift -o "$RUNNER_TEMP/native-favorites-test"
+          "$RUNNER_TEMP/native-favorites-test"
 
       - name: Verify native Japanese dictionary parity
         run: |

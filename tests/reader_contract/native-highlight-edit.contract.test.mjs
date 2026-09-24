@@ -82,7 +82,7 @@ test("⑥ 改完要重取投影，且命令过两道闸", () => {
   const open = body(WEBVIEW, "private func openNativeHighlightEditor", "/// 选区菜单里点了「语法」");
   assert.match(open, /scheduleNativePDFProjectionRefresh\(\)/);
   const allow = WEBVIEW.slice(WEBVIEW.indexOf("let allowed: Set<String>"),
-                              WEBVIEW.indexOf("guard let action = command[\"action\"]"));
+                              WEBVIEW.indexOf("guard let action = command[\"action\"]", WEBVIEW.indexOf("let allowed: Set<String>")));
   assert.match(allow, /"nativeHighlightEdit"/);
   const keys = SCRIPT.slice(SCRIPT.indexOf("const parameterKeys"),
                             SCRIPT.indexOf("const action = command.action;"));

@@ -53,7 +53,7 @@ test("④ 结果要出声，命令过两道闸", () => {
   assert.match(run, /nativeConversation\.report\("已重新识别："/);
   assert.match(run, /nativeConversation\.report\(receipt\["error"\]/);
   const allow = WEBVIEW.slice(WEBVIEW.indexOf("let allowed: Set<String>"),
-                              WEBVIEW.indexOf("guard let action = command[\"action\"]"));
+                              WEBVIEW.indexOf("guard let action = command[\"action\"]", WEBVIEW.indexOf("let allowed: Set<String>")));
   assert.match(allow, /"nativeOcrSelection"/);
   const keys = SCRIPT.slice(SCRIPT.indexOf("const parameterKeys"),
                             SCRIPT.indexOf("const action = command.action;"));

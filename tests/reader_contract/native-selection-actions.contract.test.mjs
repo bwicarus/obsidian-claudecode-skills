@@ -68,7 +68,7 @@ test("⑤ 菜单里这几件都在，且每件都过两道闸", () => {
     assert.match(menu, new RegExp(`UIAction\\(title: "${title}"`), title + " 不在菜单里");
   }
   const allow = WEBVIEW.slice(WEBVIEW.indexOf("let allowed: Set<String>"),
-                              WEBVIEW.indexOf("guard let action = command[\"action\"]"));
+                              WEBVIEW.indexOf("guard let action = command[\"action\"]", WEBVIEW.indexOf("let allowed: Set<String>")));
   assert.match(allow, /"nativePhraseFav"/);
   const keys = SCRIPT.slice(SCRIPT.indexOf("const parameterKeys"),
                             SCRIPT.indexOf("const action = command.action;"));

@@ -54,7 +54,7 @@ test("③ 原生面板只发起，并在标完后让正文重取", () => {
     "标完要重取叠加数据，否则这一页的下划线要翻页才消失");
   // 命令要过两道闸。
   const allow = WEBVIEW.slice(WEBVIEW.indexOf("let allowed: Set<String>"),
-                              WEBVIEW.indexOf("guard let action = command[\"action\"]"));
+                              WEBVIEW.indexOf("guard let action = command[\"action\"]", WEBVIEW.indexOf("let allowed: Set<String>")));
   assert.match(allow, /"nativeVocabMark"/);
   const keys = SCRIPT.slice(SCRIPT.indexOf("const parameterKeys"),
                             SCRIPT.indexOf("const action = command.action;"));

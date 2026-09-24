@@ -55,7 +55,7 @@ test("③ 网页适配器复用数据入口，原生面板只展示", () => {
 
 test("④ 命令要过两道闸，缺一就是哑按钮", () => {
   const allow = WEBVIEW.slice(WEBVIEW.indexOf("let allowed: Set<String>"),
-                              WEBVIEW.indexOf("guard let action = command[\"action\"]"));
+                              WEBVIEW.indexOf("guard let action = command[\"action\"]", WEBVIEW.indexOf("let allowed: Set<String>")));
   assert.match(allow, /"nativeSelectionLookup"/, "壳这侧的允许清单");
   const keys = SCRIPT.slice(SCRIPT.indexOf("const parameterKeys"),
                             SCRIPT.indexOf("const action = command.action;"));

@@ -44,7 +44,7 @@ test("② App 插图数据与附件由原生管理，浏览器仍用自身入口
   assert.doesNotMatch(code(toggle), /^\s*attached\.toggle\(\)/m);
   // 两道闸。
   const allow = WEBVIEW.slice(WEBVIEW.indexOf("let allowed: Set<String>"),
-                              WEBVIEW.indexOf("guard let action = command[\"action\"]"));
+                              WEBVIEW.indexOf("guard let action = command[\"action\"]", WEBVIEW.indexOf("let allowed: Set<String>")));
   assert.match(allow, /"nativeFigureAttach"/);
   const keys = SCRIPT.slice(SCRIPT.indexOf("const parameterKeys"),
                             SCRIPT.indexOf("const action = command.action;"));
