@@ -42,8 +42,9 @@ REPORTED_BUNDLE_ID="$(printf '%s\n' "$OUTPUT" | sed -n 's/^bundle_id=//p')"
 [ -f "$PACKAGE" ] || { echo "package_safari.py 没有报出 package=…"; exit 1; }
 [ "$REPORTED_BUNDLE_ID" = "$BUNDLE_ID" ] || { echo "扩展包 bundle ID 漂移：$REPORTED_BUNDLE_ID"; exit 1; }
 RESOURCES="$HERE/Extension/Resources"
-rm -rf "$RESOURCES"
+# 清空时保留仓库里的占位文件 .gitkeep，否则每次准备完工作区都显示它被删了
 mkdir -p "$RESOURCES"
+find "$RESOURCES" -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
 unzip -q "$PACKAGE" -d "$RESOURCES"
 for need in manifest.json background.js src vendor icons; do
   [ -e "$RESOURCES/$need" ] || { echo "扩展资源缺 $need"; exit 1; }
