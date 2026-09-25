@@ -30,7 +30,11 @@ from pathlib import Path
 HOME = Path.home()
 VOLUME = Path("/Volumes/BWDev")
 DEST_ROOT = VOLUME / "backups"
-SOURCES = {"data": HOME / "BW" / "data", "config": HOME / "BW" / "config"}
+SOURCES = {"data": HOME / "BW" / "data", "config": HOME / "BW" / "config",
+           # Codex 的自建 skill / AGENTS.md / config.toml / 会话与记忆（2026-09-25 从 Windows 补迁的就在这里）
+           "codex": HOME / ".codex"}
+# 各来源额外不备的（可重新下载 / 纯缓存）
+SOURCE_EXCLUDES = {"codex": ("plugins", "computer-use", "cache", ".tmp", "tmp", "log")}
 # 已整体迁到外接盘 archive/ 的旧副本、临时目录：不备
 SKIP_DIRS = {"legacy", "win-bridge-install", "temp"}
 SKIP_SUFFIX = ".moved-to-BWDev"
@@ -68,8 +72,8 @@ def snapshots() -> list[Path]:
     return sorted(p for p in DEST_ROOT.iterdir() if p.is_dir() and not p.name.endswith(".partial"))
 
 
-def rsync_files(source: Path, target: Path, previous: Path | None) -> None:
-    args = ["rsync", "-a", "--delete"]
+def rsync_files(source: Path, target: Path, previous: Path | None, extra: tuple[str, ...] = ()) -> None:
+    args = ["rsync", "-a", "--delete"] + [f"--exclude=/{name}/" for name in extra]
     args += [f"--exclude={name}/" for name in SKIP_DIRS] + [f"--exclude=*{SKIP_SUFFIX}"]
     args += [f"--exclude=*{suffix}" for suffix in SQLITE_SUFFIXES + SIDE_SUFFIXES]
     if previous is not None and previous.is_dir():
@@ -79,11 +83,11 @@ def rsync_files(source: Path, target: Path, previous: Path | None) -> None:
 
 
 def backup_databases(source: Path, target: Path, previous: Path | None,
-                     previous_started: float | None) -> dict:
+                     previous_started: float | None, extra: tuple[str, ...] = ()) -> dict:
     counts = {"copied": 0, "linked": 0, "bytes": 0}
     for root, dirs, files in os.walk(source):
         here = Path(root)
-        dirs[:] = [d for d in dirs if not skipped(here / d)]
+        dirs[:] = [d for d in dirs if not skipped(here / d) and not (here == source and d in extra)]
         for name in files:
             if not name.endswith(SQLITE_SUFFIXES):
                 continue
@@ -167,8 +171,9 @@ def main() -> int:
         for label, source in SOURCES.items():
             target = partial / label
             prior = previous / label if previous else None
-            rsync_files(source, target, prior)
-            report["sources"][label] = backup_databases(source, target, prior, previous_started)
+            rsync_files(source, target, prior, SOURCE_EXCLUDES.get(label, ()))
+            report["sources"][label] = backup_databases(source, target, prior, previous_started,
+                                                        SOURCE_EXCLUDES.get(label, ()))
             log(f"{label}: {report['sources'][label]}")
     except Exception as error:  # noqa: BLE001 —— 失败必须出声，且留下的 .partial 不会被当成快照
         log(f"失败：{error}")

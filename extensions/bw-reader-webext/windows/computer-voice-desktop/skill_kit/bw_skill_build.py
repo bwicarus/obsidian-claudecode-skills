@@ -41,7 +41,10 @@ def kit_dir() -> Path:
 
 
 def local_appdata() -> Path:
-    return Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    # 非 Windows（Mac 服务器）没设 LOCALAPPDATA 时退回 ~ —— ~/BWReader 由 deploy_mac.py 链到数据根。
+    if os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"])
+    return Path.home() / "AppData" / "Local" if os.name == "nt" else Path.home()
 
 
 def tools_cache_path() -> Path:
