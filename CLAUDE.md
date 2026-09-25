@@ -2,6 +2,28 @@
 
 ## ⚡ 环境定向（新 session 先读这个）
 
+### 🍎 2026-09-25 起：服务器与开发都在 Mac mini（先读这段，覆盖下面所有「Windows 是服务器」的说法）
+
+**详细见 [`references/mac-server.md`](references/mac-server.md)。** 要点：
+
+- **服务器 = Mac mini**（M6 / macOS 27，用户 `xuehaoyan`）。Tailscale 名 `bwicarus-2.taile44d0c.ts.net`
+  现在指向 Mac —— 靠设备改名实现，App 一行没改。**Windows 改名 `windows-pc`，服务器进程全停**，
+  下文所有「Windows 桥就是服务器」「在 Windows 上部署 / 重启 ReaderPC」都已过时。
+- **代码仓库（Mac）**：`~/BW/src/claude`，分支 `claude/mac-migration-20260925`（含 Codex build 974 +
+  Mac 适配 + Xcode 27 编译修复）。**数据**全在 `~/BW/data`，**服务**是 launchd
+  （`space.bwicarus.*`：webapp / mcp / voice-rt / rbi / bridge / voice-core / supervisor /
+  obsidian-sync / anki / kj-anki-sync），日志 `~/BW/logs/`。
+- **部署**：`/usr/bin/python3 extensions/bw-reader-webext/mac/deploy_mac.py [--only a,b] [--rollback]`，
+  不要在 `~/BW/runtime/current` 里改代码。
+- **App 本机开发**：`ios/BWReader/prepare_local_xcode.sh [--dev]` 后用 Xcode 打开 `ios/BWReader/BWReader.xcodeproj`。
+  本机 Xcode 27、云端 26.6 —— 写 Swift 避开「分支类型不同的嵌套三元」「超长 SwiftUI 修饰链」。
+- ⚠ **远程 SSH 会话不能代码签名**（`errSecInternalComponent`）：装真机、发 TestFlight 要在 Mac 桌面上开的会话里做。
+- ⚠ **.NET 8 在 macOS 上 LocalApplicationData = `~/Library/Application Support`**（不是 ~/.local/share）；
+  那里的 `BWReader` 必须是指向 `~/BW/data/BWReader` 的链接，否则桥读空目录（App 报「语音核心没在跑」）。
+- 「电脑语音」（驱动 Codex/ChatGPT 桌面版、虚拟声卡）**已停用**，只用 CLI 语音。
+- 未完成：外接盘抹 APFS 后移仓库、Mac 自动登录与断电自启（用户开）、PC OCR / spacy 未迁、
+  这批修复要合回 Codex 的分支、Windows 的「BW Computer Voice Setup」计划任务要管理员禁用。
+
 ### 🌲 第 0 步：你在哪棵 git 树
 
 这个仓库同时存在多个 worktree，**你所在的 checkout 决定你能看见哪些代码**。
