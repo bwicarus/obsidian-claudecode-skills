@@ -101,6 +101,12 @@ cd ~/BW/src/claude
   `mcpDisable=["node_repl"]`（写不存在的 bwab 会让 Codex 起不来）。
 - **Codex**：`~/.codex/config.toml` 是用户原有配置 + 末尾追加的 reader_snapshot / voice_core 两段
   （原件 `config.toml.before-mcp-append`）。Codex 桌面版与 CLI 语音共用这份。
+- **Codex 全局配置（2026-09-25 查出迁移时漏了）**：Mac 的 `~/.codex/AGENTS.md` 原是空文件，已从 Windows 恢复
+  （现行 3.8 KB 精简入口；阅读器/语音规则经 `reader_capability_guide` 按话题取）。能力指南与语音入口指令里的
+  命令改为运行时渲染本机路径（不再写死 `C:\…`）；`~/BWReader` 也链到数据根。
+  ⚠ **Windows 的 13 个自建 skill 与 `rules/default.rules` 还没迁**：12 个含 PowerShell / `Program Files` /
+  AppData 路径，需逐个改写。原件归档在 `/Volumes/BWDev/archive/windows-codex-20260925/`；
+  已装无 Windows 依赖的 `reader-selection-research-card`。Mac → Windows SSH：`ssh windows-pc`（登录名 bwicarus）。
 - **Obsidian**：库 `~/BW/data/obsidian`；`资源/vocab` 被同步配置忽略（服务器本机生成），
   >200 MB 的文件云同步不收（`File too large` 提示正常）。
 - **Anki**：数据从 AnkiWeb 同步（10 牌组 / 501 卡）。只装 AnkiConnect；Windows 的 AnkiTrayPro 不带。
