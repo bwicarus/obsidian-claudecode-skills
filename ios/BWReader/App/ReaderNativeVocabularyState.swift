@@ -94,7 +94,9 @@ struct ReaderNativeVocabularyState {
               !mutation.isEmpty, mutation.utf8.count <= 1024, !mutation.contains("\0") else {
             throw Failure(message: "词汇写入身份无效")
         }
-        return try store.inTransaction {
+        // 显式写出闭包类型：Xcode 27 的 Swift 编译器推断这个长闭包的返回类型时自身崩溃
+        // （"failed to produce diagnostic for expression"，2026-09-25 Mac 本机编译实测）。
+        return try store.inTransaction { () throws -> [String: Any] in
             let receiptID = "native-vocabulary:" + mutation
             if let saved = try store.mutationResult(mutationId: receiptID) {
                 let receipt = try R.object(JSONSerialization.jsonObject(with: Data(saved.utf8)), "vocabulary receipt")

@@ -12,6 +12,12 @@
 #   只改了 Swift 代码则不必重跑（除非新增 / 删除了文件：那要重跑 ③）。
 set -euo pipefail
 
+# --dev：生成「开发签名」的工程（自动签名 + Apple Development），用于本机装到 iPad 调试。
+#   不带时与 CI 相同（手动签名 + Apple Distribution + App Store 描述文件，用于 TestFlight）。
+#   ⚠ 只在生成时临时改一份配置，project.yml 本身不动，CI 不受影响。
+DEV_SIGNING=0
+[ "${1:-}" = "--dev" ] && DEV_SIGNING=1
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 PY="${BW_PYTHON:-$HOME/BW/venv/server/bin/python}"
@@ -58,7 +64,33 @@ READER_BUNDLE="$HERE/Generated/ReaderBundle"
 
 step "③ 生成 Xcode 工程"
 rm -rf "$HERE/BWReader.xcodeproj"
-"$XCODEGEN" generate --spec "$HERE/project.yml" --project "$HERE"
+SPEC="$HERE/project.yml"
+if [ "$DEV_SIGNING" = 1 ]; then
+  # 临时配置必须和 project.yml 同目录（里面的相对路径以配置文件所在目录为准）
+  SPEC="$HERE/.project.dev-signing.yml"
+  trap 'rm -f "$HERE/.project.dev-signing.yml"' EXIT
+  "$PY" - "$HERE/project.yml" "$SPEC" <<'PY'
+import sys
+# 逐行改，不用正则：本段嵌在 shell heredoc 里，反斜杠转义一多就容易被改坏。
+counts = [0, 0, 0]
+out = []
+for line in open(sys.argv[1], encoding="utf-8").read().splitlines(keepends=True):
+    key = line.strip()
+    if key.startswith("PROVISIONING_PROFILE_SPECIFIER:"):
+        counts[2] += 1
+        continue
+    if key == "CODE_SIGN_STYLE: Manual":
+        line = line.replace("Manual", "Automatic")
+        counts[0] += 1
+    elif key == "CODE_SIGN_IDENTITY: Apple Distribution":
+        line = line.replace("Apple Distribution", "Apple Development")
+        counts[1] += 1
+    out.append(line)
+open(sys.argv[2], "w", encoding="utf-8").write("".join(out))
+print("开发签名：手动签名 %d 处→自动，发布证书 %d 处→开发证书，去掉描述文件 %d 处" % tuple(counts))
+PY
+fi
+"$XCODEGEN" generate --spec "$SPEC" --project "$HERE"
 xcodebuild -project "$HERE/BWReader.xcodeproj" -list | sed -n '1,30p'
 
 printf '\n完成。用 Xcode 打开：open "%s"\n' "$HERE/BWReader.xcodeproj"
