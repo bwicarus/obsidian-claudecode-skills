@@ -115,6 +115,20 @@ internal static class ReaderPresenceSignal
             File.WriteAllText(temporary, record.ToJsonString(
                 new JsonSerializerOptions { WriteIndented = true }));
             File.Move(temporary, path, overwrite: true);
+            // 分设备再留一份：上面那份只剩「最后一台」，iPad 与 iPhone 同时在用时
+            // 互相覆盖，就答不出「哪台设备在做什么」（MCP user_situation 读这些）。
+            string deviceKey = new string(
+                (record["device"]?.GetValue<string>() ?? "unknown")
+                    .Where(char.IsAsciiLetterOrDigit).Take(24).ToArray());
+            if (deviceKey.Length > 0)
+            {
+                string perDevice = Path.Combine(
+                    _storeDirectory, "presence-signal-" + deviceKey + ".json");
+                string perDeviceTemporary = perDevice + ".tmp-" + Environment.ProcessId;
+                File.WriteAllText(perDeviceTemporary, record.ToJsonString(
+                    new JsonSerializerOptions { WriteIndented = true }));
+                File.Move(perDeviceTemporary, perDevice, overwrite: true);
+            }
         }
         catch (Exception exception)
         {

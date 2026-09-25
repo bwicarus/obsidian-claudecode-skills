@@ -326,6 +326,124 @@ def reading_positions() -> dict:
         return {"ok": False, "error": str(ex)}
 
 
+# ───────────────────────── 用户现况（地点 / 设备 / 在做什么）─────────────────────────
+def _bwreader_root() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "BWReader"
+
+
+def _bridge_runtime() -> Path:
+    state = os.environ.get("READER_CONTEXT_MCP_STATE", "").strip()
+    if state:
+        return Path(state).parent
+    return Path(os.environ.get("USERPROFILE") or Path.home()) / "bw-computer-voice-bridge" / "runtime"
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+
+
+def _minutes_ago(ms, now_ms: int):
+    return round((now_ms - ms) / 60000, 1) if isinstance(ms, (int, float)) and ms > 0 else None
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+))
+def user_situation() -> dict:
+    """用户**此刻**的现况：在哪（地点）、用什么设备、在做什么（读哪本书第几页 / 复习 / 语音），
+    以及是否醒着、多久没操作。回答「他现在在干嘛/在哪/方便说话吗」先调这个。
+
+    每项都带 known：known=false 表示**不知道**（附 why），不等于「否」—— 读不到位置
+    不代表不在家。ageMinutes 是该信息距今多久，旧信息请按旧处理。
+    信号与自动触发规则共用同一套判断（situation_signals），这里只读不改。"""
+    import importlib
+    now_ms = int(datetime.datetime.now().timestamp() * 1000)
+    root, runtime = _bwreader_root(), _bridge_runtime()
+    gaps: list[str] = []
+    try:
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        signals_module = importlib.import_module("situation_signals")
+        signals = signals_module.read_all(root, runtime)["signals"]
+    except Exception as ex:  # 信号模块缺失/报错：说清楚，别给一份看似完整的空结果
+        signals = {}
+        gaps.append(f"情境信号读取失败：{ex}")
+
+    def sig(name):
+        value = signals.get(name) or {"known": False, "why": "信号不可用"}
+        if not value.get("known"):
+            gaps.append(f"{name}：{value.get('why') or '不知道'}")
+        return value
+
+    place, alias = sig("place"), sig("place_alias")
+    presence = _read_json(root / "presence-signal.json") or {}
+    snapshot = _read_json(runtime / "reader-context-snapshot.json") or {}
+    active = snapshot.get("activeReading") if isinstance(snapshot.get("activeReading"), dict) else None
+
+    # 桥按设备各存一份 presence-signal-<设备>.json；旧桥只有「最后一台」那一份。
+    reports = [r for r in (_read_json(p) for p in sorted(root.glob("presence-signal-*.json"))) if isinstance(r, dict)]
+    if not reports and presence.get("device"):
+        reports = [dict(presence, _singleSlot=True)]
+    latest_ms = max((r.get("atMs") or 0 for r in reports), default=0)
+    devices = []
+    for report in sorted(reports, key=lambda r: r.get("atMs") or 0, reverse=True):
+        entry = {
+            "device": report.get("device"),
+            "appForeground": report.get("foreground"),
+            "audioRoute": report.get("audioRoute"),
+            "lastReportMinutesAgo": _minutes_ago(report.get("atMs"), now_ms),
+            "mostRecent": report.get("atMs") == latest_ms,
+        }
+        if report.get("_singleSlot"):
+            entry["note"] = "只有最后一台上报的设备（桥未升级到分设备记录）"
+        devices.append(entry)
+    if not devices:
+        gaps.append("设备：App 没报过在场信号")
+
+    reading = None
+    if active and active.get("title"):
+        observed = active.get("observedAtEpochMs")
+        reading = {
+            "title": active.get("title"), "kind": active.get("kind"), "page": active.get("page"),
+            "fresh": active.get("fresh"), "observedMinutesAgo": _minutes_ago(observed, now_ms),
+            "device": None,
+            "deviceWhy": "阅读上报里还没有设备字段（多台设备时无法区分是哪台在读）",
+        }
+    else:
+        gaps.append("阅读：快照里没有当前阅读")
+
+    return {
+        "ok": True,
+        "now": datetime.datetime.fromtimestamp(now_ms / 1000).strftime("%Y-%m-%d %H:%M"),
+        "place": {"state": place.get("value"), "alias": alias.get("value"),
+                  "known": bool(place.get("known")), "ageMinutes": place.get("ageMinutes"),
+                  "why": place.get("why")},
+        "devices": devices,
+        "activity": {
+            "reading": reading,
+            "voiceLinked": sig("voice_linked").get("value"),
+            "reviewing": sig("reviewing").get("value"),
+            "reviewRemaining": signals.get("review_remaining", {}).get("value"),
+            "reviewDue": signals.get("review_due", {}).get("value"),
+            "reviewNew": signals.get("review_new", {}).get("value"),
+            "headphones": sig("headphones").get("value"),
+        },
+        "body": {
+            "awake": sig("awake").get("value"),
+            "wokeAtHour": signals.get("woke_at_hour", {}).get("value"),
+            "idleMinutes": signals.get("idle_minutes", {}).get("value"),
+            "localHour": signals.get("local_hour", {}).get("value"),
+        },
+        "unknown": gaps,
+    }
+
+
 # ───────────────────────── 词汇 / 语言 ─────────────────────────
 @mcp.tool()
 def lookup_word(word: str, context: str = "", langs: str = "") -> dict:

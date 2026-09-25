@@ -58,6 +58,19 @@ final class ReaderPresenceGuard {
     // ─────────────────────────── 音频走向 ───────────────────────────
 
     /// 当前输出走哪儿。取第一个输出口：同时接多个输出时系统只会用一个。
+    /// 哪类设备在报（原来写死 "iPhone"，iPad 报上来也是 iPhone —— 2026-09-25 查
+    /// 「用什么设备在做什么」时发现）。用型号标识判断，不碰 UIDevice（MainActor）。
+    static let deviceKind: String = {
+        var info = utsname()
+        uname(&info)
+        let machine = withUnsafeBytes(of: &info.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        if machine.hasPrefix("iPad") { return "iPad" }
+        if machine.hasPrefix("iPhone") { return "iPhone" }
+        return machine.isEmpty ? "iOS" : String(machine.prefix(40))
+    }()
+
     static func currentAudioRoute() -> String {
         let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
         guard let port = outputs.first else {
@@ -191,7 +204,7 @@ final class ReaderPresenceGuard {
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "audioRoute": route,
             "foreground": foreground,
-            "device": "iPhone",
+            "device": Self.deviceKind,
             "atMs": Int(Date().timeIntervalSince1970 * 1000),
         ])
         do {
