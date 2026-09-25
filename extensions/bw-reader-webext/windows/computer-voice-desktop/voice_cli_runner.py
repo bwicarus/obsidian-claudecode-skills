@@ -533,7 +533,9 @@ class MicTrack(MediaStreamTrack):
             self.stream = sd.InputStream(device=idx, samplerate=RATE, channels=1, dtype="int16", blocksize=BLOCK, callback=self._cb)
         except Exception:
             # 设备不认 48 kHz（部分 USB 麦 / HDMI 只给默认采样率）→ 按它的默认率开，送轨前重采样到 48 kHz
-            self.rate = int(sd.query_devices(idx)["default_samplerate"])
+            # idx 为 None（设备名留空 = 系统默认）时必须带 kind：不带的话 query_devices(None)
+            # 返回的是**全部设备的列表**，再按 "default_samplerate" 取就是 tuple 下标报错（Mac 实测）。
+            self.rate = int(sd.query_devices(idx, "input")["default_samplerate"])
             self.stream = sd.InputStream(device=idx, samplerate=self.rate, channels=1, dtype="int16",
                                          blocksize=int(self.rate / 50), callback=self._cb)
             self.resampler = AudioResampler(format="s16", layout="mono", rate=RATE)
@@ -757,7 +759,8 @@ class Speaker:
         self.underruns = 0   # 回调要的比缓冲里有的多（半帧）
         self.status_flags = 0
         idx = pick_device(device_name, "out")
-        default_rate = int(sd.query_devices(idx)["default_samplerate"] or 48000)
+        # idx 为 None = 系统默认输出；带上 kind 才拿到那一台设备，而不是全部设备的列表
+        default_rate = int(sd.query_devices(idx, "output")["default_samplerate"] or 48000)
         candidates = [r for r in (out_rate, default_rate, 48000, 44100) if r]
         last_err: Exception | None = None
         for rate in candidates:

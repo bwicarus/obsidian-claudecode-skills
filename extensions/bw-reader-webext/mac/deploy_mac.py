@@ -142,6 +142,15 @@ def make_release() -> Path:
             shutil.rmtree(inside)
         inside.symlink_to(target)
     (release / ".env.local").symlink_to(CONFIG)
+    # .NET 8 在 macOS 上把 LocalApplicationData 映射到 ~/Library/Application Support（不是 ~/.local/share）。
+    # 桥的书库 / 用户状态 / 卡片资源 / runner.pid 都在它下面的 BWReader 里 —— 指到真正的数据目录，
+    # 否则桥读的是一个空目录（2026-09-25 实测：App 报「语音核心没在跑」、切换后写入落到错位置）。
+    for alias in (HOME / "Library" / "Application Support" / "BWReader", HOME / ".local" / "share" / "BWReader"):
+        if not alias.is_symlink():
+            if alias.exists():
+                sys.exit(f"{alias} 是实体目录：先把里面的文件合并进 {DATA / 'BWReader'} 再部署")
+            alias.parent.mkdir(parents=True, exist_ok=True)
+            alias.symlink_to(DATA / "BWReader")
     log(f"版本目录 {release}")
     return release
 
@@ -204,8 +213,13 @@ def restart(names: list[str]) -> None:
                               capture_output=True).returncode != 0:
                 break
             time.sleep(0.25)
-        done = subprocess.run(["launchctl", "bootstrap", domain, str(plist)],
-                              capture_output=True, text=True)
+        # 刚 bootout 的服务偶尔还没从 launchd 里退干净，bootstrap 会报 5（Input/output error）：等一会儿重试
+        for attempt in range(6):
+            done = subprocess.run(["launchctl", "bootstrap", domain, str(plist)],
+                                  capture_output=True, text=True)
+            if done.returncode == 0:
+                break
+            time.sleep(1)
         state = "已启动" if done.returncode == 0 else f"启动失败：{(done.stderr or '').strip()}"
         log(f"{name}: {state}")
 
