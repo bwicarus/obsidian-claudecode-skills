@@ -76,6 +76,20 @@ internal sealed record DirectRuntimeError(
                 ? protocol.Code
                 : "BW_COMPUTER_VOICE_DIRECT_INTERNAL_FAILURE";
         string stage = audioStage?.Stage ?? fallbackStage;
+#if BW_PORTABLE
+        // Mac 服务器（2026-09-25 迁移）：失败记录只有错误码，看不出是哪个 Windows 专属
+        // 接口在 Mac 上失败了。这里额外往 stderr（launchd 收进 ~/BW/logs/bridge.log）打
+        // 每层异常的**类型名 + 出错方法名** —— 都是编译期常量，不含 message，
+        // 遵守上面「message 永不外写」的规矩。Windows 版不编这段。
+        try
+        {
+            Console.Error.WriteLine(
+                "[failure] " + code + " stage=" + stage + " " + DescribeChain(exception));
+        }
+        catch
+        {
+        }
+#endif
         if (
             string.IsNullOrWhiteSpace(stage)
             || stage.Length > 80
@@ -104,6 +118,37 @@ internal sealed record DirectRuntimeError(
             (atUtc ?? DateTimeOffset.UtcNow).ToUniversalTime(),
             exceptionType);
     }
+
+#if BW_PORTABLE
+    private static string DescribeChain(Exception exception)
+    {
+        var parts = new List<string>();
+        var pending = new Stack<Exception>();
+        pending.Push(exception);
+        while (pending.Count > 0 && parts.Count < 12)
+        {
+            Exception current = pending.Pop();
+            var frames = new System.Diagnostics.StackTrace(current, false).GetFrames()
+                .Select(frame => frame.GetMethod())
+                .Where(method => method is not null)
+                .Take(4)
+                .Select(method => method!.DeclaringType?.Name + "." + method.Name);
+            parts.Add(current.GetType().Name + "@[" + string.Join(" < ", frames) + "]");
+            if (current is AggregateException aggregate)
+            {
+                foreach (Exception inner in aggregate.InnerExceptions)
+                {
+                    pending.Push(inner);
+                }
+            }
+            else if (current.InnerException is not null)
+            {
+                pending.Push(current.InnerException);
+            }
+        }
+        return string.Join(" ⇐ ", parts);
+    }
+#endif
 
     private static AudioCaptureStageException? FindAudioStageFailure(
         Exception exception)
