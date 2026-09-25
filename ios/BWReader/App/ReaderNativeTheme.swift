@@ -59,15 +59,19 @@ extension View {
         if !enabled {
             self
         } else if #available(iOS 26.0, *) {
+            // 2026-09-26 用户（迁移前笔记）：「优先复现原网页卡片的视觉设计…玻璃适度，
+            // 不要牺牲原有的字体和整体观感」。卡面回到原版 .vc-card 的深色底
+            // rgba(30,30,34)（这里 0.8，留一点透光），玻璃只薄薄一层；高光描边收淡。
             self
-                .background(LinearGradient(colors: [tone.opacity(0.20), Color.black.opacity(0.30)],
+                .background(LinearGradient(colors: [tone.opacity(0.10), Color.clear],
                                            startPoint: .top, endPoint: .bottom), in: shape)
+                .background(Color(red: 30 / 255, green: 30 / 255, blue: 34 / 255).opacity(0.80), in: shape)
                 .clipShape(shape)
-                .glassEffect(.regular.tint(tone.opacity(0.22)), in: shape)
+                .glassEffect(.regular.tint(tone.opacity(0.10)), in: shape)
                 .overlay(shape.strokeBorder(
-                    LinearGradient(colors: [Color.white.opacity(0.55), tone.opacity(0.45), Color.white.opacity(0.05)],
+                    LinearGradient(colors: [Color.white.opacity(0.30), Color.white.opacity(0.14), Color.white.opacity(0.06)],
                                    startPoint: .topLeading, endPoint: .bottomTrailing),
-                    lineWidth: 1))
+                    lineWidth: 0.5))
         } else {
             self.background(fallbackFill, in: shape)
                 .clipShape(shape)

@@ -193,6 +193,27 @@ struct ReaderNativeConversationArtifacts: View {
 }
 
 @MainActor
+/// 原网页卡片的视觉（rc-voicecall `.vc-card` / `.vc-if-*`、rc-flashcard `.fc-card`），数值逐项照搬。
+/// 2026-09-26 用户：「颜色、质感、字号和整体排版不如原网页设计 —— 先复现原设计，玻璃适度」。
+/// 原版无论深浅色都是深色卡：卡内一律按深色方案取色，次要文字自然落到原版的暗灰。
+enum ReaderNativeCardStyle {
+    static let surface = Color(red: 30/255, green: 30/255, blue: 34/255).opacity(0.9)     // --vc-cardbg
+    static let border = Color.white.opacity(0.14)                                           // 0.5px
+    static let text = Color(red: 0xf2/255, green: 0xf2/255, blue: 0xf7/255)                // #f2f2f7
+    static let purple = Color(red: 0xbf/255, green: 0x5a/255, blue: 0xf2/255)              // --rc-purple
+    static let muted = Color(red: 235/255, green: 235/255, blue: 245/255).opacity(0.62)    // --rc-text-muted
+    static let tip = Color(red: 0xb8/255, green: 0xc6/255, blue: 0xe2/255)                 // #b8c6e2
+    static let newsTitle = Color(red: 0xe8/255, green: 0xee/255, blue: 0xfb/255)           // #e8eefb
+    static let newsSummary = Color(red: 0x9f/255, green: 0xb0/255, blue: 0xcf/255)         // #9fb0cf
+    static let hairline = Color.white.opacity(0.10)
+    /// 学习卡 .fc-card：145° 深蓝渐变 + 淡青描边。
+    static let flashGradient = LinearGradient(
+        colors: [Color(red: 22/255, green: 32/255, blue: 58/255).opacity(0.82),
+                 Color(red: 13/255, green: 19/255, blue: 34/255).opacity(0.88)],
+        startPoint: .topLeading, endPoint: .bottomTrailing)
+    static let flashBorder = Color(red: 125/255, green: 211/255, blue: 252/255).opacity(0.16)
+}
+
 private struct ReaderNativeConversationArtifactCard: View {
     let part: ReaderNativeConversationPart
     @ObservedObject var model: ReaderNativeConversationModel
@@ -221,18 +242,19 @@ private struct ReaderNativeConversationArtifactCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if !bare {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: icon)
-                    .foregroundStyle(ReaderNativeTheme.accent)
-                Text(heading).font(.headline)
+            // 卡头 = 原版 .vc-if-hd：12px 紫色半粗，小图标跟随。
+            HStack(alignment: .center, spacing: 6) {
+                Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                Text(heading).font(.system(size: 12, weight: .semibold))
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if isDraft { Text("待确认").font(.caption2).foregroundStyle(ReaderNativeTheme.muted) }
+                if isDraft { Text("待确认").font(.system(size: 11)).foregroundStyle(ReaderNativeCardStyle.muted) }
                 if !part.string("dragId").isEmpty {
-                    Image(systemName: "hand.draw").foregroundStyle(ReaderNativeTheme.muted)
+                    Image(systemName: "hand.draw").font(.system(size: 12)).foregroundStyle(ReaderNativeCardStyle.muted)
                         .accessibilityHidden(true)
                 }
             }
-            .frame(minHeight: 44)
+            .foregroundStyle(ReaderNativeCardStyle.purple)
+            .frame(minHeight: 30)
             // 整条标题都能按住拖（不只是图标和字本身）。
             .contentShape(Rectangle())
             // 拖出去时给一个像"卡片副本"的影子 —— 网页那版拖的就是卡的克隆
@@ -266,7 +288,7 @@ private struct ReaderNativeConversationArtifactCard: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(fields[index]["key"] == "front" ? "正面" : fields[index]["key"] == "cloze" ? "填空" : "背面")
                                     .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
-                                richContent(fields[index]["value"] ?? "")
+                                richContent(fields[index]["value"] ?? "", size: 15)
                             }
                         }
                         Button("修改内容", systemImage: "pencil") { editing = true }
@@ -276,7 +298,7 @@ private struct ReaderNativeConversationArtifactCard: View {
                         let faces = part.data["faces"] as? [[String: String]] ?? []
                         ForEach(faces.indices, id: \.self) { index in
                             if index > 0 { Divider() }
-                            richContent(faces[index]["content"] ?? "", format: faces[index]["format"])
+                            richContent(faces[index]["content"] ?? "", format: faces[index]["format"], size: 15)
                         }
                         if !part.string("notice").isEmpty {
                             Text(part.string("notice")).font(.caption).foregroundStyle(ReaderNativeTheme.muted)
@@ -300,13 +322,14 @@ private struct ReaderNativeConversationArtifactCard: View {
             } else if part.kind == "operations" {
                 operationContent
             } else if part.kind == "fact" {
-                richContent(firstText(part.string("answer"), part.text))
+                // 原版 .vc-if-fa 15px 半粗 / .vc-if-fd 12px #b8c6e2。
+                richContent(firstText(part.string("answer"), part.text), size: 15, weight: .semibold)
                 let detail = part.string("detail")
                 if !detail.isEmpty, detail != part.string("answer") {
-                    richContent(detail)
+                    richContent(detail, size: 12, color: UIColor(red: 0xb8/255, green: 0xc6/255, blue: 0xe2/255, alpha: 1))
                 }
             } else if part.kind == "general" || part.kind == "knowledge" {
-                richContent(firstText(part.string("text"), part.text), format: part.string("format").isEmpty ? nil : part.string("format"))
+                richContent(firstText(part.string("text"), part.text), format: part.string("format").isEmpty ? nil : part.string("format"), size: 13)
             } else if part.kind == "weather" {
                 weatherContent
             } else if part.kind == "news" {
@@ -329,10 +352,25 @@ private struct ReaderNativeConversationArtifactCard: View {
             // 页卡上不放「内容资料」：原版页卡没有这个按钮（侧栏生成物里才有）。
             if !bare { ReaderNativeConversationAction(part: part, model: model) }
         }
-        .padding(bare ? 0 : 14)
+        .font(.system(size: 14)).lineSpacing(14 * 0.55 * 0.5)
+        .foregroundStyle(ReaderNativeCardStyle.text)
+        .padding(.horizontal, bare ? 0 : 13).padding(.top, bare ? 0 : 10).padding(.bottom, bare ? 0 : 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(bare ? Color.clear : ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(ReaderNativeTheme.accent.opacity(bare ? 0 : 0.12), lineWidth: 1))
+        .background {
+            if !bare {
+                // 学习卡 = .fc-card 深蓝渐变（圆角 12）；其它 = .vc-card 深色卡面（圆角 16）。
+                if isAnki { RoundedRectangle(cornerRadius: 12).fill(ReaderNativeCardStyle.flashGradient) }
+                else { RoundedRectangle(cornerRadius: 16).fill(ReaderNativeCardStyle.surface) }
+            }
+        }
+        .overlay {
+            if !bare {
+                RoundedRectangle(cornerRadius: isAnki ? 12 : 16)
+                    .stroke(isAnki ? ReaderNativeCardStyle.flashBorder : ReaderNativeCardStyle.border, lineWidth: isAnki ? 1 : 0.5)
+            }
+        }
+        .shadow(color: .black.opacity(bare ? 0 : 0.28), radius: 14, y: 6)
+        .environment(\.colorScheme, .dark)
         .sheet(isPresented: $editing) {
             ReaderNativeCardEditor(fields: fields, model: model)
         }
@@ -383,14 +421,18 @@ private struct ReaderNativeConversationArtifactCard: View {
     private func firstText(_ choices: String...) -> String { choices.first { !$0.isEmpty } ?? "" }
 
     @ViewBuilder
-    private func richContent(_ text: String, format: String? = nil) -> some View {
+    /// 卡内富文本。字号/字重/颜色要**传进去**：正文由 UIKit 文本视图画，SwiftUI 的 .font/.foregroundStyle 管不到它。
+    /// 默认 = 原版 .vc-card 正文 14px #f2f2f7。
+    private func richContent(_ text: String, format: String? = nil, size: CGFloat = 14,
+                             weight: UIFont.Weight = .regular,
+                             color: UIColor = UIColor(red: 0xf2/255, green: 0xf2/255, blue: 0xf7/255, alpha: 1)) -> some View {
         let resolved = format ?? (text.range(of: "<[a-z][^>]*>", options: [.regularExpression, .caseInsensitive]) != nil ? "html" : "markdown")
         ReaderNativeRichDocument(content: text, format: resolved, onSelection: { selection in
             let id = part.string("selectId")
             guard !id.isEmpty else { return }
             model.updateTextSelection(id: id, text: selection)
         }, inlineImages: part.data["inlineImages"] as? [String: String] ?? [:], imageModel: model,
-           font: .preferredFont(forTextStyle: .body))
+           font: .systemFont(ofSize: size, weight: weight), color: color)
         if resolved == "html", text.range(of: "<(script|iframe|button|input|canvas|svg|video|audio)\\b", options: [.regularExpression, .caseInsensitive]) != nil {
             Text("内嵌媒体或交互部分尚未迁移，原件已保留。")
                 .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
@@ -403,42 +445,44 @@ private struct ReaderNativeConversationArtifactCard: View {
     }
 
     private var weatherContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            let place = [field("loc"), field("date")].filter { !$0.isEmpty }.joined(separator: " · ")
-            if !place.isEmpty { Text(place).font(.caption).foregroundStyle(ReaderNativeTheme.muted) }
+        // 原版 .vc-if-w：温度 26px 半粗在上 → 天况 14px（· 降水）→ 地点日期 12px → 细线 + 提示 12px。
+        VStack(alignment: .leading, spacing: 2) {
             let low = ReaderWeatherDegrees.bare(field("lo")), high = ReaderWeatherDegrees.bare(field("hi"))
             if !low.isEmpty && !high.isEmpty {
-                Text("\(low)–\(high)°C").font(.title2.weight(.medium)).monospacedDigit()
+                Text("\(low)–\(high)°C").font(.system(size: 26, weight: .semibold)).kerning(-0.5).monospacedDigit()
             } else if !low.isEmpty || !high.isEmpty {
-                Text(!low.isEmpty ? "最低 \(low)°C" : "最高 \(high)°C").font(.title3.weight(.medium))
+                Text(!low.isEmpty ? "最低 \(low)°C" : "最高 \(high)°C").font(.system(size: 22, weight: .semibold))
             }
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                if !field("cond").isEmpty { Text(field("cond")).font(.subheadline) }
-                let precipitation = field("precip")
-                if !precipitation.isEmpty {
-                    Text("降水 \(precipitation)\(precipitation.hasSuffix("%") ? "" : "%")")
-                        .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
-                }
+            let precipitation = field("precip")
+            let condition = [field("cond"), precipitation.isEmpty ? "" : "降水 " + precipitation + (precipitation.hasSuffix("%") ? "" : "%")]
+                .filter { !$0.isEmpty }.joined(separator: " · ")
+            if !condition.isEmpty { Text(condition).font(.system(size: 14)) }
+            let place = [field("loc"), field("date")].filter { !$0.isEmpty }.joined(separator: " ")
+            if !place.isEmpty { Text(place).font(.system(size: 12)).foregroundStyle(ReaderNativeCardStyle.muted) }
+            if !field("tip").isEmpty {
+                Rectangle().fill(ReaderNativeCardStyle.hairline).frame(height: 0.5).padding(.top, 6)
+                Text(field("tip")).font(.system(size: 12)).foregroundStyle(ReaderNativeCardStyle.tip).padding(.top, 4)
             }
-            if !field("tip").isEmpty { richContent(field("tip")) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var newsContent: some View {
         let items = part.data["items"] as? [[String: Any]] ?? []
-        return VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: 5) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                if index > 0 { Divider() }
-                VStack(alignment: .leading, spacing: 5) {
+                if index > 0 { Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5) }
+                // 原版 .vc-if-ni：标题 13px 半粗 #e8eefb，摘要 12px #9fb0cf，来源淡一档。
+                VStack(alignment: .leading, spacing: 1) {
                     if let title = item["t"] as? String, !title.isEmpty {
-                        Text(readable(title)).font(.subheadline.weight(.medium)).textSelection(.enabled)
+                        Text(readable(title)).font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(ReaderNativeCardStyle.newsTitle).textSelection(.enabled)
                     }
                     if let summary = item["s"] as? String, !summary.isEmpty {
-                        richContent(summary)
+                        Text(readable(summary)).font(.system(size: 12)).foregroundStyle(ReaderNativeCardStyle.newsSummary)
                     }
                     if let source = item["src"] as? String, !source.isEmpty {
-                        Text(source).font(.caption2).foregroundStyle(ReaderNativeTheme.muted)
+                        Text(source).font(.system(size: 11)).foregroundStyle(ReaderNativeCardStyle.newsSummary.opacity(0.65))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
