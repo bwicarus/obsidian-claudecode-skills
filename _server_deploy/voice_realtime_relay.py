@@ -27,6 +27,7 @@ import time
 import urllib.parse
 import uuid
 from pathlib import Path
+import bw_paths as _bw_paths   # 项目根/状态目录/主目录（Mac 迁移 2026-09-25）
 
 import httpx
 import websockets
@@ -53,13 +54,13 @@ DEBUG = False   # 排障时开(350 句文本等)
 # ── 书本上下文/工具桥:经 webapp HTTP(Bearer=mcp-webapp-token,与 MCP 服务器同一套)──
 WEBAPP = "http://127.0.0.1:5000"
 _TOKEN_FILE = Path("~/.config/mcp-webapp-token").expanduser()
-DIALOG_ID_FILE = Path("/home/bwicarus/claude/state/doubao-dialog-id.txt")   # 跨通话记忆(服务端接续最近20轮)
-USAGE_FILE = Path("/home/bwicarus/claude/state/doubao-usage.json")          # 154 UsageResponse 记账(v3-⑩ A)
-ACK_PCM_DIR = Path("/home/bwicarus/claude/state/doubao-ack-pcm")            # 确认语 PCM 缓存(v3-⑪:首次豆包合成时录下,之后 relay 直接回放,零合成费)
+DIALOG_ID_FILE = (_bw_paths.STATE / "doubao-dialog-id.txt")   # 跨通话记忆(服务端接续最近20轮)
+USAGE_FILE = (_bw_paths.STATE / "doubao-usage.json")          # 154 UsageResponse 记账(v3-⑩ A)
+ACK_PCM_DIR = (_bw_paths.STATE / "doubao-ack-pcm")            # 确认语 PCM 缓存(v3-⑪:首次豆包合成时录下,之后 relay 直接回放,零合成费)
 ACK_PCM_DIR.mkdir(parents=True, exist_ok=True)
-VOICE_LOG_DIR = Path("/home/bwicarus/claude/state/voice-log")               # 学习时间线全量落盘(v3-⑰:对话+翻页/选中/圈画/工具事件)
+VOICE_LOG_DIR = (_bw_paths.STATE / "voice-log")               # 学习时间线全量落盘(v3-⑰:对话+翻页/选中/圈画/工具事件)
 VOICE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-VOCAB_LOOKUP_LOG = Path("/home/bwicarus/claude/state/vocab-lookups.jsonl")  # 查词日志(vocab 系统写,ts+page+pdf 齐全,聚合时直接合并)
+VOCAB_LOOKUP_LOG = (_bw_paths.STATE / "vocab-lookups.jsonl")  # 查词日志(vocab 系统写,ts+page+pdf 齐全,聚合时直接合并)
 
 
 def _vlog(kind: str, **kw):
@@ -1507,7 +1508,7 @@ VOLC_TTS_RMB_10K = {                    # 元/万字符(1 汉字 = 1 字符)
 }
 
 
-LEDGER_DB = Path("/home/bwicarus/claude/state/voice-ledger.db")
+LEDGER_DB = (_bw_paths.STATE / "voice-ledger.db")
 
 
 def _ledger_conn():
@@ -2546,7 +2547,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                         "text_items": _gk.get("items", 0), "tool_calls": _gk.get("tools", 0),
                         "est_by_audio_usd": round(_am * 0.05 + _gk.get("items", 0) * 0.004, 4),
                         "est_by_conn_usd": round(_cm * 0.05, 4)}
-                _gp = Path("/home/bwicarus/claude/state/grok-usage.json")
+                _gp = (_bw_paths.STATE / "grok-usage.json")
                 try:
                     _gd = json.loads(_gp.read_text("utf-8"))
                 except Exception:
@@ -2801,9 +2802,9 @@ def _is_asr_ghost(tx: str):
 #   日志里它恒为 `rtc_u7_`,但**无法证明** `u7` 是"用户"而不是"组织/项目"级前缀。
 #   万一是后者,`call_id.split("_")[1]` 对所有用户都相同 → 接管逻辑会去**踢掉别人的通话**。
 #   所以:uid 只认 webapp 用共享密钥签发的票据;**验不过就绝不踢人**(只告警),宁可不去重也不误伤。
-VOICE_TICKET_KEY = Path("/home/bwicarus/claude/state/voice-ticket.key")
+VOICE_TICKET_KEY = (_bw_paths.STATE / "voice-ticket.key")
 # 141:喂给 AI 的图落盘(按内容 sha1 去重);part 里只带 URL,webapp 的 /pdf/api/toolshot/<name> 提供
-TOOLSHOT_DIR = Path("/home/bwicarus/claude/state/reader-toolshots")
+TOOLSHOT_DIR = (_bw_paths.STATE / "reader-toolshots")
 
 
 def _ticket_secret() -> bytes:

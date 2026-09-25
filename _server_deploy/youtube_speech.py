@@ -24,10 +24,11 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+import bw_paths as _bw_paths   # 项目根/状态目录/主目录（Mac 迁移 2026-09-25）
 
 import requests
 
-VISION_KEY_FILE = Path("/home/bwicarus/.config/gcp-vision-key")
+VISION_KEY_FILE = (_bw_paths.HOME / ".config" / "gcp-vision-key")
 STT_URL = "https://speech.googleapis.com/v1/speech:recognize"
 CHUNK_SEC = 50            # STT sync API 限 60s,留余量
 SAMPLE_RATE = 16000

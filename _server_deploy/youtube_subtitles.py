@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+import bw_paths as _bw_paths   # 项目根/状态目录/主目录（Mac 迁移 2026-09-25）
 
 # 加 scripts 进 sys.path 用 ai_client(主项目)
 PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
@@ -32,7 +33,7 @@ import requests as _req  # 跟 ai_client 的依赖分开
 
 DATA_ROOT = Path(os.environ.get("WEBAPP_DATA", "/home/bwicarus/webapp/data"))
 DB_PATH = DATA_ROOT / "youtube_subtitles.db"
-GEMINI_KEY_FILE = Path("/home/bwicarus/.config/gemini-api-key")
+GEMINI_KEY_FILE = (_bw_paths.HOME / ".config" / "gemini-api-key")
 
 _LOCK = threading.Lock()
 _INFLIGHT: dict[str, threading.Event] = {}

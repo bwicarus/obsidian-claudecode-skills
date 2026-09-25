@@ -31,8 +31,9 @@ import threading
 import time
 import uuid
 from pathlib import Path
+import bw_paths as _bw_paths   # 项目根/状态目录/主目录（Mac 迁移 2026-09-25）
 
-RUNS_DIR = Path("/home/bwicarus/claude/state/reader-runs")
+RUNS_DIR = (_bw_paths.STATE / "reader-runs")
 RUN_TTL = 7 * 86400          # 7 天后清理(听写纸本身留着,只清运行状态)
 WAIT_TIMEOUT = 3600          # 挂起超时:1 小时没动静就判 cancelled(防僵尸 run 永远占着页面)
 
@@ -425,7 +426,7 @@ def _save_toolshot(b64, mt="image/png"):
         raw = _b64.b64decode(b64)
         ext = ".jpg" if ("jpeg" in (mt or "") or "jpg" in (mt or "")) else ".png"
         nm = _hl.sha1(raw).hexdigest()[:24] + ext
-        d = Path("/home/bwicarus/claude/state/reader-toolshots")
+        d = (_bw_paths.STATE / "reader-toolshots")
         d.mkdir(parents=True, exist_ok=True)
         fp = d / nm
         if not fp.exists():
@@ -1095,7 +1096,7 @@ RECIPES = {
 }
 
 
-RECIPES_DIR = Path("/home/bwicarus/claude/state/recipes")
+RECIPES_DIR = (_bw_paths.STATE / "recipes")
 
 
 def _load_recipe(name):

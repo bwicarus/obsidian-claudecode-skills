@@ -25,6 +25,7 @@ import threading
 import time
 import unicodedata
 from pathlib import Path
+import bw_paths as _bw_paths   # 项目根/状态目录/主目录（Mac 迁移 2026-09-25）
 from urllib.parse import parse_qsl, urlsplit
 
 from flask import Blueprint, Response, jsonify, request, send_file, session
@@ -5808,7 +5809,7 @@ def _t_material_graph(args, ctx):
     args {ref: 材料地址, direction?: up(来源)|down(派生/前置)|both(默认), depth?: 展开几跳(默认3)}。
     典型:「这张老错的卡背后的知识点前置是什么」→ material_graph(卡ref, down) → 看到前置节点 → read_material 读它。"""
     import sys as _sys
-    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, str(_bw_paths.SCRIPTS))
     try:
         import attention_profile as AP
     except Exception as e:
@@ -5826,7 +5827,7 @@ def _t_read_material(args, ctx):
     args {ref: 材料地址(relate_material 返回的 ref,如 anki:123 / note:x.md / book:资源/..#p9)}。
     anki 卡返回正反面、note 返回笔记全文、book 返回那页正文。检查报告请用 read_check_report。"""
     import sys as _sys
-    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, str(_bw_paths.SCRIPTS))
     try:
         import attention_profile as AP
     except Exception as e:
@@ -5852,7 +5853,7 @@ def _t_relate_material(args, ctx):
     ⚠ 这是「我关注过的」材料(有行为证据);不是全文搜索(那找「存在这个词的所有页,含没看过的」)。
     """
     import sys as _sys
-    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, str(_bw_paths.SCRIPTS))
     try:
         import attention_profile as AP
     except Exception as e:
@@ -5888,7 +5889,7 @@ def _t_learning_focus(args, ctx):
           channels?(["lookup","highlight","qa","check"])  top?(默认 12)
     """
     import sys as _sys
-    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, str(_bw_paths.SCRIPTS))
     try:
         import attention_profile as AP
     except Exception as e:
@@ -5939,7 +5940,7 @@ def _t_situation_feedback(args, ctx):
     if not concept or kind not in ("understood", "still_stuck", "mute"):
         return {"error": "要给 concept + kind(understood/still_stuck/mute)"}
     import sys as _sys
-    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, str(_bw_paths.SCRIPTS))
     try:
         import learning_situations as _LS
         return _LS.feedback(str((ctx or {}).get("_uid") or ""), concept, kind)
@@ -5986,7 +5987,7 @@ def _t_make_diagnostic(args, ctx):
     if not rel or not rel.lower().endswith(".pdf"):
         return {"error": "诊断卷目前只支持 PDF 阅读器"}
     import sys as _sys
-    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, str(_bw_paths.SCRIPTS))
     try:
         import attention_profile as AP
     except Exception as e:
@@ -6055,7 +6056,7 @@ def _t_mastery_proposal(args, ctx):
     if not rep:
         return {"提案": [], "说明": "还没有带知识点结果的诊断卷 —— 先用 make_diagnostic 出一张,点选作答后点『让 AI 检查』。"}
     import sys as _sys
-    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, str(_bw_paths.SCRIPTS))
     try:
         import attention_profile as AP
         _lbl = AP._material_label
@@ -6141,7 +6142,7 @@ def _t_apply_mastery(args, ctx):
         return {"error": "node 要是 kg:书#节点id 形式"}
     book, nid = node[3:].split("#", 1)
     import sys as _sys
-    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, str(_bw_paths.SCRIPTS))
     try:
         import attention_profile as AP
         _nodes = AP._kg_all()["nodes"]
@@ -6201,7 +6202,7 @@ def _t_error_patterns(args, ctx):
     比学习近况高一层——不是单个知识点,而是**跨知识点的共性弱点** + 针对性学习策略。args {}。"""
     uid = str((ctx or {}).get("_uid") or "")
     import sys as _sys
-    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, str(_bw_paths.SCRIPTS))
     try:
         import error_meta_profile as EMP
         d = EMP.load(uid)
@@ -7415,7 +7416,7 @@ def _attn_tool_event(uid, name, targs, res, ctx):
         if "/.sandbox/" in rel:
             return
         import sys as _sys
-        _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+        _sys.path.insert(0, str(_bw_paths.SCRIPTS))
         import attention_profile as AP
         AP.append_raw("tool", q, file=rel, page=int((ctx or {}).get("page") or 0), uid=str(uid or ""),
                       actor="user",     # 查询词是**用户想找的东西**(AI 只是执行者)
@@ -11758,7 +11759,7 @@ _RTC_KEY_PATH = Path("~/.config/openai-realtime.json").expanduser()
 # 133:通话票据密钥(与 voice_realtime_relay.py 共享同一文件)。用途见 relay 的 _ticket_uid 注释:
 #   接管旧通话必须确认"两路 call 是同一个人的",而 call_id 是 OpenAI 生成的、**不保证含应用用户身份**,
 #   从中猜 uid 可能踢掉别人的通话。所以由 webapp(唯一持有 session 的一方)签发,relay 验签。
-_VOICE_TICKET_KEY = Path("/home/bwicarus/claude/state/voice-ticket.key")
+_VOICE_TICKET_KEY = (_bw_paths.STATE / "voice-ticket.key")
 
 
 def _voice_ticket_secret() -> bytes:

@@ -19,6 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+import bw_paths as _bw_paths   # 项目根/状态目录/主目录（Mac 迁移 2026-09-25）
 
 _ROOT = Path(os.environ.get("CLAUDE_PROJECT") or "/home/bwicarus/claude")
 _CACHE = _ROOT / "state" / "img-search-cache"
@@ -47,7 +48,7 @@ def _key() -> str:
     k = os.environ.get("GOOGLE_VISION_API_KEY") or os.environ.get("YOUTUBE_API_KEY")
     if k:
         return k.strip()
-    kf = Path("/home/bwicarus/.config/gcp-vision-key")
+    kf = (_bw_paths.HOME / ".config" / "gcp-vision-key")
     try:
         if kf.exists():
             return kf.read_text().strip()

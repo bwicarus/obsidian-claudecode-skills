@@ -30,6 +30,7 @@ import uuid
 from contextlib import contextmanager
 from html.parser import HTMLParser
 from pathlib import Path
+import bw_paths as _bw_paths   # 项目根/状态目录/主目录（Mac 迁移 2026-09-25）
 
 from flask import (
     Blueprint, Response, abort, current_app, jsonify, redirect, render_template, request,
@@ -3743,7 +3744,7 @@ def pdf_api_toolshot(name):
     (pdf_reader 里所有路由都是这个约定 —— 我一开始写了个 _logged_in(),但这个函数在本模块根本不存在)。"""
     if not re.fullmatch(r"[0-9a-f]{6,40}\.(jpg|png)", name or ""):   # 路径安全:只认 sha1 十六进制 + 白名单扩展名
         return jsonify({"ok": False}), 400
-    d = Path("/home/bwicarus/claude/state/reader-toolshots")
+    d = (_bw_paths.STATE / "reader-toolshots")
     f = d / name
     if not f.exists():
         return jsonify({"ok": False, "error": "not found"}), 404

@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+import bw_paths as _bw_paths   # 项目根/状态目录/主目录（Mac 迁移 2026-09-25）
 
 import requests
 from flask import Blueprint, jsonify, request, session
@@ -902,7 +903,7 @@ def _undo_do(uid=None, owner=None):
         return {"ok": False, "error": str(e)[:120]}
 
 
-_CLI_TASK_DIR = Path("/home/bwicarus/claude/state/cli-tasks")   # vtask 落盘:重启不蒸发 + 铸造窗口 30 天(审查实锤:原先内存 30min)
+_CLI_TASK_DIR = (_bw_paths.STATE / "cli-tasks")   # vtask 落盘:重启不蒸发 + 铸造窗口 30 天(审查实锤:原先内存 30min)
 
 
 def _vtask_persist(tid):
