@@ -374,6 +374,9 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published var visibleMessageID: String?
 
     var commandHandler: (([String: Any]) async -> String?)?
+    /// 诊断出口（接到服务器的 client-log）。跳序、重新同步失败、作废范围丢包 —— 以前全都只在
+    /// 界面上闪一下，日志里一条没有，用户说「重试也失败」时无从查起。
+    var onDiagnostic: ((String) -> Void)?
     var inspectionHandler: (([String: Any]) async -> [String: Any])?
     var imageHandler: ((String, String) async throws -> Data)?
     var videoRequestHandler: ((String, String, String, String) async throws -> [String: Any])?
@@ -428,6 +431,7 @@ final class ReaderNativeConversationModel: ObservableObject {
     private var conversationStore = ReaderNativeConversationStore()
     private var messageResyncPending = false
     private var retiredNavigationScopes = Set<String>()
+    private var reportedRetiredDrop = Set<String>()
     private var pendingSelections: [(id: String, text: String)] = []
     private var deliveringSelection = false
 
@@ -462,7 +466,12 @@ final class ReaderNativeConversationModel: ObservableObject {
             error = "无法读取助手界面数据，请重新打开阅读器。"
             return
         }
-        guard !retiredNavigationScopes.contains(nextScope) else { return }
+        guard !retiredNavigationScopes.contains(nextScope) else {
+            if reportedRetiredDrop.insert(nextScope).inserted {
+                onDiagnostic?("对话更新被丢弃：范围已作废 scope=\(nextScope.prefix(20)) rev=\(nextRevision)")
+            }
+            return
+        }
         if nextScope == scope, nextRevision <= revision { return }
         let rawMessages: [[String:Any]]
         let changedMessages: Bool
@@ -473,6 +482,10 @@ final class ReaderNativeConversationModel: ObservableObject {
                 messageResyncPending = false
             } catch {
                 self.error = error.localizedDescription
+                onDiagnostic?("对话增量未应用：\(error.localizedDescription) scope=\(nextScope.prefix(20)) "
+                    + "have=\(conversationStore.revision)@\(conversationStore.scope.prefix(20)) "
+                    + "base=\(batch["baseRevision"] ?? "?") next=\(batch["revision"] ?? "?") "
+                    + "reset=\(batch["reset"] ?? "?") contract=\(batch["contract"] ?? "?")")
                 requestMessageResync(scope:nextScope)
                 return
             }
@@ -481,6 +494,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         } else {
             guard nextScope == conversationStore.scope,
                   (payload["messageRevision"] as? NSNumber)?.int64Value == conversationStore.revision else {
+                onDiagnostic?("对话快照与本地消息版本不一致：have=\(conversationStore.revision) "
+                    + "page=\(payload["messageRevision"] ?? "?")")
                 requestMessageResync(scope:nextScope); return
             }
             rawMessages = []; changedMessages = false
@@ -554,7 +569,8 @@ final class ReaderNativeConversationModel: ObservableObject {
         guard !messageResyncPending else { return }
         messageResyncPending = true
         Task { [weak self] in
-            _ = await self?.commandHandler?(["action":"resyncMessages","scope":scope])
+            let failure = await self?.commandHandler?(["action":"resyncMessages","scope":scope])
+            if let failure { self?.onDiagnostic?("对话重新同步失败：" + (failure.isEmpty ? "（无原因）" : failure)) }
             self?.messageResyncPending = false
         }
     }
@@ -616,7 +632,18 @@ final class ReaderNativeConversationModel: ObservableObject {
     private(set) var lastCommandAction = ""
     private(set) var lastCommandAt: Date?
 
-    func resetForNavigation() {
+    /// 新页面已提交：旧页面从此不可能再发消息，作废名单可以清空了。
+    /// ⚠ 必须清：同一本书的新页面算出的 scope 与旧页面**相同**（按账号+书哈希），
+    ///   不清的话新页面的所有对话更新都被当成旧页面的迟到消息永久丢弃 ——
+    ///   这就是「切后台回来侧栏不同步、显示故障」（2026-09-26 查明）。
+    func navigationCommitted() {
+        retiredNavigationScopes.removeAll()
+        reportedRetiredDrop.removeAll()
+    }
+
+    /// `retireScope`：页面还活着（正常导航）时，旧页面可能有迟到消息，要作废它的范围；
+    /// 网页进程已被杀时旧页面不存在，作废只会误伤重载后的同一本书。
+    func resetForNavigation(retireScope: Bool = true) {
         inlineMedia.reset()
         committedCards = [:]
         removedMedia = [:]; selectedContextIDs = []; contextRecords = nil; figureAttachments = []
@@ -627,7 +654,7 @@ final class ReaderNativeConversationModel: ObservableObject {
         searchPanel = nil
         tocPanel = nil
         navigationPanel = nil
-        if !scope.isEmpty { retiredNavigationScopes.insert(scope) }
+        if retireScope, !scope.isEmpty { retiredNavigationScopes.insert(scope) }
         generation = UUID()
         scope = ""
         pendingSelections = []

@@ -1003,7 +1003,12 @@ enum ReaderNativeConversationScript {
           //   是不是这样，不能靠猜：把字节数报上去，崩的时候跟着现场一起送出来。
           if (messageDelta) payload.messageDelta = messageDelta;
           payload.payloadBytes = signature.length + (messageDelta ? JSON.stringify(messageDelta).length : 0);
-          try { handler.postMessage(payload); } catch (_) {}
+          try { handler.postMessage(payload); } catch (error) {
+            // 版本号在 prepareMessageDelta 里已经前进：这次没送到，Swift 手上的就落后了，
+            // 下一份增量必判跳序。改为下一份整段重置（Swift 对 reset 不查 base），并出声。
+            resetMessages = true; messagesDirty = true; lastSignature = '';
+            try { window.dlog?.('[对话] 快照送不出去：' + (error && error.message || error)); } catch (_) {}
+          }
         }
       }
       function schedule() {

@@ -488,6 +488,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     let nativePencilInk = NativePencilInkController()
     private var readerForeground = true
     private var nativeDwellTracker: ReaderNativeDwellTracker?
+    private var reportedConversationPayloadFailure: String?
     private var readerWasBackgrounded = false
     /// 上一次发布出去的各域摘要串。内容没变就不重发 —— 导出要在页面里跑 JS
     /// 并算八个域的摘要，白发一次不便宜。换书时不必清：指纹里带着域摘要，
@@ -4498,6 +4499,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard let self else { return "阅读页已关闭" }
             return await self.performNativeConversationCommand(command)
         }
+        nativeConversation.onDiagnostic = { [weak self] line in self?.postClientLog("[对话] " + line) }
         nativeConversation.inspectionHandler = { [weak self] command in
             guard let self else { return ["ok": false, "error": "阅读页已关闭"] }
             return await self.requestNativeConversationCommand(command)
@@ -8631,8 +8633,15 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
             }
             do {
                 nativeConversation.receive(try nativeTurns?.conversationPayload(body) ?? body)
+                reportedConversationPayloadFailure = nil
                 if !pendingNativeMediaReceipts.isEmpty { Task { @MainActor [weak self] in await self?.flushNativeMediaReceipts() } }
             } catch {
+                // 出声（每种原因一次）：以前这里静默重同步，会话对不上时重同步本身也会再失败。
+                let reason = String(describing: type(of: error)) + ": " + error.localizedDescription
+                if reportedConversationPayloadFailure != reason {
+                    reportedConversationPayloadFailure = reason
+                    postClientLog("[对话] 轮次核对失败，请求重同步：" + reason)
+                }
                 // The source can advance while WebKit's observer batch is in
                 // flight. Refresh its handles; never publish a partial delta
                 // or reinterpret a stale turn as a new conversation.
@@ -9430,7 +9439,8 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         nativeReviewQueue?.invalidate(); nativeReviewQueue = nil; nativeReviewQueueContext = nil
         nativeReviewImprovements?.invalidate(); nativeReviewImprovements = nil; nativeReviewImprovementsContext = nil
         invalidateNativePDFDocument(reason: "webcontent-terminated")
-        nativeConversation.resetForNavigation()
+        // 进程已死 = 旧页面不会再有迟到消息；作废范围只会误伤重载后的同一本书。
+        nativeConversation.resetForNavigation(retireScope: false)
         webContentProcessNeedsReload = true
         isLoading = false
         guard readerForeground, isLocalRuntimeURL(webView.url) else { return }
@@ -9524,6 +9534,14 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         localPDFContentIdentityTask?.cancel()
         localPDFContentIdentityTask = nil
         bookUserStateContextGeneration &+= 1
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didCommit navigation: WKNavigation!
+    ) {
+        // 新文档已提交，旧文档从此发不出消息 —— 对话侧栏的作废名单到此为止。
+        nativeConversation.navigationCommitted()
     }
 
     func webView(

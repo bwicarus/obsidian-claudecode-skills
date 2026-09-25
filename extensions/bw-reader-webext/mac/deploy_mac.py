@@ -177,6 +177,37 @@ def make_release() -> Path:
     return release
 
 
+def releases_in_use(releases: list[Path]) -> set[Path]:
+    """仍有 launchd 服务在跑的版本目录。
+
+    ⚠ 2026-09-26 实录：`--only` 只重启点名的服务，却照样按"最近 5 个"删旧目录 ——
+    没被重启的守护进程还在用 17:15 那个版本，目录被删后网页界面报 missing index.html
+    （代码早已读进内存，所以进程没死，只是一读文件就坏）。判据：服务启动那一刻
+    `current` 指向的，就是名字时间戳 ≤ 进程启动时间的最新一个版本。
+    """
+    stamps = []
+    for release in releases:
+        try:
+            stamps.append((time.mktime(time.strptime(release.name[:15], "%Y%m%d-%H%M%S")), release))
+        except ValueError:
+            continue
+    used: set[Path] = set()
+    listing = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or not parts[2].startswith(LABEL_PREFIX) or not parts[0].isdigit():
+            continue
+        started = subprocess.run(["ps", "-o", "lstart=", "-p", parts[0]], capture_output=True, text=True).stdout.strip()
+        try:
+            started_at = time.mktime(time.strptime(started, "%a %b %d %H:%M:%S %Y"))
+        except ValueError:
+            continue
+        candidates = [release for stamp, release in stamps if stamp <= started_at]
+        if candidates:
+            used.add(candidates[-1])
+    return used
+
+
 def install_stable_scripts(release: Path) -> None:
     """把 AI / 语音运行时直接跑的脚本铺到 ~/BW/data/BWReader（Windows 上是 %LOCALAPPDATA%\\BWReader）。
 
@@ -308,11 +339,14 @@ def main() -> int:
         build_bridge(release)
         switch_current(release)
         install_stable_scripts(release)
-        # 清理旧版本（保留最近 keep 个，当前那个永远保留）
+        # 清理旧版本（保留最近 keep 个；当前那个、以及**仍有服务在跑**的版本永远保留）
         releases = sorted(p for p in RELEASES.iterdir() if p.is_dir())
+        in_use = releases_in_use(releases)
         for stale in releases[:-args.keep]:
-            if stale != CURRENT.resolve():
+            if stale != CURRENT.resolve() and stale not in in_use:
                 shutil.rmtree(stale, ignore_errors=True)
+        if in_use - set(releases[-args.keep:]):
+            log("保留仍在使用的旧版本：" + ", ".join(sorted(p.name for p in in_use - set(releases[-args.keep:]))))
 
     write_plists(env, names)
     if not args.no_restart:
