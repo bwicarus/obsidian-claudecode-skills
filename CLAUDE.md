@@ -18,6 +18,9 @@
 - **App 本机开发**：`ios/BWReader/prepare_local_xcode.sh [--dev]` 后用 Xcode 打开 `ios/BWReader/BWReader.xcodeproj`。
   本机 Xcode 27、云端 26.6 —— 写 Swift 避开「分支类型不同的嵌套三元」「超长 SwiftUI 修饰链」。
 - ⚠ **远程 SSH 会话不能代码签名**（`errSecInternalComponent`）：装真机、发 TestFlight 要在 Mac 桌面上开的会话里做。
+- 📲 **交付 = 本机装机，不出 TestFlight（2026-09-25 用户拍板）**：现阶段只有用户自己用，改完就用开发签名
+  装到他的 iPad（必要时 iPhone），命令见 `references/mac-server.md` §6；功能完善前**不触发**云端构建/上传。
+  下文「改前端要到 iPad 只能走 TestFlight」是 Windows 时代（没有本机签名）的说法。
 - ⚠ **.NET 8 在 macOS 上 LocalApplicationData = `~/Library/Application Support`**（不是 ~/.local/share）；
   那里的 `BWReader` 必须是指向 `~/BW/data/BWReader` 的链接，否则桥读空目录（App 报「语音核心没在跑」）。
 - 「电脑语音」（驱动 Codex/ChatGPT 桌面版、虚拟声卡）**已停用**，只用 CLI 语音。
