@@ -77,111 +77,11 @@ struct ReaderLocalLibraryView: View {
     }
 
     var body: some View {
+        // 拆成三段（libraryList → libraryWithPrompts → 这里）：原来一条链上二十多个修饰，
+        // Xcode 27 的 Swift 编译器「无法在合理时间内推断类型」（2026-09-25 Mac 本机编译实测）。
+        // 分段后每段单独推断；界面与行为不变。
         NavigationStack {
-            List {
-                Section {
-                    Picker("书库来源", selection: $selectedSource) {
-                        ForEach(ReaderLibrarySource.allCases) { source in
-                            Text(source.title).tag(source)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                .listRowBackground(ReaderNativeTheme.card)
-
-                if let startupNotice, !startupNotice.isEmpty {
-                    Section {
-                        Label(
-                            startupNotice,
-                            systemImage: "exclamationmark.triangle"
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                    }
-                    .listRowBackground(ReaderNativeTheme.card)
-                }
-
-                localFolderSection
-                    .listRowBackground(ReaderNativeTheme.card)
-
-                // 远端来源=Windows 服务器书库(2026-09-02 用户:Pi 退出这条线路)。
-                // Pi 书库那套 remoteBooksSection/remoteBookRow 不再挂进页面;Pi OCR
-                // (预处理)仍经 remote 取 Pi 侧书记录,那是另一条线。
-                switch selectedSource {
-                case .local:
-                    localBooksSection(library.books)
-                        .listRowBackground(ReaderNativeTheme.card)
-                case .pi:
-                    serverBooksSection(serverOnlyBooks)
-                        .listRowBackground(ReaderNativeTheme.card)
-                case .all:
-                    localBooksSection(library.books)
-                        .listRowBackground(ReaderNativeTheme.card)
-                    serverBooksSection(serverOnlyBooks)
-                        .listRowBackground(ReaderNativeTheme.card)
-                }
-
-                statusSections
-                    .listRowBackground(ReaderNativeTheme.card)
-            }
-            .listStyle(.insetGrouped)
-            .listSectionSpacing(12)
-            .environment(\.defaultMinListRowHeight, 44)
-            .scrollContentBackground(.hidden)
-            .background(ReaderNativeTheme.canvas)
-            .font(.subheadline)
-            .toolbarBackground(ReaderNativeTheme.card, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .navigationTitle("书库")
-            // ⚠ 备份闸拦住时**必须说为什么**。这条规矩最常见的失败是
-            // 「服务器没开」,而那跟「这本书有问题」该做的事完全不同 ——
-            // 只拦不说的话,用户看到的是"点了没反应"。
-            .alert(
-                "还不能打开",
-                isPresented: Binding(
-                    get: { backupNotice != nil },
-                    set: { if !$0 { backupNotice = nil } })
-            ) {
-                Button("知道了", role: .cancel) { backupNotice = nil }
-            } message: {
-                // 一个插值串代替三段相加：Xcode 27 在原写法上「无法在合理时间内推断类型」
-                Text("\(backupNotice ?? "")\n\n规矩：书要先传到\(ReaderServer.displayName)才能打开，这样任何一本能用的书，两边都有。")
-            }
-            .navigationBarTitleDisplayMode(.inline)
-            .searchable(
-                text: $searchText,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "搜索书名或路径"
-            )
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        Task { await refresh(force: true) }
-                    } label: {
-                        Label("刷新书库", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(library.isScanning || remote.isRefreshing)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
-                        .fontWeight(.semibold)
-                }
-            }
-            .fileImporter(
-                isPresented: $presentsFolderPicker,
-                allowedContentTypes: [.folder]
-            ) { result in
-                switch result {
-                case .success(let url):
-                    Task {
-                        await library.configureFolder(url)
-                    }
-                case .failure(let error):
-                    if (error as? CocoaError)?.code != .userCancelled {
-                        library.reportError(error)
-                    }
-                }
-            }
+            libraryWithPrompts
             .task { await refreshIfStale() }
             .onChange(of: selectedSource) { _, source in
                 guard source != .local else { return }
@@ -227,6 +127,119 @@ struct ReaderLocalLibraryView: View {
             }
         }
         .tint(ReaderNativeTheme.accent)
+    }
+
+    /// 列表本体与它的样式、标题。
+    private var libraryList: some View {
+        List {
+            Section {
+                Picker("书库来源", selection: $selectedSource) {
+                    ForEach(ReaderLibrarySource.allCases) { source in
+                        Text(source.title).tag(source)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            .listRowBackground(ReaderNativeTheme.card)
+
+            if let startupNotice, !startupNotice.isEmpty {
+                Section {
+                    Label(
+                        startupNotice,
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                }
+                .listRowBackground(ReaderNativeTheme.card)
+            }
+
+            localFolderSection
+                .listRowBackground(ReaderNativeTheme.card)
+
+            // 远端来源=Windows 服务器书库(2026-09-02 用户:Pi 退出这条线路)。
+            // Pi 书库那套 remoteBooksSection/remoteBookRow 不再挂进页面;Pi OCR
+            // (预处理)仍经 remote 取 Pi 侧书记录,那是另一条线。
+            switch selectedSource {
+            case .local:
+                localBooksSection(library.books)
+                    .listRowBackground(ReaderNativeTheme.card)
+            case .pi:
+                serverBooksSection(serverOnlyBooks)
+                    .listRowBackground(ReaderNativeTheme.card)
+            case .all:
+                localBooksSection(library.books)
+                    .listRowBackground(ReaderNativeTheme.card)
+                serverBooksSection(serverOnlyBooks)
+                    .listRowBackground(ReaderNativeTheme.card)
+            }
+
+            statusSections
+                .listRowBackground(ReaderNativeTheme.card)
+        }
+        .listStyle(.insetGrouped)
+        .listSectionSpacing(12)
+        .environment(\.defaultMinListRowHeight, 44)
+        .scrollContentBackground(.hidden)
+        .background(ReaderNativeTheme.canvas)
+        .font(.subheadline)
+        .toolbarBackground(ReaderNativeTheme.card, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .navigationTitle("书库")
+    }
+
+    /// 列表 + 备份提示、搜索、工具栏、导入文件。
+    private var libraryWithPrompts: some View {
+        libraryList
+        // ⚠ 备份闸拦住时**必须说为什么**。这条规矩最常见的失败是
+        // 「服务器没开」,而那跟「这本书有问题」该做的事完全不同 ——
+        // 只拦不说的话,用户看到的是"点了没反应"。
+        .alert(
+            "还不能打开",
+            isPresented: Binding(
+                get: { backupNotice != nil },
+                set: { if !$0 { backupNotice = nil } })
+        ) {
+            Button("知道了", role: .cancel) { backupNotice = nil }
+        } message: {
+            // 一个插值串代替三段相加：Xcode 27 在原写法上「无法在合理时间内推断类型」
+            Text("\(backupNotice ?? "")\n\n规矩：书要先传到\(ReaderServer.displayName)才能打开，这样任何一本能用的书，两边都有。")
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .searchable(
+            text: $searchText,
+            placement: .navigationBarDrawer(displayMode: .always),
+            prompt: "搜索书名或路径"
+        )
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    Task { await refresh(force: true) }
+                } label: {
+                    Label("刷新书库", systemImage: "arrow.clockwise")
+                }
+                .disabled(library.isScanning || remote.isRefreshing)
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("完成") { dismiss() }
+                    .fontWeight(.semibold)
+            }
+        }
+        .fileImporter(
+            isPresented: $presentsFolderPicker,
+            allowedContentTypes: [.folder]
+        ) { result in
+            switch result {
+            case .success(let url):
+                Task {
+                    await library.configureFolder(url)
+                }
+            case .failure(let error):
+                if (error as? CocoaError)?.code != .userCancelled {
+                    library.reportError(error)
+                }
+            }
+        }
     }
 
     @ViewBuilder
