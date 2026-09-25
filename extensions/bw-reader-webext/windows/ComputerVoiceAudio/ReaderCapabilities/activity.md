@@ -9,7 +9,7 @@
 学习活动/历史问题时，直接跑（数据就在本机，零传输）：
 
 ```
-python C:\Users\bwica\AppData\Local\BWReader\replication_activity.py --today
+{{PYTHON}} "{{BWREADER}}/replication_activity.py" --today
 ```
 
 读取纪律（内建于默认参数，照默认用即可）：

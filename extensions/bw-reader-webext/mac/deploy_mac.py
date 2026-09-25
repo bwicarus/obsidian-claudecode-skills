@@ -173,6 +173,35 @@ def make_release() -> Path:
     return release
 
 
+def install_stable_scripts(release: Path) -> None:
+    """把 AI / 语音运行时直接跑的脚本铺到 ~/BW/data/BWReader（Windows 上是 %LOCALAPPDATA%\\BWReader）。
+
+    布局只在 windows/package_readerpc_server.py 的 stable_install_layout() 定义一处，这里读同一份。
+    ⚠ 2026-09-25 之前 Mac 没有这一步：这些副本一直停在从 Windows 搬过来那一刻（里面还是
+    C:\\… 路径），仓库里的修复到不了 AI 真正运行的地方。
+    """
+    import importlib.util
+    packager = release / "extensions" / "bw-reader-webext" / "windows" / "package_readerpc_server.py"
+    spec = importlib.util.spec_from_file_location("bw_packager_for_mac", packager)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    root = DATA / "BWReader"
+    changed = []
+    for dest_rel, runtime_rel in module.stable_install_layout():
+        source = Path(module.RUNTIME_SOURCES[runtime_rel])
+        target = root / dest_rel
+        data = source.read_bytes()
+        if target.exists() and target.read_bytes() == data:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = target.with_name(target.name + ".deploying")
+        staging.write_bytes(data)
+        os.chmod(staging, 0o755 if dest_rel.endswith(".py") else 0o644)
+        os.replace(staging, target)
+        changed.append(dest_rel)
+    log(f"运行时脚本 → {root}：更新 {len(changed)} 个" + (f"（{', '.join(changed)}）" if changed else ""))
+
+
 def build_bridge(release: Path) -> None:
     env = dict(os.environ, DOTNET_ROOT=str(DOTNET_ROOT), DOTNET_CLI_TELEMETRY_OPTOUT="1",
                DOTNET_NOLOGO="1")
@@ -274,6 +303,7 @@ def main() -> int:
         release = make_release()
         build_bridge(release)
         switch_current(release)
+        install_stable_scripts(release)
         # 清理旧版本（保留最近 keep 个，当前那个永远保留）
         releases = sorted(p for p in RELEASES.iterdir() if p.is_dir())
         for stale in releases[:-args.keep]:

@@ -8,7 +8,7 @@
 快照（reader_context_snapshot / 快照页）里有「待办通知」节。纪律：
 
 - 读到 **[新]** 通知，先确认收到：
-  `python C:\Users\bwica\AppData\Local\BWReader\replication_notifications.py ack <id>`
+  `{{PYTHON}} "{{BWREADER}}/replication_notifications.py" ack <id>`
 - 通知代表的目标完成后（确定性的会自动消除；需要你与用户对话判断的，
   由你判断），完成入库：
   `... resolve <id> --note "怎么完成的"`

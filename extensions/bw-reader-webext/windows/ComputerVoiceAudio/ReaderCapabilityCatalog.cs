@@ -144,11 +144,11 @@ internal sealed class ReaderCapabilityCatalog
         Entry entry,
         CancellationToken cancellationToken)
     {
-        string text = _directory is null
+        string text = RenderHostPaths(_directory is null
             ? await ReadEmbeddedAsync(entry, cancellationToken)
                 .ConfigureAwait(false)
             : await ReadFileAsync(entry, cancellationToken)
-                .ConfigureAwait(false);
+                .ConfigureAwait(false));
         if (Encoding.UTF8.GetByteCount(text) > MaximumGuideBytes)
         {
             throw new InvalidDataException(
@@ -188,6 +188,39 @@ internal sealed class ReaderCapabilityCatalog
                 encoderShouldEmitUTF8Identifier: false,
                 throwOnInvalidBytes: true),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 指南里的命令写成占位符，由这里换成**本机**的真实路径（2026-09-25）。
+    /// </summary>
+    /// <remarks>
+    /// 原来写死 <c>python C:\Users\bwica\AppData\Local\BWReader\…</c>：服务器换到 Mac 后
+    /// Codex 照做必失败（09-25 20:46 实录 judgment_basis.py 找不到）。用户 2026-08-28 定的规矩是
+    /// 「服务器是我的服务器，不是 Windows」—— 换机器不该去改指南正文。
+    /// {{PYTHON}} 项目解释器；{{BWREADER}} 数据根（跟随符号链接，Mac 上避开带空格的
+    /// Application Support）；{{BRIDGE_RUNTIME}} 桥的运行目录。
+    /// </remarks>
+    internal static string RenderHostPaths(string text)
+    {
+        if (!text.Contains("{{", StringComparison.Ordinal)) return text;
+        string localData = Environment.GetEnvironmentVariable("LOCALAPPDATA") is { Length: > 0 } configured
+            ? configured
+            : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string bwreader = Path.Combine(localData, "BWReader");
+        try
+        {
+            bwreader = new DirectoryInfo(bwreader).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? bwreader;
+        }
+        catch (IOException)
+        {
+        }
+        string runtime = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "bw-computer-voice-bridge", "runtime");
+        return text
+            .Replace("{{PYTHON}}", BwHostPaths.Python(), StringComparison.Ordinal)
+            .Replace("{{BWREADER}}", bwreader, StringComparison.Ordinal)
+            .Replace("{{BRIDGE_RUNTIME}}", runtime, StringComparison.Ordinal);
     }
 
     private static async Task<string> ReadEmbeddedAsync(

@@ -228,6 +228,50 @@ class PackageError(RuntimeError):
     pass
 
 
+
+# ⚠ **这是第二份清单。** RUNTIME_SOURCES 决定"打进包里"，这里决定"铺到稳定路径"
+# （%LOCALAPPDATA%/BWReader/*.py，AI 直接跑的就是这些）。2026-08-29 只加了第一份，
+# 结果 voip_push.py 在包里、却不在运行位置 —— 调用方是 `except ImportError: return 0`，
+# 于是 deliver=call **静默地永远不响**。加新 CLI 时两份都要动。
+# 2026-09-25：从安装函数里提到模块级，Mac 服务器的 deploy_mac.py 共用这一份
+# （此前 Mac 上这些副本一直停在从 Windows 搬过来那一刻）。
+STABLE_RUNTIME_SCRIPTS = (
+    "replication_activity.py", "replication_notifications.py",
+    "replication_places.py", "transit_search.py",
+    "camera_capture.py", "voip_push.py", "judgment_basis.py",
+    "board_card_render.py",
+    "situation_signals.py", "situation_triggers.py",
+    "situation_actions.py", "review_deck.py",
+    "codex_push_register.py", "voice_status_receipt.py",
+    # 语音入口这条链:脚本之间互相 import,缺一个就整条跑不起来。
+    "voice_autoclose.py", "voice_keepalive.py", "voice_ladder.py",
+    "voice_start_step.py", "voice_start_failed.py",
+    "codex_thread_notify.py", "codex_channel.py",
+    # 语音轨迹导出(organize-into-skill 用),依赖两个同步模块
+    "voice_turn_trace.py", "voice_history_sidebar_sync.py",
+    "voice_conversation_sync.py",
+    # 重启 Codex 的标准做法（在通话就拒绝、等真热起来）
+    "codex_restart.py",
+    # 自建语音会话运行器
+    "voice_cli_runner.py",
+    "voice_jev_context.py", "voice_artifact_resend.py",
+    # 语音核心的 MCP 服务器（后台模型自己开口用）
+    "voice_core_mcp.py",
+    # 自建定时任务：执行器 + 调度
+    "bw_flow_runner.py", "bw_scheduler.py",
+)
+STABLE_SKILL_KIT = ("bw_skill_build.py", "bw_flow_runtime.js", "SKILL.template.md")
+# 在 scripts/ 子目录打包、却要铺到根下的（AGENTS/能力指南按根路径引用）
+STABLE_FROM_SCRIPTS = ("google_api_quota.py", "camera_snap.py")
+
+
+def stable_install_layout() -> list[tuple[str, str]]:
+    """[(相对 BWReader 根的目标, 包内 readerpc-runtime/ 路径)]；源文件查 RUNTIME_SOURCES。"""
+    layout = [(name, "readerpc-runtime/" + name) for name in STABLE_RUNTIME_SCRIPTS]
+    layout += [("skill-kit/" + name, "readerpc-runtime/skill-kit/" + name) for name in STABLE_SKILL_KIT]
+    layout += [(name, "readerpc-runtime/scripts/" + name) for name in STABLE_FROM_SCRIPTS]
+    return layout
+
 def _fail(message: str) -> None:
     raise PackageError(message)
 
@@ -614,52 +658,12 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
         # 却不在运行位置 —— 而调用方是 `except ImportError: return 0`，
         # 于是 deliver=call **静默地永远不响**。
         # 加新 CLI 时两份都要动。
-        for stable_name in (
-            "replication_activity.py", "replication_notifications.py",
-            "replication_places.py", "transit_search.py",
-            "camera_capture.py", "voip_push.py", "judgment_basis.py",
-            "board_card_render.py",
-            "situation_signals.py", "situation_triggers.py",
-            "situation_actions.py", "review_deck.py",
-            "codex_push_register.py", "voice_status_receipt.py",
-            # 语音入口这条链:脚本之间互相 import,缺一个就整条跑不起来。
-            "voice_autoclose.py", "voice_keepalive.py", "voice_ladder.py",
-            "voice_start_step.py", "voice_start_failed.py",
-            "codex_thread_notify.py", "codex_channel.py",
-            # 语音轨迹导出(organize-into-skill 用),依赖两个同步模块
-            "voice_turn_trace.py", "voice_history_sidebar_sync.py",
-            "voice_conversation_sync.py",
-            # 重启 Codex 的标准做法（在通话就拒绝、等真热起来）
-            "codex_restart.py",
-            # 自建语音会话运行器
-            "voice_cli_runner.py",
-            "voice_jev_context.py", "voice_artifact_resend.py",
-            # 语音核心的 MCP 服务器（后台模型自己开口用）
-            "voice_core_mcp.py",
-            # 自建定时任务：执行器 + 调度
-            "bw_flow_runner.py", "bw_scheduler.py",
-        ):
-            (root.parent / stable_name).write_bytes(
-                (release / "readerpc-runtime" / stable_name).read_bytes()
-            )
-        # 整理套件走 %LOCALAPPDATA%\BWReader\skill-kit\(AGENTS/skill 引用这个路径)。
-        kit_dir = root.parent / "skill-kit"
-        kit_dir.mkdir(parents=True, exist_ok=True)
-        for kit_name in ("bw_skill_build.py", "bw_flow_runtime.js", "SKILL.template.md"):
-            (kit_dir / kit_name).write_bytes(
-                (release / "readerpc-runtime" / "skill-kit" / kit_name).read_bytes()
-            )
-        # 配额闸 CLI 也要稳定路径(AGENTS 引用) —— 它在 scripts/ 子目录打包,
-        # 复制口径与上面不同,单列。
-        (root.parent / "google_api_quota.py").write_bytes(
-            (release / "readerpc-runtime" / "scripts"
-             / "google_api_quota.py").read_bytes()
-        )
-        # 取图脚本同理:它与 Pi 上跑的是同一份源码,本机摄像头也用它。
-        (root.parent / "camera_snap.py").write_bytes(
-            (release / "readerpc-runtime" / "scripts"
-             / "camera_snap.py").read_bytes()
-        )
+        # 铺到稳定路径（%LOCALAPPDATA%/BWReader/…，AI 直接跑的就是这些）。
+        # 布局只在 stable_install_layout() 一处定义 —— Mac 的 deploy_mac.py 也读它。
+        for dest_rel, runtime_rel in stable_install_layout():
+            target = root.parent / dest_rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((release / runtime_rel).read_bytes())
         shortcuts = _write_shortcuts(release / EXE_REL)
         _atomic_json(
             root / "current.json",

@@ -472,16 +472,28 @@ OPERATION_SILENCE_LINE = (
     "**全程不要在通话里提这件事，也不要念出任何结果**。\n"
 )
 
+def _run_line(script: str, args: str = "") -> str:
+    """给 Codex 的一行命令：本进程的解释器 + BWReader 根下的脚本。
+
+    2026-09-25：原来写死 `python "%LOCALAPPDATA%\\BWReader\\…"`（Windows cmd 语法），
+    服务器换到 Mac 后 Codex 照做必失败 —— 语音入口这条指令从迁移起就是坏的。
+    Windows 上生成的仍是 Python313\\python.exe + %LOCALAPPDATA%\\BWReader，与原来等价。
+    解释器不加引号：PowerShell 里带引号的可执行路径要 `&` 才能调，两边路径都不含空格。
+    """
+    import sys
+    root = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "BWReader"
+    return ('    %s "%s"%s' % (sys.executable or "python", root / script, args)).replace("%", "%%")
+
+
 VOICE_ENTRY_TEXT = (
     OPERATION_SILENCE_LINE
     + "指定操作（requestId: %s）。\n"
     "\n"
     "请先运行这一行（失败不要停，继续下一步）：\n"
-    '    python "%%LOCALAPPDATA%%\\BWReader\\codex_push_register.py" --enable\n'
+    + _run_line("codex_push_register.py", " --enable") + "\n"
     "\n"
     "再运行这一行**一次**，它自己会重试并在放弃时上报，你不用再做别的：\n"
-    '    python "%%LOCALAPPDATA%%\\BWReader\\voice_start_step.py"'
-    " --attempts 2 --report-failure\n"
+    + _run_line("voice_start_step.py", " --attempts 2 --report-failure") + "\n"
     "用 exec_command 起它，yield_time_ms 给 1500，返回后**就当做完了**：\n"
     "不要 wait、不要 write_stdin 查看、不要再运行第二次 —— 继续跟用户说话。\n"
     "它自己会重试，放弃时会自己上报，你不需要它的结果。\n"

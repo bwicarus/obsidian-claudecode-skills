@@ -154,12 +154,13 @@ class RuntimeSourceListsAgreeTest(unittest.TestCase):
     """
 
     def test_every_flat_runtime_source_is_also_installed_to_the_stable_path(self):
-        import ast
-        source = ast.parse(Path(module.__file__).read_text("utf-8"))
-        loops = [node for node in ast.walk(source) if isinstance(node, ast.For)
-                 and isinstance(node.target, ast.Name) and node.target.id == "stable_name"]
-        self.assertEqual(len(loops), 1)
-        stable = ast.literal_eval(loops[0].iter)
+        # 2026-09-25 起第二份清单是模块常量 STABLE_RUNTIME_SCRIPTS（Windows 安装与 Mac 部署共用），
+        # 安装只经 stable_install_layout() 铺；这里连「布局真的用了这份名单」一起核。
+        stable = set(module.STABLE_RUNTIME_SCRIPTS)
+        laid_out = {dest for dest, _ in module.stable_install_layout()}
+        self.assertTrue(stable <= laid_out)
+        self.assertTrue(all(runtime in module.RUNTIME_SOURCES
+                            for _, runtime in module.stable_install_layout()))
         missing = []
         for key in module.RUNTIME_SOURCES:
             prefix, _, name = key.partition("/")

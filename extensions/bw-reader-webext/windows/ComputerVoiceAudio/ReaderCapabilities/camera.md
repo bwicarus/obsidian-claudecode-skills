@@ -62,7 +62,7 @@ message 里会直接列出已登记的有哪几台 —— 照着改一次即可�
 有些摄像头**能被系统看见却读不出**（驱动只认另一套接口）。这种会以
 `BW_CAMERA_FAILED` 出现，message 里是 ffmpeg 的原话。不是你调用错了，
 换一台或告诉用户即可。人要排查时跑
-`python %LOCALAPPDATA%\BWReader\camera_capture.py probe` 逐台试拍。
+`{{PYTHON}} "{{BWREADER}}/camera_capture.py" probe` 逐台试拍。
 
 ⚠ **拍不到 ≠ 画面里没有那个东西**。这两件事该说的话完全不同：
 前者是「我看不到」，后者是「我看了，没有」。别把前者说成后者。
@@ -80,7 +80,7 @@ message 里会直接列出已登记的有哪几台 —— 照着改一次即可�
 用户家里接着实体摄像头。要看现场时使用 **`$camera-snap` Skill**，由固定的
 本地脚本直接取图；普通拍照不再依赖 Reader MCP：
 
-    python C:\Users\bwica\AppData\Local\BWReader\camera_capture.py snap pi
+    {{PYTHON}} "{{BWREADER}}/camera_capture.py" snap pi
 
 脚本会把照片落到 Windows 本地并返回一行 JSON；必须用本地图像查看工具打开
 返回的 `path`，真正看过图片后再回答。不要只根据元数据判断画面，也不要再用
@@ -120,7 +120,7 @@ id + label 选择。label 是位置描述，也就是你挑哪台的依据；别
 "没有位置数据"悄悄变成"他不在家"，于是该提的时候不提，而且不报错。
 别名不认识时一律 `elsewhere`，**不猜** —— 猜的话会在咖啡店按在家处理。
 用户说"这里是家/公司"这类话时，用
-`python C:\Users\bwica\AppData\Local\BWReader\replication_places.py analyze`
+`{{PYTHON}} "{{BWREADER}}/replication_places.py" analyze`
 看常在位置候选并 `name <编号> <名字>` 命名（命名追溯适用全部历史）。
 
 ⚠ **快照不是位置数据源**（2026-08-27，实测你为拿一个地址连读两次
@@ -131,7 +131,7 @@ id + label 选择。label 是位置描述，也就是你挑哪台的依据；别
 
 ### 手动命名位置（用户说「这里是家/公司」时）
 
-- 定位数据已在：`python C:\Users\bwica\AppData\Local\BWReader\replication_places.py name-latest 家`
+- 定位数据已在：`{{PYTHON}} "{{BWREADER}}/replication_places.py" name-latest 家`
 - 还没有定位数据（刚开开关/权限刚给）：`... name-next 家` —— 挂起，
   首条定位（2 小时内）到达后自动绑定并出一条完成通知；过时不绑（防错绑）。
 

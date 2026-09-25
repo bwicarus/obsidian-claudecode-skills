@@ -7,11 +7,7 @@
 不要开启语音、不要发送快捷键、不要重试、不要为了回答而改变任何状态。
 这条查询只要一个答复。
 
-    python "%LOCALAPPDATA%\BWReader\voice_status_receipt.py" ^
-      --request-id <原样填回查询里的 requestId> ^
-      --task-status ready ^
-      --voice-status <active|ended|unknown> ^
-      --evidence "<你据以判断的依据>"
+    {{PYTHON}} "{{BWREADER}}/voice_status_receipt.py" --request-id <原样填回查询里的 requestId> --task-status ready --voice-status <active|ended|unknown> --evidence "<你据以判断的依据>"
 
 命令跑完会打印一行 JSON。看到 `"ok": true` 就算答复完成，不必再做别的。
 
@@ -71,7 +67,7 @@
 的场合），**只跑这一条命令**：
 
 ```
-python C:\Users\bwica\AppData\Local\BWReader\judgment_basis.py
+{{PYTHON}} "{{BWREADER}}/judgment_basis.py"
 ```
 
 一次拿到全部判断依据：地点（含新旧）、语音链路连没连（他现在听不听得

@@ -169,7 +169,7 @@ POST https://bwicarus-2.taile44d0c.ts.net/reader-board/v1
 ## 提示板：两块，盯文件（2026-08-30 定稿）
 
 只回答「此刻该不该开口」的板子**现在只有一块**，就在
-`C:\Users\bwica\bw-computer-voice-bridge\runtime\` 下：
+`{{BRIDGE_RUNTIME}}/` 下：
 
     reader-attention-slow.md   待办（只有祈使句）
     reader-attention-fast.md   已退役 2026-09-18，留着一块墓碑，不必再盯
