@@ -1035,7 +1035,10 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
             let hold: () -> Void = { [weak self] in self?.onSentenceLongPress?(sentence) }
             var start = ReaderNativePageButton(
                 id: "s0-" + sentence.id, kind: .sentenceStart,
-                anchor: sentence.firstChar.map { CGRect(x: $0.minX, y: first.minY, width: $0.width, height: first.height) } ?? first,
+                // 没有首字框时退到行首一个行高见方的小块 —— ⚠ 不能用整行：角标臂长跟着锚宽走，
+                // 整行做锚 = 整行都是点击区，「点句子任何地方都翻译」（2026-09-26 用户实测）。
+                anchor: sentence.firstChar.map { CGRect(x: $0.minX, y: first.minY, width: $0.width, height: first.height) }
+                    ?? CGRect(x: first.minX, y: first.minY, width: first.height, height: first.height),
                 badge: nil, tint: tint, label: "翻译整句", action: tap)
             start.longAction = hold
             // 句末：末字所在那一行的高度（小标点「。」本身太矮，竖线短得像只剩横线）。
@@ -2289,7 +2292,8 @@ private final class ReaderNativePageButtonView: UIButton {
         case .sentenceStart, .sentenceEnd:
             // 原版 L 角标：臂长 ≈ 1.6 个行高（至少盖住首/末字），线落在字外侧 3pt 空隙里，不压字形。
             guard anchor.height > 4 else { isHidden = true; return }
-            let gap: CGFloat = 3, arm = max(anchor.width, anchor.height * 1.6)
+            // 臂长 ≈ 1.6 个行高，至少盖住首/末字，但封顶 2.5 个行高：角标只占句首/句尾一小段。
+            let gap: CGFloat = 3, arm = min(max(anchor.width, anchor.height * 1.6), anchor.height * 2.5)
             let start: Bool
             if case .sentenceStart = spec.kind { start = true } else { start = false }
             frame = start
