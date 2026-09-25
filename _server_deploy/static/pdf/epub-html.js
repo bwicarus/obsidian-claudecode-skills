@@ -5069,7 +5069,16 @@
     // Service Worker(同 PDF 01-boot):EPUB 只从这进也能激活 /pdf/ 域 SW → manifest/section SWR 秒开
     if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/pdf/sw.js', { scope: '/pdf/' }).catch(function () {}); } catch (e) {} }
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
-    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { try { _userpageLiveSync(); } catch (e) {} try { _favReconcile(); } catch (e) {} _readerEventsConnect(); } });
+    // 回前台补拉一次对话（同 pdf-tail.js）：后台期间事件流被挂起，光重连不补就永远缺着。
+    var _hiddenAt = 0;
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState !== 'visible') { _hiddenAt = Date.now(); return; }
+      try { _userpageLiveSync(); } catch (e) {} try { _favReconcile(); } catch (e) {} _readerEventsConnect();
+      if (_hiddenAt && Date.now() - _hiddenAt > 1500) {
+        try { if (window.RC && RC.assistant && RC.assistant.reloadHistory) RC.assistant.reloadHistory(); } catch (e) {}
+      }
+      _hiddenAt = 0;
+    });
     var _lsTick = 0;
     setInterval(function () { try {
       _lsTick++;

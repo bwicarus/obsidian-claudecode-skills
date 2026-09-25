@@ -794,20 +794,20 @@ window._inkLoadAll = _inkLoadAll;
       es = new EventSource('/pdf/api/reader-events');
       es.addEventListener('open', function () { _retry = 0; });   // 接通即清退避
       es.addEventListener('change', function (e) {
-        if (document.visibilityState !== 'visible') return;
         var ev; try { ev = JSON.parse(e.data); } catch (_) { return; }
+        // 对话更新不受前后台限制（同 epub-html.js）：以前这一类也被下面的可见性闸扔掉，
+        // App 在后台时 AI 说的话侧栏永远收不到，回来也不补（2026-09-26 用户：侧栏丢对话记录）。
+        if (ev && ev.kind === 'assistant-history') {
+          try { if (window.RC && RC.assistant && RC.assistant.onHistoryEvent) RC.assistant.onHistoryEvent(ev); } catch (_) {}
+          return;
+        }
+        if (document.visibilityState !== 'visible') return;
         if (ev && ev.kind === 'client-action' && ev.action && (!ev.file || ev.file === FILE_REL)) {   // MCP 遥控:统一走 RC.execRemote(共享层);rc-assistant 未载(legacy)回退 window 直调
           try { var _ra = ev.action; if (window.RC && RC.execRemote) RC.execRemote(_ra); else if (_ra && typeof window[_ra.fn] === 'function') window[_ra.fn].apply(null, _ra.args || []); } catch (_) {}
           return;
         }
         // ★ 任务运行时:纸内容变了(检查结果写回 / 块显隐)→ 重画那张用户页。
         //   之前这里只认 ink,text/run 事件被下面那行 return 掉 → 「让 AI 检查」结果写进了 sidecar 却不显示(用户实测卡住)。
-        // 外部(SSH bridge / MCP)写进助手历史 → 侧栏当场追加,用户不用刷新。
-        // 复用既有事件总线,不新增任何对外服务。
-        if (ev && ev.kind === 'assistant-history') {
-          try { if (window.RC && RC.assistant && RC.assistant.onHistoryEvent) RC.assistant.onHistoryEvent(ev); } catch (_) {}
-          return;
-        }
         if (ev && ev.kind === 'text' && ev.file === FILE_REL) {
           try { if (window.__upRerender) window.__upRerender(ev.uid); } catch (_) {}
           return;
@@ -843,7 +843,17 @@ window._inkLoadAll = _inkLoadAll;
     } catch (_) { es = null; }
   }
   connect();
-  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { connect(); try { _inkLoadAll(); } catch (_) {} } });
+  // 回前台补拉一次对话：iOS 在后台会挂起页面、掐断事件流，期间的更新根本到不了 ——
+  // 光重连不补，后台那段对话就永远缺着。reloadHistory 自带合并与限流，通话中调用也安全。
+  var _hiddenAt = 0;
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible') { _hiddenAt = Date.now(); return; }
+    connect(); try { _inkLoadAll(); } catch (_) {}
+    if (_hiddenAt && Date.now() - _hiddenAt > 1500) {
+      try { if (window.RC && RC.assistant && RC.assistant.reloadHistory) RC.assistant.reloadHistory(); } catch (_) {}
+    }
+    _hiddenAt = 0;
+  });
 })();
 
 // ── 工具栏 ──
