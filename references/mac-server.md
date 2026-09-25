@@ -138,8 +138,13 @@ cd ~/BW/src/claude
 - **命令行装真机**（2026-09-25 跑通，要在 Mac 桌面会话里；iPad `bwpad` UDID `00008132-000405AE36F0801C`，
   4 个描述文件都已含它，不需要 `-allowProvisioningUpdates`）：
 
+  ⚠ **改过 `_server_deploy/static/pdf/*.js` 必须先重生成 ReaderBundle**：xcodebuild 只是把
+  `Generated/ReaderBundle` 原样拷进包，**不会**自己重新打包。2026-09-26 连装两版，JS 改动都没进 App，
+  而编译全绿、看不出任何异常 —— 判据是客户端日志里静态路径的哈希（`/static/<hash>/pdf/…`）没变。
+
   ```bash
   cd ~/BW/src/claude/ios/BWReader
+  ~/BW/venv/server/bin/python package_local_reader.py --output Generated/ReaderBundle   # 改过 JS 时
   xcodebuild -project BWReader.xcodeproj -scheme BWReader -configuration Debug \
     -destination 'id=00008132-000405AE36F0801C' -derivedDataPath ~/BW/xcode-derived/device build
   xcrun devicectl device install app --device 00008132-000405AE36F0801C \
@@ -149,6 +154,22 @@ cd ~/BW/src/claude
 
   产物名是 `bwicarus-test.app`（不是 BWReader.app）。与 TestFlight 版同 bundle id，覆盖安装保留数据；
   要断点调试就在 Xcode 里选 bwpad 按 Run。
+- **模拟器**（2026-09-26 起日常测试用它，用户在模拟器里自己操作、含语音；登录用 Apple 账户，由用户本人登）：
+  iPad Pro 11 (M5) `7E409756-50E0-4090-BC46-376FEF34DFC4`。必须 `ARCHS=arm64 ONLY_ACTIVE_ARCH=YES`，
+  否则 xcodebuild 选 x86_64 报「Unable to resolve module dependency」。
+
+  ```bash
+  xcodebuild -project BWReader.xcodeproj -scheme BWReader -configuration Debug \
+    -destination 'id=7E409756-50E0-4090-BC46-376FEF34DFC4' -derivedDataPath ~/BW/xcode-derived/sim \
+    ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build
+  xcrun simctl install 7E409756-50E0-4090-BC46-376FEF34DFC4 \
+    ~/BW/xcode-derived/sim/Build/Products/Debug-iphonesimulator/bwicarus-test.app
+  xcrun simctl launch --terminate-running-process 7E409756-50E0-4090-BC46-376FEF34DFC4 space.bwicarus.bwreader2
+  ```
+
+  模拟器 App 的本机数据可直接读：`xcrun simctl get_app_container <UDID> space.bwicarus.bwreader2 data`
+  下的 `Library/Application Support/`（`conversation-cache/normal.json` 是侧栏对话的原样投影，
+  查「显示成双/缺消息」先看它）。客户端日志里模拟器的设备号结尾是 `dc6d7c`，iPad 是 `3cd63a`。
 
 ## 7. Windows 侧现状（已退役）
 
