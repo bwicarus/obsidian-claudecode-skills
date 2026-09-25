@@ -105,6 +105,9 @@ cd ~/BW/src/claude
   >200 MB 的文件云同步不收（`File too large` 提示正常）。
 - **Anki**：数据从 AnkiWeb 同步（10 牌组 / 501 卡）。只装 AnkiConnect；Windows 的 AnkiTrayPro 不带。
   Windows 上「KJ Anki Sync」其实长期 `anki_unavailable`，Mac 上第一次真正跑通。
+- **用户现况查询（MCP `user_situation`，2026-09-25）**：地点 / 各设备在场 / 正在读什么 / 复习 / 醒着与空闲。
+  判断复用 `situation_signals`；桥另按设备存 `presence-signal-<设备>.json`。
+  ⚠ 在终端里手跑 `situation_signals.py` 要带 `LOCALAPPDATA=~/BW/data`，否则找错根目录、全报「不知道」。
 - **路径**：服务代码里写死的 `/home/bwicarus/...` 改由 `_server_deploy/bw_paths.py` 给出
   （Mac 的 /home 是系统自动挂载点，不可写）。
 

@@ -91,6 +91,22 @@
     ④ 06:06 PencilKit 悬停阴影加载 USD 模型崩溃；⑤ 895 的 `didPostMessage` 巨型字典 OOM。
     本机无 974 dSYM，App 帧未符号化。
 
+### P0：复制应用自 2026-09-24 00:41 起停摆（Claude 2026-09-25 查明，待用户执行一步恢复）
+
+- 现象：`~/BW/data/BWReader/replication-apply.status.json` 报「apply 状态文件损坏……拒绝静默重置」。
+  复制链停了 = 活动账本、定位导出（`current-place.json`）、通知、情境触发器、语音区全都不更新；
+  `user_situation` / `situation_signals` 的地点一直「不知道」就是它。
+- 根因：Windows 在 09-24 00:41–00:43 间崩溃/断电，7 个正在写的小文件被 NTFS 清零（全 NUL），
+  迁移时原样搬到了 Mac：`replication-apply-state.json`、`notification-routing.json`、
+  `situation-triggers.json`、`voice-zones.json`、runtime 下 `notifications-open.json`、`current-place.json`、
+  以及 App 已自行隔离的 `assistant-convo/1.json.corrupt.1790178202`。
+- 精确游标 = **9096**：账本第 9096 条（00:41:15）的 mutationId 已在活动 jsonl 里，9097（00:43:22）没有。
+  积压 801 条（阅读位置 358 / 活动 296 / 重同步 77 / 便签 69 / 配对 1）。领域应用幂等，活动按此游标不重不漏。
+- 恢复（改写在用数据文件，Claude 自动模式被拒，由用户执行）：
+  `mv replication-apply-state.json replication-apply-state.json.zeroed-20260924-0041 && printf '{"appliedCursor": 9096}' > replication-apply-state.json`
+  （在 `~/BW/data/BWReader` 下）。其余清零文件由复制链下一轮重新导出；
+  `situation-triggers.json` 损坏时按空表处理 —— AI 注册过的触发规则已丢失，无备份。
+
 ### P0：对话重复、漏更新与前后台恢复失败
 
 - 用户和 AI 的每句话有时显示两份；最新消息可能不出现。
