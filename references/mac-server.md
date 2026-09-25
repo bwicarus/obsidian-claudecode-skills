@@ -111,8 +111,8 @@ cd ~/BW/src/claude
   原件归档 `/Volumes/BWDev/archive/windows-codex-20260925/`。`~/.codex` 已纳入每日备份（排除插件/缓存）。
   ⚠ 未迁 `rules/default.rules`：是历次「总是允许」攒下的 Windows 一次性命令，另含一条「pwsh 任意命令放行」——
   换成 Mac 等价物等于替用户放开全部审批，留给用户决定。
-  ⚠ 仍缺：**ffmpeg**（Mac 未装，影响 video-transcode 与服务端 YouTube 字幕/转写）；**摄像头**（三台 local
-  是 Windows 的硬件，Pi 那台要 Mac→Pi SSH）。`~/.config` 的密钥已从 Windows 补齐（用户授权）。
+  ⚠ 仍缺：**ffmpeg**（Mac 未装，影响 video-transcode 与服务端 YouTube 字幕/转写）。**摄像头**：用户实际只用 Pi 上的 C920 —— Mac→Pi SSH
+  已打通（`ssh pi`，Mac 公钥经 Windows 一跳装到 Pi），`camera_capture.py snap pi` 实测成功；另三台 local 是 Windows 的硬件。`~/.config` 的密钥已从 Windows 补齐（用户授权）。
 - **Obsidian**：库 `~/BW/data/obsidian`；`资源/vocab` 被同步配置忽略（服务器本机生成），
   >200 MB 的文件云同步不收（`File too large` 提示正常）。
 - **Anki**：数据从 AnkiWeb 同步（10 牌组 / 501 卡）。只装 AnkiConnect；Windows 的 AnkiTrayPro 不带。
