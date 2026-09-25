@@ -12,6 +12,7 @@ final class NativeAudioEngine {
         case microphoneFormatUnavailable
         case outputFormatUnavailable
         case invalidPlaybackFrame
+        case controlTimeout
 
         var errorDescription: String? {
             switch self {
@@ -21,6 +22,8 @@ final class NativeAudioEngine {
                 return "iPad 麦克风格式不可用"
             case .outputFormatUnavailable:
                 return "无法建立 48 kHz 通话播放格式"
+            case .controlTimeout:
+                return "iPad 音频系统没有响应（启动超时）"
             case .invalidPlaybackFrame:
                 return "Windows 返回的通话音频帧长度无效"
             }
@@ -149,29 +152,46 @@ final class NativeAudioEngine {
         }
     }
 
+    /// ⚠ 调用方都在主线程（NativeVoiceBridge / NativeAgentVoiceSession）。控制队列里的
+    /// `player.play()` 在音频链路异常时会等一个永远不来的 IO 周期 —— 974 实机：主线程
+    /// `.sync` 陪着等过 10 s，被系统看门狗 0x8BADF00D 杀掉。所以主线程最多等
+    /// `controlWaitSeconds`，超时抛 controlTimeout 交给既有恢复流程，绝不无限期陪等。
+    static let controlWaitSeconds: TimeInterval = 4
+
     func start() throws {
-        try controlQueue.sync {
-            try startOnControlQueue()
+        try runOnControlQueue { try self.startOnControlQueue() }
+    }
+
+    private func runOnControlQueue(_ work: @escaping () throws -> Void) throws {
+        final class Outcome: @unchecked Sendable { var error: Error? }
+        let outcome = Outcome()
+        let done = DispatchSemaphore(value: 0)
+        controlQueue.async {
+            do { try work() } catch { outcome.error = error }
+            done.signal()
         }
+        guard done.wait(timeout: .now() + Self.controlWaitSeconds) == .success else {
+            throw AudioFailure.controlTimeout
+        }
+        if let error = outcome.error { throw error }
     }
 
     /// Rebuilds only the App-local audio graph. The caller keeps the existing
     /// Windows WSS/session, so a transient iOS route/configuration loss does
     /// not issue another START or request microphone permission again.
     func restart() throws {
-        try controlQueue.sync {
-            stopOnControlQueue()
-            try startOnControlQueue()
+        try runOnControlQueue {
+            self.stopOnControlQueue()
+            try self.startOnControlQueue()
         }
     }
 
+    /// 健康检查每几秒问一次：不排控制队列（队列若卡在 play() 里，排队就等于陪着卡）。
     var isOperational: Bool {
-        controlQueue.sync {
-            stateLock.lock()
-            let markedRunning = running
-            stateLock.unlock()
-            return markedRunning && engine.isRunning && player.isPlaying
-        }
+        stateLock.lock()
+        let markedRunning = running
+        stateLock.unlock()
+        return markedRunning && engine.isRunning && player.isPlaying
     }
 
     private func startOnControlQueue() throws {
@@ -285,13 +305,16 @@ final class NativeAudioEngine {
         }
     }
 
+    /// 挂断要**立刻**生效：先把 running 置假（采音回调与播放入队当场停手），拆音频图放到
+    /// 控制队列异步做。以前这里是 `.sync`，控制队列卡住时「结束通话」连 STOP 都发不出去。
+    /// 之后的 start()/restart() 在同一串行队列上排在它后面，顺序不变。
     func stop() {
-        controlQueue.sync {
-            stopOnControlQueue()
-        }
-        processingQueue.sync {
-            inputAccumulator.removeAll(keepingCapacity: false)
-        }
+        stateLock.lock()
+        let wasRunning = running
+        running = false
+        stateLock.unlock()
+        controlQueue.async { self.stopOnControlQueue(deactivateSession: wasRunning) }
+        processingQueue.async { self.inputAccumulator.removeAll(keepingCapacity: false) }
     }
 
     var isInputMuted: Bool {
@@ -326,9 +349,9 @@ final class NativeAudioEngine {
         try AVAudioApplication.shared.setInputMuted(muted)
     }
 
-    private func stopOnControlQueue() {
+    private func stopOnControlQueue(deactivateSession: Bool = false) {
         stateLock.lock()
-        let wasRunning = running
+        let wasRunning = running || deactivateSession
         running = false
         stateLock.unlock()
 
@@ -350,10 +373,10 @@ final class NativeAudioEngine {
         }
     }
 
+    /// 主线程只校验、不排队等：播放入队在串行控制队列上按到达顺序执行。
     func enqueuePlayback(_ samples: [Int16]) throws {
-        try controlQueue.sync {
-            try enqueuePlaybackOnControlQueue(samples)
-        }
+        guard samples.count == Self.samplesPerFrame else { throw AudioFailure.invalidPlaybackFrame }
+        controlQueue.async { try? self.enqueuePlaybackOnControlQueue(samples) }
     }
 
     private func enqueuePlaybackOnControlQueue(
@@ -385,6 +408,8 @@ final class NativeAudioEngine {
                 : Float(value) / 32_767.0
         }
 
+        // 引擎没在跑时 play() 会去等不存在的 IO 周期（卡死的起点）。交给健康检查重启。
+        guard engine.isRunning else { return }
         let resetTimeline = scheduledFrames >= Self.maximumScheduledFrames
         if resetTimeline {
             player.stop()
