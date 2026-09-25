@@ -136,8 +136,16 @@ struct ReaderNativeVocabularyState {
         }
         let revision = current?.rev ?? 0
         guard revision >= 0, revision < 9_007_199_254_740_991 else { throw Failure(message: "词汇版本无效") }
-        let parent: Any = current == nil ? NSNull() : current!.deleted ? ["deleted": true]
-            : ["deleted": false, "value": previous!] as [String: Any]
+        // 写成 if/else 并逐支标明类型：原来的嵌套三元（NSNull / [String: Bool] / [String: Any]
+        // 三种分支类型）让 Xcode 27 的 Swift 编译器在统一类型时自身崩溃。取值完全相同。
+        let parent: Any
+        if let current {
+            parent = current.deleted
+                ? ["deleted": true] as [String: Any]
+                : ["deleted": false, "value": previous!] as [String: Any]
+        } else {
+            parent = NSNull()
+        }
         let envelope: [String: Any] = ["schema": 1, "collection": Self.collection, "id": id,
             "rev": revision + 1, "updatedAt": stamp, "updatedBy": deviceID, "deleted": false,
             "value": value, "causal": ["contract": "record-parent-state/1", "parent": parent]]
