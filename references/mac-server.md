@@ -18,11 +18,11 @@
 编译、模拟器、测试可以远程做；装真机、发 TestFlight 要在 Mac 桌面上开的会话里做
 （Mac 上装有 Claude 桌面版），或先在 Mac 上 `security unlock-keychain`。
 
-## 2. 目录布局（全部在内置盘）
+## 2. 目录布局（在用数据在内置盘，代码/缓存/归档/备份在外接盘 BWDev）
 
 ```
 ~/BW/
-  src/claude/                  代码仓库（分支 claude/mac-migration-20260925；外接盘抹成 APFS 后可移过去）
+  src/claude -> /Volumes/BWDev/src/claude   代码仓库（符号链接；实体在外接盘，2026-09-25 迁）
   runtime/releases/<时间>-<提交>/  部署出来的代码副本（服务从这里跑）
   runtime/current -> releases/…  当前版本
   data/
@@ -32,13 +32,13 @@
     BWReader/                  原 %LOCALAPPDATA%\BWReader（书、模型、卡片资源、语音设置、复制账本…）
     bridge/                    桥的安装根：native-host/（配置）+ runtime/（运行数据）
     project/{anki,index,dashboard,history,temp}   仓库里会被写入的小目录
-    legacy/                    迁移时的旧副本（C:\claude 的旧 state、首轮复制的库），核对完可删
+    （legacy/、win-bridge-install/ 已逐字节校验后迁到 /Volumes/BWDev/archive/）
   config/server.env            服务环境变量（含 SECRET_KEY，权限 600，不进 git）
   config/codex-mcp-sections.toml  追加到 ~/.codex/config.toml 的两段 MCP（已追加）
   config/jev-api.txt           语音路由用的密钥文件（权限 600）
   venv/server/                 服务 Python 3.13（依赖与 Windows 那份 Python 逐包对齐）
   logs/<服务>.log              各服务日志
-  xcode-derived/               Xcode 编译缓存
+  xcode-derived -> /Volumes/BWDev/xcode-derived   命令行编译缓存（符号链接）
 ```
 
 **必须存在的链接**（`deploy_mac.py` 会自动建前两个）：
@@ -146,13 +146,25 @@ cd ~/BW/src/claude
 - 回退：把 Mac 的 Tailscale 名改回、Windows 改回 `bwicarus-2` 并 `serve` 重配、启用上述任务。
   注意 Mac 上切换后产生的数据要先搬回去。
 
-## 8. 还没做的
+## 8. 外接盘 BWDev（Buffalo ESD-S1C 1 TB，APFS，2026-09-25 用户抹盘）
 
-- 外接盘（Buffalo ESD-S1C 1 TB，USB 10 Gbps，实测读 930 MB/s）抹成 APFS 后把仓库移过去
-  （命令：`diskutil eraseDisk APFS BWDev GPT disk7`，**先 `diskutil list external physical` 核对编号**；
-  会删掉盘上的 Windows 与游戏，用户已同意抹整盘，由用户执行）。
+用户原话：当作备份与项目工程文件用，「尽量不把东西放在这台 mac 里，但会影响运行和服务速度的就不需要妥协」。
+
+| 在外接盘 | 留内置盘（影响运行） |
+|---|---|
+| 代码仓库 `src/claude`、`xcode-derived`、`archive/`（旧副本）、`backups/`（每日快照） | `~/BW/data`（服务在用）、`runtime`、`venv`、`config`、`logs`、launchd |
+
+- **外接盘断开时**：所有服务照常（launchd 只用 runtime/venv/data/logs，运行副本不引用仓库）；
+  只是不能开发/部署，备份当天跳过（不会退回写内置盘）。
+- **每日备份**：launchd `space.bwicarus.backup` 03:30 跑 `mac/backup_mac.py`，
+  SQLite 在线备份 API + rsync 硬链接去重，保留 7 天 + 4 周；状态看 `~/BW/logs/backup.status.json`。
+  首份 27 GB / 82 s，之后每天增量约 1 GB 量级（大库 kj-public.db 13.6 GB 不变时硬链接复用）。
+- 卷上 `Owners: Disabled`（外接盘默认忽略属主），对仓库和备份无影响。
+
+## 9. 还没做的
+
 - 系统设置由用户开：自动登录（服务是用户级，登录后才起）、断电后自动开机。睡眠已是永不。
 - 没迁的：PC 端 OCR 预处理（Windows 的 reader-pc-ocr-venv / models）、spacy 语法分析 venv
   （server.env 里 `SPACY_PYTHON=~/BW/venv/spacy` 还不存在）、DocLayout-YOLO。
 - 这批 Mac/Xcode 27 修复在 `claude/mac-migration-20260925`，Codex 的分支里没有，需要合并。
-- `~/BW/data/legacy/` 与 Windows 上的旧数据：核对无误后再删。
+- Windows 上的旧数据：核对无误后再删。
