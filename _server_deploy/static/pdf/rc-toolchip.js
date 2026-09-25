@@ -691,6 +691,9 @@
     var r = vc.renderInflow(th, { label: chip.label, type: TYPE_C[chip.type] || TYPE_C.text, icon: iconOf(chip.tool, chip.type), form: 'min', cid: chip.cid });
     if (!r) return null;
     var el = r.el;
+    // 原生侧栏的投影凭它认出「这是工具长条」：没有它，长条只能按整段文字投影，
+    // 标题+「· 状态」+摘要拼成一句正文（2026-09-26 实机：「读取页面· 读取页面…读取页面…」）。
+    el.__bwToolChip = chip;
     var view = { el: el, inflow: true, idx: 0, deep: false };
     hdSplit(el, chip.label, isAction(chip.type));   // 状态行 + 【数据流】按钮(工具卡专属,保留)
     vc.pinReg(el, chip.cid);   // 选中按 cid 全局同步(同号卡处处高亮/处处取消)

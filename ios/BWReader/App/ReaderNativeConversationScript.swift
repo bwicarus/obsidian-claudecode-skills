@@ -280,9 +280,39 @@ enum ReaderNativeConversationScript {
         }
         return [artifact(id, node, part.title || part.label || (kind === 'hlcard' ? '操作记录' : '生成物'))];
       }
+      // App 自己执行语音工具时，工具长条与结果卡是直接插进对话区的（不属于任何轮次）；
+      // 随后服务器那一轮落库回来，同样的工具与卡片又在轮次里出现一次 —— 同一张卡显示两遍
+      // （2026-09-26 实机）。轮次已收编的就不再单独投影；还没收编的（正在跑）照常显示。
+      let turnOwned = { tools: new Set(), cards: new Set() };
+      function cardSignature(card) {
+        if (!card || typeof card !== 'object') return '';
+        try { return String(card.kind || '') + '|' + String(card.title || '') + '|' + JSON.stringify(card.data || {}); } catch (_) { return ''; }
+      }
+      function collectTurnOwned(nodes) {
+        const owned = { tools: new Set(), cards: new Set() };
+        nodes.forEach(node => {
+          const tid = node.getAttribute?.('data-turn') || '';
+          if (!tid) return;
+          let presentation = null;
+          try { presentation = rc().turnCard?.presentationOf(tid); } catch (_) {}
+          (presentation?.parts || []).forEach(part => {
+            if (part?.kind === 'tool' && part.label) owned.tools.add(String(part.label));
+            if (part?.kind === 'card' && part.card) owned.cards.add(cardSignature(part.card));
+          });
+        });
+        return owned;
+      }
       function projectMessage(node, index) {
         if (nativeMode && node.__bwNativeMessageHidden === true) return null;
         const id = messageID(node, index), tid = node.getAttribute('data-turn') || '';
+        if (nativeMode && !tid && node.__bwToolChip) {
+          const chip = node.__bwToolChip, label = String(chip.label || '工具调用');
+          if (turnOwned.tools.has(label)) return null;
+          const [part] = nativePartHandles({ kind: 'tool', label, tool: chip.tool || '' }, id + '-tool', node, '');
+          part.status = chip.failed ? 'failed' : chip.busy ? 'running' : 'completed';
+          return { id, role: 'assistant', text: '', streaming: false, parts: [part], title: '', statusText: '', progress: null };
+        }
+        if (nativeMode && !tid && node.__vcCard && turnOwned.cards.has(cardSignature(node.__vcCard))) return null;
         let presentation = null;
         try { if (tid) presentation = rc().turnCard?.presentationOf(tid); } catch (_) {}
         const source = presentation?.parts || [];
@@ -950,6 +980,7 @@ enum ReaderNativeConversationScript {
         actions = messagesDirty ? new Map() : new Map(messageActions);
         if (messagesDirty) {
         const all = thread ? messageSources.sources(thread) : [];
+        turnOwned = nativeMode ? collectTurnOwned(all) : { tools: new Set(), cards: new Set() };
         let reviewQuestion = '';
         const messages = all.map((node, index) => {
           const message = projectMessage(node, index);
