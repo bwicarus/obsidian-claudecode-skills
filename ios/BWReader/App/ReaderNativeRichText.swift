@@ -242,6 +242,12 @@ enum ReaderNativeTextParser {
         } else {
             output.append(NSAttributedString(string: content, attributes: base))
         }
+        // 末尾的段落换行（</p> 补的那个 \n）会让 UITextView 多算一整行空白 ——
+        // 侧栏里每句话下面都空出一截，一行字的气泡也很高（2026-09-26 用户指出）。
+        while output.length > 0, let last = output.string.unicodeScalars.last,
+              CharacterSet.whitespacesAndNewlines.contains(last) {
+            output.deleteCharacters(in: NSRange(location: output.length - 1, length: 1))
+        }
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = output.hasRuby ? font.pointSize * 0.6 : 3
         output.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: output.length))

@@ -4,10 +4,12 @@ import SwiftUI
 struct ReaderNativeConversationMessageView: View {
     let message: ReaderNativeConversationMessage
     @ObservedObject var model: ReaderNativeConversationModel
+    /// 同一角色连着说时只在第一条标「助手」/「你」（用户 2026-09-26）。
+    var showsRole = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: 6) {
+            if showsRole || message.streaming { HStack(spacing: 7) {
                 Text(message.role == "user" ? "你" : message.role == "assistant" ? "助手" : "提示")
                     .fontWeight(.medium)
                 if message.streaming {
@@ -15,15 +17,19 @@ struct ReaderNativeConversationMessageView: View {
                 }
                 Spacer(minLength: 0)
             }
-            .font(.caption).foregroundStyle(ReaderNativeTheme.muted)
-            if !message.title.isEmpty {
-                Text(message.title).font(.subheadline.weight(.medium))
+            .font(.caption).foregroundStyle(ReaderNativeTheme.muted) }
+            // 有工具卡时，标题（常是原始工具名）与「成功/失败」计数都已在卡头里、且带颜色；
+            // 再在卡外画一遍就是用户说的"跑到外面、没有颜色"那种渲染（2026-09-26）。
+            if message.tools.isEmpty {
+                if !message.title.isEmpty {
+                    Text(message.title).font(.subheadline.weight(.medium))
+                }
+                if !message.progressSummary.isEmpty {
+                    Text(message.progressSummary).font(.caption).foregroundStyle(.secondary)
+                }
             }
             if !message.statusText.isEmpty {
                 Text(message.statusText).font(.caption).foregroundStyle(.secondary)
-            }
-            if !message.progressSummary.isEmpty {
-                Text(message.progressSummary).font(.caption).foregroundStyle(.secondary)
             }
             if !message.text.isEmpty {
                 ReaderNativeConversationMarkdown(text: message.text, model: model)
@@ -57,7 +63,8 @@ struct ReaderNativeConversationMessageView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(message.role == "user" ? 12 : 0)
+        .padding(.horizontal, message.role == "user" ? 12 : 0)
+        .padding(.vertical, message.role == "user" ? 8 : 0)
         .background(message.role == "user" ? ReaderNativeTheme.accent.opacity(0.07) : Color.clear,
                     in: RoundedRectangle(cornerRadius: 14))
     }

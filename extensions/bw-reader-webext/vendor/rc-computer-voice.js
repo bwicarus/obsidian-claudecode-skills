@@ -4072,7 +4072,15 @@ if (window.__bwPwaProviderOnly) return;
         payload,
         payload.truncated === true
       );
-    }).catch(function () {
+    }).catch(function (error) {
+      // 出声：以前这里吞掉原因，只回 unavailable —— 助手只知道"没答上来"，
+      // 我们也只知道"没答上来"（2026-09-26 读页每次 130ms 就失败，查不出为什么）。
+      try {
+        if (typeof window.dlog === "function") {
+          window.dlog("[读取] " + request.query + " 失败：" +
+            (error && (error.code ? error.code + " " : "") + (error.message || error)));
+        }
+      } catch (_) {}
       return self._sendReaderQueryResult(request, "unavailable", {}, false);
     }).catch(function () {
       // 回传本身失败时由 Windows 侧的超时收尾，这里不重试也不再报第二次。

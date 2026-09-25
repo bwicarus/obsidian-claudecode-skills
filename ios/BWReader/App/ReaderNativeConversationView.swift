@@ -297,10 +297,12 @@ struct ReaderNativeConversationView: View {
         GeometryReader { viewport in
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 18) {
+                    LazyVStack(alignment: .leading, spacing: 12) {
                         if model.messages.isEmpty { emptyState }
-                        ForEach(model.messages) { message in
-                            ReaderNativeConversationMessageView(message: message, model: model)
+                        ForEach(Array(model.messages.enumerated()), id: \.element.id) { index, message in
+                            let previous = index > 0 ? model.messages[index - 1].role : ""
+                            ReaderNativeConversationMessageView(message: message, model: model,
+                                                                showsRole: previous != message.role)
                                 .id(message.id)
                         }
                         Color.clear.frame(height: 1).id("nativeConversationBottom")

@@ -4900,16 +4900,21 @@
       localBookId: bookId
     }, fields || {});
     return Promise.resolve(handler.postMessage(request)).then(function (raw) {
-      if (!raw || raw.contract !== PAGE_TEXT_RESPONSE_CONTRACT ||
-          raw.action !== action || raw.requestId !== requestId ||
-          typeof raw.ok !== 'boolean' || !PAGE_TEXT_STATES.has(raw.state)) {
-        throw new RuntimeError('原生文字响应合同无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      // 哪一条不符要说出来：五个条件并成一句时，日志里只有"合同无效"，查不出是哪一处。
+      var mismatch = !raw ? 'empty' : raw.contract !== PAGE_TEXT_RESPONSE_CONTRACT ? 'contract=' + raw.contract
+        : raw.action !== action ? 'action=' + raw.action : raw.requestId !== requestId ? 'requestId'
+        : typeof raw.ok !== 'boolean' ? 'ok=' + typeof raw.ok
+        : !PAGE_TEXT_STATES.has(raw.state) ? 'state=' + raw.state : '';
+      if (mismatch) {
+        throw new RuntimeError('原生文字响应合同无效（' + action + ' ' + mismatch + '）', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
       }
       var actionKeys = PAGE_TEXT_RESPONSE_ACTION_KEYS[action];
       if (!actionKeys || Object.keys(raw).some(function (key) {
         return !PAGE_TEXT_RESPONSE_COMMON_KEYS.has(key) && !actionKeys.has(key);
       })) {
-        throw new RuntimeError('原生文字响应含未知字段', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+        throw new RuntimeError('原生文字响应含未知字段（' + action + ' ' + Object.keys(raw).filter(function (key) {
+          return !PAGE_TEXT_RESPONSE_COMMON_KEYS.has(key) && !(actionKeys && actionKeys.has(key));
+        }).join(',') + '）', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
       }
       if (raw.error != null) {
         if (!raw.error || typeof raw.error !== 'object' || Array.isArray(raw.error) ||
