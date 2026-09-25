@@ -100,6 +100,10 @@ def services() -> dict[str, dict]:
         # KJ 知识节点 ↔ Anki：每 15 分钟吸收卡片绑定台账 + 拉复习快照进掌握度（同 Windows 的「KJ Anki Sync」）
         "kj-anki-sync": {"args": [str(PY), f"{cur}/scripts/kj/cli.py", "anki-sync"],
                          "cwd": cur, "keepalive": False, "interval": 900},
+        # 每日数据备份 → 外接盘 BWDev（在用数据留内置盘，只把快照放外接盘；没挂载就跳过）
+        "backup": {"args": [str(PY), f"{cur}/extensions/bw-reader-webext/mac/backup_mac.py"],
+                   "cwd": cur, "keepalive": False, "run_at_load": False, "background": True,
+                   "calendar": {"Hour": 3, "Minute": 30}},
     }
 
 
@@ -202,15 +206,20 @@ def write_plists(env: dict[str, str], names: list[str]) -> None:
             "ProgramArguments": spec["args"],
             "WorkingDirectory": spec["cwd"],
             "EnvironmentVariables": env,
-            "RunAtLoad": True,
+            "RunAtLoad": spec.get("run_at_load", True),
             "KeepAlive": spec.get("keepalive", True),
             "ThrottleInterval": 10,
-            "ProcessType": "Interactive",
+            "ProcessType": "Background" if spec.get("background") else "Interactive",
             "StandardOutPath": str(LOGS / f"{name}.log"),
             "StandardErrorPath": str(LOGS / f"{name}.log"),
         }
         if spec.get("interval"):
             plist["StartInterval"] = spec["interval"]
+        if spec.get("calendar"):
+            plist["StartCalendarInterval"] = spec["calendar"]
+        if spec.get("background"):
+            plist["LowPriorityIO"] = True
+            plist["Nice"] = 10
         path = LAUNCH_AGENTS / f"{LABEL_PREFIX}{name}.plist"
         with path.open("wb") as handle:
             plistlib.dump(plist, handle)
