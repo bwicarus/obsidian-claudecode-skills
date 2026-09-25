@@ -1108,8 +1108,11 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             {
                 DirectAppTargets.CodexDesktop =>
                     new WindowsCodexVoiceShortcutSender(),
+#if !BW_PORTABLE
+                // Mac 服务器那份（BW_PORTABLE）不编 ChatGPT 窗口自动化：电脑语音已不再使用。
                 DirectAppTargets.ChatGptClassic =>
                     new WindowsChatGptClassicVoiceShortcutSender(),
+#endif
                 _ => throw new DirectProtocolException(
                     "BW_COMPUTER_VOICE_DIRECT_APP_TARGET_INVALID",
                     "应用目标不在本机固定白名单"),

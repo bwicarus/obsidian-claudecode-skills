@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Mac 服务器用的桥（2026-09-25 迁移）：同一份 ComputerVoiceAudio 源码的跨平台编译。
+    只留 App 用到的网络服务与存储（书库 / 用户状态 / 缓存 / 提示板 / 上下文 / 通话令牌 /
+    CLI 语音的 UDP 音频直连）；「电脑语音」那套 Windows 专属件（驱动 ChatGPT 窗口、
+    虚拟声卡、按应用抓声、压低音量）用户已拍板不再需要 —— 窗口自动化那一个文件在这里
+    直接不编，其余 Windows 调用在运行时由 OperatingSystem.IsWindows() 守住。
+    Windows 那份 ComputerVoiceAudio.csproj 不受影响。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>bw-reader-bridge</AssemblyName>
+    <RootNamespace>BwReader.ComputerVoiceAudio</RootNamespace>
+    <DefineConstants>$(DefineConstants);BW_PORTABLE</DefineConstants>
+    <!-- CA1416 = "只在 Windows 上受支持"：这些调用点在 Mac 上走不到（运行时守住），不当错误。 -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Compile Include="../../windows/ComputerVoiceAudio/**/*.cs"
+             Exclude="../../windows/ComputerVoiceAudio/ChatGptClassicVoiceAutomation.cs;../../windows/ComputerVoiceAudio/obj/**;../../windows/ComputerVoiceAudio/bin/**" />
+    <EmbeddedResource Include="../../windows/ComputerVoiceAudio/ReaderCapabilities/*.md">
+      <LogicalName>BwReader.ComputerVoiceAudio.ReaderCapabilities.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>
