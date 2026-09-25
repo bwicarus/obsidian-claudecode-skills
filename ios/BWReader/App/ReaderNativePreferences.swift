@@ -71,7 +71,9 @@ struct ReaderNativePreferences {
         if let raw { _ = try Self.rawValue(raw) }
         let input: [String: Any] = ["key": entry.legacyKey, "raw": raw as Any? ?? NSNull(),
                                    "ifRev": expectedRevision as Any? ?? NSNull()]
-        return try store.inTransaction {
+        // 显式闭包类型 + 下面 parent 改 if/else：Xcode 27 的 Swift 编译器对原写法自身崩溃
+        // （"failed to produce diagnostic for expression"，2026-09-25 Mac 本机编译实测）。
+        return try store.inTransaction { () throws -> [String: Any] in
             let receiptID = "native-preference:" + mutation
             if let saved = try store.mutationResult(mutationId: receiptID) {
                 let receipt = try R.object(JSONSerialization.jsonObject(with: Data(saved.utf8)), "preference receipt")
@@ -93,8 +95,14 @@ struct ReaderNativePreferences {
             var envelope: [String: Any] = ["schema": 1, "collection": entry.collection, "id": entry.id,
                 "rev": revision + 1, "updatedAt": stamp, "updatedBy": deviceID, "deleted": raw == nil, "value": value]
             if entry.collection == "user-settings" {
-                let parent: Any = previous == nil ? NSNull() : previous!["deleted"] as? Bool == true
-                    ? ["deleted": true] : ["deleted": false, "value": previous!["value"]!] as [String: Any]
+                let parent: Any
+                if let previous {
+                    parent = previous["deleted"] as? Bool == true
+                        ? ["deleted": true] as [String: Any]
+                        : ["deleted": false, "value": previous["value"]!] as [String: Any]
+                } else {
+                    parent = NSNull()
+                }
                 envelope["causal"] = ["contract": "record-parent-state/1", "parent": parent]
             }
             var change: [String: Any] = ["mutationId": mutation, "operation": raw == nil ? "remove" : "put",

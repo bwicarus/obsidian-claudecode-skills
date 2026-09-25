@@ -144,9 +144,8 @@ struct ReaderLocalLibraryView: View {
             ) {
                 Button("知道了", role: .cancel) { backupNotice = nil }
             } message: {
-                Text((backupNotice ?? "")
-                     + "\n\n规矩：书要先传到\(ReaderServer.displayName)才能打开，"
-                     + "这样任何一本能用的书，两边都有。")
+                // 一个插值串代替三段相加：Xcode 27 在原写法上「无法在合理时间内推断类型」
+                Text("\(backupNotice ?? "")\n\n规矩：书要先传到\(ReaderServer.displayName)才能打开，这样任何一本能用的书，两边都有。")
             }
             .navigationBarTitleDisplayMode(.inline)
             .searchable(
