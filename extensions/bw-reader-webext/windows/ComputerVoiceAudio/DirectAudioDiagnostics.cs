@@ -323,6 +323,14 @@ internal sealed class ComMtaLease : IDisposable
 
     internal static ComMtaLease Enter()
     {
+        // 非 Windows（Mac 服务器，2026-09-25）：没有 COM 线程模型，ole32 也不存在 ——
+        // 原样调用就是 DllNotFoundException，连 UDP 直连这种根本不碰 COM 的路径
+        // （渲染线程开头先进 MTA）也一起起不来。返回空租约；真正需要 COM 的
+        // Windows 音频接口在各自的调用点会报出更明确的错误。
+        if (!OperatingSystem.IsWindows())
+        {
+            return new ComMtaLease(mustUninitialize: false);
+        }
         int result = CoInitializeEx(0, CoInitMultithreaded);
         if (result < 0)
         {
