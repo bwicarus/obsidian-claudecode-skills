@@ -487,6 +487,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private let nativePencilSettings = NativePencilSettings.shared
     let nativePencilInk = NativePencilInkController()
     private var readerForeground = true
+    private var nativeDwellTracker: ReaderNativeDwellTracker?
     private var readerWasBackgrounded = false
     /// 上一次发布出去的各域摘要串。内容没变就不重发 —— 导出要在页面里跑 JS
     /// 并算八个域的摘要，白发一次不便宜。换书时不必清：指纹里带着域摘要，
@@ -1987,6 +1988,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         activeNativePDFDocument?.onGeometry = nil
         activeNativePDFDocument?.close()
         activeNativePDFDocument = nil
+        nativeDwellTracker?.stop()
+        nativeDwellTracker = nil
         if let mounted = nativePDFDocument {
             mounted.onGeometry = nil
             mounted.close()
@@ -2055,6 +2058,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             self.nativePDFMountFailure = nil
             self.nativePDFOpenFailure = nil
             self.nativePDFDocument = document
+            self.startNativeDwellTracking(document)
             self.publishNativeInkSurfaces()
             self.publishNativeHTMLNotes()
             ReaderNativeStartupProfile.shared.mark("原生阅读区挂载")
@@ -2063,6 +2067,56 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
             self.postClientLog("[native-pdf] mounted build=" + build + (history.isEmpty ? "" : " after " + history))
         }
+    }
+
+    /// 原生 PDF 的读页停留 → 活动账本（替代原生 PDF 上数不到页的 30-dwell.js）。
+    private func startNativeDwellTracking(_ document: ReaderNativePDFDocument) {
+        nativeDwellTracker?.stop()
+        nativeDwellTracker = nil
+        guard let book = currentLocalBook, book.id != "localbook-welcome" else { return }
+        let bookID = book.id, title = book.title, contentSHA256 = currentLocalBookContentSHA256
+        nativeDwellTracker = ReaderNativeDwellTracker(
+            sample: { [weak self, weak document] in
+                guard let self, let document, self.nativePDFDocument === document,
+                      self.readerForeground, document.view.window != nil else { return nil }
+                return (document.position.page, document.lastInteractionAt)
+            },
+            flush: { [weak self] entries in
+                self?.recordNativeDwell(entries, bookID: bookID, title: title, contentSHA256: contentSHA256)
+            })
+    }
+
+    private func recordNativeDwell(_ entries: [(page: Int, seconds: Int)], bookID: String,
+                                   title: String, contentSHA256: String?) {
+        // 出声：停留是「在做什么」的唯一原始证据，丢了事后补不回来。
+        guard let deviceID = nativeReadingStoreDeviceID else {
+            postClientLog("阅读停留未记录：阅读库还没就绪（\(entries.count) 页）"); return
+        }
+        do {
+            let store = try nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store
+            guard try store.meta("legacyImport") == "done" else {
+                postClientLog("阅读停留未记录：阅读库迁移未完成"); return
+            }
+            let writer = ReaderNativeBookStore(store: store, bookID: bookID, deviceID: deviceID,
+                                               displayName: title, contentSHA256: contentSHA256)
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try writer.recordDwell(entries, location: Self.freshDwellLocation(now: now), at: now)
+            nativeReplicationService?.wake()
+        } catch {
+            postClientLog("阅读停留记录失败：" + error.localizedDescription)
+        }
+    }
+
+    /// 与 30-dwell.js 同规则：只带 30 分钟内的定位 —— 一条停留配两小时前的位置是错误数据。
+    private static func freshDwellLocation(now: Int64) -> [String: Any]? {
+        guard let latest = ReaderLocationProvider.shared.latest,
+              let lat = (latest["lat"] as? NSNumber)?.doubleValue, let lon = (latest["lon"] as? NSNumber)?.doubleValue,
+              let at = (latest["at"] as? NSNumber)?.doubleValue, lat.isFinite, lon.isFinite,
+              Double(now) / 1000 - at < 1800 else { return nil }
+        var loc: [String: Any] = ["lat": lat, "lon": lon, "at": Int64(at)]
+        if let acc = (latest["acc"] as? NSNumber)?.doubleValue, acc.isFinite { loc["acc"] = acc }
+        if let name = latest["name"] as? String, !name.isEmpty { loc["name"] = String(name.prefix(80)) }
+        return loc
     }
 
     /// 错误面板上的「重试」。
@@ -7225,7 +7279,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         restartLocalRuntime: Bool = false
     ) {
         let wasForeground = readerForeground
-        if !foreground { nativePDFNavigationBridge?.flushPendingPosition() }
+        if !foreground { nativePDFNavigationBridge?.flushPendingPosition(); nativeDwellTracker?.flushNow() }
         readerForeground = foreground
         nativeReplicationService?.setActive(foreground)
         if foreground { scheduleNativeAnkiPCRetry(); nativePhraseService?.wake() }

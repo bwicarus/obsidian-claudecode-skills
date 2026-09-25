@@ -71,6 +71,8 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     ///   SwiftUI 视图每一帧都要重算 —— 2026-09-23 用户报"卡顿"，病根之一。
     ///   要知道位置变了的（导航桥）走 onPosition。
     private(set) var position = Position(page: 1, scale: 1, visiblePages: [], fraction: 0, mode: "continuous", spreadOffset: 0, crop: nil)
+    /// 最近一次手指/笔触到阅读区的时间（停留统计的挂机判据）。
+    fileprivate(set) var lastInteractionAt = Date()
     @Published private(set) var error: String?
     @Published private(set) var ready = false
     private(set) var notesContentRevision: UInt64 = 0
@@ -572,6 +574,9 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         clearTap.cancelsTouchesInView = false
         clearTap.delegate = self
         view.addGestureRecognizer(clearTap)
+        // 停留统计的「有人在操作」判据：手指或笔一碰就记时间，然后立刻 fail 放行，
+        // 不参与任何手势竞争（ReaderNativeDwellTracker 60s 无操作即停表）。
+        view.addGestureRecognizer(ReaderInteractionRecorder { [weak self] in self?.lastInteractionAt = Date() })
         view.onLayout = { [weak self] in
             Task { @MainActor in self?.layoutChanged() }
         }

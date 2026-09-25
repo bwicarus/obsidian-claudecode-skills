@@ -483,6 +483,23 @@ struct ReaderNativeBookStore {
         return try writeState("ink-pending",value:pending,mutation:mutation + ":settled",at:at)
     }
 
+    /// 阅读停留（活动账本原始层）：原生 PDF 的停留秒数进同一条持久复制出站队列。
+    /// 形状与网页端 30-dwell.js → reportActivity 完全一致（kind/file/client/entries/loc/at），
+    /// 服务器 `_apply_activity` 只认这六个键。原生 PDF 上网页那套数不到页（没有 DOM 页），
+    /// 974 起停留与定位一直是空的 —— 这里是它的原生替身。
+    func recordDwell(_ entries: [(page: Int, seconds: Int)], location: [String: Any]?, at: Int64) throws {
+        let rows = entries.filter { $0.page > 0 && $0.seconds > 0 }.prefix(200)
+            .map { ["page": $0.page, "secs": min(86_400, $0.seconds)] as [String: Any] }
+        guard !rows.isEmpty else { return }
+        var body: [String: Any] = ["kind": "dwell", "file": "localbook:" + bookID, "client": "native",
+                                   "entries": Array(rows), "at": at / 1000]
+        if let location { body["loc"] = location }
+        _ = try store.inTransaction {
+            try enqueueReplication(["url": "/replication/activity", "method": "POST", "body": body],
+                                   mutation: "native-dwell-" + Self.uuid(), at: at)
+        }
+    }
+
     /// The durable outbox uses the existing wire protocol. Creating the book
     /// link and its pair announcement is atomic with the first command, so a
     /// crash cannot leave an unannounced identity or an unrepeatable command.
