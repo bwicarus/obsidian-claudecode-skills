@@ -20,6 +20,7 @@ struct ReaderNativeConversationView: View {
     @State private var selectsFiles = false
     @State private var selectionMode = "normal"
     @State private var photos: [PhotosPickerItem] = []
+    @State private var selectsPhotos = false
     @State private var mediaEditor: MediaEditorTarget?
     private struct MediaEditorTarget: Identifiable { let id: String; let image: UIImage }
     @GestureState private var interacting = false
@@ -111,6 +112,8 @@ struct ReaderNativeConversationView: View {
             case .failure(let error): media.error = error.localizedDescription
             }
         }
+        .photosPicker(isPresented: $selectsPhotos, selection: $photos, maxSelectionCount: 10,
+                      matching: .any(of: [.images, .videos]))
         .onChange(of: photos) { _, values in
             guard !values.isEmpty else { return }
             let mode = model.conversationMode
@@ -478,9 +481,9 @@ struct ReaderNativeConversationView: View {
             }
             HStack(alignment: .bottom, spacing: 10) {
                 Menu {
-                    PhotosPicker(selection: $photos, maxSelectionCount: 10, matching: .any(of: [.images, .videos])) {
-                        Label("照片或视频", systemImage: "photo.on.rectangle")
-                    }
+                    // PhotosPicker 放在 Menu 里点了不弹（菜单收起时把它一起带走了）——
+                    // 用户实测「选了照片或视频后没有后续界面」。改为按钮 + .photosPicker 修饰符。
+                    Button("照片或视频", systemImage: "photo.on.rectangle") { selectsPhotos = true }
                     Button("选择文件", systemImage: "doc") {
                         selectionMode = model.conversationMode; selectsFiles = true
                     }

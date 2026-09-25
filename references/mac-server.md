@@ -69,8 +69,11 @@ Python 侧的「本地应用数据」靠环境变量 `LOCALAPPDATA=~/BW/data`（
 | anki | 8765 | 官方 Anki 26.9.3 隐藏启动（`open -g -j`）；AnkiConnect 只听 127.0.0.1 |
 | kj-anki-sync | — | 每 15 分钟 `scripts/kj/cli.py anki-sync` |
 
-**对外**：`tailscale serve` 47 条路由（与 Windows 原配置逐条相同），
+**对外**：`tailscale serve` 48 条路由（Windows 原配置 47 条 + 2026-09-26 补的 `/assistant-attachments`
+—— Windows 上就漏了它，所以侧栏发图一直报「上传失败」；返回 `404 page not found` 纯文本的就是 serve 没转发），
 443 → 5000/8766/8767/8769/43128 各路径，8443 → 43132（服务器网页界面）。
+核对桥路由有没有漏转发：`tailscale serve status` 列出的前缀 vs `DirectBridgeServer.cs` 里的 `MapMethods`
+路径（`/voice-core/*` 只给本机，本就不转发）。
 ⚠ serve 配置绑在**主机名**上：Tailscale 改名后必须 `serve reset` 再重配（Windows 改名后就是因此全断）。
 
 ## 4. 部署
