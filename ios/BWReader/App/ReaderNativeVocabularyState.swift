@@ -94,60 +94,63 @@ struct ReaderNativeVocabularyState {
               !mutation.isEmpty, mutation.utf8.count <= 1024, !mutation.contains("\0") else {
             throw Failure(message: "词汇写入身份无效")
         }
-        // 显式写出闭包类型：Xcode 27 的 Swift 编译器推断这个长闭包的返回类型时自身崩溃
-        // （"failed to produce diagnostic for expression"，2026-09-25 Mac 本机编译实测）。
-        return try store.inTransaction { () throws -> [String: Any] in
-            let receiptID = "native-vocabulary:" + mutation
-            if let saved = try store.mutationResult(mutationId: receiptID) {
-                let receipt = try R.object(JSONSerialization.jsonObject(with: Data(saved.utf8)), "vocabulary receipt")
-                guard R.same(receipt["input"] as Any, incoming) else { throw Failure(message: "同一操作编号已用于不同内容") }
-                return try R.object(receipt["record"], "vocabulary record")
+        // 事务体放进独立方法：Xcode 27 的 Swift 编译器对这个长闭包自身崩溃
+        // （"failed to produce diagnostic for expression"，2026-09-25 Mac 本机编译实测），
+        // 改成普通方法后编译器能正常类型检查；行为不变。
+        return try store.inTransaction { try self.setWithinTransaction(incoming: incoming, id: id, mutation: mutation) }
+    }
+
+    private func setWithinTransaction(incoming: [String: Any], id: String, mutation: String) throws -> [String: Any] {
+        let receiptID = "native-vocabulary:" + mutation
+        if let saved = try store.mutationResult(mutationId: receiptID) {
+            let receipt = try R.object(JSONSerialization.jsonObject(with: Data(saved.utf8)), "vocabulary receipt")
+            guard R.same(receipt["input"] as Any, incoming) else { throw Failure(message: "同一操作编号已用于不同内容") }
+            return try R.object(receipt["record"], "vocabulary record")
+        }
+        let current = try store.record(collection: Self.collection, id: id)
+        let previous: [String: Any]?
+        if let current {
+            let envelope = try R.object(JSONSerialization.jsonObject(with: Data(current.json.utf8)), "vocabulary envelope")
+            guard envelope["id"] as? String == id, envelope["collection"] as? String == Self.collection,
+                  (envelope["rev"] as? NSNumber)?.int64Value == current.rev,
+                  envelope["deleted"] as? Bool == current.deleted else { throw Failure(message: "词汇记录损坏") }
+            if current.deleted { previous = nil }
+            else {
+                let raw = try R.object(envelope["value"], "vocabulary value")
+                let checked = try Self.normalized(raw)
+                guard checked["id"] as? String == id, R.same(raw, checked) else { throw Failure(message: "词汇内容损坏") }
+                previous = checked
             }
-            let current = try store.record(collection: Self.collection, id: id)
-            let previous: [String: Any]?
-            if let current {
-                let envelope = try R.object(JSONSerialization.jsonObject(with: Data(current.json.utf8)), "vocabulary envelope")
-                guard envelope["id"] as? String == id, envelope["collection"] as? String == Self.collection,
-                      (envelope["rev"] as? NSNumber)?.int64Value == current.rev,
-                      envelope["deleted"] as? Bool == current.deleted else { throw Failure(message: "词汇记录损坏") }
-                if current.deleted { previous = nil }
-                else {
-                    let raw = try R.object(envelope["value"], "vocabulary value")
-                    let checked = try Self.normalized(raw)
-                    guard checked["id"] as? String == id, R.same(raw, checked) else { throw Failure(message: "词汇内容损坏") }
-                    previous = checked
-                }
-            } else { previous = nil }
-            var value = incoming
-            if let aliases = previous?["aliases"] as? [String] {
-                let merged = Set((incoming["aliases"] as! [String]) + aliases).filter { $0 != incoming["key"] as? String }
-                    .sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) }
-                if merged.count <= 32, merged.reduce(0, { $0 + $1.utf8.count }) <= 4096 { value["aliases"] = merged }
-            }
-            let stamp = now()
-            if let previous, R.same(previous, value) {
-                try store.rememberMutationWithinTransaction(receiptID,
-                    json: String(decoding: R.bytes(["input": incoming, "record": value]), as: UTF8.self), now: stamp)
-                return value
-            }
-            let revision = current?.rev ?? 0
-            guard revision >= 0, revision < 9_007_199_254_740_991 else { throw Failure(message: "词汇版本无效") }
-            let parent: Any = current == nil ? NSNull() : current!.deleted ? ["deleted": true]
-                : ["deleted": false, "value": previous!] as [String: Any]
-            let envelope: [String: Any] = ["schema": 1, "collection": Self.collection, "id": id,
-                "rev": revision + 1, "updatedAt": stamp, "updatedBy": deviceID, "deleted": false,
-                "value": value, "causal": ["contract": "record-parent-state/1", "parent": parent]]
-            let change: [String: Any] = ["mutationId": mutation, "operation": "put", "collection": Self.collection, "record": envelope]
-            _ = try R.bytes(change)
-            _ = try store.commitWithinTransaction(record: .init(collection: Self.collection, id: id, rev: revision + 1,
-                updatedAt: stamp, deleted: false, json: String(decoding: R.bytes(envelope), as: UTF8.self)),
-                mutationId: mutation, journalJSON: { cursor in
-                    var entry = change; entry["cursor"] = cursor
-                    return String(decoding: try! R.bytes(entry), as: UTF8.self)
-                }, expectedRev: revision, now: stamp)
+        } else { previous = nil }
+        var value = incoming
+        if let aliases = previous?["aliases"] as? [String] {
+            let merged = Set((incoming["aliases"] as! [String]) + aliases).filter { $0 != incoming["key"] as? String }
+                .sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) }
+            if merged.count <= 32, merged.reduce(0, { $0 + $1.utf8.count }) <= 4096 { value["aliases"] = merged }
+        }
+        let stamp = now()
+        if let previous, R.same(previous, value) {
             try store.rememberMutationWithinTransaction(receiptID,
                 json: String(decoding: R.bytes(["input": incoming, "record": value]), as: UTF8.self), now: stamp)
             return value
         }
+        let revision = current?.rev ?? 0
+        guard revision >= 0, revision < 9_007_199_254_740_991 else { throw Failure(message: "词汇版本无效") }
+        let parent: Any = current == nil ? NSNull() : current!.deleted ? ["deleted": true]
+            : ["deleted": false, "value": previous!] as [String: Any]
+        let envelope: [String: Any] = ["schema": 1, "collection": Self.collection, "id": id,
+            "rev": revision + 1, "updatedAt": stamp, "updatedBy": deviceID, "deleted": false,
+            "value": value, "causal": ["contract": "record-parent-state/1", "parent": parent]]
+        let change: [String: Any] = ["mutationId": mutation, "operation": "put", "collection": Self.collection, "record": envelope]
+        _ = try R.bytes(change)
+        _ = try store.commitWithinTransaction(record: .init(collection: Self.collection, id: id, rev: revision + 1,
+            updatedAt: stamp, deleted: false, json: String(decoding: R.bytes(envelope), as: UTF8.self)),
+            mutationId: mutation, journalJSON: { cursor in
+                var entry = change; entry["cursor"] = cursor
+                return String(decoding: try! R.bytes(entry), as: UTF8.self)
+            }, expectedRev: revision, now: stamp)
+        try store.rememberMutationWithinTransaction(receiptID,
+            json: String(decoding: R.bytes(["input": incoming, "record": value]), as: UTF8.self), now: stamp)
+        return value
     }
 }
