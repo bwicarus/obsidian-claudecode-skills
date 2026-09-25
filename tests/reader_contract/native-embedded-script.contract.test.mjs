@@ -91,7 +91,7 @@ test("渲染进程被回收要出声，不能只是默默重载", () => {
   assert.match(handler, /noteWebContentTermination\(\)/, "回收时没有记一笔");
   // 线索必须在 resetForNavigation() 之前取：它会把上一条命令一起清掉。
   assert.ok(handler.indexOf("noteWebContentTermination()") <
-            handler.indexOf("nativeConversation.resetForNavigation()"),
+            handler.indexOf("nativeConversation.resetForNavigation("),
             "记录要排在 resetForNavigation 之前，否则线索已经被清了");
   assert.match(view, /lastCommandAction/, "没带上「崩之前在做什么」");
   const app = readFileSync(

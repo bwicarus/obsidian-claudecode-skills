@@ -22,13 +22,13 @@ enum ReaderNativeFavoritePlacement {
         var html: String, context: String
         switch kind {
         case "weather":
-            html = "<div class=\"vc-if-w\"><div class=\"vc-if-wt\">" + escaped(data["lo"]) + "–" + escaped(data["hi"]) + "°C</div>"
+            html = "<div class=\"vc-if-w\"><div class=\"vc-if-wt\">" + escaped(ReaderWeatherDegrees.bare(string(data["lo"]))) + "–" + escaped(ReaderWeatherDegrees.bare(string(data["hi"]))) + "°C</div>"
                 + "<div class=\"vc-if-wc\">" + escaped(data["cond"])
                 + (data["precip"] == nil || data["precip"] is NSNull ? "" : " · 降水 " + escaped(data["precip"]) + "%") + "</div>"
                 + "<div class=\"vc-if-ws\">" + escaped(data["loc"]) + " " + escaped(data["date"]) + "</div>"
             if !string(data["tip"]).isEmpty { html += "<div class=\"vc-if-tip\">" + escaped(data["tip"]) + "</div>" }
             html += "</div>"
-            let temperature = data["lo"] == nil || data["lo"] is NSNull ? "" : string(data["lo"]) + "-" + string(data["hi"]) + "°C"
+            let temperature = data["lo"] == nil || data["lo"] is NSNull ? "" : ReaderWeatherDegrees.bare(string(data["lo"])) + "-" + ReaderWeatherDegrees.bare(string(data["hi"])) + "°C"
             let rain = data["precip"] == nil || data["precip"] is NSNull ? "" : "降水" + string(data["precip"]) + "%"
             context = (title.isEmpty ? "天气" : title) + ":" + [string(data["loc"]), string(data["date"]), string(data["cond"]), temperature, rain, string(data["tip"])].filter { !$0.isEmpty }.joined(separator: ",")
         case "news":

@@ -15,6 +15,8 @@
   var ws = null, ac = null, capNode = null, micStream = null, playT = 0, playing = [];
   var box = null, f32buf = new Float32Array(0), curAText = '';
   var _computerVoiceUnsub = null;
+  // 天气卡 lo/hi 契约是纯数值、由渲染补「°C」；AI 常写成 "18°C" → 显示「18°C–23°C°C」。先剥再补。
+  function _bareDeg(v) { return String(v == null ? '' : v).trim().replace(/\s*(°\s*[CcＣ]?|℃|摄氏度|度)\s*$/, ''); }
   // 宿主只负责解析服务地址；语音状态机/侧栏/工具循环仍只有本文件一份。
   // PWA 是同源所以走 fallback，扩展在任意站点由 WebAdapter 宿主把 /voice-rt 指回阅读器服务。
   function _wsUrl(path) {
@@ -2855,7 +2857,7 @@
       return e0(s);
     }
     if (k === 'weather') {
-      h = '<div class="vc-if-w"><div class="vc-if-wt">' + e0(d.lo) + '–' + e0(d.hi) + '°C</div>' +
+      h = '<div class="vc-if-w"><div class="vc-if-wt">' + e0(_bareDeg(d.lo)) + '–' + e0(_bareDeg(d.hi)) + '°C</div>' +
           '<div class="vc-if-wc">' + e0(d.cond) + (d.precip != null ? ' · 降水 ' + e0(d.precip) + '%' : '') + '</div>' +
           '<div class="vc-if-ws">' + e0(d.loc) + ' ' + e0(d.date) + '</div>' +
           (d.tip ? '<div class="vc-if-tip">' + e0(d.tip) + '</div>' : '') + '</div>';
@@ -3201,7 +3203,7 @@
 
   function _infoText(card) {   // 双击带入上下文用的纯文本化
     var d = card.data || {}, k = card.kind;
-    if (k === 'weather') return (card.title || '天气') + ':' + [d.loc, d.date, d.cond, (d.lo != null ? d.lo + '-' + d.hi + '°C' : ''), (d.precip != null ? '降水' + d.precip + '%' : ''), d.tip].filter(Boolean).join(',');
+    if (k === 'weather') return (card.title || '天气') + ':' + [d.loc, d.date, d.cond, (d.lo != null ? _bareDeg(d.lo) + '-' + _bareDeg(d.hi) + '°C' : ''), (d.precip != null ? '降水' + d.precip + '%' : ''), d.tip].filter(Boolean).join(',');
     if (k === 'news') return (card.title || '新闻') + ':' + (d.items || []).map(function (it) { return (it.t || '') + '(' + (it.s || '') + ')'; }).join(';');
     if (k === 'fact') return (card.title || '') + ':' + (d.answer || '') + ' ' + (d.detail || '');
     if (k === 'images') return (card.title || '配图') + ':' + (d.items || []).filter(function (it) { return !it._gone; }).map(function (it) { return (it.title || '图') + (it.src ? '[源:' + it.src + ']' : ''); }).join(';') + '(图片本身在用户屏幕上;上下文只带元数据,不含图片/URL)';   // 用户拍板:带图卡入上下文=每张图的元数据,不是图本身;✕删除的不带

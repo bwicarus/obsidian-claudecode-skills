@@ -4375,7 +4375,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // "showLegacy" 已删除：旧网页界面不再是一个可以被请求的目的地。
             // "openArtifact" / "action" 一并删除：它们唯一的实现是把旧网页界面
             // 端出来（reveal→setLegacy），而原生界面从来没有地方会去点它们。
-            "hideLegacy", "refresh", "snapshot", "openTOC", "openSearch",
+            // resyncMessages：侧栏发现对话跳序后的唯一自救口。曾漏在白名单外 → 每次重同步都被
+            // 这里拒成「阅读页尚未准备好」，一次丢包后侧栏就永远停在旧版本（2026-09-26 实机）。
+            "hideLegacy", "refresh", "snapshot", "resyncMessages", "openTOC", "openSearch",
             "favoritesList", "favoritesPlace", "favoritesDelete", "favoritesTrash", "favoritesRestore", "favoritesPin",
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
@@ -4385,9 +4387,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             "nativeGrammar", "nativeHighlightEdit", "nativePhraseFav", "nativeCreateNote",
             "nativeOcrSelection", "nativeEpubHighlight", "nativeEpubHighlightColors",
             "anchorPreview", "operationAction"]
+        // 不在白名单与「页面没准备好」是两回事，分开报 —— 混成一句曾把白名单漏项伪装成时序问题。
         guard let action = command["action"] as? String, allowed.contains(action),
-              JSONSerialization.isValidJSONObject(command),
-              isTrustedReaderURL(webView.url), !isLoading else {
+              JSONSerialization.isValidJSONObject(command) else {
+            return ["ok": false, "error": "不支持的阅读页操作：\(command["action"] as? String ?? "（无）")"]
+        }
+        guard isTrustedReaderURL(webView.url), !isLoading else {
             return ["ok": false, "error": "阅读页尚未准备好，请稍后重试"]
         }
         do {

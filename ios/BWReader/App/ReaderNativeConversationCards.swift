@@ -399,7 +399,7 @@ private struct ReaderNativeConversationArtifactCard: View {
         VStack(alignment: .leading, spacing: 8) {
             let place = [field("loc"), field("date")].filter { !$0.isEmpty }.joined(separator: " · ")
             if !place.isEmpty { Text(place).font(.caption).foregroundStyle(ReaderNativeTheme.muted) }
-            let low = field("lo"), high = field("hi")
+            let low = ReaderWeatherDegrees.bare(field("lo")), high = ReaderWeatherDegrees.bare(field("hi"))
             if !low.isEmpty && !high.isEmpty {
                 Text("\(low)–\(high)°C").font(.title2.weight(.medium)).monospacedDigit()
             } else if !low.isEmpty || !high.isEmpty {
@@ -523,5 +523,14 @@ private struct ReaderNativeCardEditor: View {
                 }
             }
         }
+    }
+}
+
+/// 天气卡的 lo/hi 按契约是纯数值，由显示层统一补「°C」。但 AI 常顺手写成 "18°C"，
+/// 于是显示成「18°C–23°C°C」（2026-09-26 实机）。所有渲染点先剥掉已有单位再补一次。
+enum ReaderWeatherDegrees {
+    static func bare(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "\\s*(°\\s*[CcＣ]?|℃|摄氏度|度)\\s*$", with: "", options: .regularExpression)
     }
 }

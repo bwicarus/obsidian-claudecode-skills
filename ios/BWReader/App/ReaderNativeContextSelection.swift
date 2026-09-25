@@ -272,7 +272,7 @@ enum ReaderNativeCardContext {
         switch kind {
         case "weather":
             let parts = [text(data["loc"]),text(data["date"]),text(data["cond"]),
-                data["lo"] == nil || data["lo"] is NSNull ? "" : text(data["lo"]) + "-" + text(data["hi"]) + "°C",
+                data["lo"] == nil || data["lo"] is NSNull ? "" : ReaderWeatherDegrees.bare(text(data["lo"])) + "-" + ReaderWeatherDegrees.bare(text(data["hi"])) + "°C",
                 data["precip"] == nil || data["precip"] is NSNull ? "" : "降水" + text(data["precip"]) + "%",text(data["tip"])]
             body = (title.isEmpty ? "天气" : title) + ":" + parts.filter { !$0.isEmpty }.joined(separator:",")
         case "news": body = (title.isEmpty ? "新闻" : title) + ":" + items.map { text($0["t"]) + "(" + text($0["s"]) + ")" }.joined(separator:";")

@@ -335,7 +335,21 @@ struct ReaderNativeTurnStore {
                 p["states"] = states.map { $0 as Any? ?? NSNull() }; turn.progress = p
             case "import":
                 guard let parts = command["parts"] as? [O] else { throw Failure(message:"历史轮次内容无效") }
-                for raw in parts { let p = try part(raw); if !absorb(p,into:&turn) { append(p,to:&turn) } }
+                // 回放 = 用权威历史**重建**这一轮（与网页版 renderTurn 每次新建一致），不是追加。
+                // 侧栏每次原子重载都用同一个 hist_ 轮次号回放，以前这里 append —— 重载一次
+                // 每句话就多一份（2026-09-26 实机：历史里每条都成双，天气那条两段×两次=四段）。
+                // 身份相同的部件沿用旧 _nativeID，界面不闪；正在流的草稿不属于历史，原样留着。
+                let previous = turn.parts, liveDrafts = previous.filter { $0["_streamDraft"] as? Bool == true }
+                turn.parts = []
+                for (index,raw) in parts.enumerated() {
+                    var p = try part(raw)
+                    if absorb(p,into:&turn) { continue }
+                    let key = identity(p,index:index)
+                    if let old = previous.enumerated().first(where:{ $0.element["_streamDraft"] as? Bool != true && identity($0.element,index:$0.offset) == key }),
+                       let id = old.element["_nativeID"] as? String { p["_nativeID"] = id }
+                    append(p,to:&turn)
+                }
+                turn.parts += liveDrafts
             case "reconcile": try reconcile(command,turn:&turn)
             case "operationState":
                 guard let updates = command["parts"] as? [O] else { throw Failure(message:"操作状态无效") }

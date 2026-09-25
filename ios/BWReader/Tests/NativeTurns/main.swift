@@ -116,4 +116,11 @@ let operationMessage = try store.conversationMessage(["id":"operations","nativeT
 let operationOriginal = (((operationMessage["parts"] as! [O])[0]["data"] as! O)["nativeDetail"] as! O)["content"] as! O
 let operationItem = (operationOriginal["items"] as! [O])[0]
 check(operationItem["id"] as? String == "restored-highlight" && operationItem["pdf_page"] as? Int == 4 && operationItem["text"] as? String == "原文","redo lost the replacement identity or changed its source anchor")
+// 侧栏每次原子重载都用同一个 hist_ 轮次号回放历史：回放必须是重建，不能每次多叠一份。
+let replayParts: [O] = [["kind":"text","text":"东京明天多云","origin":"voice"],["kind":"text","text":"卡片已发到 Reader","origin":"runner"]]
+let firstReplay = output(try run("import",["parts":replayParts],tid:"hist_normal_h_x"),id:"hist_normal_h_x")
+let secondReplay = output(try run("import",["parts":replayParts],tid:"hist_normal_h_x"),id:"hist_normal_h_x")
+check((secondReplay["parts"] as! [O]).count == 2,"history replay appended a second copy of the same turn")
+check((firstReplay["parts"] as! [O]).map { $0["_nativeID"] as! String } == (secondReplay["parts"] as! [O]).map { $0["_nativeID"] as! String },
+      "history replay changed part identities and would flicker")
 print("Native turns: live/final reconciliation, invocation dedupe, independent drafts, rename, progress, atomic rejection and stable card identity passed")
