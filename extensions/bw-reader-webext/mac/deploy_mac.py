@@ -93,6 +93,13 @@ def services() -> dict[str, dict]:
                      "sync", "--continuous", "--path", str(DATA / "obsidian")],
             "cwd": str(DATA / "obsidian"),
         },
+        # Anki：官方桌面版隐藏启动（-g 不抢焦点、-j 隐藏窗口），AnkiConnect 在 127.0.0.1:8765。
+        # open 会立刻返回，所以不常驻；Anki 退出或崩溃后由后台守护每分钟检查并重新隐藏拉起。
+        "anki": {"args": ["/usr/bin/open", "-g", "-j", "-a", "/Applications/Anki.app"],
+                 "cwd": str(HOME), "keepalive": False},
+        # KJ 知识节点 ↔ Anki：每 15 分钟吸收卡片绑定台账 + 拉复习快照进掌握度（同 Windows 的「KJ Anki Sync」）
+        "kj-anki-sync": {"args": [str(PY), f"{cur}/scripts/kj/cli.py", "anki-sync"],
+                         "cwd": cur, "keepalive": False, "interval": 900},
     }
 
 
@@ -196,12 +203,14 @@ def write_plists(env: dict[str, str], names: list[str]) -> None:
             "WorkingDirectory": spec["cwd"],
             "EnvironmentVariables": env,
             "RunAtLoad": True,
-            "KeepAlive": True,
+            "KeepAlive": spec.get("keepalive", True),
             "ThrottleInterval": 10,
             "ProcessType": "Interactive",
             "StandardOutPath": str(LOGS / f"{name}.log"),
             "StandardErrorPath": str(LOGS / f"{name}.log"),
         }
+        if spec.get("interval"):
+            plist["StartInterval"] = spec["interval"]
         path = LAUNCH_AGENTS / f"{LABEL_PREFIX}{name}.plist"
         with path.open("wb") as handle:
             plistlib.dump(plist, handle)

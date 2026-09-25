@@ -49,6 +49,7 @@ SERVICES: list[tuple[str, str, int]] = [
     ("mcp", "MCP 门面(8766)", 8766),
     ("bridge", "阅读器桥(43128)", 43128),
     ("voice-core", "CLI 语音核心(43131)", 43131),
+    ("anki", "Anki / AnkiConnect(8765)", 8765),
 ]
 
 PATHS = ReaderPCPaths.discover()
@@ -239,6 +240,27 @@ def board_render_loop(stop: threading.Event) -> None:
             log("展示板卡片渲染超时（>90s）")
 
 
+# ---------- Anki 保活 ----------
+
+ANKI_APP = "/Applications/Anki.app"
+
+
+def anki_watch_loop(stop: threading.Event) -> None:
+    """AnkiConnect 连不上、且 Anki 进程也不在 → 隐藏拉起（-g 不抢焦点，-j 隐藏窗口）。
+
+    Anki 在跑但 8765 不通（比如正在同步、弹了对话框）时不动它：再开一次只会把窗口叫到前台。
+    """
+    while not stop.wait(60):
+        if port_open(8765) or not Path(ANKI_APP).exists():
+            continue
+        running = subprocess.run(["pgrep", "-f", ANKI_APP + "/Contents/MacOS/"],
+                                 capture_output=True).returncode == 0
+        if running:
+            continue
+        subprocess.run(["/usr/bin/open", "-g", "-j", "-a", ANKI_APP], capture_output=True)
+        log("Anki 不在运行，已在后台隐藏启动")
+
+
 # ---------- 主循环 ----------
 
 def main() -> int:
@@ -252,6 +274,10 @@ def main() -> int:
                      name="replication-apply", daemon=True).start()
     # ③ 展示板卡片
     threading.Thread(target=board_render_loop, args=(stop,), name="board-cards",
+                     daemon=True).start()
+
+    # ⑤ Anki 保活
+    threading.Thread(target=anki_watch_loop, args=(stop,), name="anki-watch",
                      daemon=True).start()
 
     # ① 网页界面
