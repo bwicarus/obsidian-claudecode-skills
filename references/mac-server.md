@@ -104,9 +104,15 @@ cd ~/BW/src/claude
 - **Codex 全局配置（2026-09-25 查出迁移时漏了）**：Mac 的 `~/.codex/AGENTS.md` 原是空文件，已从 Windows 恢复
   （现行 3.8 KB 精简入口；阅读器/语音规则经 `reader_capability_guide` 按话题取）。能力指南与语音入口指令里的
   命令改为运行时渲染本机路径（不再写死 `C:\…`）；`~/BWReader` 也链到数据根。
-  ⚠ **Windows 的 13 个自建 skill 与 `rules/default.rules` 还没迁**：12 个含 PowerShell / `Program Files` /
-  AppData 路径，需逐个改写。原件归档在 `/Volumes/BWDev/archive/windows-codex-20260925/`；
-  已装无 Windows 依赖的 `reader-selection-research-card`。Mac → Windows SSH：`ssh windows-pc`（登录名 bwicarus）。
+  **自建 skill 已迁（2026-09-25，13 个）**：路径改成 `~/BW/venv/server/bin/python ~/BWReader/…`，cmd 续行 `^`→`\`；
+  `obsidian-project-notes` 的 PowerShell 脚本等价改写为 `scripts/obsidian_notes.py`（常驻同步 = launchd
+  `space.bwicarus.obsidian-sync`）；`reader-image-cards` runner 的文件锁 msvcrt→fcntl、大载荷走 `/tmp`；
+  excalidraw 三个脚本库路径同 `OBSIDIAN_NOTES_VAULT` 规则；`video-transcode` 加 Homebrew 路径与 VideoToolbox。
+  原件归档 `/Volumes/BWDev/archive/windows-codex-20260925/`。`~/.codex` 已纳入每日备份（排除插件/缓存）。
+  ⚠ 未迁 `rules/default.rules`：是历次「总是允许」攒下的 Windows 一次性命令，另含一条「pwsh 任意命令放行」——
+  换成 Mac 等价物等于替用户放开全部审批，留给用户决定。
+  ⚠ 仍缺：**ffmpeg**（Mac 未装，影响 video-transcode 与服务端 YouTube 字幕/转写）；**摄像头**（三台 local
+  是 Windows 的硬件，Pi 那台要 Mac→Pi SSH）。`~/.config` 的密钥已从 Windows 补齐（用户授权）。
 - **Obsidian**：库 `~/BW/data/obsidian`；`资源/vocab` 被同步配置忽略（服务器本机生成），
   >200 MB 的文件云同步不收（`File too large` 提示正常）。
 - **Anki**：数据从 AnkiWeb 同步（10 牌组 / 501 卡）。只装 AnkiConnect；Windows 的 AnkiTrayPro 不带。
