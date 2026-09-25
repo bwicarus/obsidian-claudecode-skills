@@ -94,4 +94,28 @@ fi
 "$XCODEGEN" generate --spec "$SPEC" --project "$HERE"
 xcodebuild -project "$HERE/BWReader.xcodeproj" -list | sed -n '1,30p'
 
+# XcodeGen 会按 project.yml 重写 Info.plist / entitlements（Tab 缩进），而仓库里存的是空格缩进。
+# 内容相同、只有格式不同的，恢复成仓库原样，免得每次准备完工作区都「有改动」
+# （Mac 仓库设了 receive.denyCurrentBranch=updateInstead，工作区脏了就拒收推送）。
+# 内容真的变了的不动 —— 那是 project.yml 改了，应该让人看见。
+"$PY" - "$ROOT" <<'PY'
+import plistlib, subprocess, sys
+root = sys.argv[1]
+changed = subprocess.run(["git", "-C", root, "diff", "--name-only", "--", "ios/BWReader"],
+                         capture_output=True, text=True).stdout.split()
+for rel in changed:
+    if not rel.endswith((".plist", ".entitlements")):
+        continue
+    head = subprocess.run(["git", "-C", root, "show", "HEAD:" + rel], capture_output=True).stdout
+    try:
+        same = plistlib.loads(head) == plistlib.load(open(root + "/" + rel, "rb"))
+    except Exception:
+        same = False
+    if same:
+        subprocess.run(["git", "-C", root, "checkout", "--", rel], check=True)
+        print("格式不同、内容相同，已恢复：", rel)
+    else:
+        print("⚠ 内容与仓库不同（project.yml 改过？）：", rel)
+PY
+
 printf '\n完成。用 Xcode 打开：open "%s"\n' "$HERE/BWReader.xcodeproj"
