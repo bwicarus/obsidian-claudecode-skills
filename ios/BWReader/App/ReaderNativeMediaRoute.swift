@@ -7,6 +7,11 @@ enum ReaderNativeMediaRoute {
         let raw = source.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !raw.isEmpty,raw.utf16.count <= 8192 else { return nil }
         if raw.hasPrefix("data:image/") { return raw }
+        // 侧栏里已发送附件的缩略图（2026-09-26）：本机缓存优先，没有才向服务器取那张低质量 thumb。
+        if let match = raw.range(of:"^/assistant-attachments/(thumb|preview)/[a-f0-9]{32}$",options:.regularExpression) {
+            let parts = raw[match].split(separator:"/")
+            return "/pdf/api/attachment-thumb?kind=" + parts[1] + "&id=" + parts[2]
+        }
         if raw.range(of:"^/pdf/api/(?:page-image(?:\\?|$)|asset/|img-proxy(?:\\?|$)|card-asset(?:\\?|$))",options:.regularExpression) != nil { return raw }
         guard let url = URL(string:raw),url.scheme?.lowercased() == "https",url.host != nil,url.user == nil,url.password == nil,url.fragment == nil else { return nil }
         if url.host == "bwicarus-2.taile44d0c.ts.net",url.query == nil,url.path.range(of:"^/reader-card-asset/[a-f0-9]{16}$",options:.regularExpression) != nil {

@@ -36,6 +36,9 @@ internal static class ReaderAssistantAttachmentStore
 
     internal static string FilePath(Entry entry) => Path.Combine(DirectoryFor(entry.Id), entry.StoredName);
     internal static string PreviewPath(string id) => Path.Combine(DirectoryFor(id), "preview.jpg");
+    // 侧栏缩略图（2026-09-26 用户：「服务器上同步的是质量很差的缩略图」）。App 本机显示用自己
+    // 的本地副本；服务器这份只给别的设备/缓存丢失时补，所以小而糙（App 端 320px、低质量）。
+    internal static string ThumbPath(string id) => Path.Combine(DirectoryFor(id), "thumb.jpg");
     internal static object Public(Entry entry) => new { entry.Id, entry.Name, entry.Mime, entry.Bytes, entry.Sha256,
         downloadPath = "/assistant-attachments/file/" + entry.Id };
 
@@ -91,13 +94,19 @@ internal static class ReaderAssistantAttachmentStore
         finally { if (Directory.Exists(temporary)) Directory.Delete(temporary, true); }
     }
 
-    internal static async Task SavePreviewAsync(string id, Stream source, CancellationToken token)
+    internal static Task SavePreviewAsync(string id, Stream source, CancellationToken token) =>
+        SaveJpegAsync(id, PreviewPath(id), 10L * 1024 * 1024, source, token);
+
+    internal static Task SaveThumbAsync(string id, Stream source, CancellationToken token) =>
+        SaveJpegAsync(id, ThumbPath(id), 256L * 1024, source, token);
+
+    private static async Task SaveJpegAsync(string id, string destination, long limit, Stream source, CancellationToken token)
     {
         _ = Read(id);
-        string destination = PreviewPath(id), temporary = destination + "." + Guid.NewGuid().ToString("N") + ".part";
+        string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".part";
         try
         {
-            var copied = await CopyAsync(source, temporary, 10L * 1024 * 1024, token).ConfigureAwait(false);
+            var copied = await CopyAsync(source, temporary, limit, token).ConfigureAwait(false);
             await using (var input = File.OpenRead(temporary))
             {
                 byte[] signature = new byte[3];
@@ -129,6 +138,21 @@ internal static class ReaderAssistantAttachmentStore
         var token = linked.Token;
         try
         {
+            bool thumbRoute = context.Request.Path.StartsWithSegments("/assistant-attachments/thumb");
+            if (HttpMethods.IsGet(context.Request.Method) &&
+                (thumbRoute || context.Request.Path.StartsWithSegments("/assistant-attachments/preview")))
+            {
+                // 侧栏缩略图（2026-09-26）：发出去的图在对话里显示成缩略图，而不是原件地址。
+                // 只读已存的 thumb.jpg / preview.jpg；Read 先按编号校验附件存在。
+                Read(id);
+                string preview = thumbRoute ? ThumbPath(id) : PreviewPath(id);
+                if (!File.Exists(preview)) throw new FileNotFoundException("preview");
+                context.Response.ContentType = "image/jpeg";
+                context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+                context.Response.Headers["Cache-Control"] = "private, max-age=604800, immutable";
+                await context.Response.SendFileAsync(preview, token).ConfigureAwait(false);
+                return;
+            }
             if (HttpMethods.IsGet(context.Request.Method))
             {
                 var entry = Read(id);
@@ -141,7 +165,12 @@ internal static class ReaderAssistantAttachmentStore
             }
             var limit = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
             if (limit is { IsReadOnly: false }) limit.MaxRequestBodySize = MaximumBytes;
-            if (context.Request.Path.StartsWithSegments("/assistant-attachments/preview"))
+            if (thumbRoute)
+            {
+                await SaveThumbAsync(id, context.Request.Body, token).ConfigureAwait(false);
+                await context.Response.WriteAsJsonAsync(new { ok = true }, token).ConfigureAwait(false);
+            }
+            else if (context.Request.Path.StartsWithSegments("/assistant-attachments/preview"))
             {
                 await SavePreviewAsync(id, context.Request.Body, token).ConfigureAwait(false);
                 await context.Response.WriteAsJsonAsync(new { ok = true }, token).ConfigureAwait(false);

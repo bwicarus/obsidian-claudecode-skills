@@ -4550,7 +4550,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard route.hasPrefix("/pdf/api/"), !route.hasPrefix("//"),
                   let url = URL(string: route, relativeTo: base)?.absoluteURL,
                   url.host == base.host, url.port == base.port,
-                  ["/pdf/api/card-asset", "/pdf/api/img-proxy", "/pdf/api/page-image"].contains(url.path)
+                  ["/pdf/api/card-asset", "/pdf/api/img-proxy", "/pdf/api/page-image", "/pdf/api/attachment-thumb"].contains(url.path)
                     || (url.host == base.host && url.port == base.port && url.path.hasPrefix("/pdf/api/asset/")) else {
                 throw URLError(.unsupportedURL)
             }

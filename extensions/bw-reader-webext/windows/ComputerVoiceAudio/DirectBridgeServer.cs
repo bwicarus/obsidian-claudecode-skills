@@ -724,10 +724,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-library/list",
             new[] { "POST", "OPTIONS" },
             context => HandleLibraryListAsync(context, serviceToken));
-        foreach (string operation in new[] { "upload", "preview", "file" })
+        foreach (string operation in new[] { "upload", "preview", "thumb", "file" })
         {
             app.MapMethods("/assistant-attachments/" + operation + "/{id}",
-                new[] { operation == "file" ? "GET" : "POST", "OPTIONS" }, async context =>
+                // preview 另收 GET：侧栏按它显示已发送图片的缩略图。
+                (operation == "file" ? new[] { "GET", "OPTIONS" }
+                    : operation is "preview" or "thumb" ? new[] { "GET", "POST", "OPTIONS" }
+                    : new[] { "POST", "OPTIONS" }), async context =>
                 {
                     if (!AllowTailscaleClient(context, "assistant-attachment")) return;
                     await ReaderAssistantAttachmentStore.HandleAsync(context, serviceToken).ConfigureAwait(false);

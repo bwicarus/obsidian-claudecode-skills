@@ -358,6 +358,17 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             return await serveNativeCardAsset(request)
         }
 
+        if decodedPath == "/pdf/api/attachment-thumb" {
+            guard request.method == .GET else {
+                return response(status: .methodNotAllowed, text: "method not allowed",
+                                headers: [HTTPHeader("Allow"): "GET"])
+            }
+            guard trustedResourceSurface(referer: request.headers[HTTPHeader("Referer")]) != nil else {
+                return response(status: .forbidden, text: "invalid referer")
+            }
+            return await serveAttachmentThumb(request)
+        }
+
         if decodedPath == "/pdf/api/img-proxy" {
             guard request.method == .GET else {
                 return response(
@@ -812,6 +823,33 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                     HTTPHeader("X-BW-Reader-Error"): "card-asset-unavailable"
                 ]
             )
+        }
+    }
+
+    /// 侧栏里已发送图片的缩略图：本机缓存（发送时就生成好了）优先；没有才向服务器取
+    /// 那张低质量 thumb（老附件退回 preview），取到后存进本机缓存。
+    private func serveAttachmentThumb(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let id = request.query["id"], ReaderAttachmentThumbs.isValidID(id),
+              let kind = request.query["kind"], ["thumb", "preview"].contains(kind) else {
+            return response(status: .badRequest, text: "invalid attachment thumb",
+                            headers: [HTTPHeader("X-BW-Reader-Error"): "invalid-attachment-thumb"])
+        }
+        if let local = ReaderAttachmentThumbs.load(id) {
+            return dataResponse(request, data: local, contentType: "image/jpeg",
+                                cacheControl: "private, max-age=604800, immutable",
+                                additionalHeaders: [HTTPHeader("X-BW-Attachment-Thumb"): "local"])
+        }
+        let origin = await MainActor.run { ReaderServer.origin }
+        do {
+            let payload = try await imageProxyBroker.fetch(rawURL: origin + "/assistant-attachments/" + kind + "/" + id)
+            ReaderAttachmentThumbs.save(id, data: payload.data)
+            return dataResponse(request, data: payload.data, contentType: payload.contentType,
+                                cacheControl: "private, max-age=604800, immutable",
+                                additionalHeaders: [HTTPHeader("X-BW-Attachment-Thumb"): "server-fill"])
+        } catch {
+            return response(status: HTTPStatusCode(502, phrase: "Bad Gateway"),
+                            text: "附件缩略图暂时取不到：" + error.localizedDescription,
+                            headers: [HTTPHeader("X-BW-Reader-Error"): "attachment-thumb-unavailable"])
         }
     }
 

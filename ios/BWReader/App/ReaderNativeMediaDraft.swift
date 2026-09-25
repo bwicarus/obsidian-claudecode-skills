@@ -7,6 +7,22 @@ import UIKit
 import PhotosUI
 import SwiftUI
 
+/// 已发送图片的侧栏缩略图，按附件编号存在本机缓存里（2026-09-26 用户：「本来就是本地上传，
+/// 那就本地处理后显示就好了」）。服务器那份 thumb 只在本机没有时才去取（换设备 / 缓存被清）。
+enum ReaderAttachmentThumbs {
+    nonisolated static func isValidID(_ id: String) -> Bool { id.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil }
+    nonisolated static func url(_ id: String) -> URL? {
+        guard isValidID(id), let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        return base.appendingPathComponent("attachment-thumbs", isDirectory: true).appendingPathComponent(id + ".jpg")
+    }
+    nonisolated static func load(_ id: String) -> Data? { url(id).flatMap { try? Data(contentsOf: $0) } }
+    nonisolated static func save(_ id: String, data: Data) {
+        guard let target = url(id) else { return }
+        try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: target, options: .atomic)
+    }
+}
+
 struct ReaderPickedMedia: Transferable {
     let url: URL
     static var transferRepresentation: some TransferRepresentation {
@@ -35,6 +51,7 @@ final class ReaderNativeMediaDraft: ObservableObject {
         let origin: String
         var file: URL?
         var preview: URL?
+        var thumb: URL?
         var mime = "application/octet-stream"
         var bytes = 0
         var uploaded = false
@@ -122,7 +139,7 @@ final class ReaderNativeMediaDraft: ObservableObject {
                     guard !Task.isCancelled, let index = items.firstIndex(where: { $0.id == id }) else {
                         try? FileManager.default.removeItem(at: prepared.file.deletingLastPathComponent()); return
                     }
-                    items[index].file = prepared.file; items[index].preview = prepared.preview
+                    items[index].file = prepared.file; items[index].preview = prepared.preview; items[index].thumb = prepared.thumb
                     items[index].mime = prepared.mime; items[index].bytes = prepared.bytes
                     await upload(id)
                 } catch {
@@ -183,7 +200,7 @@ final class ReaderNativeMediaDraft: ObservableObject {
             referenceText: "【用户附加文件】\n" + String(decoding: data, as: UTF8.self))
     }
 
-    private struct Prepared: Sendable { let file: URL; let preview: URL?; let mime: String; let bytes: Int }
+    private struct Prepared: Sendable { let file: URL; let preview: URL?; let thumb: URL?; let mime: String; let bytes: Int }
     nonisolated private static func prepare(_ source: URL, id: String) throws -> Prepared {
         let values = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentTypeKey])
         guard values.isRegularFile == true, let size = values.fileSize, size <= maximumBytes else {
@@ -210,7 +227,23 @@ final class ReaderNativeMediaDraft: ObservableObject {
                     if CGImageDestinationFinalize(destination) { preview = url }
                 }
             }
-            return Prepared(file: target, preview: preview, mime: type?.preferredMIMEType ?? "application/octet-stream", bytes: size)
+            // 侧栏缩略图：320px、低质量 —— 本机缓存一份直接显示，也只把这份传给服务器留作同步。
+            var thumb: URL?
+            if type?.conforms(to: .image) == true,
+               let image = CGImageSourceCreateWithURL(target as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+               let small = CGImageSourceCreateThumbnailAtIndex(image, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 320,
+               ] as CFDictionary),
+               let cached = ReaderAttachmentThumbs.url(id) {
+                try? FileManager.default.createDirectory(at: cached.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if let destination = CGImageDestinationCreateWithURL(cached as CFURL, UTType.jpeg.identifier as CFString, 1, nil) {
+                    CGImageDestinationAddImage(destination, small, [kCGImageDestinationLossyCompressionQuality: 0.45] as CFDictionary)
+                    if CGImageDestinationFinalize(destination) { thumb = cached }
+                }
+            }
+            return Prepared(file: target, preview: preview, thumb: thumb, mime: type?.preferredMIMEType ?? "application/octet-stream", bytes: size)
         } catch {
             try? FileManager.default.removeItem(at: directory); throw error
         }
@@ -226,6 +259,9 @@ final class ReaderNativeMediaDraft: ObservableObject {
             _ = try await Self.post(file, url: item.origin + "/assistant-attachments/upload/" + id, origin: item.origin, headers: headers)
             if let preview = item.preview {
                 _ = try await Self.post(preview, url: item.origin + "/assistant-attachments/preview/" + id, origin: item.origin)
+            }
+            if let thumb = item.thumb {
+                _ = try await Self.post(thumb, url: item.origin + "/assistant-attachments/thumb/" + id, origin: item.origin)
             }
             try Task.checkCancellation()
             guard let current = items.firstIndex(where: { $0.id == id }) else { return }

@@ -90,6 +90,30 @@ def typed_attachment_input(text: str, ids: list[str], root: Path | None = None) 
     return text, images
 
 
+def typed_attachment_display(text: str, ids: list[str], root: Path | None = None) -> str:
+    """侧栏历史里的那句：原话 + 每张图一个缩略图引用（非图片写「📎 文件名」）。
+
+    ⚠ 2026-09-26 之前历史里存的是**发给 AI 的版本** —— 原话后面拼着附件 JSON
+      （服务器本机路径、file:// 地址），侧栏就把这串地址原样显示出来了。
+    发给 AI 的内容不变（typed_attachment_input），只是记录给人看的这份分开写。
+    """
+    root = (root or BWREADER_DIR / "assistant-attachments").resolve()
+    lines = []
+    for ident in ids or []:
+        try:
+            record = json.loads((root / ident / "metadata.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        name = str(record.get("name") or "附件").replace("]", "").replace("\n", " ")[:120]
+        # 优先引用低质量缩略图（thumb，App 发送时附带）；老附件没有就退回 preview。
+        kind = "thumb" if (root / ident / "thumb.jpg").is_file() else "preview" if (root / ident / "preview.jpg").is_file() else ""
+        if kind:
+            lines.append("![" + name + "](/assistant-attachments/" + kind + "/" + ident + ")")
+        else:
+            lines.append("📎 " + name)
+    return (text + ("\n\n" if text and lines else "") + "\n\n".join(lines)).strip()
+
+
 def claim_typed_submission(ident: str, text: str, ids: list[str], root: Path | None = None) -> tuple[Path, str, dict | None]:
     """Write intent before dispatch. Unknown outcomes remain non-replayable after restart."""
     if not isinstance(ident, str) or not re.fullmatch(r"[a-f0-9]{32}", ident):
@@ -3711,10 +3735,12 @@ class Runner:
             return {"ok": False, "reason": "empty"}
         image_paths = []
         submission = None
+        display_text = text
         if attachment_ids:
             # Validate all data and connection readiness before recording dispatch intent.
             original_text = text
             text, image_paths = typed_attachment_input(text, attachment_ids)
+            display_text = typed_attachment_display(original_text, attachment_ids)
             await self.ensure_app()
             submission_path, fingerprint, prior = claim_typed_submission(submission_id, original_text, attachment_ids)
             if prior is not None:
@@ -3728,7 +3754,7 @@ class Runner:
             res = await self.steer_running_turn(text, tag="typed", **({"image_paths": image_paths} if image_paths else {}))
             if res.get("ok"):
                 tid = str(self._turn.get("id"))
-                self._history_post({"user": text, "via": "codex-voice",
+                self._history_post({"user": display_text, "via": "codex-voice",
                                     "turn_id": tid + ".t" + str(int(time.time() * 1000))[-6:]})
                 self._segment_backend_turn("typed")
                 self.log("typed", via="steer", text=text[:200])
@@ -3741,7 +3767,7 @@ class Runner:
                 # Keep the original request id; never start another turn blindly.
                 return {"ok": False, "reason": "outcome-unknown"}
             # 那一轮恰好刚结束：退回起新的一轮
-        await self.turn(text, **({"image_paths": image_paths} if image_paths else {}))
+        await self.turn(text, **({"image_paths": image_paths} if image_paths else {}), record_text=display_text)
         self.log("typed", via="backend", text=text[:200])
         result = {"ok": True, "via": "backend"}
         if submission:
@@ -3749,10 +3775,11 @@ class Runner:
         return result
 
     async def turn(self, text: str, additional: dict | None = None, record_user: bool = True,
-                   image_paths: list[str] | None = None):
+                   image_paths: list[str] | None = None, record_text: str | None = None):
         await self.ensure_app()
         await self._ctx_inject_backend(with_text=True)   # 直接少一轮工具调用：起轮前把他正看着的内容放进去
-        self._pending_turn_user = text if record_user else None
+        # 侧栏记的是给人看的那句（record_text），不是发给后台的那份（可能拼了附件清单）。
+        self._pending_turn_user = (record_text or text) if record_user else None
         params = {"threadId": self.thread_id, "input": [{"type": "text", "text": text}]}
         params["input"].extend({"type": "localImage", "path": path} for path in (image_paths or []))
         if additional:
