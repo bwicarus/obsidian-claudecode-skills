@@ -1790,14 +1790,20 @@ internal sealed class ReaderContextMcpServer
                 ["name"] = CardToolName,
                 ["description"] =
                     "Use when the user asks to show 天气/新闻/图片/视频/地图/一个事实 as a card in the Reader. "
+                    // 2026-09-26：原句「送到当前快照里指名的那个 App」让模型每次出卡前都先
+                    // 读一次快照 —— 问天气也显示「读取页面」。目标由服务器自己解析并等待就绪。
                     + "Mirror one structured weather/news/images/videos/fact/"
-                    + "general result to the exact App or extension named by "
-                    + "the current Reader snapshot. Call this in the same "
+                    + "general result to the Reader the user is using. The "
+                    + "server resolves the target App or extension itself and "
+                    + "waits for it; do NOT read the Reader snapshot first just "
+                    + "to deliver a card. Call this in the same "
                     + "Windows Codex voice turn that produced the native tool "
                     + "result; never infer a card from final assistant text or "
                     + "expect text history synchronization to carry it. The "
                     + "exact card envelope is {kind,title,data}; data shapes "
-                    + "are weather={lo,hi,cond,loc?,date?,precip?,tip?}, "
+                    + "are weather={lo,hi,cond,loc?,date?,precip?,tip?} (lo/hi "
+                    + "are bare Celsius numbers like 18, precip a bare percent "
+                    + "like 75; the card adds the units), "
                     + "news={items:[{t,s?,src?}]}, "
                     + "images={items:[{url,title?,aid?,src?}]} where url is "
                     + "a public HTTPS address that directly returns image/* "
@@ -1863,8 +1869,9 @@ internal sealed class ReaderContextMcpServer
                     //   卡片的主入口是 reader_card，这里只在它不在清单里时才接卡。
                     "Use for BWREADER/1 navigate and tool-status commands only (cards go to reader_card). "
                     + "For cards use reader_card. This tool sends the OTHER bounded "
-                    + "structured outputs to the exact App or extension named by the "
-                    + "current Reader snapshot: BWREADER/1 navigate and tool-status "
+                    + "structured outputs to the Reader the user is using (the server "
+                    + "resolves the target App or extension itself; do not read the "
+                    + "snapshot first just to deliver): BWREADER/1 navigate and tool-status "
                     + "commands in the exact schema already known for the action; "
                     + "only complex or unknown workflows should read one capability "
                     + "guide. It is an additive output path and never replaces the "

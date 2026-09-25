@@ -298,7 +298,12 @@ enum ReaderNativeConversationScript {
           let presentation = null;
           try { presentation = rc().turnCard?.presentationOf(tid); } catch (_) {}
           (presentation?.parts || []).forEach(part => {
-            if (part?.kind === 'tool' && part.label) owned.tools.add(String(part.label));
+            if (part?.kind === 'tool') {
+              // 标签与工具名都记：App 的镜像条并进服务器那条后，轮次里只剩
+              // reader_snapshot.<名字>，长条要按不带命名空间的名字认。
+              if (part.label) owned.tools.add(String(part.label));
+              if (part.tool) { owned.tools.add(String(part.tool)); owned.tools.add(String(part.tool).split('.').pop()); }
+            }
             if (part?.kind === 'card' && part.card) owned.cards.add(cardSignature(part.card));
           });
         });
@@ -309,7 +314,7 @@ enum ReaderNativeConversationScript {
         const id = messageID(node, index), tid = node.getAttribute('data-turn') || '';
         if (nativeMode && !tid && node.__bwToolChip) {
           const chip = node.__bwToolChip, label = String(chip.label || '工具调用');
-          if (turnOwned.tools.has(label)) return null;
+          if (turnOwned.tools.has(label) || (chip.tool && turnOwned.tools.has(String(chip.tool)))) return null;
           const [part] = nativePartHandles({ kind: 'tool', label, tool: chip.tool || '' }, id + '-tool', node, '');
           part.status = chip.failed ? 'failed' : chip.busy ? 'running' : 'completed';
           return { id, role: 'assistant', text: '', streaming: false, parts: [part], title: '', statusText: '', progress: null };

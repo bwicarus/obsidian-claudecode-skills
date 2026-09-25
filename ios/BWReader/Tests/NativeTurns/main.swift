@@ -123,4 +123,11 @@ let secondReplay = output(try run("import",["parts":replayParts],tid:"hist_norma
 check((secondReplay["parts"] as! [O]).count == 2,"history replay appended a second copy of the same turn")
 check((firstReplay["parts"] as! [O]).map { $0["_nativeID"] as! String } == (secondReplay["parts"] as! [O]).map { $0["_nativeID"] as! String },
       "history replay changed part identities and would flicker")
+// App 替服务器执行的工具是服务器那次调用的镜像：先到先显示，服务器那条到了就并掉，不重复计步。
+try run("append",["part":["kind":"tool","tool":"reader_context_snapshot","label":"读取页面","origin":"app","result":"完成 · 33 ms"]],tid:"mirror")
+check(store.turns["mirror"]!.parts.count == 1,"app tool shown before the runner call arrived was hidden")
+try run("append",["part":["kind":"tool","tool":"reader_snapshot.reader_context_snapshot","origin":"runner","call_id":"exec-1","status":"completed"]],tid:"mirror")
+try run("append",["part":["kind":"tool","tool":"reader_context_snapshot","label":"读取页面","origin":"app","result":"完成 · 20 ms"]],tid:"mirror")
+try run("append",["part":["kind":"tool","tool":"webSearch","origin":"runner","call_id":"exec-2","status":"completed"]],tid:"mirror")
+check(store.turns["mirror"]!.parts.filter { $0["kind"] as? String == "tool" }.count == 2,"app mirror of a runner call counted as an extra step")
 print("Native turns: live/final reconciliation, invocation dedupe, independent drafts, rename, progress, atomic rejection and stable card identity passed")

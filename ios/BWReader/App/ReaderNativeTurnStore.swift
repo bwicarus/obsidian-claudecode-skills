@@ -214,7 +214,24 @@ struct ReaderNativeTurnStore {
         if p["kind"] as? String == "tool" { turn.title = p["label"] as? String ?? p["tool"] as? String ?? "工具" }
         turn.parts.append(p)
     }
+    /// App 替服务器执行语音工具时，自己也记一条（origin=app，名字不带命名空间）；服务器那侧
+    /// 同一次调用记作 origin=runner、`reader_snapshot.<名字>`。两条是同一件事的两面 ——
+    /// 分开算，问一次天气就成了「9 步、读了两次页面」（2026-09-26 实测：实际 4 次调用）。
+    /// App 那条并进服务器那条；服务器那条还没到时 App 那条照常显示（先到先显示）。
+    private func mirrorsRunnerTool(_ incoming: O, in turn: Turn) -> Bool {
+        guard incoming["origin"] as? String == "app", let name = incoming["tool"] as? String, !name.isEmpty else { return false }
+        return turn.parts.contains { p in
+            guard p["kind"] as? String == "tool", (p["origin"] as? String ?? "runner") == "runner",
+                  let tool = p["tool"] as? String else { return false }
+            return tool == name || tool.hasSuffix("." + name)
+        }
+    }
+    private func dropAppMirrors(in turn: inout Turn) {
+        let snapshot = turn
+        turn.parts.removeAll { $0["kind"] as? String == "tool" && mirrorsRunnerTool($0, in: snapshot) }
+    }
     private func absorb(_ incoming: O, into turn: inout Turn) -> Bool {
+        if mirrorsRunnerTool(incoming, in: turn) { return true }
         guard incoming["kind"] as? String == "tool", let key = (incoming["tool"] as? String) ?? (incoming["label"] as? String), !key.isEmpty else { return false }
         func callID(_ p: O) -> String { ["call_id","callId","item_id","id"].compactMap { p[$0] as? String }.first(where:{ !$0.isEmpty }) ?? "" }
         func rich(_ p: O) -> Int { (p["result"] != nil && !(p["result"] is NSNull) ? 2 : 0) + (p["args"] != nil && !(p["args"] is NSNull) ? 1 : 0) }
@@ -396,6 +413,7 @@ struct ReaderNativeTurnStore {
             default: throw Failure(message:"未知轮次操作")
             }
             if action != "drop" {
+                dropAppMirrors(in: &turn)   // 服务器那条晚到时，把先到的 App 镜像收掉
                 guard turn.parts.count <= 10_000 else { throw Failure(message:"轮次内容过多") }
                 streamVersion = max(streamVersion,turn.streamVersion)
                 turn.presentationRevision = revision + 1
