@@ -211,7 +211,11 @@ private struct ReaderRootView: View {
                 ReaderNativePDFViewport(
                     document: document,
                     onTranslateSentence: { sentence in
-                        // 行首「译」→ 复用原生翻译面板（与选区菜单里的「翻译」同一个）。
+                        // 点句首/句末角标：译文就地盖在原句上（原版设计）；再点一次收起。
+                        reader.toggleNativeSentenceTranslation(sentence)
+                    },
+                    onSentenceLongPress: { sentence in
+                        // 长按角标：打开完整翻译面板（重新翻译、加卡等都在那里）。
                         reader.openNativeSentenceTranslation(sentence)
                     },
                     onOpenFigure: { figure in

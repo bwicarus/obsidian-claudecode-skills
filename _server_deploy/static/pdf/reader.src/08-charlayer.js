@@ -624,10 +624,15 @@ window.__bwReaderPageOverlay = async function (page) {
     searchQuery: _takePendingSearchQuery(page),
     // 生词句子（含未掌握词的整句）：rects 同样是点坐标。text 留着让原生那侧
     // 点「译」时直接送进翻译，不必再回来问一次。
+    // firstChar/lastChar：原生画句首「⌐」/句末「⌟」两个角标（原版 L 按钮）的依据；
+    // zh：已有译文（服务端缓存命中）直接就地铺上，不必再翻一遍。
     vocabSentences: (d.vocab_sentences || []).slice(0, 64).map((s) => ({
       rects: (s.rects || []).slice(0, 64),
       text: String(s.text || '').slice(0, 2000),
-      count: Number(s.count) || 0
+      count: Number(s.count) || 0,
+      firstChar: Array.isArray(s.first_char) ? s.first_char.slice(0, 4) : null,
+      lastChar: Array.isArray(s.last_char) ? s.last_char.slice(0, 4) : null,
+      zh: typeof s.zh === 'string' ? s.zh.slice(0, 4000) : ''
     })).filter((s) => s.rects.length)
   };
 };

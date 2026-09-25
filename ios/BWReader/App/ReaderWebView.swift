@@ -977,9 +977,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                                   height: (r[3] - r[1]) / size.height)
                 }
                 guard !boxes.isEmpty else { return nil }
+                let charBox: (Any?) -> CGRect? = { value in
+                    guard let r = value as? [Double], r.count == 4, r.allSatisfy(\.isFinite), r[2] > r[0], r[3] > r[1],
+                          size.width > 0, size.height > 0 else { return nil }
+                    return CGRect(x: r[0] / size.width, y: r[1] / size.height,
+                                  width: (r[2] - r[0]) / size.width, height: (r[3] - r[1]) / size.height)
+                }
                 // id 要带页码：不同页的第 0 句不能撞成同一个。
                 return .init(id: "\(page):\(index)", index: index, page: page,
-                             text: text, rects: boxes)
+                             text: text, rects: boxes,
+                             firstChar: charBox(row["firstChar"]), lastChar: charBox(row["lastChar"]),
+                             zh: row["zh"] as? String ?? "")
             }
         document.setVocabSentences(sentences, page: page)
         // 搜索跳转后要亮的那个词。网页那侧取走即清，所以只会亮一次。
@@ -2126,8 +2134,37 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         mountNativePDFDocument()
     }
 
-    /// 生词句子行首的「译」：整句交给原生翻译面板（与选区菜单里的「翻译」同一个，
-    /// 不另做一套句子翻译 UI）。
+    /// 点句首「⌐」/ 句末「⌟」：译文就地盖在原句上，再点收起（原版 toggleSentenceOverlay）。
+    /// 已有译文直接铺；没有就现翻（与翻译面板同一条取数路径：本机缓存 → 服务器留底 → 直连）。
+    func toggleNativeSentenceTranslation(_ sentence: ReaderNativePDFDocument.VocabSentence) {
+        guard let document = nativePDFDocument else { return }
+        if document.sentenceTranslations[sentence.id] != nil {
+            document.setSentenceTranslation(nil, id: sentence.id); return
+        }
+        if !sentence.zh.isEmpty { document.setSentenceTranslation(.text(sentence.zh), id: sentence.id); return }
+        document.setSentenceTranslation(.pending, id: sentence.id)
+        Task { @MainActor [weak self, weak document] in
+            guard let self else { return }
+            let receipt = await self.requestNativeConversationCommand([
+                "action": "nativeSelectionLookup",
+                "value": ["text": sentence.text, "mode": "translate", "page": sentence.page, "context": sentence.text],
+            ])
+            guard let document, document === self.nativePDFDocument,
+                  document.sentenceTranslations[sentence.id] == .pending else { return }
+            let body = receipt["value"] as? [String: Any] ?? [:]
+            let zh = ["meaning", "zh", "translation"].compactMap { body[$0] as? String }
+                .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            if receipt["ok"] as? Bool == true, let zh {
+                document.setSentenceTranslation(.text(zh), id: sentence.id)
+            } else {
+                let reason = receipt["error"] as? String ?? "没有返回译文"
+                self.postClientLog("[整句翻译] 失败：" + reason)
+                document.setSentenceTranslation(.failed(String(reason.prefix(40))), id: sentence.id)
+            }
+        }
+    }
+
+    /// 长按句子角标：整句交给原生翻译面板（与选区菜单里的「翻译」同一个）。
     func openNativeSentenceTranslation(_ sentence: ReaderNativePDFDocument.VocabSentence) {
         openNativeLookup(page: sentence.page, text: sentence.text,
                          sentence: sentence.text, mode: "translate")

@@ -8917,6 +8917,7 @@
         url.searchParams.get('page'), 1, 10000000, 'page', code
       );
       return pageTextForPage(page).then(function (result) {
+        var localMarks = safeLocalVocabMarks(result && result.chars);
         return {
           ok: true,
           state: result.state,
@@ -8926,8 +8927,9 @@
           native_formula_state: String(result.state || 'unknown'),
           native_formula_source: String(result.source || 'none'),
           // 本地权威(2026-09-03):按本地字符层 + 本地 vocabulary-state 算;服务端增强只做并集
-          vocab_marks: safeLocalVocabMarks(result && result.chars),
-          vocab_sentences: [],
+          vocab_marks: localMarks,
+          vocab_sentences: safeLocalVocabSentences(result && result.chars, localMarks,
+            Number(result && result.pageHeight) || 0),
           mastered_furi: [],
           offset: { dx: 0, dy: 0, scale: 1 }
         };
@@ -8960,6 +8962,132 @@
   // 算下划线抛异常时,整页 overlay 的返回对象都构造不出来 → 这一页公式/下划线/句子全没
   // (用户 2026-09-08:「连续翻页后 app 的下划线等全部消失」)。这里兜住,但**出声**:
   // 静默返回空正是"全没了却查不出为什么"的成因(references/silent-failure-lessons.md 规则一)。
+  // ── 生词句（整句预翻译的框）本地版（2026-09-26）────────────────────────────
+  // 以前这里恒返回 []，而服务端增强对本机书又被拒（BW_PI_GATEWAY_REMOTE_BOOK）——
+  // 于是本机书上**一个句子框都没有**，用户说的「旧版生词多的句子会预翻译并高亮」整个消失。
+  // 规则逐条对应服务端 _build_unmastered_sentences：句中下划线词（未掌握）≥3 且总词数 ≥10；
+  // 断句 = 句末标点 / 「.」后非延续 / 换块 / 段距 >1.5 行高 / 新行是列表项 / 上一行是本块短行 / 列表符；
+  // 排除竖排、页眉页脚、大字号标题、整句加粗、文本 <12 字。计数集 = 下划线集（按标记的字符范围数）。
+  function localVocabSentences(chars, marks, pageHeight) {
+    if (!Array.isArray(chars) || !chars.length) return [];
+    var n = chars.length;
+    var markAt = {};
+    (Array.isArray(marks) ? marks : []).forEach(function (m) {
+      if (!m || m.label_slug === 'mastered' || typeof m._lo !== 'number') return;
+      markAt[m._lo] = String(m.lemma || m.word || m._lo);
+    });
+    var num = function (v) { v = Number(v); return Number.isFinite(v) ? v : 0; };
+    var hs = [], edgeByBk = {}, leftByBk = {}, rightEdge = 0, leftEdge = Infinity;
+    chars.forEach(function (c) {
+      if (!c || c.sp || !(num(c.x1) > num(c.x0))) return;
+      hs.push(num(c.y1) - num(c.y0));
+      rightEdge = Math.max(rightEdge, num(c.x1)); leftEdge = Math.min(leftEdge, num(c.x0));
+      if (c.bk == null) return;
+      if (!(c.bk in edgeByBk) || num(c.x1) > edgeByBk[c.bk]) edgeByBk[c.bk] = num(c.x1);
+      if (!(c.bk in leftByBk) || num(c.x0) < leftByBk[c.bk]) leftByBk[c.bk] = num(c.x0);
+    });
+    hs.sort(function (a, b) { return a - b; });
+    var medianH = hs.length ? hs[Math.floor(hs.length / 2)] : 0;
+    var textWidth = Math.max(1, rightEdge - (Number.isFinite(leftEdge) ? leftEdge : 0));
+    var lineIsShort = function (prev) {
+      var edge = prev.bk in edgeByBk ? edgeByBk[prev.bk] : rightEdge;
+      var width = Math.max(1, edge - (prev.bk in leftByBk ? leftByBk[prev.bk] : rightEdge - textWidth));
+      return (edge - num(prev.x1)) > width * 0.30;
+    };
+    var listHead = /^\s*(\d{1,3}([.)]|\.\d)|[A-Za-z][.)]|[ivxIVX]{1,4}[.)])/;
+    var isListHead = function (idx) {
+      var t = '';
+      for (var j = idx; j < Math.min(idx + 12, n); j += 1) t += String((chars[j] && chars[j].c) || '');
+      return listHead.test(t);
+    };
+    var out = [], start = -1;
+    var flush = function (end) {
+      if (start < 0 || end < start) { start = -1; return; }
+      var lemmas = {}, words = {}, nsp = [], text = '';
+      for (var k = start; k <= end; k += 1) {
+        var c = chars[k];
+        if (!c) continue;
+        text += String(c.c || '');
+        if (markAt[k] != null) lemmas[markAt[k]] = true;
+        if (c.sp) continue;
+        nsp.push(c);
+        var ch = String(c.c || '');
+        if (c.w != null && c.w >= 0 && /[A-Za-z぀-ヿ㐀-鿿]/.test(ch)) words[c.w] = (words[c.w] || '') + ch;
+      }
+      start = -1;
+      var count = Object.keys(lemmas).length;
+      var total = Object.keys(words).filter(function (w) {
+        var s = words[w]; return /[぀-ヿ㐀-鿿]/.test(s) || s.length >= 2;
+      }).length;
+      text = text.replace(/\s+/g, ' ').trim().slice(0, 500);
+      if (count < 3 || total < 10 || text.length < 12 || !nsp.length) return;
+      var bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity, sumH = 0, bold = 0;
+      nsp.forEach(function (c) {
+        bx0 = Math.min(bx0, num(c.x0)); by0 = Math.min(by0, num(c.y0));
+        bx1 = Math.max(bx1, num(c.x1)); by1 = Math.max(by1, num(c.y1));
+        sumH += num(c.y1) - num(c.y0); if (c.b) bold += 1;
+      });
+      if (by1 - by0 > (bx1 - bx0) * 1.6) return;                                   // 竖排
+      if (pageHeight && (by0 > pageHeight * 0.90 || by1 < pageHeight * 0.06)) return; // 页眉页脚
+      if (medianH && sumH / nsp.length > medianH * 1.4) return;                      // 大字号标题
+      if (bold / nsp.length > 0.9) return;                                           // 整句加粗
+      var rects = [], cur = null;
+      nsp.forEach(function (c) {
+        var x0 = num(c.x0), y0 = num(c.y0), x1 = num(c.x1), y1 = num(c.y1);
+        if (cur && Math.abs(y0 - cur[1]) <= (y1 - y0) * 0.5) {
+          cur[2] = Math.max(cur[2], x1); cur[1] = Math.min(cur[1], y0); cur[3] = Math.max(cur[3], y1);
+        } else { if (cur) rects.push(cur); cur = [x0, y0, x1, y1]; }
+      });
+      if (cur) rects.push(cur);
+      var box = function (c) { return [num(c.x0), num(c.y0), num(c.x1), num(c.y1)].map(function (v) { return Math.round(v * 100) / 100; }); };
+      out.push({
+        text: text, rects: rects.map(function (r) { return r.map(function (v) { return Math.round(v * 100) / 100; }); }),
+        lemmas: Object.keys(lemmas).sort(), count: count, total_words: total,
+        first_char: box(nsp[0]), last_char: box(nsp[nsp.length - 1]), local: true
+      });
+    };
+    var prevNs = null, pendingPeriod = false;
+    for (var i = 0; i < n; i += 1) {
+      var ch = chars[i];
+      if (!ch) continue;
+      var c = String(ch.c || '');
+      if (pendingPeriod) {
+        var prev = chars[i - 1];
+        var sameLine = prev && !prev.sp && Math.abs(num(ch.y0) - num(prev.y0)) < Math.max(1, (num(prev.y1) - num(prev.y0)) * 0.5);
+        var continuation = sameLine && !ch.sp && c.length === 1 && (/[0-9]/.test(c) || /[a-z]/.test(c));
+        if (!continuation) flush(i - 1);
+        pendingPeriod = false;
+      }
+      if (i > 0 && chars[i - 1] && chars[i - 1].bk != null && ch.bk != null && chars[i - 1].bk !== ch.bk) flush(i - 1);
+      if (prevNs && !ch.sp) {
+        var ph = Math.max(0.1, num(prevNs.y1) - num(prevNs.y0));
+        var gap = num(ch.y0) - num(prevNs.y0);
+        if (gap > ph * 1.5) flush(i - 1);
+        else if (Math.abs(gap) > ph * 0.5 && (isListHead(i) || lineIsShort(prevNs))) flush(i - 1);
+      }
+      if ('•▪▶◆●○◇'.indexOf(c) >= 0 && c) { flush(i - 1); start = i; prevNs = ch; continue; }
+      if (start < 0 && !ch.sp) start = i;
+      if (ch.sp) continue;
+      prevNs = ch;
+      if ('!?。！？'.indexOf(c) >= 0 && c) { flush(i); continue; }
+      if (c === '.') pendingPeriod = true;
+    }
+    flush(n - 1);
+    return out.slice(0, 200);
+  }
+
+  function safeLocalVocabSentences(chars, marks, pageHeight) {
+    try {
+      return localVocabSentences(chars, marks, pageHeight);
+    } catch (error) {
+      try {
+        (root.dlog || function () {})('localVocabSentences 失败,本页句子框为空: '
+          + String((error && (error.stack || error.message)) || error).slice(0, 400));
+      } catch (_) {}
+      return [];
+    }
+  }
+
   function safeLocalVocabMarks(chars) {
     try {
       return localVocabMarks(chars);

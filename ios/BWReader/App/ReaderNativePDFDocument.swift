@@ -134,8 +134,23 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         let page: Int
         let text: String
         let rects: [CGRect]
+        /// 句首 / 句末字符框（归一化）：原版 L 按钮 ——「⌐」包首字、「⌟」包末字。
+        var firstChar: CGRect? = nil
+        var lastChar: CGRect? = nil
+        /// 已有译文（服务端缓存命中时随数据来）：点角标直接就地铺上。
+        var zh: String = ""
     }
     @Published private(set) var vocabSentences: [Int: [VocabSentence]] = [:] { didSet { refreshDecorations() } }
+
+    /// 就地译文（原版设计：逐行白条贴合原文行，中文按各行宽度比例分配）。
+    /// 键 = 句子 id；pending = 正在翻。关掉就从表里删掉。
+    enum SentenceTranslation: Equatable { case pending, text(String), failed(String) }
+    @Published private(set) var sentenceTranslations: [String: SentenceTranslation] = [:] { didSet { refreshDecorations() } }
+    func setSentenceTranslation(_ value: SentenceTranslation?, id: String) {
+        guard sentenceTranslations[id] != value else { return }
+        sentenceTranslations[id] = value
+    }
+    var onSentenceLongPress: ((VocabSentence) -> Void)?
 
     /// 整页正文（按阅读顺序）。
     ///
@@ -1008,15 +1023,44 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
     }
 
-    /// 行首「译」与图徽标 —— 真控件，长在页面 overlay 里。
+    /// 句首「⌐」/ 句末「⌟」角标、就地译文条、图徽标 —— 真控件，长在页面 overlay 里。
+    /// ⚠ 2026-09-26 用户：原来句首一个「译」字按钮，挡住前面的内容又不好点；
+    ///   原版是句首、句尾各一段 L 形点击区，点了译文**就地**盖在原句上（不开新窗口）。
     fileprivate func decorationButtons(page number: Int) -> [ReaderNativePageButton] {
         var buttons: [ReaderNativePageButton] = []
         for sentence in vocabSentences[number] ?? [] {
-            guard let first = sentence.rects.first else { continue }
-            buttons.append(ReaderNativePageButton(
-                id: "tr-" + sentence.id, kind: .translate, anchor: first, badge: nil,
-                tint: UIColor(ReaderNativePDFDocument.sentenceStroke(sentence.index)),
-                label: "翻译整句") { [weak self] in self?.onTranslateSentence?(sentence) })
+            guard let first = sentence.rects.first, let lastLine = sentence.rects.last else { continue }
+            let tint = UIColor(ReaderNativePDFDocument.sentenceStroke(sentence.index))
+            let tap: () -> Void = { [weak self] in self?.onTranslateSentence?(sentence) }
+            let hold: () -> Void = { [weak self] in self?.onSentenceLongPress?(sentence) }
+            var start = ReaderNativePageButton(
+                id: "s0-" + sentence.id, kind: .sentenceStart,
+                anchor: sentence.firstChar.map { CGRect(x: $0.minX, y: first.minY, width: $0.width, height: first.height) } ?? first,
+                badge: nil, tint: tint, label: "翻译整句", action: tap)
+            start.longAction = hold
+            // 句末：末字所在那一行的高度（小标点「。」本身太矮，竖线短得像只剩横线）。
+            let endLine = sentence.lastChar.flatMap { char in sentence.rects.first { $0.minY <= char.midY && char.midY <= $0.maxY } } ?? lastLine
+            var end = ReaderNativePageButton(
+                id: "s1-" + sentence.id, kind: .sentenceEnd,
+                anchor: sentence.lastChar.map { CGRect(x: $0.minX, y: endLine.minY, width: $0.width, height: endLine.height) }
+                    ?? CGRect(x: lastLine.maxX - lastLine.height, y: lastLine.minY, width: lastLine.height, height: lastLine.height),
+                badge: nil, tint: tint, label: "翻译整句", action: tap)
+            end.longAction = hold
+            buttons.append(start); buttons.append(end)
+            guard let state = sentenceTranslations[sentence.id] else { continue }
+            let text: String
+            switch state {
+            case .pending: text = "翻译中…"
+            case .failed(let reason): text = "翻译失败：" + reason
+            case .text(let value): text = value
+            }
+            // 中文按各行宽度比例分到每一行（原版 toggleSentenceOverlay 的分配法）。
+            let chunks = ReaderNativePDFDocument.distribute(text, widths: sentence.rects.map(\.width))
+            for (index, line) in sentence.rects.enumerated() where index < chunks.count {
+                buttons.append(ReaderNativePageButton(
+                    id: "zh-\(sentence.id)-\(index)", kind: .translationLine(chunks[index]),
+                    anchor: line, badge: nil, tint: tint, label: chunks[index], action: tap))
+            }
         }
         for figure in figures[number] ?? [] {
             buttons.append(ReaderNativePageButton(
@@ -1026,6 +1070,20 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
                 label: figure.caption.isEmpty ? "图说明" : figure.caption) { [weak self] in self?.onOpenFigure?(figure) })
         }
         return buttons
+    }
+
+    /// 按宽度比例把译文切成 n 段（字符级；余数给最后一行，空行给空串）。
+    static func distribute(_ text: String, widths: [CGFloat]) -> [String] {
+        let characters = Array(text), total = widths.reduce(0, +)
+        guard !widths.isEmpty, total > 0 else { return [text] }
+        var result: [String] = [], cursor = 0, used: CGFloat = 0
+        for (index, width) in widths.enumerated() {
+            used += width
+            let end = index == widths.count - 1 ? characters.count
+                : min(characters.count, Int((CGFloat(characters.count) * used / total).rounded()))
+            result.append(String(characters[min(cursor, end)..<end])); cursor = max(cursor, end)
+        }
+        return result
     }
 
     func setSpread(_ enabled: Bool, firstPageAlone: Bool) {
@@ -1656,7 +1714,7 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         // 锁定框与页内按钮在**任何**页上都要接得住点击 —— 包括有文字层的 PDF 页。
         // ⚠ 原来这里第一句就是"没有自建选区就放行"，于是文字层 PDF 上的锁定框
         //   一律点不到（点击直接落到 PDFKit）。
-        if buttonViews.contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return true }
+        if buttonViews.contains(where: { !$0.isHidden && $0.hitFrame.contains(point) }) { return true }
         if cardMarkerAt(point) != nil { return true }
         guard characters != nil else { return false }
         if [leadingHandle, trailingHandle].contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return true }
@@ -1999,6 +2057,7 @@ struct ReaderNativePDFViewport: View {
     @ObservedObject var document: ReaderNativePDFDocument
     /// 点行首的「译」：把整句交给原生翻译面板。
     var onTranslateSentence: ((ReaderNativePDFDocument.VocabSentence) -> Void)?
+    var onSentenceLongPress: ((ReaderNativePDFDocument.VocabSentence) -> Void)?
     /// 点图徽标 → 打开原生描述面板（描述文本是服务端早就生成好的，不在这里烧额度）。
     var onOpenFigure: ((ReaderNativePDFDocument.Figure) -> Void)?
     var body: some View {
@@ -2009,6 +2068,7 @@ struct ReaderNativePDFViewport: View {
         ReaderNativePDFSurface(document: document)
             .onAppear {
                 document.onTranslateSentence = onTranslateSentence
+                document.onSentenceLongPress = onSentenceLongPress
                 document.onOpenFigure = onOpenFigure
             }
             .clipped()
@@ -2124,7 +2184,7 @@ struct ReaderNativeMarkerStyle {
 
 /// 页内按钮的规格（行首「译」/ 图徽标）。位置用归一化锚点，由 overlay 按当前缩放摆。
 struct ReaderNativePageButton {
-    enum Kind { case translate, figure }
+    enum Kind { case translate, figure, sentenceStart, sentenceEnd, translationLine(String) }
     let id: String
     let kind: Kind
     let anchor: CGRect          // 归一化：译 = 句子首行框；图 = 图框
@@ -2132,6 +2192,7 @@ struct ReaderNativePageButton {
     let tint: UIColor
     let label: String
     let action: () -> Void
+    var longAction: (() -> Void)? = nil
     var signature: String { id + "|" + label + "|" + tint.description }
 }
 
@@ -2148,6 +2209,24 @@ private final class ReaderNativePageButtonView: UIButton {
             setTitleColor(spec.tint, for: .normal)
             backgroundColor = UIColor.systemBackground.withAlphaComponent(0.72)
             layer.cornerRadius = 4
+        case .sentenceStart, .sentenceEnd:
+            backgroundColor = .clear
+            corner.fillColor = nil
+            corner.strokeColor = spec.tint.withAlphaComponent(0.85).cgColor
+            corner.lineWidth = 2.5
+            corner.lineCap = .round
+            layer.addSublayer(corner)
+        case .translationLine(let text):
+            // 白条盖住原文行（原版：逐行白条贴合原文行）。点它 = 收起译文。
+            backgroundColor = UIColor.systemBackground.withAlphaComponent(0.97)
+            layer.cornerRadius = 2
+            line.text = text
+            line.textColor = .label
+            line.adjustsFontSizeToFitWidth = true
+            line.minimumScaleFactor = 0.35
+            line.lineBreakMode = .byClipping
+            line.isUserInteractionEnabled = false
+            addSubview(line)
         case .figure:
             setImage(UIImage(systemName: "photo",
                              withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)),
@@ -2156,8 +2235,32 @@ private final class ReaderNativePageButtonView: UIButton {
             backgroundColor = spec.tint
         }
         addAction(UIAction { [weak self] _ in self?.spec.action() }, for: .touchUpInside)
+        if spec.longAction != nil {
+            let press = UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:)))
+            press.minimumPressDuration = 0.45
+            addGestureRecognizer(press)
+        }
     }
     required init?(coder: NSCoder) { return nil }
+    private let corner = CAShapeLayer()
+    private let line = UILabel()
+    @objc private func longPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        spec.longAction?()
+    }
+    /// 角标只画一段细线，手指却要点得中：可点范围向外扩 10pt。
+    var hitFrame: CGRect {
+        switch spec.kind {
+        case .sentenceStart, .sentenceEnd: return frame.insetBy(dx: -10, dy: -10)
+        default: return frame
+        }
+    }
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        switch spec.kind {
+        case .sentenceStart, .sentenceEnd: return bounds.insetBy(dx: -10, dy: -10).contains(point)
+        default: return super.point(inside: point, with: event)
+        }
+    }
 
     /// 译：贴在句子首行左侧外沿，边长随行高（14~26）；图：服务端锚点优先，缺了退图框右上角内缩，夹进页面内。
     func place(anchor: CGRect, page: CGRect, badge: CGPoint?) {
@@ -2167,6 +2270,29 @@ private final class ReaderNativePageButtonView: UIButton {
             let side = min(26, max(14, anchor.height))
             titleLabel?.font = .systemFont(ofSize: side * 0.6, weight: .semibold)
             frame = CGRect(x: anchor.minX - side * 1.1, y: anchor.midY - side / 2, width: side, height: side)
+        case .sentenceStart, .sentenceEnd:
+            // 原版 L 角标：臂长 ≈ 1.6 个行高（至少盖住首/末字），线落在字外侧 3pt 空隙里，不压字形。
+            guard anchor.height > 4 else { isHidden = true; return }
+            let gap: CGFloat = 3, arm = max(anchor.width, anchor.height * 1.6)
+            let start: Bool
+            if case .sentenceStart = spec.kind { start = true } else { start = false }
+            frame = start
+                ? CGRect(x: anchor.minX - gap, y: anchor.minY - gap, width: arm + gap, height: anchor.height + gap)
+                : CGRect(x: anchor.maxX - arm, y: anchor.minY, width: arm + gap, height: anchor.height + gap)
+            let path = UIBezierPath()
+            let w = frame.width, h = frame.height, inset: CGFloat = 1.25
+            if start {
+                path.move(to: CGPoint(x: inset, y: h)); path.addLine(to: CGPoint(x: inset, y: inset)); path.addLine(to: CGPoint(x: w, y: inset))
+            } else {
+                path.move(to: CGPoint(x: w - inset, y: 0)); path.addLine(to: CGPoint(x: w - inset, y: h - inset)); path.addLine(to: CGPoint(x: 0, y: h - inset))
+            }
+            corner.frame = bounds
+            corner.path = path.cgPath
+        case .translationLine:
+            guard anchor.height > 4 else { isHidden = true; return }
+            frame = anchor.insetBy(dx: -2, dy: -1)
+            line.font = .systemFont(ofSize: max(8, anchor.height * 0.72))
+            line.frame = bounds.insetBy(dx: 2, dy: 0)
         case .figure:
             let side: CGFloat = 26, half = side / 2
             let center = badge.map { CGPoint(x: page.minX + $0.x * page.width, y: page.minY + $0.y * page.height) }

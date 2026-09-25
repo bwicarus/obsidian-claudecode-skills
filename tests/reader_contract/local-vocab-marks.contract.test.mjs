@@ -49,7 +49,10 @@ test("vocabulary-state 多了 lookup 属性，词框查到即记（词组只认�
 test("本地 page-overlay 按本地字符层 + 本地状态算下划线，已掌握不画", () => {
   const overlay = bodyOf(RUNTIME, "localPageOverlay");
   // 2026-09-08 起经 safeLocalVocabMarks:算下划线抛异常不该让整页 overlay 一起没(但要出声)
-  assert.match(overlay, /vocab_marks: safeLocalVocabMarks\(result && result\.chars\)/);
+  assert.match(overlay, /var localMarks = safeLocalVocabMarks\(result && result\.chars\);/);
+  assert.match(overlay, /vocab_marks: localMarks,/);
+  // 生词句（整句预翻译的框）也在本地算，计数集 = 同一份下划线（2026-09-26）
+  assert.match(overlay, /vocab_sentences: safeLocalVocabSentences\(result && result\.chars, localMarks,/);
   assert.match(bodyOf(RUNTIME, 'safeLocalVocabMarks'), /return localVocabMarks\(chars\);/);
   const marks = bodyOf(RUNTIME, "localVocabMarks");
   // 没有 vocabulary-state 时必须仍是 []（首开不出网、不制造假标记）
@@ -168,4 +171,36 @@ test("overlay 结果先落缓存再判页面在不在；回到同页不再出网
   // 掌握/收藏后的新结果必须覆盖同一条缓存，否则页面重建会拿回旧下划线
   assert.match(CHARLAYER, /_ovCacheSet\(page, d\);\s*\/\/ 掌握\/收藏后的新结果覆盖缓存/);
   assert.ok(read("_server_deploy/static/pdf/reader.js").includes("_ovCacheSet"), "reader.js 需重新拼合");
+});
+
+
+// 用户 2026-09-26：「旧版生词多的句子会预翻译并高亮」—— 本机书上一个框都没有
+// （本地恒返回 []、服务端增强对本机书被拒）。本地版规则逐条对应服务端 _build_unmastered_sentences。
+test("本地生词句：下划线词 ≥3 且总词数 ≥10 才框，断句与页脚排除同服务端", () => {
+  const sentences = new Function(bodyOf(RUNTIME, "localVocabSentences") + "; return localVocabSentences;")();
+  const chars = [], marks = [];
+  let x = 10;
+  const put = (text, { y = 100, w, bk = 0, sp = false } = {}) => {
+    for (const c of text) { chars.push({ c, x0: x, y0: y, x1: x + 6, y1: y + 10, w: sp ? -1 : w, bk, sp }); x += 6; }
+  };
+  const sentence = (words, marked, { y = 100, end = "." } = {}) => {
+    words.forEach((word, i) => {
+      const lo = chars.length;
+      put(word, { y, w: chars.length + 1000 });
+      if (marked.includes(i)) marks.push({ lemma: word, label_slug: "new", _lo: lo, _hi: chars.length - 1 });
+      put(i === words.length - 1 ? end : " ", { y, sp: i !== words.length - 1 });
+    });
+    put(" ", { y, sp: true });
+  };
+  const twelve = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima".split(" ");
+  sentence(twelve, [0, 3, 7]);                                      // 3 个生词 → 框
+  sentence(twelve.map((w) => w + "s"), [1, 2]);                     // 只有 2 个 → 不框
+  x = 10; sentence(twelve.map((w) => w + "x"), [0, 1, 2], { y: 980 }); // 页脚（>90% 页高）→ 不框
+  const got = sentences(chars, marks, 1000);
+  assert.equal(got.length, 1);
+  assert.equal(got[0].count, 3);
+  assert.ok(got[0].total_words >= 10);
+  assert.match(got[0].text, /^alpha bravo .* lima\.$/);
+  assert.deepEqual(got[0].first_char.slice(0, 2), [10, 100]);
+  assert.ok(got[0].rects.length >= 1 && got[0].last_char);
 });
