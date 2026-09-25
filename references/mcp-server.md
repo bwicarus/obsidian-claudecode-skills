@@ -80,6 +80,15 @@ stdio 模式由客户端按需拉起进程,不需要常驻服务。
 `/.well-known` 暴露给 tailnet。公网 `https://bwicarus.space` 的 VPS nginx 只把这些 MCP/OAuth
 路径经 tailnet 反代到 Windows，其它公网路由不因此开放。树莓派的旧 8766 不再是生产上游。
 
+**本机接入（2026-09-25，Mac 服务器；用户：「AI 主要运行在这个电脑上，本机提供接口就行」）**：
+本机 AI 一律走 **stdio**，由客户端按需拉起 `~/BW/runtime/current/_server_deploy/mcp_server.py`，不经网络、不要令牌；
+环境只需 `LOCALAPPDATA=~/BW/data`（`user_situation` 靠它找 BWReader 根）。
+- Claude Code：`claude mcp add --scope user bwicarus-app --env LOCALAPPDATA=… -- ~/BW/venv/server/bin/python …/mcp_server.py`（全部工具，调用时照常征求许可）。
+- Codex：`~/.codex/config.toml` 的 `[mcp_servers.bwicarus_app]`，`enabled_tools` 只放**只读**查询工具、`approve` 免确认
+  （这份配置语音助手也在用；画线/记词/制卡/记训练等写操作不在这里开）。原配置备份 `config.toml.before-bwicarus-app-20260925`。
+- Codex 的 HTTP MCP 只能从环境变量读 Bearer，而它从桌面 App / 终端 / launchd 语音核心多处启动 —— 所以不用 HTTP。
+- 公网 `bwicarus.space/mcp`（claude.ai 连接器）目前 502：VPS nginx 上游仍指停掉的 Windows。用户说本机够用，暂不修。
+
 **HTTP 模式强制 Bearer 门禁**:所有请求须带 `Authorization: Bearer <token>`,认**两类** token(无 token → 401;静态 token 文件缺失服务拒绝启动):
 - 静态 token `~/.config/mcp-http-token`(Claude Code / 脚本客户端,`--header` 直填);
 - **OAuth access token**(官方 app 走 OAuth 流程签发,见下节)。
