@@ -119,6 +119,20 @@ cd ~/BW/src/claude
   一个长事务闭包挪成方法、书库界面长修饰链拆成三段。**写新代码时避免**：
   多分支类型不同的嵌套三元、超长 SwiftUI 修饰链、多段字符串 `+` 夹插值。
 - 已打开 Xcode 偏好「遇到错误继续编译」（`IDEBuildingContinueBuildingAfterErrors`）。
+- **命令行装真机**（2026-09-25 跑通，要在 Mac 桌面会话里；iPad `bwpad` UDID `00008132-000405AE36F0801C`，
+  4 个描述文件都已含它，不需要 `-allowProvisioningUpdates`）：
+
+  ```bash
+  cd ~/BW/src/claude/ios/BWReader
+  xcodebuild -project BWReader.xcodeproj -scheme BWReader -configuration Debug \
+    -destination 'id=00008132-000405AE36F0801C' -derivedDataPath ~/BW/xcode-derived/device build
+  xcrun devicectl device install app --device 00008132-000405AE36F0801C \
+    ~/BW/xcode-derived/device/Build/Products/Debug-iphoneos/bwicarus-test.app
+  xcrun devicectl device process launch --device 00008132-000405AE36F0801C space.bwicarus.bwreader2
+  ```
+
+  产物名是 `bwicarus-test.app`（不是 BWReader.app）。与 TestFlight 版同 bundle id，覆盖安装保留数据；
+  要断点调试就在 Xcode 里选 bwpad 按 Run。
 
 ## 7. Windows 侧现状（已退役）
 

@@ -1,5 +1,16 @@
 # Obsidian 笔记管理项目
 
+## Mac mini 接续入口（2026-09-25）
+
+新 Codex 会话先读 [Mac 服务器与开发环境](references/mac-server.md)、
+[Codex 交接与当前问题](references/codex-macmini-handoff-20260925.md)，再按下面的 Reader 入口定位。
+当前开发及服务器环境已迁至 Mac mini，仓库位于 `~/BW/src/claude`；
+实际目录、服务管理和部署入口以最新 Mac 说明为准。
+下文遗留的“Pi 是唯一部署机”“Windows 是主开发机”和旧跨机路径约束属于历史环境，
+不得据此在旧机器部署或覆盖 Mac 工作树；其他数据安全、功能身份及协作约束继续适用。
+当前 Mac 分支已包含 Codex 原生迁移提交 `5088d73a`，不要重复迁移这批代码。
+用户报告的实机问题仍需逐项验收；编译、出包或服务器运行成功不代表这些问题已修复。
+
 ## Reader / PWA / 浏览器扩展：Codex 快速入口
 
 Reader 主线先读 [Codex Reader Context](references/codex-reader-context.md)，再读
