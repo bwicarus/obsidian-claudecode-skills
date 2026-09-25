@@ -118,9 +118,11 @@ def http(method: str, path: str, body: dict | None = None, timeout: float = 150)
         return {"ok": False, "msg": f"语音核心不可达（{e}）。它由 ReaderPC 托管，几秒后再试；或在 ReaderPC 界面点「启动语音核心」。"}
 
 
-KJ_CLI = pathlib.Path(r"C:\tmp\reader-card-anchor-release\scripts\kj\cli.py")
-KJ_PROJECT = r"C:\tmp\reader-card-anchor-release"
-KJ_PYTHON = r"C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe"
+# 知识节点 CLI 所在的项目与解释器。环境变量优先（Mac 服务器由 launchd 设好 CLAUDE_PROJECT / APP_PYTHON）；
+# 没设时退回 Windows 上一直用的那两处，Windows 行为不变。
+KJ_PROJECT = os.environ.get("CLAUDE_PROJECT") or r"C:\tmp\reader-card-anchor-release"
+KJ_CLI = pathlib.Path(KJ_PROJECT) / "scripts" / "kj" / "cli.py"
+KJ_PYTHON = os.environ.get("APP_PYTHON") or r"C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe"
 
 
 def _kj_cli(argv: list) -> dict:

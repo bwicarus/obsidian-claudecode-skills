@@ -1557,7 +1557,9 @@ class Runner:
 
     async def _ensure_app_locked(self):
         if self.app is None:
-            exe = self.settings.get("codexExe") or "codex.exe"
+            # 空 = PATH 里的 codex（Windows 上是 codex.exe；Mac 由 launchd 的 PATH 或 APP_CODEX 指到）
+            exe = (self.settings.get("codexExe") or os.environ.get("APP_CODEX")
+                   or ("codex.exe" if sys.platform == "win32" else "codex"))
             self.app = AppServer(exe, list(self.settings.get("mcpDisable") or []), self.on_notification,
                                  bool(self.settings.get("disableOfficialPlugins")))
             await self.app.launch()
