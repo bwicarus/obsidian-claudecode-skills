@@ -87,7 +87,10 @@ stdio 模式由客户端按需拉起进程,不需要常驻服务。
 - Codex：`~/.codex/config.toml` 的 `[mcp_servers.bwicarus_app]`，`enabled_tools` 只放**只读**查询工具、`approve` 免确认
   （这份配置语音助手也在用；画线/记词/制卡/记训练等写操作不在这里开）。原配置备份 `config.toml.before-bwicarus-app-20260925`。
 - Codex 的 HTTP MCP 只能从环境变量读 Bearer，而它从桌面 App / 终端 / launchd 语音核心多处启动 —— 所以不用 HTTP。
-- 公网 `bwicarus.space/mcp`（claude.ai 连接器）目前 502：VPS nginx 上游仍指停掉的 Windows。用户说本机够用，暂不修。
+- 公网 `bwicarus.space/mcp`（claude.ai 连接器）：VPS nginx 第 119–125 行 7 条 MCP/OAuth 反代，上游 2026-09-25 从
+  Windows `100.99.9.124` 改为 Mac `100.66.124.26`（SNI 仍是 `bwicarus-2.taile44d0c.ts.net`），只这 7 条，其它路由不公开。
+  线上配置 = 仓库 `_server_deploy/nginx/bwicarus.conf`（已核对一致）；Mac 的 `~/.ssh/id_ed25519` 已授权 root@VPS。
+  ⚠ 换服务器机器时这 7 行要跟着改 —— nginx 写的是 IP，Tailscale 改名不会让它跟过去。
 
 **HTTP 模式强制 Bearer 门禁**:所有请求须带 `Authorization: Bearer <token>`,认**两类** token(无 token → 401;静态 token 文件缺失服务拒绝启动):
 - 静态 token `~/.config/mcp-http-token`(Claude Code / 脚本客户端,`--header` 直填);
@@ -98,7 +101,7 @@ stdio 模式由客户端按需拉起进程,不需要常驻服务。
 **接入方式**:
 - tailnet 内：`https://bwicarus-2.taile44d0c.ts.net/mcp` + Authorization header。
 - 公网官方插件：`https://bwicarus.space/mcp`，标准 443；VPS 只做 TLS/反代，Reader 数据和 MCP
-  执行均留在 Windows。不要把 Windows 的 443 从 Serve 改成 Funnel：同端口改为 Funnel 会使该
+  执行均留在服务器（现为 Mac）。不要把服务器的 443 从 Serve 改成 Funnel：同端口改为 Funnel 会使该
   端口上的其它 Reader 路径也公开。
 
 ## OAuth 2.1 层(mcp_oauth.py,2026-07-13)——接 claude.ai / ChatGPT 官方连接器
