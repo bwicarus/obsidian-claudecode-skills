@@ -370,6 +370,10 @@ internal sealed class CodexCliReaderDictionaryFallback
 
     private static string? FindCodexExecutable()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return BwHostPaths.CodexOnUnix();
+        }
         string appData = Environment.GetFolderPath(
             Environment.SpecialFolder.ApplicationData);
         string packageRoot = Path.Combine(

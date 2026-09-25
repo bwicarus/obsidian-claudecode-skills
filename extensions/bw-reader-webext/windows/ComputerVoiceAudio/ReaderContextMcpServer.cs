@@ -7610,9 +7610,7 @@ internal sealed class ReaderContextMcpServer
         "BWReader",
         "camera_capture.py");
 
-    private static string CameraPythonPath() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        "AppData", "Local", "Programs", "Python", "Python313", "python.exe");
+    private static string CameraPythonPath() => BwHostPaths.Python();
 
     private async Task HandleCameraToolCallAsync(
         JsonNode id,

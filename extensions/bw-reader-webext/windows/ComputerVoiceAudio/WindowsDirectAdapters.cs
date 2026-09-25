@@ -634,15 +634,7 @@ internal sealed class WindowsDirectTypistLeaseController
         );
     }
 
-    private static string PythonExecutable() => System.IO.Path.Combine(
-        Environment.GetFolderPath(
-            Environment.SpecialFolder.UserProfile),
-        "AppData",
-        "Local",
-        "Programs",
-        "Python",
-        "Python313",
-        "python.exe");
+    private static string PythonExecutable() => BwHostPaths.Python();
 }
 
 internal interface IDirectCaptureEndpointMuteBackend

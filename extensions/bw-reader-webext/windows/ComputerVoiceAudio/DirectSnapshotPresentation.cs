@@ -774,6 +774,10 @@ internal static class DirectSnapshotTerminal
 
     private static string? FindCodexExecutable()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return BwHostPaths.CodexOnUnix();
+        }
         string appData = Environment.GetFolderPath(
             Environment.SpecialFolder.ApplicationData);
         string packageRoot = System.IO.Path.Combine(
@@ -3525,9 +3529,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
     private static string CameraCliPath() => System.IO.Path.Combine(
         BwReaderRoot(), "camera_capture.py");
 
-    private static string CameraPythonPath() => System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        "AppData", "Local", "Programs", "Python", "Python313", "python.exe");
+    private static string CameraPythonPath() => BwHostPaths.Python();
 
     /// <summary>跑一次 camera_capture.py，把它那行 JSON 原样带回。</summary>
     private static async Task<(int Code, string Output)> RunCameraCliAsync(
@@ -4248,6 +4250,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
 
     private static string? FindEdgeExecutable()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return BwHostPaths.BrowserOnUnix();
+        }
         string[] candidates =
         [
             System.IO.Path.Combine(

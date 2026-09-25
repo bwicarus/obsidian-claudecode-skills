@@ -99,6 +99,7 @@ WINDOWS_SOURCE_FILES = (
     "test_computer_voice_native_host.py",
     "ComputerVoiceAudio/.gitignore",
     "ComputerVoiceAudio/AudioBridgeContract.cs",
+    "ComputerVoiceAudio/BwHostPaths.cs",
     "ComputerVoiceAudio/AudioSessionDuckingInterop.cs",
     "ComputerVoiceAudio/ChatGptClassicVoiceAutomation.cs",
     "ComputerVoiceAudio/CodexVoiceActivity.cs",

@@ -4867,10 +4867,7 @@ internal sealed class DirectBridgeProtocolSession
         TimeSpan.FromSeconds(20);
 
     /// 与 NativeMessagingHost 用同一个解释器路径。
-    internal static string PythonExecutable() => Path.Combine(
-        Environment.GetFolderPath(
-            Environment.SpecialFolder.LocalApplicationData),
-        "Programs", "Python", "Python313", "python.exe");
+    internal static string PythonExecutable() => BwHostPaths.Python();
 
     /// <summary>桥自己把语音开起来。</summary>
     /// <remarks>

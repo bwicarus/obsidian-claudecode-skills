@@ -462,15 +462,7 @@ internal sealed class NativeMessagingHost : IAsyncDisposable
         }
     }
 
-    private static string PythonExecutable() => Path.Combine(
-        Environment.GetFolderPath(
-            Environment.SpecialFolder.UserProfile),
-        "AppData",
-        "Local",
-        "Programs",
-        "Python",
-        "Python313",
-        "python.exe");
+    private static string PythonExecutable() => BwHostPaths.Python();
 
     private async Task WriteCapabilitiesAsync(
         CancellationToken cancellationToken)
