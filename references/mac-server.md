@@ -153,8 +153,10 @@ cd ~/BW/src/claude
 
 - 停掉的：ReaderPC 整棵进程树、桥、网页后端与三个边车、CLI 语音运行器、Obsidian 同步。
 - 禁用的计划任务：`BW ReaderPC Watchdog`、`KJ Anki Sync`、`Obsidian Headless Sync`。
-- ⚠ **没禁掉**：`BW Computer Voice Setup`（要管理员）。登录 Windows 时可能把旧服务拉起 ——
-  若 Windows 又起了语音运行器，定时提醒会在两台机器上各响一次。
+- 2026-09-26 复查：`BW ReaderPC Watchdog` 又是 Ready（会把 Windows 服务器拉起），已与 `BW Computer Voice Setup`
+  一起禁用（经 `ssh windows-pc` 的管理员会话即可，不必上桌面）。Windows 上 5000/8766/8767/8769/43128/43131/43132
+  均无监听；只剩用户开着的 Codex 桌面版及其只读 MCP 子进程。
+- Windows 现在的用途只剩：Mac 取旧文件的来源、`C:\tmp\mac-relay.git`（Mac 仓库的异地备份远端 `windows`）。
 - 回退：把 Mac 的 Tailscale 名改回、Windows 改回 `bwicarus-2` 并 `serve` 重配、启用上述任务。
   注意 Mac 上切换后产生的数据要先搬回去。
 
