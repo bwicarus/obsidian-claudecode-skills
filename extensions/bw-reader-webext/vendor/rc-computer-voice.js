@@ -7434,8 +7434,20 @@ if (window.__bwPwaProviderOnly) return;
     if (pump.pendingEvent) {
       work = sendPendingContextEvent(state, pump);
     } else if (pump.queue.length) {
-      pump.pendingEvent = pump.queue.shift();
-      work = sendPendingContextEvent(state, pump);
+      var queued = pump.queue.shift();
+      if (
+        queued.type === "page.context" &&
+        queued.page_context &&
+        queued.page_context.superseded === true
+      ) {
+        // 生产端已清掉正文：后面必有一条更新的 page.context，转发这条只会让桥
+        // 短暂拿到空正文。只推进本地游标（不是 ACK，桥也不要求序号连续）。
+        pump.cursor = queued.seq;
+        lastContextResumeCursor = queued.seq;
+      } else {
+        pump.pendingEvent = queued;
+        work = sendPendingContextEvent(state, pump);
+      }
     } else if (!pump.bootstrapDone && pump.bootstrapTail === null) {
       work = outgoingJournalFetch(state, pump, 0, 1, 0).then(function (journal) {
         if (!contextPumpAlive(state, pump)) return;
@@ -11086,15 +11098,22 @@ if (window.__bwPwaProviderOnly) return;
         var latest = localActiveReadingSnapshot();
         if (!latest || latest.file !== current.file ||
             !sameActiveScalar(latest.page, current.page)) return null;
-        var signature = JSON.stringify(payload);
+        var signature = stableSignature(payload);
         // 签名去重带过期(2026-09-02):桥重启后稳定页丢失,而正文没变就永远不重发,
         // 快照板一直"无文字层"直到翻页。同一份正文超过 60s 允许重发,桥失忆最多空一分钟。
         // ⚠ sentAt 未知(旧泵对象/别处只写了签名)时按"刚发过"处理,不重发 —— 否则每个
         //   轮询 tick 都重发同一份(契约"迟到卡片读取不能覆盖"实锤 2 次发布)。
+        var publishReason = "new";
         if (signature === pump.lastPageContextSignature) {
           var sentAt = pump.lastPageContextSentAt;
           if (!sentAt || Date.now() - sentAt < LOCAL_PAGE_CONTEXT_RESEND_MS) return null;
+          publishReason = "resend";
+        } else if (pump.lastPageContextSignature) {
+          var before = pump.lastPageContextSignature, at = 0;
+          while (at < before.length && at < signature.length && before[at] === signature[at]) at += 1;
+          publishReason = "changed@" + at + " " + JSON.stringify(signature.slice(Math.max(0, at - 20), at + 20));
         }
+        notePageContextPublish(pump, publishReason);
         return Promise.resolve(runtime.publishPageContext(payload)).then(function () {
           pump.lastPageContextSignature = signature;
           pump.lastPageContextSentAt = Date.now();
@@ -11217,7 +11236,7 @@ if (window.__bwPwaProviderOnly) return;
     observeReaderVisualPage(current);
     maybeRefreshLocalHighlightSource(state, pump, current);
     maybePublishLocalPageContext(state, pump, current);
-    var signature = JSON.stringify(current);
+    var signature = stableSignature(current);
     var now = Date.now();
     if (
       signature === pump.lastSignature &&
@@ -11230,7 +11249,7 @@ if (window.__bwPwaProviderOnly) return;
     Promise.resolve().then(function () {
       if (!activeReadingPumpAlive(state, pump)) return null;
       var latest = localActiveReadingSnapshot();
-      if (!latest || JSON.stringify(latest) !== signature) {
+      if (!latest || stableSignature(latest) !== signature) {
         return null;
       }
       var activeReading = Object.assign({}, current, {
@@ -11264,9 +11283,44 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
+  // 页上下文诊断：每次起泵、每次发布各记一笔原因（前 40 笔全记，之后每 200 笔记一笔）。
+  // 2026-09-25 实机：同一页每 1.5s 发一次、签名去重失效，把 device 库写到 18 GB ——
+  // 起泵与发布若不出声，下次再坏还是只能从磁盘写入量倒推。
+  // 去重签名必须与键序无关：原生层经 WebKit 回传的字典转成 JS 对象时键序随机，
+  // JSON.stringify 对同一份内容每次给出不同字符串 —— 「内容没变不重发」就永远判成变了
+  // （2026-09-25 实机：同页每 1.5s 发一次，device 库 18 GB 的起因）。
+  function stableSignature(value) {
+    if (Array.isArray(value)) return "[" + value.map(stableSignature).join(",") + "]";
+    if (value && typeof value === "object") {
+      return "{" + Object.keys(value).sort().map(function (key) {
+        return JSON.stringify(key) + ":" + stableSignature(value[key]);
+      }).join(",") + "}";
+    }
+    return JSON.stringify(value === undefined ? null : value);
+  }
+  var activeReadingPumpSerial = 0;
+  // 页上下文发布过频报警：同一泵 60s 内超过 5 次（正常同页 60s 才重发一次）只报一次。
+  // 2026-09-25 实机：签名去重失效、同页每 1.5s 发一次，写满 18 GB 才被发现 ——
+  // 正常路径不出声（契约测试按 dlog 条数断言），异常时必须出声。
+  function notePageContextPublish(pump, reason) {
+    var now = Date.now();
+    pump.publishTimes = (pump.publishTimes || []).filter(function (at) {
+      return now - at < 60 * 1000;
+    });
+    pump.publishTimes.push(now);
+    if (pump.publishTimes.length <= 5 || pump.publishRateWarned) return;
+    pump.publishRateWarned = true;
+    try {
+      if (window.dlog) window.dlog("页上下文发布过频: pump#" + pump.serial + " 60s 内 " +
+        pump.publishTimes.length + " 次，最近原因 " + reason);
+    } catch (_) {}
+  }
+
   function startActiveReadingPump(state) {
     stopActiveReadingPump(state);
+    activeReadingPumpSerial += 1;
     state.activeReadingPump = {
+      serial: activeReadingPumpSerial,
       stopped: false,
       timer: null,
       inFlight: false,
@@ -11662,7 +11716,7 @@ if (window.__bwPwaProviderOnly) return;
     }
     var current = localActiveReadingSnapshot();
     if (!current) return Promise.resolve(null);
-    var signature = JSON.stringify(current);
+    var signature = stableSignature(current);
     return state.channel.request("active-reading", {
       sessionId: state.sessionId,
       activeContract: ACTIVE_READING_CONTRACT,

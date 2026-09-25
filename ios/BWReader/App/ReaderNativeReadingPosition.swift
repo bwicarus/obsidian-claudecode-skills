@@ -49,6 +49,15 @@ enum ReaderNativeReadingPosition {
                     previous = seq
                 }
                 if let previous, next != previous + 1 { throw bad() }
+                // 旧 page.context 已被这一条取代：清正文、标 superseded（消费端见标记跳过）。
+                // 与 native-local-runtime.js 的 supersedePageContext 同一规则 —— 不清的话
+                // 200 份整页正文随每分钟重发整条重写，device 库曾因此涨到 18.4 GB。
+                events = events.map { row in
+                    guard row["type"] as? String == "page.context", var context = row["page_context"] as? [String:Any],
+                          context["superseded"] as? Bool != true else { return row }
+                    context["text"] = ""; context["superseded"] = true
+                    var compacted = row; compacted["page_context"] = context; return compacted
+                }
             }
             let stamp = Int64(Date().timeIntervalSince1970 * 1000)
             let eventID = String(UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased().prefix(16))
@@ -62,15 +71,12 @@ enum ReaderNativeReadingPosition {
             let payload:[String:Any] = ["contract":"reader-native-outgoing-journal/1","nextSeq":next+1,"events":Array(events.suffix(200))]
             let record:[String:Any] = ["schema":1,"collection":collection,"id":id,"rev":revision,"updatedAt":stamp,"updatedBy":deviceID,"deleted":false,
                 "value":["id":id,"deviceId":deviceID,"payload":payload,"updatedAt":stamp]]
-            let mutation = "native-page-context-" + eventID
-            let change:[String:Any] = ["mutationId":mutation,"operation":"put","collection":collection,"record":record]
-            func json(_ value:[String:Any]) throws -> String { String(decoding:try JSONSerialization.data(withJSONObject:value,options:.sortedKeys),as:UTF8.self) }
-            let encoded = try json(record)
+            let encoded = String(decoding:try JSONSerialization.data(withJSONObject:record,options:.sortedKeys),as:UTF8.self)
+            // 只写记录本身：device 库的 journal 没有读取方（同步只走 global/document），
+            // 这条的 mutationId 也从没人用 remembered 查回。以前两处各抄一份整条记录，
+            // 保留上限 1 万 / 2 万份 —— 18.4 GB 里绝大部分就是这些拷贝。
             _ = try store.commitWithinTransaction(record:.init(collection:collection,id:id,rev:revision,updatedAt:stamp,deleted:false,json:encoded),
-                mutationId:mutation,journalJSON:{ cursor in
-                    var result = change; result["cursor"] = cursor
-                    return try! json(result)
-                },expectedRev:old?.rev ?? 0,now:stamp)
+                mutationId:nil,journalJSON:nil,expectedRev:old?.rev ?? 0,now:stamp)
             return ["ok":true,"contract":"reader-outgoing-context/1","seq":next,"eventId":eventID]
         }
     }

@@ -3895,6 +3895,20 @@
       throw error;
     });
   }
+  // 新的 page.context 一进来，更早的 page.context 就只剩序号意义：
+  // 引导只从最新一条开始，追赶时消费端见 superseded 直接跳过、从不转发。
+  // ⚠ 不清的话每条都带整页正文（上限 22 万字），200 条挤在一条记录里、
+  //   每分钟重发还要整条重写 —— 2026-09-25 实测 device 库 18.4 GB、
+  //   iOS 报 1 GB/86 分钟磁盘写入超限，就是这里（之前在 IndexedDB 上已犯过一次）。
+  function supersedePageContext(event) {
+    if (event.type !== 'page.context' || !event.page_context ||
+        event.page_context.superseded === true) return event;
+    return Object.assign({}, event, {
+      page_context: Object.assign({}, event.page_context, {
+        text: '', superseded: true
+      })
+    });
+  }
   function journalWithEvent(journal, type, payload, eventId) {
     if (!OUTGOING_EVENT_TYPES.has(type)) {
       throw new RuntimeError(
@@ -3912,7 +3926,9 @@
       id: eventId || randomHex(8)
     }, clone(payload));
     validateOutgoingEvent(event);
-    var events = journal.events.concat([event]);
+    var retained = journal.events;
+    if (type === 'page.context') retained = retained.map(supersedePageContext);
+    var events = retained.concat([event]);
     if (events.length > OUTGOING_JOURNAL_KEEP) {
       events = events.slice(events.length - OUTGOING_JOURNAL_KEEP);
     }

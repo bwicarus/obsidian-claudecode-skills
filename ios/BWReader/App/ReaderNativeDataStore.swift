@@ -413,4 +413,71 @@ final class ReaderNativeDataStore {
         guard let pointer = sqlite3_column_text(statement, column) else { return nil }
         return String(cString: pointer)
     }
+
+    private func count(_ sql: String) throws -> Int64 {
+        var value: Int64 = -1
+        try query(sql) { value = sqlite3_column_int64($0, 0) }
+        return value
+    }
+
+    /// 把被拷贝撑大的库重建成只含活数据的新库：records/meta 全部保留，
+    /// journal 丢弃，mutations 只留最近少量小条目。返回旧→新字节数。
+    ///
+    /// 为什么不删库重建：device 库里除了发送队列还有偏好/视口/词组的本机状态，
+    /// 整库丢掉是一次数据丢失；这里只丢"没人读的历史拷贝"。
+    /// 为什么不 VACUUM：VACUUM 要把旧库整个读一遍（18 GB），这里只读活数据。
+    ///
+    /// ⚠ 只能在**还没有任何连接**打开 `path` 时调用（Host 在首次打开前调）。
+    /// ⚠ 替换靠 rename 原子完成；旧库 WAL 没合并干净就放弃 —— 残留的旧 WAL
+    ///   配上新库文件会被 SQLite 当成新库的日志重放，那是真正的损坏。
+    static func rebuildKeepingLiveData(path: String, keepMutations: Int64 = 100,
+                                       maxMutationBytes: Int64 = 65_536) throws -> (before: Int64, after: Int64) {
+        let files = FileManager.default
+        func size(_ p: String) -> Int64 { ((try? files.attributesOfItem(atPath: p))?[.size] as? NSNumber)?.int64Value ?? 0 }
+        func removeSidecars(_ p: String) { for suffix in ["-wal", "-shm"] { try? files.removeItem(atPath: p + suffix) } }
+        let before = size(path)
+        let staging = path + ".rebuild"
+        try? files.removeItem(atPath: staging); removeSidecars(staging)
+
+        // 先把旧库的 WAL 合并清空，替换时才不会有属于旧库的日志留在原地。
+        do {
+            let old = try ReaderNativeDataStore(path: path)
+            try old.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            old.close()
+        }
+        guard size(path + "-wal") == 0 else { throw StoreError.sql("重建放弃：旧库 WAL 未合并") }
+
+        do {
+            let fresh = try ReaderNativeDataStore(path: staging)
+            try fresh.execute("ATTACH DATABASE ? AS src", bind: [.text(path)])
+            try fresh.inTransaction {
+                try fresh.execute("INSERT INTO records (collection, id, rev, updatedAt, deleted, json) "
+                                  + "SELECT collection, id, rev, updatedAt, deleted, json FROM src.records")
+                try fresh.execute("INSERT INTO meta (key, json) SELECT key, json FROM src.meta")
+                try fresh.execute("INSERT INTO mutations (mutationId, rememberedAt, json) "
+                                  + "SELECT mutationId, rememberedAt, json FROM src.mutations WHERE rowid IN "
+                                  + "(SELECT rowid FROM src.mutations ORDER BY rememberedAt DESC LIMIT ?) "
+                                  + "AND length(CAST(json AS BLOB)) <= ?",
+                                  bind: [.int(keepMutations), .int(maxMutationBytes)])
+            }
+            let copied = try fresh.count("SELECT count(*) FROM records")
+            let source = try fresh.count("SELECT count(*) FROM src.records")
+            try fresh.execute("DETACH DATABASE src")
+            fresh.close()
+            guard copied == source else { throw StoreError.sql("重建放弃：记录数 \(copied)≠\(source)") }
+        } catch {
+            try? files.removeItem(atPath: staging); removeSidecars(staging)
+            throw error
+        }
+        guard size(staging + "-wal") == 0, size(path + "-wal") == 0 else {
+            try? files.removeItem(atPath: staging); removeSidecars(staging)
+            throw StoreError.sql("重建放弃：WAL 未合并")
+        }
+        removeSidecars(path); removeSidecars(staging)
+        guard rename(staging, path) == 0 else {
+            try? files.removeItem(atPath: staging)
+            throw StoreError.sql("重建放弃：替换失败 errno=\(errno)")
+        }
+        return (before, size(path))
+    }
 }

@@ -235,10 +235,32 @@ final class ReaderNativeDataStoreHost {
     func bridge(for name: String) throws -> ReaderNativeDataStoreBridge {
         guard Self.allowedStores.contains(name) else { throw HostError.unknownStore(name) }
         if let existing = stores[name] { return ReaderNativeDataStoreBridge(store: existing) }
-        let store = try ReaderNativeDataStore(
-            path: root.appendingPathComponent(name + ".sqlite").path)
+        let path = root.appendingPathComponent(name + ".sqlite").path
+        if name == "bw-reader-native-v1-device" { reclaimOversizedDeviceStore(path: path) }
+        let store = try ReaderNativeDataStore(path: path)
         stores[name] = store
         return ReaderNativeDataStoreBridge(store: store)
+    }
+
+    /// device 库正常只有几 MB 活数据。超过这个大小说明是历史拷贝把它撑大了
+    /// （2026-09-25 实测 18.8 GB：发送队列每次整条重写都往 journal/mutations 各抄一份）。
+    static let deviceStoreRebuildBytes: Int64 = 512 * 1024 * 1024
+
+    /// 首次打开前做一次，失败就照常打开旧库 —— 大而慢总比打不开强。
+    private func reclaimOversizedDeviceStore(path: String) {
+        let size = ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.int64Value ?? 0
+        guard size > Self.deviceStoreRebuildBytes else { return }
+        let started = Date()
+        let message: String
+        do {
+            let result = try ReaderNativeDataStore.rebuildKeepingLiveData(path: path)
+            message = "device 库重建 \(result.before / 1_048_576)MB→\(result.after / 1_048_576)MB "
+                + String(format: "%.1fs", Date().timeIntervalSince(started))
+        } catch {
+            message = "device 库重建失败(\(size / 1_048_576)MB): \(error)"
+        }
+        NSLog("[BWReader] %@", message)
+        Task { @MainActor in ReaderNativeFaultReporter.shared.note("store", message) }
     }
 
     /// 处理一条网页请求：`{ store, action, ... }`。
