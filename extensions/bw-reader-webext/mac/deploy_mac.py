@@ -163,7 +163,11 @@ def make_release() -> Path:
     # .NET 8 在 macOS 上把 LocalApplicationData 映射到 ~/Library/Application Support（不是 ~/.local/share）。
     # 桥的书库 / 用户状态 / 卡片资源 / runner.pid 都在它下面的 BWReader 里 —— 指到真正的数据目录，
     # 否则桥读的是一个空目录（2026-09-25 实测：App 报「语音核心没在跑」、切换后写入落到错位置）。
-    for alias in (HOME / "Library" / "Application Support" / "BWReader", HOME / ".local" / "share" / "BWReader"):
+    # ~/BWReader：Python 侧脚本的退路是 `$LOCALAPPDATA/BWReader`，没设时退回 `~/BWReader`。
+    # launchd 的服务都带 LOCALAPPDATA，但 Codex 桌面版 / 终端里的 Codex 不带 —— 照能力指南
+    # 跑 judgment_basis.py 就读成空目录（2026-09-25 实测「ReaderPC 状态：读不到」）。
+    for alias in (HOME / "Library" / "Application Support" / "BWReader", HOME / ".local" / "share" / "BWReader",
+                  HOME / "BWReader"):
         if not alias.is_symlink():
             if alias.exists():
                 sys.exit(f"{alias} 是实体目录：先把里面的文件合并进 {DATA / 'BWReader'} 再部署")
