@@ -773,6 +773,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-error-log",
             new[] { "POST", "OPTIONS" },
             context => HandleReaderErrorLogAsync(context, serviceToken));
+        // iOS MetricKit 诊断包（崩溃/卡死/CPU 与磁盘写入超限）：包体大，不塞进 16 KB 的错误日志。
+        // 挂在 /reader-error-log 下 = 复用已有的 Tailscale Serve 路由，不另开对外路径。
+        app.MapMethods(
+            "/reader-error-log/metrickit",
+            new[] { "POST", "OPTIONS" },
+            context => HandleReaderMetricKitAsync(context, serviceToken));
         app.MapMethods(
             "/reader-phrases",
             new[] { "GET", "POST", "OPTIONS" },
@@ -1746,6 +1752,58 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
     /// 任何一层都可以往这里写。写日志本身失败绝不向上抛：它是旁路，
     /// 不能因为记不上而把真正在做的事弄坏。
+    private async Task HandleReaderMetricKitAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "reader-metrickit")) return;
+        const int maxBytes = 4 * 1024 * 1024;
+        string kind = new string((context.Request.Query["kind"].ToString() ?? "")
+            .Where(char.IsAsciiLetterOrDigit).Take(24).ToArray());
+        if (kind.Length == 0) kind = "payload";
+        byte[] body;
+        using (MemoryStream buffer = new())
+        {
+            await context.Request.Body.CopyToAsync(buffer, serviceCancellationToken)
+                .ConfigureAwait(false);
+            body = buffer.ToArray();
+        }
+        JsonObject? parsed = null;
+        if (body.Length is > 0 and <= maxBytes)
+        {
+            try { parsed = JsonNode.Parse(body) as JsonObject; } catch (JsonException) { }
+        }
+        if (parsed is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_METRICKIT_BODY" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        string directory = System.IO.Path.Combine(ReaderUserDataDirectory, "metrickit");
+        System.IO.Directory.CreateDirectory(directory);
+        string name = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss") + "-" + kind + "-"
+            + Guid.NewGuid().ToString("N")[..6] + ".json";
+        await File.WriteAllBytesAsync(System.IO.Path.Combine(directory, name), body,
+            serviceCancellationToken).ConfigureAwait(false);
+        foreach (FileInfo old in new DirectoryInfo(directory).GetFiles("*.json")
+                     .OrderByDescending(f => f.Name).Skip(200))
+        {
+            try { old.Delete(); } catch (IOException) { }
+        }
+        // 摘要：每类诊断几条（crashDiagnostics / hangDiagnostics / diskWriteExceptionDiagnostics …）
+        string summary = string.Join(", ", parsed
+            .Where(pair => pair.Value is JsonArray)
+            .Select(pair => pair.Key + "=" + ((JsonArray)pair.Value!).Count));
+        AppendReaderErrorLog("metrickit", kind,
+            (summary.Length > 0 ? summary : "keys=" + string.Join(",", parsed.Select(p => p.Key)))
+                + " → metrickit/" + name);
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.WriteAsJsonAsync(new { ok = true, file = name },
+            serviceCancellationToken).ConfigureAwait(false);
+    }
+
     internal static void AppendReaderErrorLog(
         string source, string code, string message, string? detail = null)
     {

@@ -443,7 +443,11 @@ private struct ReaderRootView: View {
             // 现场补出去），进后台就标记这条命是干净结束的。
             // ⚠ 没有这个标记，"App 被系统杀了"和"用户正常退出"看起来一模一样，
             //   于是每次启动都会误报一次 —— 误报多了这条通道就没人看了。
-            if phase == .active { ReaderNativeFaultReporter.shared.beginSession(origin: ReaderServer.origin) }
+            if phase == .active {
+                ReaderNativeFaultReporter.shared.beginSession(origin: ReaderServer.origin)
+                // iOS 自己记下的崩溃/卡死/发热类诊断，送到服务器（见 ReaderMetricKitReporter）
+                ReaderMetricKitReporter.shared.start(origin: ReaderServer.origin)
+            }
             else { ReaderNativeFaultReporter.shared.endSession() }
             reader.setReaderScenePhase(phase)
             voiceBridge.setAppForeground(phase == .active)
