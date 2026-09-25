@@ -1606,9 +1606,15 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                         // after preparation. Revalidate B at the last safe
                         // boundary and require both owned audio sessions to
                         // still be running before the shortcut side effect.
-                        VirtualRenderEndpointProbe.ValidateExactActiveRender(
-                            request.VirtualSpeakerRenderEndpointId,
-                            "virtual-speaker");
+                        // ⚠ 与准备阶段同一条件：直连管道不碰虚拟声卡，这里也不校验
+                        //   （2026-09-25 Mac 实测：这一处漏了条件，没装声卡的机器
+                        //   在最后一刻 PlatformNotSupported；Windows 上声卡总在，所以没暴露）。
+                        if (audioPipe is null)
+                        {
+                            VirtualRenderEndpointProbe.ValidateExactActiveRender(
+                                request.VirtualSpeakerRenderEndpointId,
+                                "virtual-speaker");
+                        }
                         if (automateRoute)
                         {
                             VirtualCaptureEndpointProbe
