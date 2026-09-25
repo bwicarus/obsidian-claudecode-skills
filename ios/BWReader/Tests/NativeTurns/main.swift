@@ -130,4 +130,10 @@ try run("append",["part":["kind":"tool","tool":"reader_snapshot.reader_context_s
 try run("append",["part":["kind":"tool","tool":"reader_context_snapshot","label":"读取页面","origin":"app","result":"完成 · 20 ms"]],tid:"mirror")
 try run("append",["part":["kind":"tool","tool":"webSearch","origin":"runner","call_id":"exec-2","status":"completed"]],tid:"mirror")
 check(store.turns["mirror"]!.parts.filter { $0["kind"] as? String == "tool" }.count == 2,"app mirror of a runner call counted as an extra step")
+// 空草稿是「撤掉草稿」：既不新建一条空转的「正在回复」，也要把已有草稿收掉。
+let emptyDraft = output(try run("draft",["text":"","itemId":"v-1","origin":"voice","role":"assistant"],tid:"retarget"),id:"retarget")
+check((emptyDraft["presentation"] as! O)["streaming"] as? Bool == false,"an empty draft left a spinning reply")
+try run("draft",["text":"整体来说","itemId":"v-2","origin":"voice","role":"assistant"],tid:"retarget")
+let cleared = output(try run("draft",["text":"","itemId":"v-2","origin":"voice","role":"assistant"],tid:"retarget"),id:"retarget")
+check((cleared["presentation"] as! O)["streaming"] as? Bool == false && (cleared["parts"] as! [O]).isEmpty,"clearing a draft left it streaming")
 print("Native turns: live/final reconciliation, invocation dedupe, independent drafts, rename, progress, atomic rejection and stable card identity passed")

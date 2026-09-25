@@ -266,6 +266,17 @@ struct ReaderNativeTurnStore {
                 target = turn.parts.first { $0["kind"] as? String == "text" && $0["item_id"] as? String == item && ($0["origin"] as? String ?? "runner") == origin && ($0["role"] as? String ?? "assistant") == role }?["_nativeID"] as? String
             } else { target = turn.currentDraft }
         }
+        // 空文本草稿 = 撤掉草稿（运行器把语音草稿从后台轮挪回 v- 轮时，给旧位置发的就是空串）。
+        // 以前这里照样新建一条空草稿：没字、也永远等不到定稿，侧栏就挂着一条
+        // 「助手 正在回复…」空转（2026-09-26 模拟器实测），而且只要它在，对话缓存就一直不写。
+        if text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
+            if let target, let index = turn.parts.firstIndex(where:{ $0["_nativeID"] as? String == target }),
+               turn.parts[index]["_streamDraft"] as? Bool == true {
+                turn.parts[index]["text"] = ""
+                freeze(target, turn:&turn)
+            }
+            return
+        }
         if target == nil {
             target = UUID().uuidString
             var p: O = ["_nativeID":target!,"kind":"text","role":role,"origin":origin,"text":"","_streamText":true]
