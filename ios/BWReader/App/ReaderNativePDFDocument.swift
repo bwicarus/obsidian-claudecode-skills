@@ -1665,6 +1665,9 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         contentMode = .redraw
         let gesture = UILongPressGestureRecognizer(target: self, action: #selector(selectText(_:)))
         gesture.minimumPressDuration = 0.3
+        // 按住期间手指漂移超过系统默认 10pt 手势就作废 —— 稍早一点开始拖就选不上（2026-09-26）。
+        // 放宽到 20pt；快速滑动仍在 0.3s 之前由滚动接走，不影响翻页滚动。
+        gesture.allowableMovement = 20
         gesture.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
         gesture.delegate = self
         addGestureRecognizer(gesture)
@@ -1720,9 +1723,22 @@ private final class ReaderNativePDFTextOverlay: UIView, UIEditMenuInteractionDel
         if [leadingHandle, trailingHandle].contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return true }
         return hit(point) != nil
     }
+    /// 长按起点：先精确命中；落在字间/行间空隙时，在**屏幕坐标**里向外找一圈
+    /// （6/12/18/24pt，约一个指尖），取最近的真字。
+    /// ⚠ 2026-09-26 用户：「长按选词要较精准地点到词上」—— 原来只认精确命中，
+    ///   手指落在两个词之间或行距里就什么都不选。不用 exactOnly:false：它没有距离上限，
+    ///   按在页边空白处会选到很远的字。屏幕坐标的半径与缩放无关。
     private func hit(_ point: CGPoint) -> Int? {
-        guard let p = canonicalPoint?(point) else { return nil }
-        return selectionCore?.hit(p)
+        guard let core = selectionCore else { return nil }
+        if let p = canonicalPoint?(point), let index = core.hit(p) { return index }
+        for radius in [6.0, 12.0, 18.0, 24.0] as [CGFloat] {
+            for step in 0..<12 {
+                let angle = CGFloat(step) * .pi / 6
+                let probe = CGPoint(x: point.x + cos(angle) * radius, y: point.y + sin(angle) * radius)
+                if let p = canonicalPoint?(probe), let index = core.hit(p) { return index }
+            }
+        }
+        return nil
     }
     /// 点到已有划线时返回它的 id。接管后 .hl-layer 不存在，原生是唯一能点到划线的地方。
     var highlightAt: ((CGPoint) -> String?)?
