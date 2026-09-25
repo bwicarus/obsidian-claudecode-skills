@@ -1173,7 +1173,7 @@
         if (RC.turnCard && window.__asstVoiceTid) {
           var errorDetail = String(p.rag || p.result_brief || p.label || '失败').slice(0, 6000);
           RC.turnCard.addPart(window.__asstVoiceTid(), {
-            kind: 'tool', tool: p.tool || '', label: (p.label || '工具') + '(失败)',
+            kind: 'tool', tool: p.tool || '', label: (p.label || '工具') + '(失败)', origin: 'app',
             args: p.args || {}, steps: p.sub_steps || [], result: errorDetail,
             vision: p.vision || [], took_s: p.took_s, model: p.model,
             error: errorDetail
@@ -1366,7 +1366,9 @@
       if (RC.turnCard && window.__asstVoiceTid) {
         var _tid = window.__asstVoiceTid();
         RC.turnCard.idle(_tid);
-        RC.turnCard.addPart(_tid, { kind: 'tool', tool: p.tool || '', label: p.label || p.tool || '工具',
+        // origin:'app' —— 这是 App 替服务器执行那次调用的**镜像**；服务器落库时本来就标 app，
+        // 现场不标，原生轮次就认不出它是镜像，同一次调用算两步（2026-09-26：实际 8 步显示 10）。
+        RC.turnCard.addPart(_tid, { kind: 'tool', tool: p.tool || '', label: p.label || p.tool || '工具', origin: 'app',
           args: p.args || {}, steps: p.sub_steps || [], vision: p.vision || [],
           result: String(p.rag || p.result_brief || '').slice(0, 6000), took_s: p.took_s, model: p.model });   // model 补上(流程详情窗显示;relay 没带则显 —)
       }
