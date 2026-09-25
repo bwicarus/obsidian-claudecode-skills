@@ -86,6 +86,13 @@ def services() -> dict[str, dict]:
                        "cwd": str(DATA / "BWReader" / "voice-cli")},
         "supervisor": {"args": [str(PY), f"{cur}/extensions/bw-reader-webext/mac/bw_mac_supervisor.py"],
                        "cwd": str(DATA / "BWReader")},
+        # Obsidian 无头同步（2026-09-25 从 Windows 迁来）：登录令牌与库配置在 ~/.obsidian-headless
+        "obsidian-sync": {
+            "args": [str(NODE_BIN / "node"),
+                     str(NODE_BIN.parent / "lib" / "node_modules" / "obsidian-headless" / "cli.js"),
+                     "sync", "--continuous", "--path", str(DATA / "obsidian")],
+            "cwd": str(DATA / "obsidian"),
+        },
     }
 
 
