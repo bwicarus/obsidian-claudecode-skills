@@ -85,8 +85,9 @@ cd ~/BW/src/claude
 做的事：仓库 → 新版本目录（数据目录链到 ~/BW/data）→ `dotnet publish` 桥 → 切 current →
 重写 launchd 配置并重载。保留最近 5 个版本。**不要**在 `~/BW/runtime/current` 里直接改代码。
 
-从 Windows 推代码到 Mac 仓库：`git push xuehaoyan@100.66.124.26:BW/src/claude <分支>`
-（Mac 仓库设了 `receive.denyCurrentBranch=updateInstead`，工作区有未提交改动时会拒收）。
+**Git 远端（2026-09-26）**：Mac 仓库 `origin` = `git@github.com:bwicarus/obsidian-claudecode-skills.git`
+（Mac 的 `~/.ssh/id_ed25519` 已加到 GitHub 账号 bwicarus）。仓库在外接盘上，**每完成一块工作就推**，
+别让提交只存在一块会掉线的盘上（2026-09-26 00:32 外接盘掉线过一次）。用户已授权推送。
 
 ## 5. 各子系统要点
 
@@ -156,7 +157,7 @@ cd ~/BW/src/claude
 - 2026-09-26 复查：`BW ReaderPC Watchdog` 又是 Ready（会把 Windows 服务器拉起），已与 `BW Computer Voice Setup`
   一起禁用（经 `ssh windows-pc` 的管理员会话即可，不必上桌面）。Windows 上 5000/8766/8767/8769/43128/43131/43132
   均无监听；只剩用户开着的 Codex 桌面版及其只读 MCP 子进程。
-- Windows 现在的用途只剩：Mac 取旧文件的来源、`C:\tmp\mac-relay.git`（Mac 仓库的异地备份远端 `windows`）。
+- Windows 现在的用途只剩：Mac 取旧文件的来源（`ssh windows-pc`）。不再承担开发、服务器、备份任何一项。
 - 回退：把 Mac 的 Tailscale 名改回、Windows 改回 `bwicarus-2` 并 `serve` 重配、启用上述任务。
   注意 Mac 上切换后产生的数据要先搬回去。
 
