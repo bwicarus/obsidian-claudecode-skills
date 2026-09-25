@@ -286,7 +286,9 @@ enum ReaderNativeConversationScript {
       let turnOwned = { tools: new Set(), cards: new Set() };
       function cardSignature(card) {
         if (!card || typeof card !== 'object') return '';
-        try { return String(card.kind || '') + '|' + String(card.title || '') + '|' + JSON.stringify(card.data || {}); } catch (_) { return ''; }
+        // 只比类型+标题：同一张卡在轮次里与现场插入的那份，编号不同（tc_… / 本地 mkCid），
+        // data 的字段顺序也不同，按整份 data 比永远对不上（2026-09-26 实测第一版就是这样漏的）。
+        return String(card.kind || '') + '|' + String(card.title || '');
       }
       function collectTurnOwned(nodes) {
         const owned = { tools: new Set(), cards: new Set() };
@@ -312,7 +314,10 @@ enum ReaderNativeConversationScript {
           part.status = chip.failed ? 'failed' : chip.busy ? 'running' : 'completed';
           return { id, role: 'assistant', text: '', streaming: false, parts: [part], title: '', statusText: '', progress: null };
         }
-        if (nativeMode && !tid && node.__vcCard && turnOwned.cards.has(cardSignature(node.__vcCard))) return null;
+        if (nativeMode && !tid) {
+          const liveCard = node.__vcCard || node.querySelector?.('.vc-card')?.__vcCard;
+          if (liveCard && liveCard.title && turnOwned.cards.has(cardSignature(liveCard))) return null;
+        }
         let presentation = null;
         try { if (tid) presentation = rc().turnCard?.presentationOf(tid); } catch (_) {}
         const source = presentation?.parts || [];
