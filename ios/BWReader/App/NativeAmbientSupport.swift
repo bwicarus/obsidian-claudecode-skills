@@ -169,16 +169,39 @@ actor NativeSortformerModels {
 final class NativeStreamDiarizer {
     static let sampleRate: Double = 16_000
 
+    /// Sortformer 一共 4 个槽位：「我」占 1 个，熟人最多预占 2 个，至少留 1 个给陌生人。
+    static let maxEnrolledPeople = 2
+
     let diarizer: SortformerDiarizer
     /// 登记声纹对应的说话人槽位；没登记声纹时为 nil（调用方按「说话最多的人」兜底）。
     private(set) var userIndex: Int?
+    /// 预先登记的熟人：槽位 → 名字。
+    private(set) var names: [Int: String] = [:]
     private(set) var fedSamples = 0
 
-    init(models: SortformerModels, voiceprint: [Float]?) throws {
+    init(models: SortformerModels, voiceprint: [Float]?, people: [NativeVoiceprint.Person] = []) throws {
         diarizer = SortformerDiarizer(config: NativeSortformerModels.config)
         diarizer.initialize(models: models)
         if let voiceprint, !voiceprint.isEmpty {
             userIndex = try diarizer.enrollSpeaker(withAudio: voiceprint, sourceSampleRate: nil, named: "我")?.index
+        }
+        for person in people.prefix(Self.maxEnrolledPeople) {
+            guard let samples = NativeVoiceprint.loadPerson(person.id), !samples.isEmpty else {
+                NativeAmbientLog.note("熟人声纹：\(person.name) 的声音文件读不出来，跳过", level: "error")
+                continue
+            }
+            // 不许改掉已有名字：声音太像「我」或另一位熟人时，会被分到那个槽位上
+            guard let speaker = try diarizer.enrollSpeaker(withAudio: samples, sourceSampleRate: nil, named: person.name,
+                                                           overwritingAssignedSpeakerName: false) else {
+                NativeAmbientLog.note("熟人声纹：\(person.name) 的样本里没检测到语音，跳过", level: "error")
+                continue
+            }
+            if speaker.index == userIndex || (names[speaker.index].map { $0 != person.name } ?? false) {
+                let other = speaker.index == userIndex ? "我" : (names[speaker.index] ?? "?")
+                NativeAmbientLog.note("熟人声纹：\(person.name) 的声音和「\(other)」分不开，没单独占位")
+                continue
+            }
+            names[speaker.index] = person.name
         }
     }
 
@@ -259,6 +282,61 @@ enum NativeVoiceprint {
     }
 
     static func delete() { try? FileManager.default.removeItem(at: fileURL) }
+
+    // MARK: 熟人声纹（用户 2026-09-26：「有可能为不同的人的声音建立特征然后标记名字么」）
+
+    struct Person: Codable, Identifiable, Equatable {
+        let id: String
+        var name: String
+        var seconds: Double
+        var updatedAt: Date
+    }
+
+    private static var peopleFolder: URL {
+        let folder = fileURL.deletingLastPathComponent().appendingPathComponent("people", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    private static var peopleIndex: URL { peopleFolder.appendingPathComponent("people.json") }
+
+    /// 最近更新的在前（分离器只预占 2 个熟人槽位，先登记最近用到的）。
+    static func people() -> [Person] {
+        guard let data = try? Data(contentsOf: peopleIndex),
+              let list = try? JSONDecoder().decode([Person].self, from: data) else { return [] }
+        return list.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    static func loadPerson(_ id: String) -> [Float]? {
+        guard let data = try? Data(contentsOf: peopleFolder.appendingPathComponent(id + ".f32")), data.count >= 4 else { return nil }
+        return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    }
+
+    /// 同名就追加样本（最多留 30 秒），否则新建。返回保存后的有声秒数。
+    @discardableResult
+    static func savePerson(name: String, samples: [Float]) throws -> Double {
+        var list = people()
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let existing = list.firstIndex { $0.name == trimmed }
+        let id = existing.map { list[$0].id } ?? UUID().uuidString
+        var merged = (existing != nil ? loadPerson(id) ?? [] : []) + samples
+        let cap = Int(30 * NativeStreamDiarizer.sampleRate)
+        if merged.count > cap { merged.removeFirst(merged.count - cap) }
+        try merged.withUnsafeBufferPointer { Data(buffer: $0) }
+            .write(to: peopleFolder.appendingPathComponent(id + ".f32"), options: .atomic)
+        let seconds = Double(merged.count) / NativeStreamDiarizer.sampleRate
+        let person = Person(id: id, name: trimmed, seconds: seconds, updatedAt: Date())
+        if let existing { list[existing] = person } else { list.append(person) }
+        try JSONEncoder().encode(list).write(to: peopleIndex, options: .atomic)
+        return seconds
+    }
+
+    static func deletePerson(_ id: String) {
+        var list = people()
+        list.removeAll { $0.id == id }
+        try? FileManager.default.removeItem(at: peopleFolder.appendingPathComponent(id + ".f32"))
+        if let data = try? JSONEncoder().encode(list) { try? data.write(to: peopleIndex, options: .atomic) }
+    }
 
     /// 只留有声的 20 ms 帧（静音会把声纹冲淡）。
     static func voicedOnly(_ samples: [Float]) -> [Float] {

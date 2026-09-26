@@ -11,9 +11,14 @@ struct NativeAmbientSettingsSections: View {
     @State private var enrolling = false
     @State private var enrollNote = ""
     @State private var showLog = false
+    @State private var people = NativeVoiceprint.people()
+    @State private var naming: NativeAmbientPipeline.HeardSpeaker?
+    @State private var personName = ""
+    @State private var peopleNote = ""
 
     var body: some View {
         voiceprintSection
+        peopleSection
         ambientSection
         if !listener.feed.isEmpty { feedSection }
         gateSection
@@ -69,6 +74,55 @@ struct NativeAmbientSettingsSections: View {
             hasVoiceprint = NativeVoiceprint.exists
             enrolling = false
         }
+    }
+
+    // MARK: 熟人
+
+    private var peopleSection: some View {
+        Section {
+            ForEach(people) { person in
+                LabeledContent(person.name, value: String(format: "%.0f 秒样本", person.seconds))
+            }
+            .onDelete { offsets in
+                for index in offsets { NativeVoiceprint.deletePerson(people[index].id) }
+                people = NativeVoiceprint.people()
+                listener.peopleChanged()
+                NativeAmbientLog.note("熟人声纹：已删除，分离器会重新预登记")
+            }
+            if listener.heardSpeakers.isEmpty {
+                Text(listener.isEnabled ? "旁听到还没名字的人时，会出现在这里供你起名。" : "打开环境旁听后，听到的陌生人会出现在这里供你起名。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(listener.heardSpeakers) { speaker in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(speaker.label) · \(speaker.heardAt.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption.bold())
+                        Text(speaker.sample).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    Spacer()
+                    Button("起名") { personName = ""; naming = speaker }.buttonStyle(.bordered)
+                }
+            }
+            if !peopleNote.isEmpty { Text(peopleNote).font(.caption).foregroundStyle(.secondary) }
+        } header: { Text("熟人") } footer: {
+            Text("给常听到的人起名后，旁听转写就写成「小王：……」而不是「说话人2：……」，jev 判断时也知道是谁在说。"
+                 + "说话人分离模型一次最多分 4 个人：「我」占一个，熟人最多预占 2 个（最近更新的优先），至少留一个给陌生人。"
+                 + "同名再起一次会追加样本，认得更准。")
+        }
+        .alert("给\(naming?.label ?? "")起名", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
+            TextField("名字（最多 20 字）", text: $personName)
+            Button("取消", role: .cancel) { naming = nil }
+            Button("保存") {
+                guard let speaker = naming else { return }
+                naming = nil
+                let name = personName
+                Task {
+                    peopleNote = await listener.namePerson(speaker, name: name)
+                    people = NativeVoiceprint.people()
+                }
+            }
+        } message: { Text(naming?.sample ?? "") }
     }
 
     // MARK: 环境旁听

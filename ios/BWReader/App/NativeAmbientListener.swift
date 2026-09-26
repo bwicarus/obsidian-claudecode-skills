@@ -39,6 +39,7 @@ final class NativeAmbientListener: ObservableObject {
     @Published private(set) var lastJudgment = ""
     @Published private(set) var dangerRecordingUntil: Date?
     @Published private(set) var feed: [[String: Any]] = []
+    @Published private(set) var heardSpeakers: [NativeAmbientPipeline.HeardSpeaker] = []
     @Published var locale = UserDefaults.standard.string(forKey: localeKey) ?? "zh-CN" {
         didSet {
             UserDefaults.standard.set(locale, forKey: Self.localeKey)
@@ -195,6 +196,8 @@ final class NativeAmbientListener: ObservableObject {
             partialText = text
         case .speakers(let count):
             speakersNow = count
+        case .heard(let list):
+            heardSpeakers = list
         case .failed(let message):
             NativeAmbientLog.note("旁听：\(message)，5 秒后重启", level: "error")
             stopPipeline(reason: message)
@@ -207,6 +210,19 @@ final class NativeAmbientListener: ObservableObject {
             Task { await judge(window) }
         }
     }
+
+    // MARK: 熟人
+
+    func namePerson(_ speaker: NativeAmbientPipeline.HeardSpeaker, name: String) async -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "我", !trimmed.hasPrefix("说话人") else { return "名字不能为空、不能叫「我」或「说话人…」" }
+        guard let pipeline else { return "旁听没在运行，这段声音已经没有了" }
+        return await withCheckedContinuation { continuation in
+            pipeline.namePerson(speaker, name: String(trimmed.prefix(20))) { continuation.resume(returning: $0) }
+        }
+    }
+
+    func peopleChanged() { pipeline?.reloadPeople() }
 
     // MARK: 送判断
 
@@ -327,7 +343,17 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         case partial(String)
         case speakers(Int)
         case window(Window)
+        case heard([HeardSpeaker])
         case failed(String)
+    }
+
+    /// 最近听到、还没名字的人：给设置页「给他起名」用。`ranges` 是他在管线时间轴上的说话区间。
+    struct HeardSpeaker: Identifiable {
+        let id: String
+        let label: String
+        let sample: String
+        let ranges: [ClosedRange<Double>]
+        let heardAt: Date
     }
 
     struct Utterance {
@@ -404,6 +430,8 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private var lastTextAt = 0.0                // 识别文字最后一次变化的时刻：停顿判据
     private var heardTextInTask = false
     private var lastSpeakerCount = -1
+    private var heard: [HeardSpeaker] = []
+    private var needsRecycle = false            // 新登记了熟人：窗口一清空就换分离器，让它预占槽位
     private var loggedDangerWriteFailure = false
     private var pendingFinals: [(ready: Double, segments: [(text: String, start: Double, end: Double)])] = []
     private var utterances: [Utterance] = []
@@ -602,13 +630,18 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             do {
                 let models = try await NativeSortformerModels.shared.models()
                 let voiceprint = NativeVoiceprint.load()
+                let people = NativeVoiceprint.people()
                 self?.work.async {
                     guard let self else { return }
                     self.diarizerLoading = false
                     do {
-                        self.diarizer = try NativeStreamDiarizer(models: models, voiceprint: voiceprint)
+                        let diarizer = try NativeStreamDiarizer(models: models, voiceprint: voiceprint, people: people)
+                        self.diarizer = diarizer
                         self.diarizerOrigin = self.ring.isEmpty ? 0 : self.ringStart + Double(self.ring.count) / NativeStreamDiarizer.sampleRate
-                        NativeAmbientLog.note("旁听：说话人分离已接上（\(voiceprint == nil ? "没有声纹，说话人只按编号" : "用声纹认出「我」")）")
+                        let known = diarizer.names.values.sorted().joined(separator: "、")
+                        NativeAmbientLog.note("旁听：说话人分离已接上（\(voiceprint == nil ? "没有声纹，「我」认不出" : "用声纹认出「我」")"
+                            + (known.isEmpty ? "" : "，预登记熟人：\(known)")
+                            + (people.count > NativeStreamDiarizer.maxEnrolledPeople ? "；熟人超过 \(NativeStreamDiarizer.maxEnrolledPeople) 位，只预登记最近更新的" : "") + "）")
                     } catch {
                         NativeAmbientLog.note("旁听：说话人分离创建失败 \(error.localizedDescription)，只转写不分人", level: "error")
                     }
@@ -623,6 +656,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private func speakerLabel(_ index: Int?) -> (String, Bool) {
         guard let index else { return ("?", false) }
         if index == diarizer?.userIndex { return ("我", true) }
+        if let name = diarizer?.names[index] { return (name, false) }
         return ("说话人\(index + 1)", false)
     }
 
@@ -711,7 +745,9 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         // 4) 危险录音到点
         if dangerFile != nil, Date() >= dangerUntil { closeDangerFile() }
         // 5) 分离器定期换新（时间线会一直长；只在窗口刚清空时换，免得同一窗口里编号变）
-        if let diarizer, utterances.isEmpty, pendingFinals.isEmpty, diarizer.elapsed > Self.diarizerRecycleSeconds {
+        if let diarizer, utterances.isEmpty, pendingFinals.isEmpty,
+           needsRecycle || diarizer.elapsed > Self.diarizerRecycleSeconds {
+            needsRecycle = false
             self.diarizer = nil
             loadDiarizer()
         }
@@ -758,11 +794,69 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                     "t0": max(0, utterance.start - first.start), "t1": max(0, utterance.end - first.start)]
         }
         let speakers = Set(taken.compactMap(\.speaker)).count
+        collectHeard(taken)
         let window = Window(id: "amb-" + Self.stamp.string(from: started) + "-" + String(UUID().uuidString.prefix(4)),
                             startedAt: started, endedAt: Date(), streamStart: first.start, streamEnd: last.end,
                             utterances: rows, speakerCount: max(1, speakers), locale: locale,
                             source: source.wireName)
         emit(.window(window))
+    }
+
+    // MARK: 熟人（起名 → 存样本 → 下次换分离器时预登记）
+
+    private func collectHeard(_ taken: [Utterance]) {
+        var byIndex: [Int: [Utterance]] = [:]
+        for utterance in taken {
+            guard let index = utterance.speaker, index != diarizer?.userIndex, diarizer?.names[index] == nil else { continue }
+            byIndex[index, default: []].append(utterance)
+        }
+        guard !byIndex.isEmpty else { return }
+        let fresh = byIndex.map { index, rows in
+            HeardSpeaker(id: UUID().uuidString, label: "说话人\(index + 1)",
+                         sample: String(rows.map(\.text).joined(separator: " ").prefix(60)),
+                         ranges: rows.map { $0.start...$0.end }, heardAt: Date())
+        }
+        heard = Array((fresh + heard).prefix(8))
+        emit(.heard(heard))
+    }
+
+    /// 从环形缓冲里取出这个人的说话片段存成熟人声纹。只取还在缓冲里（最近 4 分钟）的部分。
+    func namePerson(_ speaker: HeardSpeaker, name: String, done: @escaping (String) -> Void) {
+        work.async {
+            var samples: [Float] = []
+            for range in speaker.ranges {
+                let a = Int((range.lowerBound - self.ringStart) * NativeStreamDiarizer.sampleRate)
+                let b = Int((range.upperBound - self.ringStart) * NativeStreamDiarizer.sampleRate)
+                guard a >= 0, b > a, b <= self.ring.count else { continue }
+                samples.append(contentsOf: self.ring[a..<b].map { Float($0) / 32_768 })
+            }
+            let voiced = NativeVoiceprint.voicedOnly(samples)
+            let seconds = Double(voiced.count) / NativeStreamDiarizer.sampleRate
+            guard seconds >= 3 else {
+                let message = samples.isEmpty ? "这段声音已经滚出缓冲（超过 4 分钟），等他再说话后重试"
+                    : String(format: "他的有效语音只有 %.1f 秒，至少要 3 秒；等他多说几句再起名", seconds)
+                NativeAmbientLog.note("熟人声纹：\(name) 没保存 —— \(message)")
+                done(message)
+                return
+            }
+            do {
+                let total = try NativeVoiceprint.savePerson(name: name, samples: voiced)
+                self.heard.removeAll { $0.id == speaker.id }
+                self.emit(.heard(self.heard))
+                self.needsRecycle = true
+                let message = String(format: "已记住「%@」（样本共 %.0f 秒），这段话结束后开始按名字标注", name, total)
+                NativeAmbientLog.note("熟人声纹：" + message)
+                done(message)
+            } catch {
+                NativeAmbientLog.note("熟人声纹：\(name) 保存失败 \(error.localizedDescription)", level: "error")
+                done("保存失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// 熟人列表变了（删除 / 改名）：换一个分离器重新预登记。
+    func reloadPeople() {
+        work.async { self.needsRecycle = true }
     }
 
     // MARK: 存音频

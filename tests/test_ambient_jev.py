@@ -31,6 +31,7 @@ WINDOW = {
     "utterances": [
         {"speaker": "我", "isUser": True, "text": "下周三几点交报告来着", "t0": 1.0, "t1": 2.5},
         {"speaker": "说话人2", "isUser": False, "text": "下午五点前，发到老师邮箱", "t0": 3.0, "t1": 5.0},
+        {"speaker": "小王", "isUser": False, "text": "我也还没写完", "t0": 6.0, "t1": 7.0},
     ],
 }
 
@@ -85,7 +86,9 @@ class AmbientJevTests(unittest.TestCase):
         state = self.calls[0]["state"]
         self.assertIn("[00:01 我] 下周三几点交报告来着", state)
         self.assertIn("[00:03 说话人2]", state)
+        self.assertIn("[00:06 小王] 我也还没写完", state)
         self.assertIn("多人说话", state)
+        self.assertIn("熟人", state)
         self.assertEqual(self.calls[0]["questions"], ["danger", "meaningful", "question", "record"])
 
     def test_question_routes_to_ai_and_lands_in_feed_and_vault(self):
