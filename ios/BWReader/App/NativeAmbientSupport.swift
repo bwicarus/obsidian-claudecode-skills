@@ -198,11 +198,17 @@ actor NativeSpeakerEmbedder {
     }
 
     /// 服务器声纹库（/api/ambient/voiceprints）：每人全部向量。5 分钟刷新一次；编辑人物后立即作废。
-    private var serverPeople: [(personId: String, name: String, vectors: [[Float]])] = []
+    private var serverPeople: [(personId: String, name: String, vectors: [[Float]], language: String?)] = []
     private var serverFetchedAt = Date.distantPast
     private var loggedServerFailure = false
 
     func invalidateServer() { serverFetchedAt = .distantPast }
+
+    /// 这个人登记的语言（人物页里设置，存在服务器）；没登记返回 nil → 由转写器推测。
+    func language(of personId: String) async -> String? {
+        await refreshServerIfStale()
+        return serverPeople.first { $0.personId == personId }?.language
+    }
 
     private func refreshServerIfStale() async {
         guard Date().timeIntervalSince(serverFetchedAt) > 300 else { return }
@@ -210,10 +216,11 @@ actor NativeSpeakerEmbedder {
         do {
             let reply = try await NativeAmbientServer.get("api/ambient/voiceprints")
             let rows = reply["people"] as? [[String: Any]] ?? []
-            serverPeople = rows.compactMap { row -> (personId: String, name: String, vectors: [[Float]])? in
+            serverPeople = rows.compactMap { row -> (personId: String, name: String, vectors: [[Float]], language: String?)? in
                 guard let id = row["personId"] as? String, let name = row["name"] as? String else { return nil }
                 let vectors = (row["vectors"] as? [[Any]] ?? []).map { $0.compactMap { ($0 as? NSNumber)?.floatValue } }
-                return (personId: id, name: name, vectors: vectors.filter { !$0.isEmpty })
+                let language = (row["language"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                return (personId: id, name: name, vectors: vectors.filter { !$0.isEmpty }, language: language)
             }
             loggedServerFailure = false
         } catch {
@@ -356,11 +363,26 @@ final class NativeStreamDiarizer {
     /// 已送入的音频时长（秒，从本实例创建算起）。
     var elapsed: Double { Double(fedSamples) / Self.sampleRate }
 
+    /// 已定稿的时间线推进到哪一秒（分离器时间轴）。早于它的「谁在说」不会再变。
+    private(set) var finalizedUntil = 0.0
+
     /// 送 16 kHz 单声道；够一个分块时模型才会真正跑。
     @discardableResult
     func feed(_ samples: [Float]) throws -> DiarizerTimelineUpdate? {
         fedSamples += samples.count
-        return try diarizer.process(samples: samples, sourceSampleRate: nil)
+        let update = try diarizer.process(samples: samples, sourceSampleRate: nil)
+        if let chunk = update?.chunkResult {
+            let frames = chunk.startFrame + chunk.finalizedFrameCount
+            finalizedUntil = max(finalizedUntil, Double(frames) * Double(NativeSortformerModels.config.frameDurationSeconds))
+        }
+        return update
+    }
+
+    /// 全部人已定稿的说话片段（分离器时间轴），按开始时间排序。
+    func finalizedSegments() -> [(speaker: Int, start: Double, end: Double)] {
+        diarizer.timeline.speakers.values
+            .flatMap { slot in slot.finalizedSegments.map { (speaker: slot.index, start: Double($0.startTime), end: Double($0.endTime)) } }
+            .sorted { $0.start < $1.start }
     }
 
     private func segments() -> [DiarizerSegment] {

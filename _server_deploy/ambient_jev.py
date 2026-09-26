@@ -252,7 +252,9 @@ def normalize_window(body: dict) -> dict:
         total += len(text)
         rows.append({"speaker": str(item.get("speaker") or "?")[:24], "isUser": bool(item.get("isUser")),
                      "text": text[:1200], "t0": float(item.get("t0") or 0), "t1": float(item.get("t1") or 0),
-                     "slotKey": str(item.get("slotKey") or "")[:80]})
+                     "slotKey": str(item.get("slotKey") or "")[:80],
+                     # 这一句用什么语言转写的；langConfirmed=false 表示是推测（服务器累计投票，人物页待确认）
+                     "lang": str(item.get("lang") or "")[:12], "langConfirmed": bool(item.get("langConfirmed", True))})
     if not rows:
         raise ValueError("empty_transcript")
     if total > MAX_TRANSCRIPT_CHARS:
@@ -576,7 +578,8 @@ def person_detail(person_id):
 def person_update(person_id):
     body = request.get_json(silent=True) or {}
     return _people_reply(lambda: {"person": people().update_person(
-        person_id, name=body.get("name"), intro=body.get("intro"), profile=body.get("profile"))})
+        person_id, name=body.get("name"), intro=body.get("intro"), profile=body.get("profile"),
+        language=body.get("language"))})
 
 
 @bp.post("/people/<person_id>/merge")

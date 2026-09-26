@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -43,6 +44,7 @@ SPEAKERS_CONTRACT = "bw-ambient-speakers/1"
 UTTERANCE_CONTRACT = "bw-utterance/1"
 MAX_VOICEPRINTS = 12
 SOURCE = {"kind": "audio", "ref": "ambient"}
+LANGUAGE_RE = re.compile(r"[a-z]{2,3}(-[A-Za-z]{2,4})?")
 
 
 class PeopleError(ValueError):
@@ -147,6 +149,14 @@ class AmbientPeople:
         entry = data["persons"].get(person_id, {})
         info["voiceprints"] = len(entry.get("voiceprints", []))
         info["slots"] = sorted(k for k, v in data["slots"].items() if self._alive(v.get("personId")) == person_id)
+        # 语言：登记的（人物页确认过）+ 推测票数（App 没登记语言时逐段推测，累计在他的声音块上）
+        info["language"] = entry.get("language") or ""
+        votes: dict[str, int] = {}
+        for key in info["slots"]:
+            for lang, n in (data["slots"][key].get("langVotes") or {}).items():
+                votes[lang] = votes.get(lang, 0) + int(n)
+        info["languageVotes"] = votes
+        info["languageGuess"] = max(votes, key=votes.get) if votes and not info["language"] else ""
         if with_voiceprints:
             info["vectors"] = [v["vector"] for v in entry.get("voiceprints", [])]
         return info
@@ -164,7 +174,7 @@ class AmbientPeople:
     # ─────────────── 编辑 ───────────────
 
     def update_person(self, person_id: str, *, name: str | None = None, intro: str | None = None,
-                      profile: str | None = None) -> dict:
+                      profile: str | None = None, language: str | None = None) -> dict:
         person_id = self._alive(person_id)
         if not person_id or person_id == ME:
             raise PeopleError("person_not_found" if not person_id else "readonly", "「我」不能改名，也没有 KJ 页")
@@ -178,7 +188,24 @@ class AmbientPeople:
                 self._check(self._kj().update_node(person_id, summary=intro.strip()))
             if profile is not None and profile.strip():
                 self.write_profile(person_id, profile.strip(), by="user")
+            if language is not None:
+                self.set_language(person_id, language)
         return self.person(person_id)
+
+    def set_language(self, person_id: str, language: str) -> None:
+        """登记（确认）这个人说的语言，如 "ja-JP"；空串 = 取消，回到逐段推测。"""
+        language = (language or "").strip()
+        if language and not LANGUAGE_RE.fullmatch(language):
+            raise PeopleError("bad_language", f"看不懂的语言代码：{language}")
+        with self._lock:
+            data = self._load()
+            entry = data["persons"].setdefault(person_id, {"voiceprints": []})
+            if language:
+                entry["language"] = language
+            else:
+                entry.pop("language", None)
+            entry["updatedAt"] = _now()
+            self._save(data)
 
     def write_profile(self, person_id: str, text: str, *, by: str) -> None:
         """写 AI 总结（用户手改也走这里）：取代当前全部有效的那几条，保证只剩一条。"""
@@ -212,8 +239,11 @@ class AmbientPeople:
                     combined = "\n\n".join(d["text"] for d in profiles)
                     self.write_profile(into, combined, by="merge")
             data = self._load()
-            moved = data["persons"].pop(person_id, {}).get("voiceprints", [])
+            source_entry = data["persons"].pop(person_id, {})
+            moved = source_entry.get("voiceprints", [])
             target = data["persons"].setdefault(into, {"voiceprints": []})
+            if source_entry.get("language") and not target.get("language"):
+                target["language"] = source_entry["language"]
             target["voiceprints"] = (target.get("voiceprints", []) + moved)[-MAX_VOICEPRINTS:]
             target["updatedAt"] = _now()
             for slot in data["slots"].values():
@@ -271,10 +301,12 @@ class AmbientPeople:
         out = []
         for pid, entry in data["persons"].items():
             alive = self._alive(pid)
-            if not alive or not entry.get("voiceprints"):
+            if not alive:
                 continue
             name = "我" if alive == ME else self.kj.ledger.node(alive)["name"]
-            out.append({"personId": alive, "name": name, "vectors": [v["vector"] for v in entry["voiceprints"]]})
+            # 没声纹的人也列出来：App 要按人查登记的语言
+            out.append({"personId": alive, "name": name, "language": entry.get("language") or "",
+                        "vectors": [v["vector"] for v in entry.get("voiceprints", [])]})
         return out
 
     # ─────────────── 收窗口 ───────────────
@@ -302,8 +334,13 @@ class AmbientPeople:
             for u in window["utterances"]:
                 key = u.get("slotKey") or ""
                 if key:
-                    data["slots"].setdefault(key, {"personId": None, "firstSeen": started, "lastSeen": started,
-                                                   "utterances": 0})["utterances"] += 1
+                    slot = data["slots"].setdefault(key, {"personId": None, "firstSeen": started, "lastSeen": started,
+                                                          "utterances": 0})
+                    slot["utterances"] = slot.get("utterances", 0) + 1
+                    lang = str(u.get("lang") or "")
+                    if lang and not u.get("langConfirmed", True) and LANGUAGE_RE.fullmatch(lang):
+                        votes = slot.setdefault("langVotes", {})
+                        votes[lang] = votes.get(lang, 0) + 1
                     if u.get("isUser") and not data["slots"][key].get("personId"):
                         data["slots"][key]["personId"] = ME
                 rows.append({"contract": UTTERANCE_CONTRACT, "id": uuid.uuid4().hex[:12],
@@ -311,7 +348,8 @@ class AmbientPeople:
                              "t1": started + int(float(u.get("t1") or 0) * 1000),
                              "windowId": window["windowId"], "source": window.get("source") or "",
                              "slotKey": key, "isUser": bool(u.get("isUser")), "label": u.get("speaker") or "",
-                             "text": u.get("text") or ""})
+                             "text": u.get("text") or "", "lang": str(u.get("lang") or ""),
+                             "langConfirmed": bool(u.get("langConfirmed", True))})
             self._save(data)
             path = self.root / "timeline" / (time.strftime("%Y-%m-%d", time.localtime(started / 1000)) + ".jsonl")
             with path.open("a", encoding="utf-8") as handle:

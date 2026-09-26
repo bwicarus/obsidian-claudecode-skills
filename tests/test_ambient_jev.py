@@ -288,3 +288,22 @@ class AmbientPeopleTests(AmbientJevTests):
         self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "小王"})
         names = [p["name"] for p in self.client.get("/api/ambient/people").get_json()["people"]]
         self.assertEqual(names, ["我", "小王"])
+
+    def test_language_guess_votes_then_confirm(self):
+        self.login()
+        pid = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "田中"}).get_json()["person"]["id"]
+        for wid in ("w1", "w2"):
+            body = self.window(wid)
+            body["utterances"][1].update({"lang": "ja-JP", "langConfirmed": False})
+            self.judge(body)
+        person = self.client.get(f"/api/ambient/people/{pid}").get_json()["person"]
+        self.assertEqual(person["languageVotes"], {"ja-JP": 2})
+        self.assertEqual(person["languageGuess"], "ja-JP")
+        tanaka = [u for u in self.timeline()["utterances"] if u["name"] == "田中"]
+        self.assertEqual({u["lang"] for u in tanaka}, {"ja-JP"})
+        confirmed = self.client.patch(f"/api/ambient/people/{pid}", json={"language": "ja-JP"}).get_json()["person"]
+        self.assertEqual((confirmed["language"], confirmed["languageGuess"]), ("ja-JP", ""))
+        prints = self.client.get("/api/ambient/voiceprints").get_json()["people"]
+        self.assertEqual([(p["name"], p["language"]) for p in prints], [("田中", "ja-JP")])
+        bad = self.client.patch(f"/api/ambient/people/{pid}", json={"language": "日本語"})
+        self.assertEqual(bad.status_code, 400)

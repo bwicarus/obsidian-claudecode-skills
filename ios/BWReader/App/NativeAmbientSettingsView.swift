@@ -9,6 +9,7 @@ struct NativeAmbientSettingsSections: View {
     @State private var promptIsolation = NativeNoisyVoiceGate.promptsSystemIsolation
     @State private var forceUserOnly = NativeNoisyVoiceGate.forceUserOnly
     @State private var showTimeline = false
+    @State private var candidates = Set(NativeSegmentTranscriber.candidateLocales)
     @State private var hasVoiceprint = NativeVoiceprint.exists
     @State private var enrolling = false
     @State private var enrollNote = ""
@@ -142,10 +143,20 @@ struct NativeAmbientSettingsSections: View {
     private var ambientSection: some View {
         Section {
             Toggle("环境旁听", isOn: Binding(get: { listener.isEnabled }, set: { listener.setEnabled($0) }))
-            Picker("识别语言", selection: $listener.locale) {
-                Text("中文").tag("zh-CN")
-                Text("日本語").tag("ja-JP")
-                Text("English").tag("en-US")
+            Picker("我的语言", selection: $listener.locale) {
+                ForEach(NativeSegmentTranscriber.allLocales, id: \.self) { code in
+                    Text(NativeSegmentTranscriber.displayName(code)).tag(code)
+                }
+            }
+            DisclosureGroup("推测别人语言时的候选") {
+                ForEach(NativeSegmentTranscriber.allLocales, id: \.self) { code in
+                    Toggle(NativeSegmentTranscriber.displayName(code), isOn: Binding(
+                        get: { candidates.contains(code) },
+                        set: { on in
+                            if on { candidates.insert(code) } else { candidates.remove(code) }
+                            NativeSegmentTranscriber.candidateLocales = NativeSegmentTranscriber.allLocales.filter { candidates.contains($0) }
+                        }))
+                }
             }
             LabeledContent("状态", value: listener.state)
             if listener.isEnabled {
@@ -162,7 +173,9 @@ struct NativeAmbientSettingsSections: View {
                 }
             }
         } header: { Text("环境旁听") } footer: {
-            Text("持续听周围的声音：本机转写 + 分出不同的人，每段话送到你的服务器由 jev 判断——"
+            Text("按每个人的开始和结束切成一段一段再转写：你用「我的语言」；人物页登记了语言的人用他的语言；"
+                 + "没登记的在候选语言里各试一次、挑最可信的（标「推测」，人物页可一键确认）。候选越多越耗电。"
+                 + "持续听周围的声音：本机转写 + 分出不同的人，每段话送到你的服务器由 jev 判断——"
                  + "有没有意义、有没有即时危险（有就持续录音 5 分钟并通知）、有没有要解决的疑问（交 AI 解答）、"
                  + "要不要记录（写进 Obsidian「AI助手专用/环境旁听」，重要的连原声存进「文件 → BWReader → 环境旁听」）。"
                  + "原声不离开设备，只有文字出网。它是独立模块，与语音开没开无关：通话时改接通话的上行继续判断。"

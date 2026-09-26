@@ -20,9 +20,13 @@ struct NativeAmbientUtterance: Identifiable, Hashable {
     let text: String
     let personId: String?
     let name: String?
+    let lang: String
+    let langConfirmed: Bool
 
     init?(_ row: [String: Any]) {
         guard let id = row["id"] as? String, let t0 = (row["t0"] as? NSNumber)?.doubleValue else { return nil }
+        lang = row["lang"] as? String ?? ""
+        langConfirmed = row["langConfirmed"] as? Bool ?? true
         self.id = id
         self.t0 = t0
         self.t1 = max(t0 + 300, (row["t1"] as? NSNumber)?.doubleValue ?? t0)
@@ -49,9 +53,15 @@ struct NativeAmbientPersonInfo: Identifiable, Hashable {
     let aliases: [String]
     let voiceprints: Int
     let slots: Int
+    var language: String
+    let languageGuess: String
+    let languageVotes: [String: Int]
 
     init?(_ row: [String: Any]) {
         guard let id = row["id"] as? String else { return nil }
+        language = row["language"] as? String ?? ""
+        languageGuess = row["languageGuess"] as? String ?? ""
+        languageVotes = row["languageVotes"] as? [String: Int] ?? [:]
         self.id = id
         name = row["name"] as? String ?? ""
         intro = row["intro"] as? String ?? ""
@@ -370,6 +380,10 @@ struct NativeAmbientBlockSheet: View {
                 Section {
                     Text(utterance.text).textSelection(.enabled)
                     LabeledContent("说话人", value: utterance.displayName)
+                    if !utterance.lang.isEmpty {
+                        LabeledContent("语言", value: NativeSegmentTranscriber.displayName(utterance.lang)
+                            + (utterance.langConfirmed ? "" : "（推测）"))
+                    }
                     LabeledContent("时间", value: Date(timeIntervalSince1970: utterance.t0 / 1000)
                         .formatted(date: .abbreviated, time: .standard))
                 }
@@ -450,6 +464,7 @@ struct NativeAmbientPersonView: View {
     @State private var name = ""
     @State private var intro = ""
     @State private var profile = ""
+    @State private var language = ""
     @State private var message = ""
     @State private var busy = false
     @State private var others: [NativeAmbientPersonInfo] = []
@@ -489,6 +504,7 @@ struct NativeAmbientPersonView: View {
         } header: { Text("名字") } footer: {
             Text("改成另一个已有的人的名字 = 合并成同一个人（KJ 节点一起合并）。")
         }
+        languageSection(person)
         Section {
             TextEditor(text: $intro).frame(minHeight: 70)
         } header: { Text("我的介绍") } footer: {
@@ -509,6 +525,28 @@ struct NativeAmbientPersonView: View {
             }
             .disabled(others.isEmpty)
             LabeledContent("声音块 / 声纹", value: "\(person.slots) / \(person.voiceprints)")
+        }
+    }
+
+    @ViewBuilder private func languageSection(_ person: NativeAmbientPersonInfo) -> some View {
+        Section {
+            Picker("说的语言", selection: $language) {
+                Text("未登记（逐段推测）").tag("")
+                ForEach(NativeSegmentTranscriber.allLocales, id: \.self) { code in
+                    Text(NativeSegmentTranscriber.displayName(code)).tag(code)
+                }
+            }
+            if person.language.isEmpty && !person.languageGuess.isEmpty {
+                let votes = person.languageVotes.sorted { $0.value > $1.value }
+                    .map { "\(NativeSegmentTranscriber.displayName($0.key)) \($0.value) 段" }.joined(separator: "，")
+                Text("推测：\(votes)").font(.caption).foregroundStyle(.secondary)
+                Button("确认他说\(NativeSegmentTranscriber.displayName(person.languageGuess))") {
+                    language = person.languageGuess
+                    save()
+                }
+            }
+        } header: { Text("语言") } footer: {
+            Text("登记后他的话都用这种语言转写；没登记时每段在候选语言里推测，结果标「推测」。")
         }
     }
 
@@ -547,6 +585,7 @@ struct NativeAmbientPersonView: View {
             name = info.name
             intro = info.intro
             profile = info.profile
+            language = info.language
             history = reply["history"] as? [[String: Any]] ?? []
             let list = try await NativeAmbientServer.get("api/ambient/people")
             others = (list["people"] as? [[String: Any]] ?? []).compactMap(NativeAmbientPersonInfo.init)
@@ -565,6 +604,7 @@ struct NativeAmbientPersonView: View {
             if name != person.name { body["name"] = name }
             if intro != person.intro { body["intro"] = intro }
             if profile != person.profile { body["profile"] = profile }
+            if language != person.language { body["language"] = language }
             defer { busy = false }
             guard !body.isEmpty else { message = "没有改动"; return }
             do {
