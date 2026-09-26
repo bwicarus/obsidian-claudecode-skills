@@ -252,9 +252,38 @@ final class ReaderNativeHistoryMessages {
         message["text"] = parsed.finalDisplayText
         if !parsed.followups.isEmpty { message["followups"] = parsed.followups }
         if record["via"] as? String == "voice" { message["subtitle"] = true }
-        for key in ["videos", "undo_cards", "actions"] {
-            if let values = record[key] as? [Any], !values.isEmpty { unmigrated[key, default: 0] += values.count }
+        // P1 遗留（2026-09-26 补）：三种旧附件也由原生显示，不再只记「尚未迁移」。
+        var parts: [[String: Any]] = []
+        if let videos = record["videos"] as? [[String: Any]], !videos.isEmpty {
+            // 原生视频卡直接吃这些条目（id / title / channel / src / url），播放、收藏、拖到书页都由原生视频卡负责。
+            let card: [String: Any] = ["kind": "videos", "cid": "hist-videos-" + String(index), "title": "相关视频",
+                                       "data": ["items": Array(videos.prefix(12))]]
+            parts.append(["kind": "videos", "title": "", "text": "", "status": "unknown", "actionLabel": "查看原件",
+                          "data": ["nativeDetail": ["kind": "videos", "title": "相关视频", "content": card]]])
         }
+        if let undo = record["undo_cards"] as? [[String: Any]], !undo.isEmpty {
+            // 旧式撤销卡（新数据已是轮次里的操作记录卡）：只显示做了什么、在哪一页；撤销按钮不再提供。
+            let lines = undo.compactMap { card -> String? in
+                guard card["undo_id"] != nil else { return nil }
+                let label = card["label"] as? String ?? "完成"
+                let page = (card["page"] as? NSNumber)?.intValue ?? Int(card["page"] as? String ?? "")
+                return "✓ " + label + (page.map { " · 第 \($0) 页" } ?? "")
+            }
+            if !lines.isEmpty {
+                let text = message["text"] as? String ?? ""
+                message["text"] = ([text] + lines).filter { !$0.isEmpty }.joined(separator: "\n\n")
+                unmigrated["undo_cards(只显示)", default: 0] += lines.count
+            }
+        }
+        if let actions = record["actions"] as? [[String: Any]], !actions.isEmpty {
+            for (offset, action) in actions.prefix(8).enumerated() {
+                let title = (action["label"] as? String) ?? (action["title"] as? String) ?? "阅读器操作"
+                parts.append(["kind": "artifact", "title": "", "text": "", "status": "unknown", "actionLabel": "查看原件",
+                              "data": ["nativeDetail": ["kind": "artifact", "title": title,
+                                       "content": action.merging(["cid": "hist-action-\(index)-\(offset)"]) { old, _ in old }]]])
+            }
+        }
+        if !parts.isEmpty { message["parts"] = parts }
         return message
     }
 

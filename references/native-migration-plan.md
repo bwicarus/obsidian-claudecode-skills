@@ -41,7 +41,7 @@
 - 网页：`window.__bwNativeConversationFeed = true`（documentStart 注入）→ 普通模式的 `onHistoryEvent`/`loadHistory` 让位。
 - 退回路径（语音核心不在 → 网页 `send`）：用户话（P2a 原生占位）与原生回复（replyRef 轮次）也进对话流。
 - **未迁**：~~复习会话仍走网页~~（P4b 已迁）；~~hlcard「撤销/重做」仍靠网页 turnCard~~ → 2026-09-26 补：原生取 TurnStore 记录交网页执行器 `performOperationItem`，结果以 `operationState` 写回原生轮次并落库；
-  视频/旧撤销卡/EPUB 动作卡（历史里出现会记日志）；~~App 端工具「长条」即时反馈不再显示~~ → P3 修复。
+  ~~视频/旧撤销卡/EPUB 动作卡~~ → 2026-09-26 补：视频转原生视频卡、EPUB 动作卡转「查看原件」卡、旧撤销卡只显示做了什么（新数据已是操作记录卡，旧卡不再提供撤销）；~~App 端工具「长条」即时反馈不再显示~~ → P3 修复。
 
 ### 原 P2 打字发送与流式（网页 send，仅退回路径用）
 - 原生输入框直接调 stream bridge；`sentCtx` 由原生组（可见页正文、选区、页码、图）。
