@@ -332,9 +332,14 @@ final class NativeAmbientListener: ObservableObject {
 /// 只被 NativeAmbientListener 持有。音频回调（tap）只记时钟、把样本转投 `work` 串行队列；
 /// 分离、切段、分窗、存盘都在 `work` 上，所有可变状态只在 `work` 上改。
 ///
-/// 转写是**分段**的（2026-09-26 用户）：按分离器给出的每人起止切成「一人一段」，已定稿后
-/// 交 NativeSegmentTranscriber —— 这个人登记了语言就用该语言，否则在候选语言里推测（标「待确认」）。
-/// 分离器没就绪时退回按静音切（不分人，用「我的语言」）。
+/// 转写是**两条线**（2026-09-26 实测后改）：
+///   - 主线：「我的语言」的连续识别流一直开着，覆盖所有声音，词段按时间交分离器认人。便宜、不积压。
+///   - 补线：按分离器给出的每人起止切成「一人一段」交 NativeSegmentTranscriber，**只**用于
+///     ① 说别的语言的人（人物页登记的 / 推测出来的）→ 用他的语言重转，替换主线在这段的字；
+///     ② 还不知道语言的人 → 取他最先几段试推测（不是每段都推测）。
+///   纯逐段转写在电影这种人声不断的场景下转写速度远跟不上（实测只剩零星两句），所以不能当主线；
+///   补线也不抢实时：段落连同音频落盘排队（NativeAmbientBackfill），周围安静时后台一段段转，
+///   转完修正记录 —— 窗口还在本机就地替换，已送服务器的走 /api/ambient/revise（用户：「逐段转写应该在空闲时后台处理」）。
 final class NativeAmbientPipeline: @unchecked Sendable {
     /// 音频来源：自己的麦克风引擎，或通话引擎的上行旁路（48 kHz 单声道 20 ms 帧）。
     enum Source {
@@ -371,6 +376,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         var end: Double
         var locale: String? = nil
         var langConfirmed = true
+        var fromStream = false
     }
 
     /// 待转写的一段：一个人从开始到结束（管线时间轴）。
@@ -410,27 +416,36 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     static let turnMaxSeconds = 28.0            // 一段最长；太长的切开（识别器对长段更容易丢字）
     static let turnMinSeconds = 0.35
     static let turnPad = 0.15                   // 前后各多取一点，免得切掉首尾音
-    static let vadSilence = 0.7                 // 秒：退回静音切分时，静这么久算一段结束
-    static let vadThreshold: Float = 0.012
+    static let silenceToFinalize = 1.2          // 秒：主线识别出文字后这么久没新字，就结束当前识别任务拿定稿
+    static let maxRecognitionSeconds = 45.0
+    static let assignDelay = 1.5                // 秒：等分离结果定稿再给主线词段认人
+    static let maxGuessesPerSpeaker = 3         // 每个声音块最多拿几段来推测语言
+    static let guessMinSeconds = 1.2            // 太短的段推测不准，不拿来推测
     static let langVotesToTrust = 3             // 同一个人推测出同一种语言这么多次，之后直接沿用
     // 积压控制（2026-09-26 实测：开着电影时陌生人声源源不断，每段都按候选语言各转一遍，转写远跟不上，
     // 而分窗又要等「全部转完」—— 结果一窗都没送出去，时间轴一条记录都没有）
-    static let busyBacklog = 3                  // 待转写超过这么多段：不再推测语言，沿用已有票数或「我的语言」
-    static let maxBacklog = 10                  // 超过这么多段：新的一段直接丢（出声），免得越积越多
-    static let guessCooldown = 20.0             // 秒：同一个人两次推测之间至少隔这么久，期间沿用已有票数
-    static let windowWaitLimit = 20.0           // 秒：窗口该送了但还有更早的段没转完，最多等这么久
+    static let idleSeconds = 4.0                // 秒：主线这么久没新字 = 周围安静，后台开始逐段重转
+    static let windowWaitLimit = 20.0           // 秒：窗口该送了但主线还有更早的定稿没认人，最多等这么久
     static let windowGap = 12.0                 // 秒：两句之间停这么久就切窗口
     static let windowMaxSeconds = 120.0
     static let windowMaxChars = 1500
     static let ringSeconds = 240.0
     static let diarizerRecycleSeconds = 20 * 60.0
 
-    private let locale: String                  // 「我的语言」：用户本人与不分人时用它
+    private let locale: String                  // 「我的语言」：主线识别用它；用户本人与不分人时也用它
+    private let recognizer: SFSpeechRecognizer?
+    private let recognitionQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .utility
+        return queue
+    }()
     private let source: Source
     private let emit: (Event) -> Void
     private let engine = AVAudioEngine()
     private let work = DispatchQueue(label: "space.bwicarus.reader.ambient", qos: .utility)
     private let tapLock = NSLock()
+    private var request: SFSpeechAudioBufferRecognitionRequest?   // 主线识别的当前请求（tap 往里追加）
     private var streamFrames: Int64 = 0         // 原生采样率下已收到的帧数（整条管线的时钟）
     private var sampleRate: Double = 48_000
     private var running = false
@@ -443,18 +458,28 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private var ring: [Int16] = []
     private var ringStart = 0.0                 // ring[0] 对应的管线时刻
     private var transcribedUntil: [Int: Double] = [:]  // 每个槽位已送转写到哪一秒（分离器时间轴）
-    private var pendingTurns: [Int: Double] = [:]   // 待转写的段：编号 → 段开始时刻（分窗时只等比窗口更早的段）
-    private var nextJobID = 0
+    private let backfill = NativeAmbientBackfill()
+    private var backfillBusy = false
+    private var startEpochMs = Date().timeIntervalSince1970 * 1000   // 管线时刻 0 对应的绝对时间
     private var lastGuessAt: [Int: Double] = [:]
     private var windowDueSince: Date?
     // 诊断计数：每 30 秒有变化就写一行日志（「没有记录」时一眼看出卡在哪一步）
-    private var stats = (cut: 0, done: 0, empty: 0, dropped: 0, sent: 0)
+    private var stats = (streamed: 0, cut: 0, done: 0, empty: 0, revised: 0, sent: 0)
     private var lastStatsLine = ""
     private var lastStatsAt = Date.distantPast
-    private var vadActive = false               // 退回静音切分用
-    private var vadStart = 0.0
-    private var vadLastVoice = 0.0
     private var slotLangVotes: [Int: [String: Int]] = [:]
+    private var guessCount: [Int: Int] = [:]
+    private var personLanguage: [String: String] = [:]   // personId → 登记的语言（"" = 没登记）
+    private var replaced: [(speaker: Int, start: Double, end: Double)] = []  // 已被补线重转、主线要让出的时段
+    // 主线识别
+    private var task: SFSpeechRecognitionTask?
+    private var taskGeneration = 0
+    private var taskStarts: [Int: Double] = [:]
+    private var rotationClock = 0.0
+    private var lastText = ""
+    private var lastTextAt = 0.0
+    private var heardTextInTask = false
+    private var pendingFinals: [(ready: Double, segments: [(text: String, start: Double, end: Double)])] = []
     private var lastSpeakerCount = -1
     private var heard: [HeardSpeaker] = []
     // 声纹比对（熟人不占分离器槽位）：槽位 → 名字，按分离器会话隔离
@@ -482,6 +507,8 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         self.locale = locale
         self.source = source
         self.emit = emit
+        recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale))
+        recognizer?.queue = recognitionQueue
     }
 
     private var now: Double {
@@ -516,7 +543,11 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         streamFrames = 0
         running = true
         tapLock.unlock()
-        work.sync { resampler = NativeResampler16k(sourceRate: format.sampleRate) }
+        startEpochMs = Date().timeIntervalSince1970 * 1000
+        work.sync {
+            resampler = NativeResampler16k(sourceRate: format.sampleRate)
+            beginRecognitionTask()
+        }
         input.installTap(onBus: 0, bufferSize: 4_096, format: format) { [weak self] buffer, _ in
             self?.captured(buffer)
         }
@@ -537,7 +568,11 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         streamFrames = 0
         running = true
         tapLock.unlock()
-        work.sync { resampler = NativeResampler16k(sourceRate: NativeAudioEngine.sampleRate) }
+        startEpochMs = Date().timeIntervalSince1970 * 1000
+        work.sync {
+            resampler = NativeResampler16k(sourceRate: NativeAudioEngine.sampleRate)
+            beginRecognitionTask()
+        }
         NativeAudioEngine.microphoneTap.set { [weak self] frame in self?.callFrame(frame) }
         startTimerAndDiarizer()
     }
@@ -568,7 +603,10 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     func stop(releaseSession: Bool) {
         tapLock.lock()
         running = false
+        let current = request
+        request = nil
         tapLock.unlock()
+        current?.endAudio()
         if source == .call {
             NativeAudioEngine.microphoneTap.set(nil)
         } else {
@@ -578,7 +616,11 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         tick?.cancel()
         tick = nil
         work.async {
-            // 手里还没切出去的最后一段也送转写
+            self.task?.cancel()
+            self.task = nil
+            // 手里还没认人的主线词段、还没切出去的最后一段都处理掉
+            for pending in self.pendingFinals { self.assign(pending.segments) }
+            self.pendingFinals = []
             self.cutTurns(final: true)
             self.closeDangerFile()
             // 停下时手里还没送的句子也送出去，别丢
@@ -594,6 +636,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private func captured(_ buffer: AVAudioPCMBuffer) {
         tapLock.lock()
         guard running else { tapLock.unlock(); return }
+        request?.append(buffer)
         streamFrames += Int64(buffer.frameLength)
         let end = Double(streamFrames) / sampleRate
         tapLock.unlock()
@@ -630,8 +673,6 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             ring.removeFirst(drop)
             ringStart += Double(drop) / NativeStreamDiarizer.sampleRate
         }
-        // 退回用的静音切分（分离器没就绪时）
-        trackVoiceActivity(pcm16k, end: end)
         // 说话人分离
         if let diarizer {
             do {
@@ -692,6 +733,95 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         return ("说话人\(index + 1)", false)
     }
 
+    // MARK: 主线：「我的语言」连续识别（按停顿切任务拿定稿）
+
+    private func beginRecognitionTask() {
+        guard let recognizer else {
+            NativeAmbientLog.note("旁听：没有「\(NativeSegmentTranscriber.displayName(locale))」的识别器，主线不转写", level: "error")
+            return
+        }
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.requiresOnDeviceRecognition = true
+        request.shouldReportPartialResults = true
+        request.addsPunctuation = true
+        request.taskHint = .dictation
+        taskGeneration += 1
+        let generation = taskGeneration
+        let start = now
+        taskStarts[generation] = start
+        rotationClock = start
+        heardTextInTask = false
+        lastText = ""
+        tapLock.lock()
+        self.request = request
+        tapLock.unlock()
+        task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            self?.work.async { self?.recognized(result, error: error, generation: generation) }
+        }
+    }
+
+    /// 结束当前任务（它会带着定稿回调 recognized），并立刻开新任务接着听。
+    private func rotateRecognition() {
+        tapLock.lock()
+        let finishing = request
+        tapLock.unlock()
+        beginRecognitionTask()
+        finishing?.endAudio()
+    }
+
+    private func recognized(_ result: SFSpeechRecognitionResult?, error: Error?, generation: Int) {
+        if let result {
+            let text = result.bestTranscription.formattedString
+            if generation == taskGeneration, text != lastText {
+                // 嘈杂环境里音量永远不低，拿音量判停顿会一直判不出；改看「识别文字多久没变」
+                lastText = text
+                lastTextAt = now
+                heardTextInTask = heardTextInTask || !text.isEmpty
+                emit(.partial(text))
+            }
+            if result.isFinal, let base = taskStarts[generation] {
+                let segments = result.bestTranscription.segments.map {
+                    (text: $0.substring, start: base + $0.timestamp, end: base + $0.timestamp + $0.duration)
+                }
+                if !segments.isEmpty { pendingFinals.append((ready: now + Self.assignDelay, segments: segments)) }
+                taskStarts[generation] = nil
+            }
+        }
+        if let error {
+            taskStarts[generation] = nil
+            let code = (error as NSError).code
+            // 1110 = 没检测到语音、216/203 = 任务被取消 / 结束：旋转时的正常结局，不算故障
+            let benign = [1110, 216, 203, 301].contains(code)
+            if !benign {
+                NativeAmbientLog.note("旁听：主线识别出错 code=\(code) \(error.localizedDescription)", level: "error")
+            }
+            if generation == taskGeneration && isRunning {
+                if benign { beginRecognitionTask() }
+                else { emit(.failed("主线识别出错 code=\(code)")) }
+            }
+        }
+    }
+
+    /// 主线定稿词段 → 按分离结果认人 → 同一人相邻的合句。已被逐段重转替换的时段让出。
+    private func assign(_ segments: [(text: String, start: Double, end: Double)]) {
+        for segment in segments {
+            let speaker = diarizer?.dominantSpeaker(from: segment.start - diarizerOrigin, to: segment.end - diarizerOrigin)
+            let middle = (segment.start + segment.end) / 2
+            if let speaker, replaced.contains(where: { $0.speaker == speaker && $0.start <= middle && middle <= $0.end }) {
+                continue
+            }
+            if var last = utterances.last, last.fromStream, last.speaker == speaker, segment.start - last.end < 1.5 {
+                last.text += segment.text
+                last.end = segment.end
+                utterances[utterances.count - 1] = last
+            } else {
+                utterances.append(Utterance(speaker: speaker, text: segment.text, start: segment.start, end: segment.end,
+                                            locale: locale, langConfirmed: true, fromStream: true))
+                stats.streamed += 1
+            }
+        }
+    }
+
     // MARK: 周期（每 0.5 秒，在 work 上）
 
     private func periodic() {
@@ -700,15 +830,24 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             lastIdentifyCheck = t
             identifyNextSlot()
         }
-        // 1) 按每个人的起止切段、送转写
+        // 1) 主线：识别出文字后 1.2 秒没新字（或本任务满 45 秒）就换任务拿定稿；定稿满 1.5 秒的认人合句
+        if heardTextInTask && t - lastTextAt >= Self.silenceToFinalize || t - rotationClock >= Self.maxRecognitionSeconds {
+            if heardTextInTask { rotateRecognition() } else { rotationClock = t }
+        }
+        while let first = pendingFinals.first, first.ready <= t {
+            pendingFinals.removeFirst()
+            assign(first.segments)
+        }
+        // 2) 补线：按每个人的起止切段，说别的语言 / 待推测的人的段落盘排队；周围安静时后台逐段重转
         cutTurns(final: false)
+        processBackfillIfIdle()
         logStats()
         // 2) 切窗口
         flushWindow(force: false)
         // 3) 危险录音到点
         if dangerFile != nil, Date() >= dangerUntil { closeDangerFile() }
         // 4) 分离器定期换新（时间线会一直长；只在窗口刚清空时换，免得同一窗口里编号变）
-        if let diarizer, utterances.isEmpty, pendingTurns.isEmpty, !identifying,
+        if let diarizer, utterances.isEmpty, pendingFinals.isEmpty, !identifying, !backfillBusy,
            diarizer.elapsed > Self.diarizerRecycleSeconds {
             self.diarizer = nil
             transcribedUntil = [:]
@@ -724,7 +863,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         guard let diarizer else {
             if !loggedNoDiarizer {
                 loggedNoDiarizer = true
-                NativeAmbientLog.note("旁听：分离器还没就绪，先按静音切段，不分人")
+                NativeAmbientLog.note("旁听：分离器还没就绪，先只用主线识别，不分人")
             }
             return
         }
@@ -755,100 +894,146 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         for turn in turns.sorted(by: { $0.start < $1.start }) { enqueue(turn) }
     }
 
-    /// 退回：分离器没就绪时按音量切（不分人）。
-    private func trackVoiceActivity(_ pcm16k: [Float], end: Double) {
-        guard diarizer == nil, !pcm16k.isEmpty else {
-            if vadActive {   // 分离器刚接上：按静音切的这半段先送出去
-                vadActive = false
-                enqueue(Turn(speaker: nil, start: vadStart, end: vadLastVoice))
-            }
-            return
-        }
-        let rms = sqrt(pcm16k.reduce(0) { $0 + $1 * $1 } / Float(pcm16k.count))
-        let begin = end - Double(pcm16k.count) / NativeStreamDiarizer.sampleRate
-        if rms > Self.vadThreshold {
-            if !vadActive { vadActive = true; vadStart = begin }
-            vadLastVoice = end
-            if end - vadStart >= Self.turnMaxSeconds {
-                enqueue(Turn(speaker: nil, start: vadStart, end: end))
-                vadStart = end
-            }
-        } else if vadActive, end - vadLastVoice >= Self.vadSilence {
-            vadActive = false
-            enqueue(Turn(speaker: nil, start: vadStart, end: vadLastVoice))
-        }
-    }
-
     // MARK: 转写（按这个人的语言；没登记就推测）
 
+    /// 需要重转的段：音频落盘排队，不当场转（空闲时后台处理）。
     private func enqueue(_ turn: Turn) {
-        guard turn.end - turn.start >= Self.turnMinSeconds else { return }
+        guard turn.end - turn.start >= Self.turnMinSeconds, let speaker = turn.speaker else { return }
+        // 主线已覆盖「我的语言」：只有说别的语言、或还要推测语言的人才重转
+        guard let plan = segmentPlan(speaker: speaker, duration: turn.end - turn.start) else { return }
         let from = max(ringStart, turn.start - Self.turnPad)
         let to = min(ringStart + Double(ring.count) / NativeStreamDiarizer.sampleRate, turn.end + Self.turnPad)
         let a = Int((from - ringStart) * NativeStreamDiarizer.sampleRate)
         let b = Int((to - ringStart) * NativeStreamDiarizer.sampleRate)
         guard a >= 0, b > a, b <= ring.count else {
-            NativeAmbientLog.note("旁听：一段声音已滚出缓冲，没能转写", level: "error")
+            NativeAmbientLog.note("旁听：一段声音已滚出缓冲，没能排进重转队列", level: "error")
             return
         }
-        guard pendingTurns.count < Self.maxBacklog else {
-            stats.dropped += 1
-            if stats.dropped == 1 || stats.dropped % 20 == 0 {
-                NativeAmbientLog.note("旁听：转写跟不上（积压 \(pendingTurns.count) 段），丢弃新段（累计 \(stats.dropped)）", level: "error")
-            }
-            return
-        }
-        let samples = ring[a..<b].map { Float($0) / 32_768 }
-        var plan = languagePlan(for: turn.speaker)
-        let busy = pendingTurns.count >= Self.busyBacklog
-        let fallback = turn.speaker.flatMap(topVote) ?? locale
-        if plan.locale == nil, let speaker = turn.speaker {
-            if busy || now - (lastGuessAt[speaker] ?? -.infinity) < Self.guessCooldown {
-                // 忙或刚推测过：不再按候选语言各转一遍，沿用已有票数（没有就用我的语言），仍标「推测」
-                if plan.personId == nil { plan.locale = fallback }
-            } else {
-                lastGuessAt[speaker] = now
-            }
+        if plan.locale == nil {
+            guessCount[speaker, default: 0] += 1
+            lastGuessAt[speaker] = now
         }
         stats.cut += 1
-        nextJobID += 1
-        let jobID = nextJobID
-        pendingTurns[jobID] = turn.start
-        let session = diarizerSession
-        let chosen = plan   // 闭包里只捕获常量（并发闭包不许引用可变的捕获变量）
-        Task.detached(priority: .utility) { [weak self] in
-            var locale = chosen.locale
-            var registered = false   // 用的是他在人物页登记的语言（=已确认）
-            if locale == nil, let personId = chosen.personId {
-                locale = await NativeSpeakerEmbedder.shared.language(of: personId)
-                registered = locale != nil
-                if locale == nil && busy { locale = fallback }
-            }
+        let job = NativeAmbientBackfill.Job(
+            id: UUID().uuidString, slotKey: slotKey(speaker), speaker: speaker, session: sessionID,
+            t0: epochMs(turn.start), t1: epochMs(turn.end), streamStart: turn.start, streamEnd: turn.end,
+            locale: plan.locale, confirmed: plan.confirmed, attempts: 0)
+        backfill.add(job, samples: Array(ring[a..<b]))
+    }
+
+    private func epochMs(_ streamTime: Double) -> Double { startEpochMs + streamTime * 1000 }
+
+    /// 周围安静（主线 4 秒没新字、没有待认人的定稿）或旁听已停时，取一段重转。一次只转一段。
+    private func processBackfillIfIdle() {
+        guard !backfillBusy, let job = backfill.next() else { return }
+        let quiet = now - max(lastTextAt, rotationClock) >= Self.idleSeconds && pendingFinals.isEmpty
+        guard quiet || !isRunning else { return }
+        guard let samples = backfill.samples(of: job) else { backfill.finish(job); return }
+        backfillBusy = true
+        Task.detached(priority: .background) { [weak self] in
             let result: NativeSegmentTranscriber.Result?
-            let confirmed: Bool
-            if let locale {
+            if let locale = job.locale {
                 result = await NativeSegmentTranscriber.shared.transcribe(samples, locale: locale)
-                confirmed = chosen.confirmed || registered
             } else {
                 result = await NativeSegmentTranscriber.shared.guess(samples)
-                confirmed = false
             }
-            self?.work.async { self?.transcribed(turn, jobID: jobID, result: result, confirmed: confirmed, session: session) }
+            self?.work.async { self?.applyBackfill(job, result: result) }
         }
     }
 
-    /// 这一段该用什么语言：「我」/ 不分人 → 我的语言；认出的人 → 他登记的语言（到服务器缓存里查）；
-    /// 同一个槽位推测结果已连续一致 → 沿用（仍算待确认）；否则 → 推测。
-    private func languagePlan(for speaker: Int?) -> (locale: String?, personId: String?, confirmed: Bool) {
-        guard let speaker else { return (locale, nil, true) }
-        if speaker == diarizer?.userIndex || slotNames[speaker] == "我" || slotPersonIds[speaker] == "me" {
-            return (locale, nil, true)
+    /// 重转结果：推测投票；是我的语言就不改（主线已对）；否则替换这段 —— 窗口还在本机就地改，已送出就修服务器时间轴。
+    private func applyBackfill(_ job: NativeAmbientBackfill.Job, result: NativeSegmentTranscriber.Result?) {
+        backfillBusy = false
+        guard let result, !result.text.trimmingCharacters(in: .whitespaces).isEmpty else {
+            stats.empty += 1
+            backfill.finish(job)
+            return
         }
-        if let votes = slotLangVotes[speaker], let top = votes.max(by: { $0.value < $1.value }),
-           top.value >= Self.langVotesToTrust, Double(top.value) >= Double(votes.values.reduce(0, +)) * 0.75 {
-            return (top.key, slotPersonIds[speaker], false)
+        stats.done += 1
+        let current = job.session == sessionID
+        let guessed = !result.scores.isEmpty
+        if guessed {
+            let scores = result.scores.map { "\(NativeSegmentTranscriber.displayName($0.key)) \($0.value)" }.sorted().joined(separator: "，")
+            NativeAmbientLog.note("逐段重转：\(job.slotKey) 推测为\(NativeSegmentTranscriber.displayName(result.locale))（\(scores)）")
+            if current { slotLangVotes[job.speaker, default: [:]][result.locale, default: 0] += 1 }
+            if result.locale == locale { backfill.finish(job); return }   // 就是我的语言：主线已经转对了
         }
-        return (nil, slotPersonIds[speaker], false)
+        let confirmed = job.confirmed && !guessed
+        let local = current && utterances.contains { $0.speaker == job.speaker && $0.start < job.streamEnd + 0.3 && $0.end > job.streamStart - 0.3 }
+        if local {
+            replaced.append((job.speaker, job.streamStart - 0.3, job.streamEnd + 0.3))
+            if replaced.count > 300 { replaced.removeFirst(replaced.count - 300) }
+            utterances.removeAll { u in
+                u.fromStream && u.speaker == job.speaker && u.start < job.streamEnd + 0.3 && u.end > job.streamStart - 0.3
+            }
+            utterances.append(Utterance(speaker: job.speaker, text: result.text, start: job.streamStart, end: job.streamEnd,
+                                        locale: result.locale, langConfirmed: confirmed))
+            stats.revised += 1
+            backfill.finish(job)
+            return
+        }
+        if current {
+            // 以后主线再给这段认人时让出（窗口已送出，这里只防同一段又被主线记一遍）
+            replaced.append((job.speaker, job.streamStart - 0.3, job.streamEnd + 0.3))
+        }
+        let body: [String: Any] = ["slotKey": job.slotKey, "t0": Int(job.t0), "t1": Int(job.t1), "text": result.text,
+                                   "lang": result.locale, "langConfirmed": confirmed]
+        backfillBusy = true
+        Task.detached(priority: .background) { [weak self] in
+            do {
+                let reply = try await NativeAmbientServer.post("api/ambient/revise", body: body)
+                let replacedRows = reply["replaced"] as? Int ?? 0
+                self?.work.async {
+                    self?.backfillBusy = false
+                    self?.stats.revised += 1
+                    self?.backfill.finish(job)
+                    if replacedRows == 0 {
+                        NativeAmbientLog.note("逐段重转：服务器时间轴上没找到 \(job.slotKey) 这段（已按新句补记）")
+                    }
+                }
+            } catch {
+                NativeAmbientLog.note("逐段重转：修正服务器记录失败 \(error.localizedDescription)，稍后重试", level: "error")
+                self?.work.async {
+                    self?.backfillBusy = false
+                    self?.backfill.retry(job)
+                }
+            }
+        }
+    }
+
+    /// 这个人的这一段要不要补线重转、用什么语言。nil = 不用（主线的「我的语言」已覆盖）。
+    ///   - 「我」→ nil；
+    ///   - 认出的人登记了语言：和我的语言一样 → nil；不一样 → 用它（已确认）；
+    ///   - 推测票数：多数（≥75%）是别的语言 → 用它（待确认）；多数是我的语言且 ≥2 票 → nil；
+    ///   - 否则拿这段去推测（每人最多 3 段、每段 ≥1.2 秒、积压时不推测）。
+    private func segmentPlan(speaker: Int, duration: Double) -> (locale: String?, confirmed: Bool)? {
+        if speaker == diarizer?.userIndex || slotNames[speaker] == "我" || slotPersonIds[speaker] == "me" { return nil }
+        if let person = slotPersonIds[speaker] {
+            if let registered = personLanguage[person] {
+                if !registered.isEmpty { return registered == locale ? nil : (registered, true) }
+            } else {
+                fetchPersonLanguage(person)
+            }
+        }
+        if let votes = slotLangVotes[speaker], let top = votes.max(by: { $0.value < $1.value }) {
+            let share = Double(top.value) / Double(max(1, votes.values.reduce(0, +)))
+            if share >= 0.75 {
+                if top.key != locale { return (top.key, false) }
+                if top.value >= 2 { return nil }
+            }
+        }
+        guard (guessCount[speaker] ?? 0) < Self.maxGuessesPerSpeaker, duration >= Self.guessMinSeconds,
+              backfill.count < NativeAmbientBackfill.maxJobs / 2,
+              now - (lastGuessAt[speaker] ?? -.infinity) >= 2 else { return nil }
+        return (nil, false)
+    }
+
+    private func fetchPersonLanguage(_ person: String) {
+        personLanguage[person] = personLanguage[person]   // 占位防重复
+        Task.detached(priority: .utility) { [weak self] in
+            let language = await NativeSpeakerEmbedder.shared.language(of: person) ?? ""
+            self?.work.async { self?.personLanguage[person] = language }
+        }
     }
 
     private func topVote(_ speaker: Int) -> String? {
@@ -858,32 +1043,12 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private func logStats() {
         guard Date().timeIntervalSince(lastStatsAt) >= 30 else { return }
         lastStatsAt = Date()
-        let line = "旁听统计：切出 \(stats.cut) 段，转出文字 \(stats.done) 段（空 \(stats.empty)），待转写 \(pendingTurns.count)，"
-            + "丢弃 \(stats.dropped)，本窗 \(utterances.count) 句，已送 \(stats.sent) 窗"
+        let line = "旁听统计：主线 \(stats.streamed) 句；重转排队 \(stats.cut) 段、已转 \(stats.done)（空 \(stats.empty)、修正 \(stats.revised)），"
+            + "队列里还有 \(backfill.count)；本窗 \(utterances.count) 句，已送 \(stats.sent) 窗"
             + (diarizer == nil ? "（分离器未就绪）" : "")
         guard line != lastStatsLine else { return }
         lastStatsLine = line
         NativeAmbientLog.note(line)
-    }
-
-    private func transcribed(_ turn: Turn, jobID: Int, result: NativeSegmentTranscriber.Result?, confirmed: Bool, session: Int) {
-        pendingTurns[jobID] = nil
-        guard let result, !result.text.trimmingCharacters(in: .whitespaces).isEmpty else {
-            stats.empty += 1
-            return
-        }
-        stats.done += 1
-        if !result.scores.isEmpty {
-            let scores = result.scores.map { "\(NativeSegmentTranscriber.displayName($0.key)) \($0.value)" }.sorted().joined(separator: "，")
-            NativeAmbientLog.note("分段转写：说话人\((turn.speaker ?? -1) + 1) 推测为\(NativeSegmentTranscriber.displayName(result.locale))（\(scores)）")
-            if let speaker = turn.speaker, session == diarizerSession {
-                slotLangVotes[speaker, default: [:]][result.locale, default: 0] += 1
-            }
-        }
-        let speaker = session == diarizerSession ? turn.speaker : nil
-        utterances.append(Utterance(speaker: speaker, text: result.text, start: turn.start, end: turn.end,
-                                    locale: result.locale, langConfirmed: confirmed))
-        emit(.partial(result.text))
     }
 
     private func flushWindow(force: Bool) {
@@ -898,11 +1063,11 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             || chars >= Self.windowMaxChars
         guard due else { windowDueSince = nil; return }
         // 只等「比这窗最后一句还早」的段转完；之后的段归下一窗。等太久（转写积压）也照送，别让整窗卡死
-        let blocking = pendingTurns.values.contains { $0 < last.end }
+        let blocking = !pendingFinals.isEmpty   // 主线还有定稿没认人：等一下（逐段重转不等，它在后台事后修正）
         if blocking && !force {
             if windowDueSince == nil { windowDueSince = Date() }
             guard let since = windowDueSince, Date().timeIntervalSince(since) >= Self.windowWaitLimit else { return }
-            NativeAmbientLog.note("旁听：还有更早的段没转完，已等 \(Int(Self.windowWaitLimit)) 秒，先送这一窗")
+            NativeAmbientLog.note("旁听：主线定稿迟迟没认完人，已等 \(Int(Self.windowWaitLimit)) 秒，先送这一窗")
         }
         windowDueSince = nil
         let taken = utterances.sorted { $0.start < $1.start }
@@ -930,7 +1095,9 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         let speakers = Set(taken.compactMap(\.speaker)).count
         collectHeard(taken)
         let window = Window(id: "amb-" + Self.stamp.string(from: started) + "-" + String(UUID().uuidString.prefix(4)),
-                            startedAt: started, endedAt: Date(), streamStart: first.start, streamEnd: last.end,
+                            startedAt: Date(timeIntervalSince1970: epochMs(first.start) / 1000),
+                            endedAt: Date(timeIntervalSince1970: epochMs(last.end) / 1000),
+                            streamStart: first.start, streamEnd: last.end,
                             utterances: rows, speakerCount: max(1, speakers), locale: locale,
                             source: source.wireName, speakers: speakerRows)
         stats.sent += 1

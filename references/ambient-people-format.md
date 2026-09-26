@@ -63,6 +63,7 @@ iPad 页面：设置 →「旁听与降噪」→「对话时间轴与人物」�
 | PATCH | `/people/<id>` | 改 `name` / `intro` / `profile`（改成已有名字 = 合并） |
 | POST | `/people/<id>/merge` | `{into}` 显式合并 |
 | POST | `/people/<id>/summarize` | 让 AI 按历史重写整理 |
+| POST | `/revise` | `{slotKey, t0, t1, text, lang, langConfirmed}` App 空闲时逐段重转后修正时间轴那一段（替换该块在该时段的句子，标 `revised`） |
 | POST | `/slots/assign` | `{slotKey, name|personId, vector?}` 给块定人 |
 | POST | `/slots/unassign` | `{slotKey}` 取消 |
 | GET | `/voiceprints` | 每人名字 + 全部声纹向量（App 比对用） |

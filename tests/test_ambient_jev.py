@@ -307,3 +307,20 @@ class AmbientPeopleTests(AmbientJevTests):
         self.assertEqual([(p["name"], p["language"]) for p in prints], [("田中", "ja-JP")])
         bad = self.client.patch(f"/api/ambient/people/{pid}", json={"language": "日本語"})
         self.assertEqual(bad.status_code, 400)
+
+    def test_revise_replaces_stream_text_for_that_block(self):
+        self.login()
+        self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "田中"})
+        self.judge(self.window("w1"))
+        reply = self.client.post("/api/ambient/revise", json={
+            "slotKey": "s1:1", "t0": 1_700_000_003_000, "t1": 1_700_000_005_000,
+            "text": "土曜日の朝八時にしよう", "lang": "ja-JP", "langConfirmed": False}).get_json()
+        self.assertEqual(reply["replaced"], 1)
+        rows = self.timeline()["utterances"]
+        tanaka = [r for r in rows if r["name"] == "田中"]
+        self.assertEqual([r["text"] for r in tanaka], ["土曜日の朝八時にしよう"])
+        self.assertTrue(tanaka[0]["revised"])
+        self.assertEqual(rows[0]["text"], "周末去爬山吗")   # 别人的句子不动
+        person = self.client.get("/api/ambient/people").get_json()["people"][1]
+        self.assertEqual(person["languageVotes"], {"ja-JP": 1})
+

@@ -360,6 +360,46 @@ class AmbientPeople:
         self._record_conversation(window, rows, mapping)
         return mapping
 
+    def revise(self, slot_key: str, t0: int, t1: int, text: str, *, lang: str = "", confirmed: bool = True) -> int:
+        """逐段重转的事后修正（App 空闲时后台转完才送来）：把这个声音块在 [t0, t1] 前后 0.3 秒内的句子
+        换成一句新的（保留原窗口编号，标 revised）。返回替换掉的句数；一句都没对上也照样补记这一句。"""
+        slot_key = (slot_key or "").strip()
+        text = (text or "").strip()
+        if not slot_key or not text or t1 < t0:
+            raise PeopleError("bad_revision", "缺少声音块编号 / 文字，或时间不对")
+        if lang and not LANGUAGE_RE.fullmatch(lang):
+            raise PeopleError("bad_language", f"看不懂的语言代码：{lang}")
+        pad = 300
+        with self._lock:
+            path = self.root / "timeline" / (time.strftime("%Y-%m-%d", time.localtime(t0 / 1000)) + ".jsonl")
+            rows = []
+            if path.is_file():
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        rows.append(json.loads(line))
+                    except ValueError:
+                        continue
+            hit = [r for r in rows if r.get("slotKey") == slot_key
+                   and int(r.get("t0") or 0) < t1 + pad and int(r.get("t1") or 0) > t0 - pad]
+            keep = [r for r in rows if r not in hit]
+            first = hit[0] if hit else {}
+            keep.append({"contract": UTTERANCE_CONTRACT, "id": uuid.uuid4().hex[:12], "t0": int(t0), "t1": int(t1),
+                         "windowId": first.get("windowId") or "revise", "source": first.get("source") or "",
+                         "slotKey": slot_key, "isUser": bool(first.get("isUser")), "label": first.get("label") or "",
+                         "text": text[:1200], "lang": lang, "langConfirmed": bool(confirmed), "revised": True})
+            keep.sort(key=lambda r: int(r.get("t0") or 0))
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep), encoding="utf-8")
+            tmp.replace(path)
+            if lang and not confirmed:
+                data = self._load()
+                slot = data["slots"].setdefault(slot_key, {"personId": None, "firstSeen": int(t0), "lastSeen": int(t1),
+                                                           "utterances": 0})
+                votes = slot.setdefault("langVotes", {})
+                votes[lang] = votes.get(lang, 0) + 1
+                self._save(data)
+        return len(hit)
+
     def _record_conversation(self, window: dict, rows: list[dict], mapping: dict) -> None:
         present = {pid for pid in mapping.values() if pid and pid != ME}
         if not present:

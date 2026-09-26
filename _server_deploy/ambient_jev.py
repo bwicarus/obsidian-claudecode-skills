@@ -607,6 +607,23 @@ def slot_unassign():
     return _people_reply(lambda: (people().unassign_slot(str(body.get("slotKey") or "")), {})[1])
 
 
+@bp.post("/revise")
+def revise():
+    """App 空闲时后台逐段重转完，修正时间轴上那一段（用该说话人的语言重转的结果替换主线识别的文字）。"""
+    body = request.get_json(silent=True) or {}
+    try:
+        t0, t1 = int(body.get("t0") or 0), int(body.get("t1") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "code": "bad_range"}), 400
+
+    def go():
+        count = people().revise(str(body.get("slotKey") or ""), t0, t1, str(body.get("text") or ""),
+                                lang=str(body.get("lang") or ""), confirmed=bool(body.get("langConfirmed", True)))
+        log_event("revised", slotKey=body.get("slotKey"), replaced=count, lang=body.get("lang"))
+        return {"replaced": count}
+    return _people_reply(go)
+
+
 @bp.get("/timeline")
 def timeline():
     now = int(time.time() * 1000)
