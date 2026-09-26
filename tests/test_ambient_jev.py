@@ -322,6 +322,16 @@ class AmbientPeopleTests(AmbientJevTests):
         names = [p["name"] for p in self.client.get("/api/ambient/people").get_json()["people"]]
         self.assertIn("小王", names)   # 又定回来就重新出现
 
+    def test_judge_off_records_timeline_without_judging(self):
+        self.login()
+        import ambient_jev
+        called = []
+        ambient_jev._predict = lambda *a, **k: called.append(1) or {}
+        reply = self.client.post("/api/ambient/judge", json=dict(self.window("w1"), judge=False)).get_json()
+        self.assertEqual((reply["ok"], reply["judged"], reply["actions"]), (True, False, []))
+        self.assertEqual(called, [])
+        self.assertEqual(len(self.timeline()["utterances"]), 2)   # 时间轴照记
+
     def test_refine_translation_keeps_order_and_alignment(self):
         self.login()
         import ambient_jev
@@ -339,6 +349,11 @@ class AmbientPeopleTests(AmbientJevTests):
         ambient_jev._ai = lambda prompt: (self.ai_prompts.append(prompt) or "1. 你好")
         self.client.post("/api/ambient/translate", json={"lines": [{"speaker": "田中", "text": "Hi", "personId": pid}]})
         self.assertIn("田中：大学同学，在东京做设计", self.ai_prompts[-1])
+        self.client.post("/api/ambient/translate", json={"lines": [{"speaker": "田中", "text": "Hi"}],
+                                                         "context": [{"speaker": "我", "text": "你好啊"}]})
+        self.assertIn("前文（只用来理解上下文", self.ai_prompts[-1])
+        self.assertIn("我：你好啊", self.ai_prompts[-1])
+        self.assertNotIn("1. 我：你好啊", self.ai_prompts[-1])   # 前文不编号、不要求输出
 
     def test_delete_person_with_all_utterances_and_unnamed_block(self):
         self.login()

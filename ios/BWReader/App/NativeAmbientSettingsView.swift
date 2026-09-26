@@ -34,6 +34,7 @@ struct NativeAmbientSettingsSections: View {
         voiceprintSection
         peopleSection
         ambientSection
+        judgeSection
         if !listener.feed.isEmpty { feedSection }
         gateSection
         diagnosticsSection
@@ -140,6 +141,16 @@ struct NativeAmbientSettingsSections: View {
     }
 
     // MARK: 环境旁听
+
+    /// jev 判断单独一个开关：旁听照常转写、记时间轴，只是不判断、不动作。
+    private var judgeSection: some View {
+        Section {
+            Toggle("jev 判断", isOn: $listener.judgeEnabled)
+        } header: { Text("jev 判断") } footer: {
+            Text("打开时每段旁听都交 jev 判断，并可能自动执行：危险时持续录音并通知、有疑问交 AI 解答、"
+                 + "把对话存进 Obsidian、记下任务。关掉后旁听照常转写、照常记进时间轴与人物，只是不判断、不执行任何动作。")
+        }
+    }
 
     private var ambientSection: some View {
         Section {

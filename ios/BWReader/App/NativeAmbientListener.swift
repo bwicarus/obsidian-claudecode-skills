@@ -228,10 +228,27 @@ final class NativeAmbientListener: ObservableObject {
 
     private var outbox: [[String: Any]] = []
 
+    /// jev 判断开关（2026-09-27 用户：「jev 的旁听被触发了一次，希望把这个功能的开启关闭单独列出来」）。
+    /// 关掉：照常转写、记时间轴与人物，但服务器不做 jev 判断、不执行任何动作（危险录音 / AI 解答 / 存转写 / 记任务）。
+    static let judgeKey = "bw.ambient.jevJudge"
+    @Published var judgeEnabled: Bool = UserDefaults.standard.object(forKey: NativeAmbientListener.judgeKey) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(judgeEnabled, forKey: Self.judgeKey)
+            NativeAmbientLog.note("旁听：jev 判断已" + (judgeEnabled ? "打开" : "关闭（只转写、记时间轴）"))
+        }
+    }
+
     private func judge(_ window: NativeAmbientPipeline.Window) async {
-        let body = window.payload
+        var body = window.payload
+        body["judge"] = judgeEnabled
         do {
             let reply = try await NativeAmbientServer.post("api/ambient/judge", body: body, timeout: 30)
+            if reply["judged"] as? Bool == false {
+                lastJudgment = "只记录（jev 判断已关）"
+                if let names = reply["names"] as? [String: Any], !names.isEmpty { pipeline?.applyServerNames(names) }
+                await flushOutbox()
+                return
+            }
             let actions = reply["actions"] as? [String] ?? []
             let judgments = reply["judgments"] as? [String: [String: Any]] ?? [:]
             let summary = ["meaningful", "danger", "question", "record"].compactMap { name -> String? in

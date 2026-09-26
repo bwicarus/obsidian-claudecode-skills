@@ -120,3 +120,7 @@ iPad 麦克风（平时）/ 通话引擎上行旁路（通话中）
   `Application Support/BWReader/ambient-translations.json`（`NativeAmbientTranslationStore`）：按块第一句 id 记，存整块句子 id + 原文；
   AI 精翻覆盖本机翻译、本机翻译不覆盖 AI；原文变了（块又长了）旧译文不显示；**绑定删除** = 每次刷新时，已加载时间范围内
   句子 id 不全在服务器上的记录删掉（删人 / 删声音块 / 被重转替换都走这一条）。
+- **jev 判断开关（2026-09-27）**：设置 →「旁听与降噪」→「jev 判断」（默认开，`UserDefaults bw.ambient.jevJudge`）。关掉时 App 送窗带
+  `judge:false`，服务器只 `_ingest_people`（时间轴 / 人物照记），不 predict、不执行动作、不更新滚动摘要（日志 `recorded_only`）。
+- **翻译进度**：顶部进度条（本机翻译 / AI 精翻 · 完成数 / 总数）+ 每块状态（等待 / 翻译中 / 失败，完成后译文尾标「本机」「AI」）。
+  AI 精翻分批：每批 20 块、附前 12 块作 `context`（服务器写进「前文（只用来理解…）」，不编号不输出）。

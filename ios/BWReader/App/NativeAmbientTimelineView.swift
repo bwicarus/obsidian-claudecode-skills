@@ -172,6 +172,13 @@ final class NativeAmbientTimelineModel: ObservableObject {
     @Published var translationVersion = 0                 // 变了 = 有新的待翻（翻译器据此开下一组）
     @Published var translationNote: String?
     @Published var refining = false
+    /// 每一块的翻译进行状态（按块第一句 id）；完成 = 有译文记录，不在这里。
+    enum RowState: Equatable { case queued(String), working(String), failed(String) }
+    @Published var rowStates: [String: RowState] = [:]
+    /// 顶部进度：当前这一轮翻译（本机或 AI）已完成 / 总数。
+    struct Job: Equatable { var label: String; var done: Int; var total: Int; var finished = false }
+    @Published var job: Job?
+    private var appleGroupIDs: [String: [String]] = [:]   // 一组里的原文 → 对应块的 id
     private var translationInFlight: Set<String> = []
     private var translationFailed: Set<String> = []
 
@@ -189,8 +196,26 @@ final class NativeAmbientTimelineModel: ObservableObject {
             if byLanguage[key] == nil { order.append(key) }
             byLanguage[key, default: []].append(text)
         }
-        guard let key = order.first, let texts = byLanguage[key]?.prefix(60) else { return nil }
+        // 所有待翻的块先标「等待」，进度总数随之更新（自动刷新进来的新句也算进来）
+        var queued = 0
+        for block in groups.flatMap(\.blocks) {
+            let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard byLanguage.values.contains(where: { $0.contains(text) }) else { continue }
+            if rowStates[block.first.id] == nil { rowStates[block.first.id] = .queued("本机"); queued += 1 }
+        }
+        if queued > 0 {
+            if var current = job, current.label == "本机翻译", !current.finished { current.total += queued; job = current }
+            else { job = Job(label: "本机翻译", done: 0, total: queued) }
+        }
+        guard let key = order.first, let texts = byLanguage[key]?.prefix(60) else {
+            finishJob("本机翻译")
+            return nil
+        }
         translationInFlight.formUnion(texts)
+        for block in groups.flatMap(\.blocks) where texts.contains(block.text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            rowStates[block.first.id] = .working("本机")
+            appleGroupIDs[block.text.trimmingCharacters(in: .whitespacesAndNewlines), default: []].append(block.first.id)
+        }
         return (key.isEmpty ? nil : key, Array(texts))
     }
 
@@ -212,12 +237,31 @@ final class NativeAmbientTimelineModel: ObservableObject {
         }
         if !results.isEmpty { store.save(); storeRevision += 1 }
         let missing = texts.filter { results[$0] == nil }
+        var finishedBlocks = 0
+        for text in texts {
+            for id in appleGroupIDs.removeValue(forKey: text) ?? [] {
+                finishedBlocks += 1
+                rowStates[id] = results[text] == nil ? .failed("本机") : nil
+            }
+        }
+        if var current = job, current.label == "本机翻译" { current.done += finishedBlocks; job = current }
         if let error {
             translationFailed.formUnion(missing)
             translationNote = "翻译失败：" + error
             NativeAmbientLog.note("时间轴：翻译失败（\(missing.count) 句，首句「\(missing.first?.prefix(40) ?? "")」）\(error)", level: "error")
         }
         translationVersion += 1   // 接着翻下一组
+    }
+
+    private func finishJob(_ label: String) {
+        guard var current = job, current.label == label, !current.finished else { return }
+        current.finished = true
+        current.done = current.total
+        job = current
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            if self?.job?.finished == true { self?.job = nil }
+        }
     }
 
     /// 精翻（2026-09-27 用户）：只翻滑条选中范围内的对话 —— 按时间先后整理成「说话人：原文」一次交给 AI，
@@ -227,40 +271,61 @@ final class NativeAmbientTimelineModel: ObservableObject {
         guard !blocks.isEmpty, !refining else { return }
         refining = true
         translateOn = true
-        translationNote = "AI 精翻中…（\(blocks.count) 块，要十几秒到一两分钟）"
+        translationNote = nil
         defer { refining = false }
-        let lines: [[String: Any]] = blocks.map {
-            ["speaker": $0.first.displayName, "text": $0.text, "personId": $0.first.personId ?? ""]
+        for block in blocks { rowStates[block.first.id] = .queued("AI") }
+        job = Job(label: "AI 精翻", done: 0, total: blocks.count)
+        let line = { (block: Block) -> [String: Any] in
+            ["speaker": block.first.displayName, "text": block.text, "personId": block.first.personId ?? ""]
         }
-        do {
-            let reply = try await NativeAmbientServer.post("api/ambient/translate", body: ["lines": lines], timeout: 300)
-            let out = reply["translations"] as? [String] ?? []
-            var count = 0
-            let store = NativeAmbientTranslationStore.shared
-            for (block, text) in zip(blocks, out) where !text.isEmpty {
-                store.put(block, text: text, source: "ai")   // AI 精翻覆盖本机翻译
-                count += 1
+        let store = NativeAmbientTranslationStore.shared
+        var translated = 0, failedChunks = 0
+        // 分批：每批 20 块、附前面 12 块当上下文 —— 进度能一批批往前走，也不丢前后文
+        for start in stride(from: 0, to: blocks.count, by: 20) {
+            let chunk = Array(blocks[start..<min(blocks.count, start + 20)])
+            let context = blocks[max(0, start - 12)..<start].map(line)
+            for block in chunk { rowStates[block.first.id] = .working("AI") }
+            do {
+                let reply = try await NativeAmbientServer.post("api/ambient/translate",
+                                                               body: ["lines": chunk.map(line), "context": Array(context)], timeout: 300)
+                let out = reply["translations"] as? [String] ?? []
+                for (index, block) in chunk.enumerated() {
+                    if index < out.count, !out[index].isEmpty {
+                        store.put(block, text: out[index], source: "ai")   // AI 精翻覆盖本机翻译
+                        rowStates[block.first.id] = nil
+                        translated += 1
+                    } else {
+                        rowStates[block.first.id] = .failed("AI")
+                    }
+                }
+                store.save()
+                storeRevision += 1
+            } catch {
+                failedChunks += 1
+                for block in chunk { rowStates[block.first.id] = .failed("AI") }
+                translationNote = "精翻有一批失败：\(error.localizedDescription)"
+                NativeAmbientLog.note("时间轴：精翻一批失败 \(error.localizedDescription)", level: "error")
             }
-            store.save()
-            storeRevision += 1
-            translationNote = "AI 精翻完成：\(count) / \(blocks.count) 块"
-            NativeAmbientLog.note("时间轴：精翻 \(count)/\(blocks.count) 块")
-        } catch {
-            translationNote = "精翻失败：\(error.localizedDescription)"
-            NativeAmbientLog.note("时间轴：精翻失败 \(error.localizedDescription)", level: "error")
+            if var current = job { current.done += chunk.count; job = current }
         }
+        finishJob("AI 精翻")
+        NativeAmbientLog.note("时间轴：精翻 \(translated)/\(blocks.count) 块" + (failedChunks > 0 ? "，\(failedChunks) 批失败" : ""))
     }
 
     /// 这一块显示的译文：精翻优先，其次 Apple 机翻；与原文相同（本来就是中文）不显示。
-    func translation(for block: Block) -> String? {
+    func translation(for block: Block) -> NativeAmbientTranslationStore.Record? {
         guard translateOn, let record = NativeAmbientTranslationStore.shared.translation(for: block) else { return nil }
         let original = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return record.text == original ? nil : record.text
+        return record.text == original ? nil : record
     }
 
     func toggleTranslation() {
         translateOn.toggle()
         translationNote = nil
+        if !translateOn {
+            rowStates = rowStates.filter { if case .working = $0.value { return true }; return false }
+            if job?.label == "本机翻译" { job = nil }
+        }
         translationFailed = []
         translationVersion += 1
     }
@@ -515,6 +580,16 @@ struct NativeAmbientTimelineView: View {
 
     private var controls: some View {
         Section {
+            if let job = model.job {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(job.finished ? job.label + "完成" : job.label + "中").font(.subheadline)
+                        Spacer()
+                        Text("\(job.done) / \(job.total)").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: Double(min(job.done, job.total)), total: Double(max(1, job.total)))
+                }
+            }
             Picker("范围", selection: $model.range) {
                 ForEach(NativeAmbientTimelineModel.Span.allCases) { Text($0.rawValue).tag($0) }
             }
@@ -553,7 +628,8 @@ struct NativeAmbientTimelineView: View {
                         ForEach(NativeAmbientTimelineModel.ticks(from: block.t1, to: newer).reversed(), id: \.self) { tick in
                             NativeAmbientTickRow(time: tick)
                         }
-                        NativeAmbientTimelineRow(block: block, translation: model.translation(for: block))
+                        NativeAmbientTimelineRow(block: block, translation: model.translation(for: block),
+                                                 state: model.rowStates[block.first.id])
                             .contentShape(Rectangle())
                             .onTapGesture { selected = block.first }
                     }
@@ -599,7 +675,8 @@ struct NativeAmbientTimelineView: View {
 /// 时间轴的一块：一个人连着说的几句 —— 起止时间 · 说话人 · 全文（长句换行显示完整）。
 struct NativeAmbientTimelineRow: View {
     let block: NativeAmbientTimelineModel.Block
-    var translation: String?
+    var translation: NativeAmbientTranslationStore.Record?
+    var state: NativeAmbientTimelineModel.RowState?
 
     var body: some View {
         let first = block.first
@@ -616,8 +693,22 @@ struct NativeAmbientTimelineRow: View {
                 .frame(width: 70, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 Text(block.text).font(.callout).fixedSize(horizontal: false, vertical: true)
-                if let translation, !translation.isEmpty {
-                    Text(translation).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if let translation, !translation.text.isEmpty {
+                    (Text(translation.text) + Text(translation.source == "ai" ? "  · AI" : "  · 本机").font(.caption2).foregroundColor(.gray))
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                switch state {
+                case .queued(let who):
+                    Text(who == "AI" ? "等待 AI 精翻…" : "等待本机翻译…").font(.caption).foregroundStyle(.tertiary)
+                case .working(let who):
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text(who == "AI" ? "AI 精翻中…" : "本机翻译中…").font(.caption).foregroundStyle(.secondary)
+                    }
+                case .failed(let who):
+                    Text(who == "AI" ? "AI 精翻失败" : "本机翻译失败").font(.caption).foregroundStyle(.red)
+                case nil:
+                    EmptyView()
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

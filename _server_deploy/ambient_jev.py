@@ -431,13 +431,19 @@ def _guard():
 @bp.post("/judge")
 def judge():
     started = time.monotonic()
+    body = request.get_json(silent=True) or {}
     try:
-        window = normalize_window(request.get_json(silent=True) or {})
+        window = normalize_window(body)
     except (TypeError, ValueError) as exc:
         log_event("judge_rejected", reason=str(exc))
         return jsonify({"ok": False, "code": str(exc)}), 400
     summary = load_context().get("summary") or ""
     clues = _ingest_people(window)
+    if body.get("judge") is False:
+        # App 里「jev 判断」关着：只记时间轴与人物（上面 _ingest_people 已做），不判断、不动作、不更新滚动摘要
+        log_event("recorded_only", windowId=window["windowId"], source=window["source"], utterances=len(window["utterances"]))
+        return jsonify({"ok": True, "windowId": window["windowId"], "judged": False, "judgments": {}, "actions": [],
+                        "names": window.get("names") or {}})
     try:
         judgments = _predict(build_state(window, summary, clues), QUESTIONS)
     except JevUnavailable as exc:
@@ -647,7 +653,7 @@ def revise():
     return _people_reply(go)
 
 
-def refine_translation(lines: list[dict]) -> list[str]:
+def refine_translation(lines: list[dict], context: list | None = None) -> list[str]:
     """精翻（2026-09-27 用户）：整段对话连同说话人一起交给 AI，结合上下文翻成简体中文，按顺序逐行给回。
     输入每项 {speaker, text, personId?}；说话人数量不限。定了人且写过介绍 / 有 AI 整理的，附在提示里当背景。
     返回与输入等长的译文列表（没对上的行为空串，不错位）。"""
@@ -672,6 +678,11 @@ def refine_translation(lines: list[dict]) -> list[str]:
         if about:
             profiles.append(f"- {info['name']}：{about[:600]}")
     background = ("出场人物（供理解上下文，不用翻译）：\n" + "\n".join(profiles) + "\n\n") if profiles else ""
+    # 分批精翻时 App 附上这一批之前的几句：只用来理解，不翻译、不输出
+    before = [f"{str(c.get('speaker') or '?').strip()[:40]}：{str(c.get('text') or '').strip()[:600]}"
+              for c in (context or [])[-20:] if isinstance(c, dict) and str(c.get("text") or "").strip()]
+    if before:
+        background += "前文（只用来理解上下文，不要翻译、不要输出）：\n" + "\n".join(before) + "\n\n"
     prompt = ("下面是按时间顺序的多人对话（自动语音转写，可能有识别错误），每行是「序号. 说话人：原文」。\n"
               "请结合上下文把每一行翻译成自然的简体中文；识别错误按上下文合理还原。\n"
               f"严格输出 {len(rows)} 行，与输入一一对应、顺序相同，每行格式「序号. 译文」，译文里不要带说话人；"
@@ -699,7 +710,7 @@ def refine_translation(lines: list[dict]) -> list[str]:
 @bp.post("/translate")
 def translate():
     body = request.get_json(silent=True) or {}
-    return _people_reply(lambda: {"translations": refine_translation(body.get("lines") or [])})
+    return _people_reply(lambda: {"translations": refine_translation(body.get("lines") or [], body.get("context") or [])})
 
 
 @bp.get("/timeline")
