@@ -368,6 +368,7 @@ OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。2026-06 曾�
   `reader_book_ocr_worker.py`（profile `pi-default-v5`，不带 DocLayout-YOLO / UniMerNet 公式模型，manga
   走 `MANGA_OCR_PYTHON`）；`pc` = 任务排队等 ReaderPC 托管的 `reader_pc_preprocess_worker.py` 认领
   （profile `quality-first-v6`，独立 `reader-pc-ocr-venv`，带公式定位/识别，结果在 App 里标「PC 高质量」）。
+  2026-09-27 起这个 worker 跑在 Mac mini（launchd `pc-ocr`，Apple MPS；见 `references/mac-server.md` §9）。
   Pi 出局后差别只剩流水线，`pi` 没有任何独有能力，所以 App 只保留 `pc` 入口
   （`ReaderLocalLibraryView.preprocessingStartMenus`，契约测试钉住 `executor: "pi"` 不再出现在该视图）。
   ⚠ 服务端**仍认** `executor=pi`：旧结果采纳（`adoptExisting`）走的就是它，别顺手删。

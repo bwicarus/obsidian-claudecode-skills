@@ -63,10 +63,13 @@ class OfficialUniMERNetBase:
         self.model = None
         self.processor = None
         self.torch = None
-        if str(device).lower() != "cuda":
+        accel = str(device).lower()
+        if accel not in ("cuda", "mps"):
             raise UniMERNetUnavailable(
-                "formula-model-unavailable: UniMERNet quality profile requires CUDA"
+                "formula-model-unavailable: UniMERNet quality profile requires CUDA or MPS"
             )
+        # Mac（MPS）与 Windows（CUDA）同一份适配器；实例属性盖掉类上的默认值。
+        self.device = "cuda:0" if accel == "cuda" else "mps"
         if not self.model_dir.is_dir():
             raise UniMERNetUnavailable(
                 "formula-model-unavailable: UniMERNet model directory is missing"
@@ -84,9 +87,11 @@ class OfficialUniMERNetBase:
         os.environ["HF_DATASETS_OFFLINE"] = "1"
 
         torch, Config, tasks, load_processor = _official_runtime()
-        if not bool(torch.cuda.is_available()):
+        available = (bool(torch.cuda.is_available()) if accel == "cuda"
+                     else bool(torch.backends.mps.is_available()))
+        if not available:
             raise UniMERNetUnavailable(
-                "formula-model-unavailable: CUDA is unavailable"
+                f"formula-model-unavailable: {accel} is unavailable"
             )
         self.torch = torch
         model_path = self.model_dir.as_posix()
@@ -97,7 +102,7 @@ class OfficialUniMERNetBase:
                 f"model.model_config.model_name={model_path}",
                 f"model.pretrained={checkpoint_path}",
                 f"model.tokenizer_config.path={model_path}",
-                "run.device=cuda",
+                f"run.device={accel}",
                 "run.distributed=false",
                 "run.world_size=1",
             ],
@@ -105,7 +110,7 @@ class OfficialUniMERNetBase:
         try:
             cfg = Config(args)
             task = tasks.setup_task(cfg)
-            model = task.build_model(cfg).to(torch.device("cuda:0"))
+            model = task.build_model(cfg).to(torch.device(self.device))
             model.eval()
             processor = load_processor(
                 "formula_image_eval",
@@ -124,7 +129,7 @@ class OfficialUniMERNetBase:
             raise UniMERNetUnavailable("formula-model-unavailable: adapter is closed")
         try:
             tensor = self.processor(image.convert("RGB")).unsqueeze(0).to(
-                self.torch.device("cuda:0")
+                self.torch.device(self.device)
             )
             with self.torch.inference_mode():
                 output = self.model.generate(

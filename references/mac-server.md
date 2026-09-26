@@ -220,7 +220,18 @@ cd ~/BW/src/claude
 ## 9. 还没做的
 
 - 系统设置由用户开：自动登录（服务是用户级，登录后才起）、断电后自动开机。睡眠已是永不。
-- 没迁的：PC 端 OCR 预处理（Windows 的 reader-pc-ocr-venv / models）、spacy 语法分析 venv
-  （server.env 里 `SPACY_PYTHON=~/BW/venv/spacy` 还不存在）、DocLayout-YOLO。
-- 这批 Mac/Xcode 27 修复在 `claude/mac-migration-20260925`，Codex 的分支里没有，需要合并。
+- ✅ 已迁（2026-09-27）：
+  - **spacy 语法分析**：`~/BW/venv/spacy`（uv，Python 3.13，spaCy 3.8 + en_core_web_sm 3.8），`SPACY_PYTHON` 已指向它。
+  - **「PC 预处理」高质量 OCR**：launchd `space.bwicarus.pc-ocr`（`deploy_mac.py` 里的 `pc-ocr`），跑同一份
+    `scripts/reader_pc_preprocess_worker.py`，设备从「只认 CUDA」改成「CUDA 或 Apple MPS」（两者都没有仍拒绝，
+    不退 CPU）。venv `~/BW/venv/pc-ocr`（**Python 3.11** —— 3.10 只能装到 scipy 1.15，它的 PROPACK 扩展在
+    macOS 27 上 dlopen 失败「__thread_bss zero-fill」；3.11 可装 scipy ≥1.16）。依赖对齐 Windows：torch 2.6 /
+    doclayout-yolo 0.0.4 / unimernet 0.2.3 / manga-ocr 0.1.15 / mokuro 0.2.5 / transformers 4.42.4 /
+    datasets 5.0.1（新 pyarrow 与旧 datasets 不兼容）。模型 1.7 GB 从 Windows 拷到 `~/BW/data/BWReader/models`。
+    经 `https://bwicarus-2…ts.net` 回连本机 webapp 认领（worker 只接受 HTTPS）。M6 实测：公式识别约 5 秒/个。
+    状态 `~/BW/data/BWReader/pc-ocr-cache/worker-status.json`，日志 `~/BW/logs/pc-ocr.log`。
+  - DocLayout-YOLO：不再单独跑，PC 预处理那一趟 YOLO 顺手出图/表框。
+- 缺 **ffmpeg**：Mac 没有 Homebrew，装它要用户本人输入系统密码。
+- 分支：Codex 的各分支（`codex/native-pdf-runtime-20260924` 等）**全是本分支的祖先**，没有要合回的东西；
+  Codex 也不再作为开发主体（2026-09-01），所以不再往 codex/* 推。
 - Windows 上的旧数据：核对无误后再删。

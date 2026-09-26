@@ -816,5 +816,31 @@ class WindowsPriorityTest(unittest.TestCase):
         self.assertEqual(set_priority.calls, [(pseudo_handle, 0x00004000)])
 
 
+
+class AcceleratorTest(unittest.TestCase):
+    """2026-09-27 服务器换 Mac：质量档接受 CUDA 或 Apple MPS，两者都没有仍然拒绝（不许退回 CPU）。"""
+
+    @staticmethod
+    def _torch(cuda: bool, mps: bool):
+        return SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: cuda),
+            backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps)),
+        )
+
+    def test_prefers_cuda_then_mps(self):
+        self.assertEqual(worker._accelerator(self._torch(True, True)), "cuda")
+        self.assertEqual(worker._accelerator(self._torch(False, True)), "mps")
+
+    def test_no_accelerator_refuses_cpu(self):
+        with self.assertRaisesRegex(worker.WorkerError, "CPU fallback is disabled"):
+            worker._accelerator(self._torch(False, False))
+
+    def test_model_placement_accepts_mps(self):
+        model = SimpleNamespace(device="mps:0")
+        worker.QualityPipeline._assert_model_cuda(model, "probe", "mps")
+        with self.assertRaises(worker.WorkerError):
+            worker.QualityPipeline._assert_model_cuda(SimpleNamespace(device="cpu"), "probe", "mps")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,8 +28,9 @@
 - ⚠ **.NET 8 在 macOS 上 LocalApplicationData = `~/Library/Application Support`**（不是 ~/.local/share）；
   那里的 `BWReader` 必须是指向 `~/BW/data/BWReader` 的链接，否则桥读空目录（App 报「语音核心没在跑」）。
 - 「电脑语音」（驱动 Codex/ChatGPT 桌面版、虚拟声卡）**已停用**，只用 CLI 语音。
-- 未完成：外接盘抹 APFS 后移仓库、Mac 自动登录与断电自启（用户开）、PC OCR / spacy 未迁、
-  这批修复要合回 Codex 的分支、Windows 的「BW Computer Voice Setup」计划任务要管理员禁用。
+- 未完成：Mac 自动登录与断电自启（用户开）、ffmpeg（要装 Homebrew，需用户密码）。
+  已完成（2026-09-27）：仓库已在外接盘 BWDev、spacy 与「PC 预处理」OCR 已迁 Mac（CUDA→MPS，launchd `pc-ocr`）、
+  Codex 分支全是本分支祖先无需合并、Windows 计划任务已于 09-26 禁用。
 
 ### 🌲 第 0 步：你在哪棵 git 树
 

@@ -767,6 +767,7 @@ class QualityPipeline:
         self._formula = None
         self._formula_backend = None
         self._torch = None
+        self._device = "cuda"
 
     @staticmethod
     def supported_engines(configured: tuple[str, ...]) -> tuple[str, ...]:
@@ -779,8 +780,9 @@ class QualityPipeline:
             torch = importlib.import_module("torch")
         except Exception as exc:
             raise WorkerError("quality-first profile requires an importable PyTorch") from exc
-        if not bool(torch.cuda.is_available()):
-            raise WorkerError("quality-first profile requires CUDA; CPU fallback is disabled")
+        if _accelerator(torch) == "mps":
+            return {"available": True, "deviceIndex": 0, "deviceName": _apple_chip_name(),
+                    "cudaVersion": "mps", "accelerator": "mps"}
         try:
             index = int(torch.cuda.current_device())
             name = str(torch.cuda.get_device_name(index))
@@ -794,10 +796,10 @@ class QualityPipeline:
         }
 
     def _require_cuda(self):
+        # 名字留着（调用点多）：意思是「要一块加速器」—— Windows 的 CUDA 或 Mac 的 MPS。
         if self._torch is None:
             self._torch = importlib.import_module("torch")
-        if not bool(self._torch.cuda.is_available()):
-            raise WorkerError("quality-first profile requires CUDA; CPU fallback is disabled")
+        self._device = _accelerator(self._torch)
         return self._torch
 
     def open(self, pdf: Path) -> int:
@@ -824,11 +826,11 @@ class QualityPipeline:
             # PC quality profile explicitly allows/needs GPU.  Never copy the
             # Pi worker's force_cpu=True setting.
             self._manga = module.MangaPageOcr(force_cpu=False)
-            self._assert_model_cuda(self._manga, "manga OCR")
+            self._assert_model_cuda(self._manga, "manga OCR", self._device)
         return self._manga
 
     @staticmethod
-    def _assert_model_cuda(model, label: str) -> None:
+    def _assert_model_cuda(model, label: str, accel: str = "cuda") -> None:
         """Reject unknown/CPU placement instead of silently losing quality."""
         queue = [(model, 0)]
         seen = set()
@@ -847,7 +849,7 @@ class QualityPipeline:
                     devices.add(str(device).lower())
                 except Exception:
                     pass
-            if any("cuda" in item for item in devices):
+            if any(accel in item for item in devices):
                 return
             try:
                 parameters = getattr(value, "parameters", None)
@@ -859,7 +861,7 @@ class QualityPipeline:
                     devices.add(str(getattr(first, "device", "unknown")).lower())
                 except (StopIteration, TypeError, RuntimeError):
                     pass
-            if any("cuda" in item for item in devices):
+            if any(accel in item for item in devices):
                 return
             try:
                 providers = getattr(value, "get_providers", None)
@@ -870,7 +872,7 @@ class QualityPipeline:
                     devices.update(str(item).lower() for item in providers())
                 except Exception:
                     pass
-            if any("cuda" in item for item in devices):
+            if any(accel in item for item in devices):
                 return
             if depth < 3:
                 try:
@@ -886,10 +888,10 @@ class QualityPipeline:
                         traversable = False
                     if traversable:
                         queue.append((child, depth + 1))
-        if not any("cuda" in item for item in devices):
+        if not any(accel in item for item in devices):
             detail = ",".join(sorted(devices))[:120] or "unknown"
             raise WorkerError(
-                f"{label} did not prove CUDA placement ({detail}); CPU fallback is disabled"
+                f"{label} did not prove {accel} placement ({detail}); CPU fallback is disabled"
             )
 
     def _vision_page(self, page) -> tuple[list[dict], str, int, int, float]:
@@ -1066,11 +1068,11 @@ class QualityPipeline:
                 try:
                     module = importlib.import_module(module_name)
                     factory = getattr(module, factory_name)
-                    self._formula = factory(model_name="unimernet-base", device="cuda")
+                    self._formula = factory(model_name="unimernet-base", device=self._device)
                 except Exception as exc:
                     self._formula = None
                     raise WorkerError("formula-model-unavailable: UniMERNet base") from exc
-                self._assert_model_cuda(self._formula, "UniMERNet base")
+                self._assert_model_cuda(self._formula, "UniMERNet base", self._device)
                 self._formula_backend = "unimernet-base-local"
             elif backend == "pix2tex":
                 # Compatibility is intentionally opt-in.  Absence/failure of
@@ -1135,7 +1137,8 @@ class QualityPipeline:
             try:
                 image = pillow.frombytes("RGB", (pix.width, pix.height), pix.samples)
                 result = layout.predict(
-                    image, imgsz=1600, conf=0.12, device=0, verbose=False
+                    image, imgsz=1600, conf=0.12,
+                    device=0 if self._device == "cuda" else self._device, verbose=False
                 )[0]
                 names = getattr(result, "names", {}) or {}
                 for bbox, class_no, confidence in zip(
@@ -1251,6 +1254,8 @@ class QualityPipeline:
         try:
             if self._torch is not None and self._torch.cuda.is_available():
                 self._torch.cuda.empty_cache()
+            elif self._torch is not None and self._device == "mps":
+                self._torch.mps.empty_cache()
         except Exception:
             pass
 
@@ -1578,6 +1583,26 @@ def _lower_process_priority() -> None:
         raise WorkerError("could not lower PC worker process priority") from exc
 
 
+def _accelerator(torch) -> str:
+    """质量档要一块加速器：Windows 的 CUDA，或 Mac（2026-09-27 起的服务器）的 Apple MPS。
+    两个都没有就拒绝 —— 质量档从来不许悄悄退回 CPU。"""
+    if bool(torch.cuda.is_available()):
+        return "cuda"
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    if mps is not None and bool(mps.is_available()):
+        return "mps"
+    raise WorkerError("quality-first profile requires CUDA or Apple MPS; CPU fallback is disabled")
+
+
+def _apple_chip_name() -> str:
+    try:
+        out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True,
+                             text=True, timeout=5, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    return out or "Apple silicon"
+
+
 def _lightweight_cuda_status(
     *,
     executable: str | None = None,
@@ -1585,6 +1610,15 @@ def _lightweight_cuda_status(
 ) -> dict:
     """Inspect the NVIDIA adapter without importing PyTorch while idle."""
 
+    if sys.platform == "darwin" and not executable:
+        # Mac 没有 nvidia-smi；空闲时也不导入 PyTorch，真正的 MPS 校验在接单时做。
+        return {
+            "available": True,
+            "deviceIndex": 0,
+            "deviceName": _apple_chip_name(),
+            "cudaVersion": "mps-validated-on-job-start",
+            "probe": "apple-silicon-idle",
+        }
     command = executable or os.environ.get("BW_READER_PC_NVIDIA_SMI")
     command = str(command or shutil.which("nvidia-smi.exe") or shutil.which("nvidia-smi") or "")
     if not command:

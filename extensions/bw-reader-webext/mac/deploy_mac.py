@@ -102,6 +102,25 @@ def services() -> dict[str, dict]:
         # KJ 知识节点 ↔ Anki：每 15 分钟吸收卡片绑定台账 + 拉复习快照进掌握度（同 Windows 的「KJ Anki Sync」）
         "kj-anki-sync": {"args": [str(PY), f"{cur}/scripts/kj/cli.py", "anki-sync"],
                          "cwd": cur, "keepalive": False, "interval": 900},
+        # 「PC 预处理」高质量 OCR worker（2026-09-27 从 Windows 迁来：CUDA → Apple MPS，
+        # 同一份 scripts/reader_pc_preprocess_worker.py）。独立 venv（torch/DocLayout/UniMERNet/manga-ocr），
+        # 模型在 ~/BW/data/BWReader/models（从 Windows 拷来，不自动下载）。经 tailscale serve 回连本机 webapp 认领任务。
+        "pc-ocr": {"args": [str(BW / "venv" / "pc-ocr" / "bin" / "python"),
+                            f"{cur}/scripts/reader_pc_preprocess_worker.py", "--project-root", cur,
+                            "--recycle-after-job"],
+                   "cwd": cur, "background": True, "env": {
+                       "BW_READER_PC_OCR_BASE_URL": "https://bwicarus-2.taile44d0c.ts.net",
+                       "BW_READER_PC_FORMULA_BACKEND": "unimernet-base",
+                       "BW_READER_PC_UNIMERNET_ADAPTER": "reader_unimernet_adapter:create_model",
+                       "BW_READER_PC_UNIMERNET_CONFIG": f"{cur}/scripts/reader_unimernet_base.yaml",
+                       "BW_READER_PC_UNIMERNET_MODEL_DIR": str(DATA / "BWReader" / "models" / "unimernet_base"),
+                       "BW_READER_PC_DOCLAYOUT_MODEL": str(DATA / "BWReader" / "models" / "doclayout_yolo"
+                                                           / "doclayout_yolo_docstructbench_imgsz1024.pt"),
+                       "HF_HOME": str(DATA / "BWReader" / "models" / "hf-cache"),
+                       "XDG_CACHE_HOME": str(DATA / "BWReader" / "models" / "cache"),
+                       "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+                       "PYTHONUTF8": "1",
+                   }},
         # 每日数据备份 → 外接盘 BWDev（在用数据留内置盘，只把快照放外接盘；没挂载就跳过）
         "backup": {"args": [str(PY), f"{cur}/extensions/bw-reader-webext/mac/backup_mac.py"],
                    "cwd": cur, "keepalive": False, "run_at_load": False, "background": True,
@@ -278,7 +297,7 @@ def write_plists(env: dict[str, str], names: list[str]) -> None:
             "Label": LABEL_PREFIX + name,
             "ProgramArguments": spec["args"],
             "WorkingDirectory": spec["cwd"],
-            "EnvironmentVariables": env,
+            "EnvironmentVariables": {**env, **spec.get("env", {})},
             "RunAtLoad": spec.get("run_at_load", True),
             "KeepAlive": spec.get("keepalive", True),
             "ThrottleInterval": 10,
