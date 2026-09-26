@@ -66,7 +66,8 @@ test("④ 原生读取和过滤本机数据，不再让网页查询或计算页�
                        "/// 把可见页的屏幕矩形推给墨迹层");
   assert.doesNotMatch(code(refresh), /__bwReaderPageOverlay|_vocabMarksForDisplay\(/);
   assert.match(refresh, /document\.sourceCharacters\(page:/);
-  assert.match(refresh, /ReaderNativeVocabularyOverlay\.localMarks\(/);
+  // localMarkSpans = localMarks 另带字符起点（生词句按它计数，2026-09-26）。
+  assert.match(refresh, /ReaderNativeVocabularyOverlay\.localMark(s|Spans)\(/);
   assert.match(refresh, /ReaderNativeVocabularyOverlay\.visible\(/);
   assert.match(refresh, /nativeOverlayGeneration == generation/);
   assert.match(refresh, /position\.visiblePages/, "只取可见页");

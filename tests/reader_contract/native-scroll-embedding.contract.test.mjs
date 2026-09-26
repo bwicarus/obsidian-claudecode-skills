@@ -112,7 +112,9 @@ test("页卡卡面是真正透光的 Liquid Glass，不是染成不透明深灰�
   // 2026-09-23 用户："既然使用 liquid glass 了就把玻璃效果做的好看点""不一定要严格遵照过去的样式"。
   const THEME = read("ios/BWReader/App/ReaderNativeTheme.swift");
   const glass = THEME.slice(THEME.indexOf("func readerCardGlass<"), THEME.indexOf("func readerGlassCircle("));
-  assert.match(glass, /\.glassEffect\(\.regular\.tint\(tone\.opacity\(0\.22\)\), in: shape\)/);
+  // 2026-09-26 用户（迁移前笔记）：先复现原网页卡片、玻璃适度 —— 卡面回到原版深色底，玻璃薄一层。
+  assert.match(glass, /\.glassEffect\(\.regular\.tint\(tone\.opacity\(0\.10\)\), in: shape\)/);
+  assert.match(glass, /Color\(red: 30 \/ 255, green: 30 \/ 255, blue: 34 \/ 255\)\.opacity\(0\.80\)/);
   // 先裁内容再垫玻璃：裁在玻璃外面会把玻璃自己的边缘高光裁掉。
   assert.ok(glass.indexOf(".clipShape(shape)") < glass.indexOf(".glassEffect("));
   assert.doesNotMatch(THEME, /func readerCardSurface/);
