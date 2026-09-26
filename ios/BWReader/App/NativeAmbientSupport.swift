@@ -163,45 +163,145 @@ actor NativeSortformerModels {
     }
 }
 
+// MARK: - 声纹特征比对
+
+/// 用 FluidAudio 的 WeSpeaker 嵌入模型（256 维，L2 归一化）给一段声音算声纹特征，
+/// 再和「我」及所有熟人的特征比余弦距离（1 − cos）。人数不设上限，不占分离器槽位。
+///
+/// 阈值是起点而不是定论：每次比对都把最近 / 次近距离写进日志，照实测再调。
+actor NativeSpeakerEmbedder {
+    static let shared = NativeSpeakerEmbedder()
+    /// 最近距离低于它才算认出。
+    static let matchDistance: Float = 0.55
+    /// 最近与次近至少要差这么多，否则算「分不清」（两位熟人声音很像时宁可不标）。
+    static let ambiguityMargin: Float = 0.08
+    static let chunkSamples = 160_000           // 模型窗口 10 秒
+    static let minimumSamples = 48_000          // 3 秒
+
+    struct Match: Sendable {
+        let name: String?
+        let nearest: String?
+        let distance: Float
+        let runnerUp: Float
+    }
+
+    private var manager: DiarizerManager?
+    private var loading: Task<DiarizerModels, Error>?
+    private var cache: [String: (stamp: Date, vector: [Float])] = [:]
+    private var userCache: (stamp: Date, vector: [Float])?
+
+    private func ready() async throws -> DiarizerManager {
+        if let manager { return manager }
+        let task: Task<DiarizerModels, Error>
+        if let loading { task = loading } else {
+            NativeAmbientLog.note("声纹比对模型：开始加载（首次需要从 HuggingFace 下载）")
+            task = Task { try await DiarizerModels.downloadIfNeeded() }
+            loading = task
+        }
+        do {
+            let models = try await task.value
+            loading = nil
+            if let manager { return manager }
+            let created = DiarizerManager()
+            created.initialize(models: models)
+            manager = created
+            NativeAmbientLog.note("声纹比对模型：已就绪")
+            return created
+        } catch {
+            loading = nil
+            NativeAmbientLog.note("声纹比对模型加载失败：\(error.localizedDescription)", level: "error")
+            throw error
+        }
+    }
+
+    /// 16 kHz 单声道 → 归一化声纹特征。超过 10 秒按 10 秒一段分别算再平均（最后一段不足 3 秒就丢掉）。
+    func embedding(of samples: [Float]) async throws -> [Float] {
+        let manager = try await ready()
+        var sum: [Float] = []
+        var count = 0
+        var start = 0
+        while start < samples.count {
+            let end = min(samples.count, start + Self.chunkSamples)
+            if end - start >= Self.minimumSamples || (count == 0 && end == samples.count) {
+                let vector = try manager.extractSpeakerEmbedding(from: Array(samples[start..<end]))
+                if sum.isEmpty { sum = vector } else { for i in 0..<min(sum.count, vector.count) { sum[i] += vector[i] } }
+                count += 1
+            }
+            start = end
+        }
+        guard count > 0 else { throw NSError(domain: "BWSpeaker", code: 1, userInfo: [NSLocalizedDescriptionKey: "声音太短"]) }
+        return Self.normalized(sum)
+    }
+
+    /// 和「我」及全部熟人比。
+    func identify(_ vector: [Float]) async -> Match {
+        var scored: [(String, Float)] = []
+        if let user = await userVector() { scored.append(("我", Self.distance(vector, user))) }
+        for person in NativeVoiceprint.people() {
+            guard let reference = await personVector(person) else { continue }
+            scored.append((person.name, Self.distance(vector, reference)))
+        }
+        scored.sort { $0.1 < $1.1 }
+        guard let best = scored.first else { return Match(name: nil, nearest: nil, distance: 2, runnerUp: 2) }
+        // 同名（同一人多个来源）不算次近
+        let runnerUp = scored.first { $0.0 != best.0 }?.1 ?? 2
+        let accepted = best.1 < Self.matchDistance && runnerUp - best.1 >= Self.ambiguityMargin
+        return Match(name: accepted ? best.0 : nil, nearest: best.0, distance: best.1, runnerUp: runnerUp)
+    }
+
+    private func personVector(_ person: NativeVoiceprint.Person) async -> [Float]? {
+        if let hit = cache[person.id], hit.stamp == person.updatedAt { return hit.vector }
+        guard let samples = NativeVoiceprint.loadPerson(person.id) else { return nil }
+        do {
+            let vector = try await embedding(of: samples)
+            cache[person.id] = (person.updatedAt, vector)
+            return vector
+        } catch {
+            NativeAmbientLog.note("声纹比对：\(person.name) 的特征算不出来 \(error.localizedDescription)", level: "error")
+            return nil
+        }
+    }
+
+    private func userVector() async -> [Float]? {
+        let stamp = (try? FileManager.default.attributesOfItem(atPath: NativeVoiceprint.fileURL.path)[.modificationDate]) as? Date
+        guard let stamp else { userCache = nil; return nil }
+        if let userCache, userCache.stamp == stamp { return userCache.vector }
+        guard let samples = NativeVoiceprint.load(), let vector = try? await embedding(of: samples) else { return nil }
+        userCache = (stamp, vector)
+        return vector
+    }
+
+    static func normalized(_ vector: [Float]) -> [Float] {
+        let norm = sqrt(vector.reduce(0) { $0 + $1 * $1 })
+        return norm > 0 ? vector.map { $0 / norm } : vector
+    }
+
+    static func distance(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return 2 }
+        var dot: Float = 0, na: Float = 0, nb: Float = 0
+        for i in 0..<a.count { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i] }
+        guard na > 0, nb > 0 else { return 2 }
+        return 1 - dot / (sqrt(na) * sqrt(nb))
+    }
+}
+
 // MARK: - 流式说话人分离
 
 /// ⚠ 不是线程安全的：调用方把它的全部调用放在同一条串行队列上。
 final class NativeStreamDiarizer {
     static let sampleRate: Double = 16_000
 
-    /// Sortformer 一共 4 个槽位：「我」占 1 个，熟人最多预占 2 个，至少留 1 个给陌生人。
-    static let maxEnrolledPeople = 2
-
     let diarizer: SortformerDiarizer
     /// 登记声纹对应的说话人槽位；没登记声纹时为 nil（调用方按「说话最多的人」兜底）。
+    /// 熟人不占槽位：分离器只回答「哪几段是同一个人」，是谁由 NativeSpeakerEmbedder 做声纹比对。
     private(set) var userIndex: Int?
-    /// 预先登记的熟人：槽位 → 名字。
-    private(set) var names: [Int: String] = [:]
     private(set) var fedSamples = 0
 
-    init(models: SortformerModels, voiceprint: [Float]?, people: [NativeVoiceprint.Person] = []) throws {
+    init(models: SortformerModels, voiceprint: [Float]?) throws {
         diarizer = SortformerDiarizer(config: NativeSortformerModels.config)
         diarizer.initialize(models: models)
         if let voiceprint, !voiceprint.isEmpty {
             userIndex = try diarizer.enrollSpeaker(withAudio: voiceprint, sourceSampleRate: nil, named: "我")?.index
-        }
-        for person in people.prefix(Self.maxEnrolledPeople) {
-            guard let samples = NativeVoiceprint.loadPerson(person.id), !samples.isEmpty else {
-                NativeAmbientLog.note("熟人声纹：\(person.name) 的声音文件读不出来，跳过", level: "error")
-                continue
-            }
-            // 不许改掉已有名字：声音太像「我」或另一位熟人时，会被分到那个槽位上
-            guard let speaker = try diarizer.enrollSpeaker(withAudio: samples, sourceSampleRate: nil, named: person.name,
-                                                           overwritingAssignedSpeakerName: false) else {
-                NativeAmbientLog.note("熟人声纹：\(person.name) 的样本里没检测到语音，跳过", level: "error")
-                continue
-            }
-            if speaker.index == userIndex || (names[speaker.index].map { $0 != person.name } ?? false) {
-                let other = speaker.index == userIndex ? "我" : (names[speaker.index] ?? "?")
-                NativeAmbientLog.note("熟人声纹：\(person.name) 的声音和「\(other)」分不开，没单独占位")
-                continue
-            }
-            names[speaker.index] = person.name
         }
     }
 
@@ -238,6 +338,21 @@ final class NativeStreamDiarizer {
             if value > 0 { overlap[segment.speakerIndex, default: 0] += value }
         }
         return overlap.max { $0.value < $1.value }?.key
+    }
+
+    /// 某个槽位的已定稿说话区间（分离器时间轴），新的在后。
+    func finalizedSpeech(of speaker: Int) -> [ClosedRange<Double>] {
+        guard let slot = diarizer.timeline.speakers[speaker] else { return [] }
+        return slot.finalizedSegments.map { Double($0.startTime)...Double($0.endTime) }
+    }
+
+    /// 除「我」以外、已定稿说话时长（秒）。
+    func finalizedSpeechSeconds() -> [Int: Double] {
+        var out: [Int: Double] = [:]
+        for (index, slot) in diarizer.timeline.speakers where index != userIndex {
+            out[index] = Double(slot.finalizedSpeechDuration)
+        }
+        return out
     }
 
     /// 至今说话最多的人（没登记声纹时当作「我」：离麦克风最近、说得最多的通常是用户本人）。
@@ -283,7 +398,10 @@ enum NativeVoiceprint {
 
     static func delete() { try? FileManager.default.removeItem(at: fileURL) }
 
-    // MARK: 熟人声纹（用户 2026-09-26：「有可能为不同的人的声音建立特征然后标记名字么」）
+    // MARK: 熟人声纹（用户 2026-09-26：「有可能为不同的人的声音建立特征然后标记名字么」→「直接做成声纹特征比对」）
+    //
+    // 存的是原声样本（≤30 秒）；声纹特征向量由 NativeSpeakerEmbedder 按需算、按 updatedAt 缓存 ——
+    // 换更好的嵌入模型时不用让用户重新起名。
 
     struct Person: Codable, Identifiable, Equatable {
         let id: String
@@ -300,7 +418,7 @@ enum NativeVoiceprint {
 
     private static var peopleIndex: URL { peopleFolder.appendingPathComponent("people.json") }
 
-    /// 最近更新的在前（分离器只预占 2 个熟人槽位，先登记最近用到的）。
+    /// 最近更新的在前。
     static func people() -> [Person] {
         guard let data = try? Data(contentsOf: peopleIndex),
               let list = try? JSONDecoder().decode([Person].self, from: data) else { return [] }

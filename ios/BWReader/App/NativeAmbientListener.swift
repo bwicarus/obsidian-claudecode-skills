@@ -354,6 +354,8 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         let sample: String
         let ranges: [ClosedRange<Double>]
         let heardAt: Date
+        let slot: Int
+        let session: Int
     }
 
     struct Utterance {
@@ -431,7 +433,16 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private var heardTextInTask = false
     private var lastSpeakerCount = -1
     private var heard: [HeardSpeaker] = []
-    private var needsRecycle = false            // 新登记了熟人：窗口一清空就换分离器，让它预占槽位
+    // 声纹比对（熟人不占分离器槽位）：槽位 → 名字，按分离器会话隔离
+    private var diarizerSession = 0
+    private var slotNames: [Int: String] = [:]
+    private var slotCheckedSpeech: [Int: Double] = [:]  // 上次比对时该槽位的定稿说话秒数
+    private var slotChecks: [Int: Int] = [:]
+    private var identifying = false
+    private var lastIdentifyCheck = 0.0
+    static let identifyEvery = 3.0              // 秒：多久看一次有没有该比对的槽位
+    static let identifyRecheckSpeech = 10.0     // 秒：多说了这么久再比一次（前几秒样本可能不准）
+    static let identifyMaxChecks = 3
     private var loggedDangerWriteFailure = false
     private var pendingFinals: [(ready: Double, segments: [(text: String, start: Double, end: Double)])] = []
     private var utterances: [Utterance] = []
@@ -630,18 +641,20 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             do {
                 let models = try await NativeSortformerModels.shared.models()
                 let voiceprint = NativeVoiceprint.load()
-                let people = NativeVoiceprint.people()
+                let people = NativeVoiceprint.people().count
                 self?.work.async {
                     guard let self else { return }
                     self.diarizerLoading = false
                     do {
-                        let diarizer = try NativeStreamDiarizer(models: models, voiceprint: voiceprint, people: people)
+                        let diarizer = try NativeStreamDiarizer(models: models, voiceprint: voiceprint)
                         self.diarizer = diarizer
                         self.diarizerOrigin = self.ring.isEmpty ? 0 : self.ringStart + Double(self.ring.count) / NativeStreamDiarizer.sampleRate
-                        let known = diarizer.names.values.sorted().joined(separator: "、")
-                        NativeAmbientLog.note("旁听：说话人分离已接上（\(voiceprint == nil ? "没有声纹，「我」认不出" : "用声纹认出「我」")"
-                            + (known.isEmpty ? "" : "，预登记熟人：\(known)")
-                            + (people.count > NativeStreamDiarizer.maxEnrolledPeople ? "；熟人超过 \(NativeStreamDiarizer.maxEnrolledPeople) 位，只预登记最近更新的" : "") + "）")
+                        self.diarizerSession += 1
+                        self.slotNames = [:]
+                        self.slotCheckedSpeech = [:]
+                        self.slotChecks = [:]
+                        NativeAmbientLog.note("旁听：说话人分离已接上（\(voiceprint == nil ? "没有声纹，「我」靠比对也认不出" : "用声纹认出「我」")"
+                            + "，\(people) 位熟人靠声纹特征比对）")
                     } catch {
                         NativeAmbientLog.note("旁听：说话人分离创建失败 \(error.localizedDescription)，只转写不分人", level: "error")
                     }
@@ -656,7 +669,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private func speakerLabel(_ index: Int?) -> (String, Bool) {
         guard let index else { return ("?", false) }
         if index == diarizer?.userIndex { return ("我", true) }
-        if let name = diarizer?.names[index] { return (name, false) }
+        if let name = slotNames[index] { return (name, name == "我") }
         return ("说话人\(index + 1)", false)
     }
 
@@ -730,6 +743,10 @@ final class NativeAmbientPipeline: @unchecked Sendable {
 
     private func periodic() {
         let t = now
+        if t - lastIdentifyCheck >= Self.identifyEvery {
+            lastIdentifyCheck = t
+            identifyNextSlot()
+        }
         // 1) 切识别任务：识别出文字之后 1.2 秒没有新字，或本任务满 45 秒
         if heardTextInTask && t - lastTextAt >= Self.silenceToFinalize || t - rotationClock >= Self.maxRecognitionSeconds {
             if heardTextInTask { rotateRecognition() }
@@ -745,9 +762,8 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         // 4) 危险录音到点
         if dangerFile != nil, Date() >= dangerUntil { closeDangerFile() }
         // 5) 分离器定期换新（时间线会一直长；只在窗口刚清空时换，免得同一窗口里编号变）
-        if let diarizer, utterances.isEmpty, pendingFinals.isEmpty,
-           needsRecycle || diarizer.elapsed > Self.diarizerRecycleSeconds {
-            needsRecycle = false
+        if let diarizer, utterances.isEmpty, pendingFinals.isEmpty, !identifying,
+           diarizer.elapsed > Self.diarizerRecycleSeconds {
             self.diarizer = nil
             loadDiarizer()
         }
@@ -802,21 +818,83 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         emit(.window(window))
     }
 
-    // MARK: 熟人（起名 → 存样本 → 下次换分离器时预登记）
+    // MARK: 熟人：声纹特征比对（不占分离器槽位，人数不限）
+
+    /// 找一个「说够 3 秒还没比过」或「又多说了 10 秒」的槽位，取它最近 ≤10 秒的定稿语音算特征去比。
+    /// 一次只比一个（嵌入模型在神经引擎上排队也要时间）。
+    private func identifyNextSlot() {
+        guard !identifying, let diarizer else { return }
+        let ringEnd = ringStart + Double(ring.count) / NativeStreamDiarizer.sampleRate
+        for (index, speech) in diarizer.finalizedSpeechSeconds().sorted(by: { $0.value > $1.value }) {
+            let checks = slotChecks[index] ?? 0
+            let checked = slotCheckedSpeech[index] ?? 0
+            guard speech >= 3, checks < Self.identifyMaxChecks,
+                  checks == 0 || speech - checked >= Self.identifyRecheckSpeech else { continue }
+            slotCheckedSpeech[index] = speech
+            var pieces: [[Float]] = []
+            var total = 0
+            for range in diarizer.finalizedSpeech(of: index).reversed() {
+                let from = range.lowerBound + diarizerOrigin, to = range.upperBound + diarizerOrigin
+                guard to <= ringEnd, from >= ringStart else { continue }
+                let a = Int((from - ringStart) * NativeStreamDiarizer.sampleRate)
+                let b = Int((to - ringStart) * NativeStreamDiarizer.sampleRate)
+                guard b > a else { continue }
+                pieces.append(ring[a..<b].map { Float($0) / 32_768 })
+                total += b - a
+                if total >= NativeSpeakerEmbedder.chunkSamples { break }
+            }
+            let voiced = NativeVoiceprint.voicedOnly(pieces.reversed().flatMap { $0 })
+            guard voiced.count >= NativeSpeakerEmbedder.minimumSamples else { continue }
+            slotChecks[index] = checks + 1
+            identifying = true
+            let session = diarizerSession
+            Task.detached(priority: .utility) { [weak self] in
+                do {
+                    let vector = try await NativeSpeakerEmbedder.shared.embedding(of: voiced)
+                    let match = await NativeSpeakerEmbedder.shared.identify(vector)
+                    self?.work.async { self?.identified(slot: index, match: match, session: session) }
+                } catch {
+                    NativeAmbientLog.note("声纹比对：说话人\(index + 1) 的特征算不出来 \(error.localizedDescription)", level: "error")
+                    self?.work.async { self?.identifying = false }
+                }
+            }
+            return
+        }
+    }
+
+    private func identified(slot: Int, match: NativeSpeakerEmbedder.Match, session: Int) {
+        identifying = false
+        guard session == diarizerSession else { return }
+        let detail = String(format: "最近 %@ %.2f，次近 %.2f", match.nearest ?? "无", match.distance, match.runnerUp)
+        if let name = match.name {
+            if slotNames[slot] != name {
+                let before = slotNames[slot]
+                slotNames[slot] = name
+                heard.removeAll { $0.session == session && $0.slot == slot }
+                emit(.heard(heard))
+                NativeAmbientLog.note("声纹比对：说话人\(slot + 1) → \(name)" + (before.map { "（原来认成 \($0)）" } ?? "") + "（\(detail)）")
+            }
+        } else {
+            // 没认出时保留之前的结论：一次样本不好不该把已认出的人抹掉
+            NativeAmbientLog.note("声纹比对：说话人\(slot + 1) 不是已登记的人（\(detail)）")
+        }
+    }
 
     private func collectHeard(_ taken: [Utterance]) {
         var byIndex: [Int: [Utterance]] = [:]
         for utterance in taken {
-            guard let index = utterance.speaker, index != diarizer?.userIndex, diarizer?.names[index] == nil else { continue }
+            guard let index = utterance.speaker, index != diarizer?.userIndex, slotNames[index] == nil else { continue }
             byIndex[index, default: []].append(utterance)
         }
         guard !byIndex.isEmpty else { return }
         let fresh = byIndex.map { index, rows in
             HeardSpeaker(id: UUID().uuidString, label: "说话人\(index + 1)",
                          sample: String(rows.map(\.text).joined(separator: " ").prefix(60)),
-                         ranges: rows.map { $0.start...$0.end }, heardAt: Date())
+                         ranges: rows.map { $0.start...$0.end }, heardAt: Date(), slot: index, session: diarizerSession)
         }
-        heard = Array((fresh + heard).prefix(8))
+        // 同一会话同一槽位只留最新的一条
+        let freshSlots = Set(fresh.map(\.slot))
+        heard = Array((fresh + heard.filter { $0.session != diarizerSession || !freshSlots.contains($0.slot) }).prefix(8))
         emit(.heard(heard))
     }
 
@@ -843,8 +921,9 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                 let total = try NativeVoiceprint.savePerson(name: name, samples: voiced)
                 self.heard.removeAll { $0.id == speaker.id }
                 self.emit(.heard(self.heard))
-                self.needsRecycle = true
-                let message = String(format: "已记住「%@」（样本共 %.0f 秒），这段话结束后开始按名字标注", name, total)
+                // 起名即生效：这个槽位就是他，不必等比对
+                if speaker.session == self.diarizerSession { self.slotNames[speaker.slot] = name }
+                let message = String(format: "已记住「%@」（样本共 %.0f 秒），之后靠声纹比对认出他", name, total)
                 NativeAmbientLog.note("熟人声纹：" + message)
                 done(message)
             } catch {
@@ -854,9 +933,14 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         }
     }
 
-    /// 熟人列表变了（删除 / 改名）：换一个分离器重新预登记。
+    /// 熟人列表变了（删除）：去掉已不存在的名字，所有槽位重新比对。
     func reloadPeople() {
-        work.async { self.needsRecycle = true }
+        work.async {
+            let names = Set(NativeVoiceprint.people().map(\.name))
+            self.slotNames = self.slotNames.filter { $0.value == "我" || names.contains($0.value) }
+            self.slotChecks = [:]
+            self.slotCheckedSpeech = [:]
+        }
     }
 
     // MARK: 存音频

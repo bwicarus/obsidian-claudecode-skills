@@ -107,8 +107,8 @@ struct NativeAmbientSettingsSections: View {
             if !peopleNote.isEmpty { Text(peopleNote).font(.caption).foregroundStyle(.secondary) }
         } header: { Text("熟人") } footer: {
             Text("给常听到的人起名后，旁听转写就写成「小王：……」而不是「说话人2：……」，jev 判断时也知道是谁在说。"
-                 + "说话人分离模型一次最多分 4 个人：「我」占一个，熟人最多预占 2 个（最近更新的优先），至少留一个给陌生人。"
-                 + "同名再起一次会追加样本，认得更准。")
+                 + "认人靠声纹特征比对（每个人说够 3 秒就比一次，之后再多说 10 秒复核），熟人数量不限。"
+                 + "同名再起一次会追加样本，认得更准。同一时刻在场的人最多分出 4 个（分离模型的上限）。")
         }
         .alert("给\(naming?.label ?? "")起名", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
             TextField("名字（最多 20 字）", text: $personName)
