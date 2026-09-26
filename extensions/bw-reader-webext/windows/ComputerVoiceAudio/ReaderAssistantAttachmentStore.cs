@@ -144,10 +144,18 @@ internal static class ReaderAssistantAttachmentStore
             {
                 // 侧栏缩略图（2026-09-26）：发出去的图在对话里显示成缩略图，而不是原件地址。
                 // 只读已存的 thumb.jpg / preview.jpg；Read 先按编号校验附件存在。
-                Read(id);
+                var stored = Read(id);
                 string preview = thumbRoute ? ThumbPath(id) : PreviewPath(id);
+                string contentType = "image/jpeg";
+                // 缩略图是 2026-09-26 才开始存的：更早的附件退回 preview.jpg，再不行用原图（仅图片）。
+                if (!File.Exists(preview) && thumbRoute && File.Exists(PreviewPath(id))) preview = PreviewPath(id);
+                if (!File.Exists(preview) && stored.Mime.StartsWith("image/", StringComparison.Ordinal) &&
+                    stored.Bytes <= 10L * 1024 * 1024)
+                {
+                    preview = FilePath(stored); contentType = stored.Mime;
+                }
                 if (!File.Exists(preview)) throw new FileNotFoundException("preview");
-                context.Response.ContentType = "image/jpeg";
+                context.Response.ContentType = contentType;
                 context.Response.Headers["X-Content-Type-Options"] = "nosniff";
                 context.Response.Headers["Cache-Control"] = "private, max-age=604800, immutable";
                 await context.Response.SendFileAsync(preview, token).ConfigureAwait(false);

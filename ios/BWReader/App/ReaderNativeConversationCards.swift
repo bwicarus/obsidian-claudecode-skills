@@ -36,6 +36,25 @@ struct ReaderNativeConversationMessageView: View {
             } else if message.streaming {
                 ProgressView().controlSize(.small)
             }
+            if !message.contextLine.isEmpty {
+                Label(message.contextLine, systemImage: "text.page")
+                    .font(.caption).foregroundStyle(ReaderNativeTheme.muted).lineLimit(2)
+            }
+            if !message.followups.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(message.followups, id: \.self) { question in
+                        Button {
+                            Task { _ = await model.perform("send", parameters: ["text": question]) }
+                        } label: {
+                            Label(question, systemImage: "arrow.turn.down.right")
+                                .font(.caption).multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain).foregroundStyle(ReaderNativeTheme.accent)
+                        .disabled(!model.supports("send") || model.isPerforming("send"))
+                    }
+                }
+            }
             if !message.tools.isEmpty {
                 ReaderNativeConversationTools(parts: message.tools, model: model)
             }

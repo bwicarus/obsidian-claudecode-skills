@@ -253,6 +253,10 @@ struct ReaderNativeVocabularyOverlay {
                 let ph = max(0.1, num(prev, "y1") - num(prev, "y0")), gap = num(ch, "y0") - num(prev, "y0")
                 if gap > ph * 1.5 { flush(i - 1) }
                 else if abs(gap) > ph * 0.5 && (isListHead(i) || lineIsShort(prev)) { flush(i - 1) }
+                // 同一行里隔着一大段空白（表格的不同格、一行排几个的列表项）→ 不是同一句。
+                // 服务端靠 PyMuPDF 的块号（每格一块）断开；本机抽取没有这种块，按几何补上
+                //（2026-09-26 用户：表格里的病名被连成一句加了框）。
+                else if abs(gap) <= ph * 0.5 && num(ch, "x0") - num(prev, "x1") > ph * 1.2 { flush(i - 1) }
             }
             if !c.isEmpty && "•▪▶◆●○◇".contains(c) { flush(i - 1); start = i; prevNs = ch; continue }
             if start < 0 && !spacer(ch) { start = i }

@@ -22,7 +22,6 @@ struct ReaderNativeWorkspace<Document: View>: View {
     @ViewBuilder let document: () -> Document
 
     @AppStorage("reader.navigationCollapsed") private var navigationCollapsed = false
-    @State private var dropTarget = false
     /// 侧栏宽度（点）。0 = 还没调过，按屏幕比例给默认值。
     /// ⚠ 存起来而不是每次重算：调过一次就该一直是那个宽度，
     ///   否则每次开侧栏都要重新拖一遍。
@@ -96,9 +95,6 @@ struct ReaderNativeWorkspace<Document: View>: View {
                             .dropDestination(for: ReaderNativeCardTransfer.self) { values, location in
                                 // ⚠ 这里以前一律 `return false` 就完事：拖过去、卡飞回侧栏、
                                 //   一个字都没有。放不下也要说是为什么。
-                                // 放下即收起虚线框：isTargeted 在成功放下后不一定回 false，
-                                // 框会一直挂在正文上（2026-09-26 用户：「拖动后屏幕区域出现了虚线勾边」）。
-                                dropTarget = false
                                 reader.postClientLog("[card-drop] received n=\(values.count)")
                                 guard let payload = values.first, page.size.width > 0, page.size.height > 0 else {
                                     reader.showTransientNotice("没能读出这张卡，请重试。")
@@ -123,7 +119,7 @@ struct ReaderNativeWorkspace<Document: View>: View {
                                     if let failure = conversation.error { reader.showTransientNotice(failure) }
                                 }
                                 return true
-                            } isTargeted: { dropTarget = $0 }
+                            }
                             .overlay(alignment: .bottom) {
                                 // EPUB 的选区操作条。PDF 不出 —— 它有自己的选区菜单，
                                 // 两套都出就是同一个选区上下各一排按钮。
@@ -149,13 +145,8 @@ struct ReaderNativeWorkspace<Document: View>: View {
                                     .disabled(!conversation.supports("toggleAssistant"))
                                 }
                             }
-                            .overlay {
-                                if dropTarget {
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(ReaderNativeTheme.accent, style: StrokeStyle(lineWidth: 2, dash: [6]))
-                                        .padding(4).allowsHitTesting(false)
-                                }
-                            }
+                            // 不再画整页虚线「可放置」框：拖动预览本身就说明落点；那个框还会在
+                            // 放下/取消后挂住不退（2026-09-26 用户两次报「虚线框」）。
                     }
                     if nativeSidebarVisible {
                         ReaderNativeConversationView(

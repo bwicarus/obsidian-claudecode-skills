@@ -167,3 +167,108 @@ actor ReaderNativeAssistantHistory {
         revisions.removeAll()
     }
 }
+
+/// 历史回放的**原生内容**（迁出 P1，2026-09-26）。网页层按原顺序为每条历史放一个
+/// 占位节点（只带 ref），侧栏投影到原生时按 ref 换成这里建好的消息 —— 正文、上下文、
+/// 追问、旧版卡片都由 Swift 从历史记录直接生成，不再从网页 DOM 抓。
+/// 带 parts 的轮次仍走 TurnStore（本来就是原生数据），这里返回 nil。
+@MainActor
+final class ReaderNativeHistoryMessages {
+    private var entries: [(token: String, messages: [[String: Any]?])] = []
+    var onDiagnostic: ((String) -> Void)?
+
+    /// 建好一批，返回 token；只保留最近几批（重同步会带着旧 ref 再来）。
+    func store(_ raw: [Any], mode: String) -> (token: String, built: [Bool]) {
+        var unmigrated: [String: Int] = [:]
+        let messages = raw.enumerated().map { Self.build($0.element, index: $0.offset, unmigrated: &unmigrated) }
+        let token = UUID().uuidString
+        entries.append((token, messages))
+        if entries.count > 6 { entries.removeFirst(entries.count - 6) }
+        let built = messages.filter { $0 != nil }.count
+        let missing = unmigrated.sorted { $0.key < $1.key }.map { "\($0.key)×\($0.value)" }.joined(separator: " ")
+        onDiagnostic?("历史原生化：\(mode) 共 \(raw.count) 条，原生生成 \(built) 条" + (missing.isEmpty ? "" : "；尚未迁移：" + missing))
+        return (token, messages.map { $0 != nil })
+    }
+
+    /// 占位消息 → 原生消息（保留占位的 id，部件 id 由它派生）。
+    func resolve(_ placeholder: [String: Any]) -> [String: Any]? {
+        guard let ref = placeholder["nativeHistoryRef"] as? String, let id = placeholder["id"] as? String else { return nil }
+        let pieces = ref.split(separator: "#", maxSplits: 1).map(String.init)
+        guard pieces.count == 2, let index = Int(pieces[1]),
+              let entry = entries.last(where: { $0.token == pieces[0] }),
+              entry.messages.indices.contains(index), var message = entry.messages[index] else { return nil }
+        message["id"] = id
+        message["parts"] = (message["parts"] as? [[String: Any]] ?? []).enumerated().map { offset, part in
+            var part = part, data = part["data"] as? [String: Any] ?? [:]
+            let partID = id + "-h" + String(offset)
+            part["id"] = partID; data["nativeActionKey"] = partID; part["data"] = data
+            return part
+        }
+        return message
+    }
+
+    static func build(_ item: Any, index: Int, unmigrated: inout [String: Int]) -> [String: Any]? {
+        guard let record = item as? [String: Any], let role = record["role"] as? String,
+              ["user", "assistant"].contains(role) else { return nil }
+        let content = record["content"] as? String ?? ""
+        var message: [String: Any] = ["role": role, "streaming": false, "title": "", "statusText": "", "parts": [[String: Any]]()]
+        if role == "user" {
+            message["text"] = displayAttachments(content)
+            let line = contextLine(record)
+            if !line.isEmpty { message["contextLine"] = line }
+            return message
+        }
+        if let parts = record["parts"] as? [Any], !parts.isEmpty { return nil }
+        if let card = record["card"] as? [String: Any], !card.isEmpty {
+            let kind = card["kind"] as? String ?? "artifact", title = card["title"] as? String ?? "生成物"
+            var original = card
+            if (original["cid"] as? String ?? "").isEmpty { original["cid"] = "hist-card-" + String(index) }
+            message["text"] = ""
+            message["parts"] = [["kind": kind, "title": "", "text": "", "status": "unknown", "actionLabel": "查看原件",
+                                 "data": ["nativeDetail": ["kind": kind, "title": title, "content": original]]]]
+            return message
+        }
+        let parsed = ReaderNativeAssistantTurn.content(content)
+        message["text"] = parsed.finalDisplayText
+        if !parsed.followups.isEmpty { message["followups"] = parsed.followups }
+        if record["via"] as? String == "voice" { message["subtitle"] = true }
+        for key in ["videos", "undo_cards", "actions"] {
+            if let values = record[key] as? [Any], !values.isEmpty { unmigrated[key, default: 0] += values.count }
+        }
+        return message
+    }
+
+    /// 旧记录（2026-09-26 之前）把附件清单原样存成「【用户附加文件…】\n[{json}]」；
+    /// 显示成与新记录一致的缩略图引用（图片）或文件名（其它）。
+    static func displayAttachments(_ content: String) -> String {
+        guard let marker = content.range(of: "【用户附加文件") else { return content }
+        let head = content[..<marker.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let open = content[marker.upperBound...].firstIndex(of: "["),
+              let data = String(content[open...]).data(using: .utf8),
+              let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return content }
+        let lines = items.map { item -> String in
+            let name = item["name"] as? String ?? "附件"
+            let path = item["path"] as? String ?? ""
+            let parts = path.split(separator: "/")
+            if let index = parts.firstIndex(of: "assistant-attachments"), parts.indices.contains(index + 1),
+               (item["mime"] as? String ?? "").hasPrefix("image/") {
+                return "![\(name)](/assistant-attachments/thumb/\(parts[index + 1]))"
+            }
+            return "📎 " + name
+        }
+        return ([head.isEmpty ? "" : head] + lines).filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    /// 用户消息下的一行上下文：第几页 · 选中了什么 · 几张图（原网页 _ctxCard 的原生版）。
+    static func contextLine(_ record: [String: Any]) -> String {
+        var bits: [String] = []
+        if let page = (record["page"] as? NSNumber)?.intValue, page > 0 { bits.append("第 \(page) 页") }
+        else if let section = record["section"] as? String, !section.isEmpty { bits.append(String(section.prefix(40))) }
+        if let selection = record["selection"] as? String {
+            let clean = selection.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+            if !clean.isEmpty { bits.append("选中：" + (clean.count > 40 ? String(clean.prefix(40)) + "…" : clean)) }
+        }
+        if let figures = record["figures"] as? [Any], !figures.isEmpty { bits.append("\(figures.count) 张图") }
+        return bits.joined(separator: " · ")
+    }
+}

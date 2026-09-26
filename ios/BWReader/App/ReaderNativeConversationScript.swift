@@ -312,6 +312,11 @@ enum ReaderNativeConversationScript {
       function projectMessage(node, index) {
         if (nativeMode && node.__bwNativeMessageHidden === true) return null;
         const id = messageID(node, index), tid = node.getAttribute('data-turn') || '';
+        // 迁出 P1：历史占位，内容由 Swift 按 ref 生成（见 ReaderNativeHistoryMessages）。
+        if (nativeMode && typeof node.__bwNativeHistoryRef === 'string') {
+          return { id, role: node.classList.contains('asst-u') ? 'user' : 'assistant', text: '', streaming: false,
+                   parts: [], title: '', statusText: '', progress: null, nativeHistoryRef: node.__bwNativeHistoryRef };
+        }
         if (nativeMode && !tid && node.__bwToolChip) {
           const chip = node.__bwToolChip, label = String(chip.label || '工具调用');
           if (turnOwned.tools.has(label) || (chip.tool && turnOwned.tools.has(String(chip.tool)))) return null;

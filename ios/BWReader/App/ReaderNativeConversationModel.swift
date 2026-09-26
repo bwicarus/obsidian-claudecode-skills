@@ -69,6 +69,9 @@ struct ReaderNativeConversationMessage: Identifiable {
     let progressSummary: String
     var parts: [ReaderNativeConversationPart]
     let reviewSelections: [ReaderNativeReviewSelection]
+    /// 原生历史（迁出 P1）：用户消息的上下文一行、回答后的追问建议。
+    let contextLine: String
+    let followups: [String]
 
     var tools: [ReaderNativeConversationPart] { parts.filter(\.isTool) }
     var artifacts: [ReaderNativeConversationPart] { parts.filter { !$0.isTool && $0.kind != "text" } }
@@ -89,6 +92,8 @@ struct ReaderNativeConversationMessage: Identifiable {
             progressSummary = "成功 \(done)，失败 \(failed)，运行中 \(running)，待处理 \(total - done - failed - running)"
         } else { progressSummary = "" }
         reviewSelections = (value["reviewSelections"] as? [[String: Any]] ?? []).compactMap(ReaderNativeReviewSelection.init)
+        contextLine = value["contextLine"] as? String ?? ""
+        followups = (value["followups"] as? [String] ?? []).filter { !$0.isEmpty }.prefix(4).map { $0 }
         var seen = Set<String>()
         parts = (value["parts"] as? [[String: Any]] ?? [])
             .compactMap(ReaderNativeConversationPart.init)

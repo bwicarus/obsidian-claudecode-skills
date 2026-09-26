@@ -30,6 +30,8 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     var prepareReaderPCContext: (([String:Any]) async throws -> [String:Any])?
     private var contextTask: Task<Void,Never>?
     var replyReference: ((String,String,Bool) throws -> [String:Any])?
+    /// 设了就由原生生成历史消息内容（网页只放占位）。
+    var historyMessages: ReaderNativeHistoryMessages?
 
     init(webView: WKWebView, trustedBaseURL: URL, gateway: ReaderNativeServerGateway) {
         self.webView = webView; self.trustedBaseURL = trustedBaseURL; self.gateway = gateway
@@ -276,7 +278,20 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                        let result = try? JSONSerialization.jsonObject(with:response.body) as? [String:Any], result["ok"] as? Bool == true { cleared = true }
                     var reply: [String: Any] = ["ok": (200..<300).contains(response.status), "status": response.status,
                                                 "body": String(decoding: response.body, as: UTF8.self)]
-                    if let presentation = response.presentation { reply["presentation"] = String(decoding: presentation, as: UTF8.self) }
+                    if var presentation = response.presentation {
+                        if operation == "read", let cache = self.historyMessages,
+                           let value = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+                           let messages = value["messages"] as? [Any],
+                           var plans = try? JSONSerialization.jsonObject(with: presentation) as? [Any], plans.count == messages.count {
+                            let stored = cache.store(messages, mode: mode)
+                            for index in plans.indices where stored.built[index] {
+                                guard var plan = plans[index] as? [String: Any] else { continue }
+                                plan["ref"] = stored.token + "#" + String(index); plans[index] = plan
+                            }
+                            if let data = try? JSONSerialization.data(withJSONObject: plans) { presentation = data }
+                        }
+                        reply["presentation"] = String(decoding: presentation, as: UTF8.self)
+                    }
                     replyHandler(reply, nil)
                 } catch { replyHandler(nil, error.localizedDescription) }
             }

@@ -489,6 +489,29 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var readerForeground = true
     private var nativeDwellTracker: ReaderNativeDwellTracker?
     private var reportedConversationPayloadFailure: String?
+    /// 迁出 P1：历史消息由原生生成，网页只放占位（见 ReaderNativeHistoryMessages）。
+    let nativeHistoryMessages = ReaderNativeHistoryMessages()
+    private var reportedMissingHistoryRef = false
+
+    /// 把投影里的历史占位换成原生建好的消息。占位对应的批次已被淘汰时出声，并显示一句提示而不是空白。
+    private func resolveNativeHistory(_ body: [String: Any]) -> [String: Any] {
+        guard var batch = body["messageDelta"] as? [String: Any],
+              let upserts = batch["upserts"] as? [[String: Any]],
+              upserts.contains(where: { $0["nativeHistoryRef"] != nil }) else { return body }
+        batch["upserts"] = upserts.map { message -> [String: Any] in
+            guard message["nativeHistoryRef"] != nil else { return message }
+            if let resolved = nativeHistoryMessages.resolve(message) { return resolved }
+            if !reportedMissingHistoryRef {
+                reportedMissingHistoryRef = true
+                postClientLog("历史原生化：占位找不到对应内容 ref=\(message["nativeHistoryRef"] ?? "?")，显示提示")
+            }
+            var fallback = message
+            fallback.removeValue(forKey: "nativeHistoryRef")
+            fallback["text"] = "（这条历史需要重新载入）"
+            return fallback
+        }
+        var result = body; result["messageDelta"] = batch; return result
+    }
     private var readerWasBackgrounded = false
     /// 上一次发布出去的各域摘要串。内容没变就不重发 —— 导出要在页面里跑 JS
     /// 并算八个域的摘要，白发一次不便宜。换书时不必清：指纹里带着域摘要，
@@ -4801,6 +4824,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             )
             let nativeAssistantStream = ReaderNativeAssistantStreamBridge(webView: webView,
                 trustedBaseURL: localRuntimeServer.baseURL, gateway: nativeServerGateway)
+            nativeHistoryMessages.onDiagnostic = { [weak self] line in self?.postClientLog(line) }
+            nativeAssistantStream.historyMessages = nativeHistoryMessages
             nativeAssistantStream.preparePDFBody = { [weak self] input in
                 guard let self, let document = self.nativePDFDocument, let bookID = self.nativeReadingStoreBookID,
                       bookID == self.currentLocalBook?.id, self.currentLocalBook?.format == .pdf,
@@ -8742,7 +8767,7 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 return
             }
             do {
-                nativeConversation.receive(try nativeTurns?.conversationPayload(body) ?? body)
+                nativeConversation.receive(try nativeTurns?.conversationPayload(resolveNativeHistory(body)) ?? resolveNativeHistory(body))
                 reportedConversationPayloadFailure = nil
                 if !pendingNativeMediaReceipts.isEmpty { Task { @MainActor [weak self] in await self?.flushNativeMediaReceipts() } }
             } catch {

@@ -4232,6 +4232,17 @@
   function _historyReplayOne(m, mode, state, target, scope, deferredActions) {
     if (!m || (m.role !== 'user' && m.role !== 'assistant')) throw new Error('invalid history record');
     var nativeHistory = m.__bwNativeHistory?.mode === _modeNorm(mode) ? m.__bwNativeHistory : null;
+    // 迁出 P1（2026-09-26）：App 里用户话、纯文字回答、旧版卡片由原生按 ref 生成内容，
+    // 这里只放一个带身份的占位（顺序与 preserveLive 的替换仍靠它）。带 parts 的轮次照旧走 turnCard。
+    if (nativeHistory && typeof nativeHistory.ref === 'string' && nativeHistory.kind !== 'parts') {
+      if (nativeHistory.kind === 'user') state.lastQ = m.content || '';
+      var ph = document.createElement('div');
+      ph.className = 'asst-msg ' + (nativeHistory.kind === 'user' ? 'asst-u' : 'asst-a');
+      ph.setAttribute('data-turn-id', m.turn_id ? (nativeHistory.kind === 'user' ? _streamViewId(m.turn_id, 'user') : String(m.turn_id)) : _historyTurnId(m, mode, scope));
+      ph.__bwNativeHistoryRef = nativeHistory.ref;
+      target.appendChild(ph); window.__bwNativeMessages?.publish(ph, target);
+      return;
+    }
     if (nativeHistory ? nativeHistory.kind === 'user' : m.role === 'user') {
       state.lastQ = m.content || '';
       if (m.turn_id && RC.turnCard && RC.turnCard.renderTurn) {

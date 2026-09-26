@@ -37,6 +37,23 @@ do {
     print("Native vocab sentences: ≥3 underlined, ≥10 words, footer excluded")
 }
 
+// 表格同一行的几格 / 一行排几个的列表项：中间隔着大段空白，不能连成一句（2026-09-26 实机）。
+do {
+    var chars: [O.Row] = [], spans: [(row: O.Row, lo: Int)] = [], x = 10.0, wid = 1000.0
+    for cell in 0..<4 {
+        for i in 0..<4 {
+            let word = "cell\(cell)word\(i)", lo = chars.count; wid += 1
+            for c in word { chars.append(["c": String(c), "x0": x, "y0": 100, "x1": x + 6, "y1": 110, "w": wid, "bk": 0, "sp": false]); x += 6 }
+            if i == 0 { spans.append((row: ["lemma": word, "label_slug": "new"], lo: lo)) }
+            chars.append(["c": " ", "x0": x, "y0": 100, "x1": x + 6, "y1": 110, "w": -1, "bk": 0, "sp": true]); x += 6
+        }
+        x += 60   // 格与格之间的空白
+    }
+    let got = O.localSentences(chars, spans: spans, visibleLemmas: Set(spans.compactMap { $0.row["lemma"] as? String }), pageHeight: 1000)
+    precondition(got.isEmpty, "table cells on one line were joined into a sentence: \(got)")
+    print("Native vocab sentences: table cells separated by wide gaps stay apart")
+}
+
 let store = try ReaderNativeDataStore(path: ":memory:")
 let cache = ReaderNativePageOverlayStore()
 let v = ReaderNativeVocabularyState(store: store, deviceID: "test")
