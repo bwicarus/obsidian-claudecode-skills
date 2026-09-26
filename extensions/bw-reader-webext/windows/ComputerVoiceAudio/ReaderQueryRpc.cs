@@ -415,7 +415,7 @@ internal sealed class NamedPipeReaderQueryRpcClient
         {
             throw Failure(
                 "BW_READER_QUERY_RPC_FAILED",
-                "Windows Reader 查询 RPC 失败",
+                "Windows Reader 查询 RPC 失败（" + ReaderRpcDiagnostics.Describe(exception) + "）",
                 exception);
         }
         finally
@@ -476,6 +476,8 @@ internal sealed class NamedPipeReaderQueryRpcServer
                 or ReaderQueryException
             )
             {
+                // 出声（2026-09-26）：以前静默吞掉，客户端只能看到「RPC 失败」。
+                Console.Error.WriteLine("[reader-query-rpc] 连接处理中断: " + ReaderRpcDiagnostics.Describe(exception));
             }
         }
     }

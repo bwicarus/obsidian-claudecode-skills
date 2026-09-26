@@ -549,7 +549,7 @@ internal sealed class NamedPipeReaderVisualRpcClient
         {
             throw new ReaderVisualDeliveryException(
                 "BW_READER_VISUAL_RPC_FAILED",
-                "Windows Reader 视觉 RPC 失败",
+                "Windows Reader 视觉 RPC 失败（" + ReaderRpcDiagnostics.Describe(exception) + "）",
                 retryable: true,
                 exception);
         }
@@ -608,6 +608,7 @@ internal sealed class NamedPipeReaderVisualRpcServer
             {
                 // A malformed or disconnected client must not stop the
                 // dedicated service pipe.  Each exchange has one request.
+                Console.Error.WriteLine("[reader-visual-rpc] 连接处理中断: " + ReaderRpcDiagnostics.Describe(exception));
             }
         }
     }

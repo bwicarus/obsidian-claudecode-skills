@@ -490,9 +490,11 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcClient
             or JsonException
             or ReaderVisualDeliveryException)
         {
+            // 出声（2026-09-26）：以前只有「输出 RPC 失败」一句，内部原因（管道被对方关闭 / 分帧 /
+            // JSON / 权限）全丢了 —— 用户报「高亮执行了却显示输出 RPC 失败」时无从查起。
             throw Failure(
                 "BW_READER_REALTIME_OUTPUT_RPC_FAILED",
-                "Windows Reader 输出 RPC 失败",
+                "Windows Reader 输出 RPC 失败（" + ReaderRpcDiagnostics.Describe(exception) + "）",
                 exception);
         }
         finally
@@ -542,14 +544,13 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcServer
             {
                 return;
             }
-            catch (Exception exception) when (
-                exception is IOException
-                or UnauthorizedAccessException
-                or ObjectDisposedException
-                or JsonException
-                or ReaderVisualDeliveryException
-                or ReaderRealtimeOutputException)
+            catch (Exception exception)
             {
+                // 出声（2026-09-26）：以前这里对 IO / JSON / 分帧等异常静默吞掉、直接关管道，
+                // 客户端只能报「输出 RPC 失败」；清单外的异常类型更会让整个服务循环退出，
+                // 此后所有输出都成了「输出服务未连接」。现在一律记下并继续服务。
+                Console.Error.WriteLine(
+                    "[reader-output-rpc] 连接处理中断: " + ReaderRpcDiagnostics.Describe(exception));
             }
         }
     }
@@ -613,6 +614,21 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcServer
                 request,
                 exception);
         }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // 出声（2026-09-26）：非 ReaderRealtimeOutputException 以前会冲出这里、管道被关，
+            // 客户端读到 EOF。现在回一个带真实异常的失败回执 —— 输出可能已经在 App 生效，
+            // 这条回执至少能说清是桥的哪一步出了什么错。
+            Console.Error.WriteLine(
+                "[reader-output-rpc] 处理失败: " + ReaderRpcDiagnostics.Describe(exception));
+            response = ReaderRealtimeOutputRpcProtocol.Failure(
+                request,
+                new ReaderRealtimeOutputException(
+                    "BW_READER_REALTIME_OUTPUT_BRIDGE_FAILED",
+                    "Windows 桥处理 Reader 输出时出错（" + ReaderRpcDiagnostics.Describe(exception) + "）",
+                    retryable: false,
+                    exception));
+        }
         byte[] encoded = Encoding.UTF8.GetBytes(
             response.ToJsonString(DirectBridgeContract.JsonOptions));
         try
@@ -626,5 +642,21 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcServer
         {
             Array.Clear(encoded);
         }
+    }
+}
+
+/// 出声用的异常描述：类型 + 原文（截断），内层异常也带上 —— 管道 / 分帧异常的真实原因常在内层。
+internal static class ReaderRpcDiagnostics
+{
+    internal static string Describe(Exception exception)
+    {
+        static string Clip(string value) =>
+            value.Length > 200 ? value[..200] + "…" : value;
+        string text = exception.GetType().Name + ": " + Clip(exception.Message);
+        if (exception.InnerException is Exception inner)
+        {
+            text += " ← " + inner.GetType().Name + ": " + Clip(inner.Message);
+        }
+        return text;
     }
 }
