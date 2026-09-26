@@ -4342,6 +4342,10 @@ class Runner:
 
     def _history_enabled(self) -> str:
         url = str(self.settings.get("historyUrl") or "").rstrip("/")
+        # 旧设置里存的是默认的 5000；webapp 换端口（Mac：BW_WEBAPP_PORT=5055）后跟着换，免得侧栏历史静默写丢
+        port = os.environ.get("BW_WEBAPP_PORT")
+        if port and url == "http://127.0.0.1:5000":
+            url = "http://127.0.0.1:" + port
         return url if url and self.settings.get("historyEnabled", True) else ""
 
     def _history_post(self, body: dict):

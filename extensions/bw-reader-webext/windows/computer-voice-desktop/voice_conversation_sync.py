@@ -367,7 +367,8 @@ class FlaskHistoryWriter:
 
     def __init__(self, base_url: str | None = None, token: str | None = None,
                  opener: Callable[..., Any] | None = None) -> None:
-        self.base_url = (base_url or os.environ.get("BW_READER_WEBAPP_URL") or "http://127.0.0.1:5000").rstrip("/")
+        self.base_url = (base_url or os.environ.get("BW_READER_WEBAPP_URL")
+                         or f"http://127.0.0.1:{os.environ.get('BW_WEBAPP_PORT') or 5000}").rstrip("/")
         self._token = token
         self._opener = opener or urllib.request.urlopen
 

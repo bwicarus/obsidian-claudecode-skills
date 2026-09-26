@@ -37,7 +37,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
-BASE = os.environ.get("BW_BRIDGE_BASE", "http://127.0.0.1:5000")
+BASE = os.environ.get("BW_BRIDGE_BASE") or f"http://127.0.0.1:{os.environ.get('BW_WEBAPP_PORT') or 5000}"
 STATE = ROOT / "state" / "reader-bridge"
 AUDIT = STATE / "audit.jsonl"
 SEEN = STATE / "seen.json"          # request_id → 上次结果（幂等）

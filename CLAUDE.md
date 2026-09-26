@@ -23,6 +23,8 @@
 - 📲 **交付 = 本机装机，不出 TestFlight（2026-09-25 用户拍板）**：现阶段只有用户自己用，改完就用开发签名
   装到他的 iPad（必要时 iPhone），命令见 `references/mac-server.md` §6；功能完善前**不触发**云端构建/上传。
   下文「改前端要到 iPad 只能走 TestFlight」是 Windows 时代（没有本机签名）的说法。
+- 🔌 **Mac 上 webapp 端口是 5055，不是 5000**（2026-09-26）：5000 被 macOS「隔空播放接收器」占着，iPad 请求会随机收到它的 403。
+  端口由 `deploy_mac.py` 下发的 `BW_WEBAPP_PORT` 统一控制；tailscale serve 的 Flask 路由用 `mac/retarget_serve.sh` 改。下文「恒为 5000」只指 Windows / Pi。
 - ⚠ **.NET 8 在 macOS 上 LocalApplicationData = `~/Library/Application Support`**（不是 ~/.local/share）；
   那里的 `BWReader` 必须是指向 `~/BW/data/BWReader` 的链接，否则桥读空目录（App 报「语音核心没在跑」）。
 - 「电脑语音」（驱动 Codex/ChatGPT 桌面版、虚拟声卡）**已停用**，只用 CLI 语音。

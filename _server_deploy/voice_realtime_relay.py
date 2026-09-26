@@ -52,7 +52,7 @@ LISTEN_HOST, LISTEN_PORT = "127.0.0.1", 8767
 DEBUG = False   # 排障时开(350 句文本等)
 
 # ── 书本上下文/工具桥:经 webapp HTTP(Bearer=mcp-webapp-token,与 MCP 服务器同一套)──
-WEBAPP = "http://127.0.0.1:5000"
+WEBAPP = f"http://127.0.0.1:{os.environ.get('BW_WEBAPP_PORT') or 5000}"
 _TOKEN_FILE = Path("~/.config/mcp-webapp-token").expanduser()
 DIALOG_ID_FILE = (_bw_paths.STATE / "doubao-dialog-id.txt")   # 跨通话记忆(服务端接续最近20轮)
 USAGE_FILE = (_bw_paths.STATE / "doubao-usage.json")          # 154 UsageResponse 记账(v3-⑩ A)

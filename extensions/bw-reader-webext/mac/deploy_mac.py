@@ -39,6 +39,8 @@ NODE_BIN = HOME / ".local" / "opt" / "node" / "bin"
 BRIDGE_ROOT = DATA / "bridge"
 LAUNCH_AGENTS = HOME / "Library" / "LaunchAgents"
 LABEL_PREFIX = "space.bwicarus."
+# webapp 本机端口（2026-09-26 从 5000 换来：5000 被 macOS「隔空播放接收器」占着，iPad 请求随机 403）
+WEBAPP_PORT = 5055
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -132,6 +134,9 @@ def read_env() -> dict[str, str]:
     env.setdefault("LOCALAPPDATA", str(DATA))
     env.setdefault("DOTNET_ROOT", str(DOTNET_ROOT))
     env.setdefault("BW_PYTHON", str(PY))
+    # webapp 端口（2026-09-26）：5000 被 macOS「隔空播放接收器」占着，iPad 请求会随机收到它的 403。
+    # 所有服务都从这个变量推 webapp 地址；改端口后 tailscale serve 的 Flask 路由也要跟着改（见 mac-server.md）。
+    env.setdefault("BW_WEBAPP_PORT", str(WEBAPP_PORT))
     # MCP 门面的「ReaderPC 实时工具」代理（reader_pc_tools / reader_pc_call_tool / voice_brief）要起
     # 桥的 --reader-context-mcp 模式；以前只认 Windows 的 EXE 路径，迁到 Mac 后一直 READER_PC_UNAVAILABLE。
     env.setdefault("READER_CONTEXT_MCP_COMMAND", str(CURRENT / "bridge" / "bw-reader-bridge"))
@@ -355,24 +360,28 @@ def main() -> int:
     write_plists(env, names)
     if not args.no_restart:
         restart(names)
-    check_port_5000()
+    check_webapp_port(int(env.get("BW_WEBAPP_PORT") or WEBAPP_PORT))
     return 0
 
 
-def check_port_5000() -> None:
-    """webapp 在 127.0.0.1:5000。macOS 的「隔空播放接收器」（ControlCenter）默认也听 *:5000，
-    经 tailscale serve 进来的部分请求会被它接走并回 403 —— 2026-09-26 iPad 时间轴与设置页因此报 403，
-    而 Mac 本机 curl 却一切正常（302），极易误判。部署完查一次，占着就大声提醒。"""
+def check_webapp_port(port: int) -> None:
+    """webapp 端口若还有别的进程在听（2026-09-26：5000 被 macOS「隔空播放接收器」占着，iPad 请求随机 403，
+    Mac 本机 curl 却一切正常），部署完大声提醒；另核对 tailscale serve 的 Flask 路由是否已指向这个端口。"""
     try:
-        out = subprocess.run(["lsof", "-nP", "-iTCP:5000", "-sTCP:LISTEN"], capture_output=True, text=True).stdout
+        out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout
     except OSError as exc:
-        log(f"⚠ 没能检查 5000 端口占用（{exc}）")
+        log(f"⚠ 没能检查 {port} 端口占用（{exc}）")
         return
     others = sorted({line.split()[0] for line in out.splitlines()[1:] if line and not line.startswith("python")})
     if others:
-        log("⚠⚠ 5000 端口还被这些进程监听：" + ", ".join(others) +
-            " —— 若是 ControlCe（隔空播放接收器），iPad 请求会随机收到 403。"
-            "关掉：系统设置 → 通用 → 隔空投送与接力 → 隔空播放接收器。")
+        log(f"⚠⚠ webapp 端口 {port} 还被这些进程监听：" + ", ".join(others))
+    ts = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
+    if ts.exists():
+        status = subprocess.run([str(ts), "serve", "status"], capture_output=True, text=True).stdout
+        stale = [line.split()[0].lstrip("|-").strip() for line in status.splitlines() if "127.0.0.1:5000" in line]
+        if stale and port != 5000:
+            log(f"⚠⚠ tailscale serve 还有 {len(stale)} 条路由指向旧端口 5000（{', '.join(stale[:6])}…）："
+                f"跑 extensions/bw-reader-webext/mac/retarget_serve.sh {port} 改过去")
 
 
 if __name__ == "__main__":

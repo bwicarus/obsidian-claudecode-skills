@@ -1675,4 +1675,5 @@ register_assistant(app)
 
 if __name__ == "__main__":
     # threaded=True：慢的 AI 请求（语法分析/翻译走 claude_cli）不再阻塞其他请求
-    app.run(host="127.0.0.1", port=5000, threaded=True)
+    # 端口可配（2026-09-26）：Mac 上 5000 被「隔空播放接收器」占着，iPad 请求会随机 403；deploy_mac 设 5055
+    app.run(host="127.0.0.1", port=int(os.environ.get("BW_WEBAPP_PORT") or 5000), threaded=True)

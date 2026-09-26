@@ -26,7 +26,7 @@ from mcp.client.stdio import StdioServerParameters, get_default_environment, std
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ToolAnnotations
 
-BASE = os.environ.get("MCP_WEBAPP_BASE", "http://127.0.0.1:5000")
+BASE = os.environ.get("MCP_WEBAPP_BASE") or f"http://127.0.0.1:{os.environ.get('BW_WEBAPP_PORT') or 5000}"
 
 
 def _token() -> str:

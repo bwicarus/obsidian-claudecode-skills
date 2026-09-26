@@ -41,9 +41,12 @@ LABEL_PREFIX = "space.bwicarus."
 BRIDGE_ROOT = Path.home() / "BW" / "data" / "bridge"
 BRIDGE_RUNTIME = BRIDGE_ROOT / "runtime"
 
+# webapp 端口与 deploy_mac 同源（5000 在 Mac 上被「隔空播放接收器」占着）
+WEBAPP_PORT = int(os.environ.get("BW_WEBAPP_PORT") or 5055)
+
 # launchd 里的服务：名字 = plist 标签后缀，端口用来判断"真的在服务"。
 SERVICES: list[tuple[str, str, int]] = [
-    ("webapp", "网页后端(5000)", 5000),
+    ("webapp", f"网页后端({WEBAPP_PORT})", WEBAPP_PORT),
     ("voice-rt", "实时语音中继(8767)", 8767),
     ("rbi", "远程浏览器(8769)", 8769),
     ("mcp", "MCP 门面(8766)", 8766),

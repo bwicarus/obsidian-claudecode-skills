@@ -58,7 +58,7 @@ Python 侧的「本地应用数据」靠环境变量 `LOCALAPPDATA=~/BW/data`（
 
 | 服务 | 端口 | 说明 |
 |---|---|---|
-| webapp | 5000 | Flask 网页后端（`_server_deploy/app.py`） |
+| webapp | **5055** | Flask 网页后端（`_server_deploy/app.py`）。⚠ 2026-09-26 从 5000 换来，见下「5000 端口」；端口由 `BW_WEBAPP_PORT` 统一下发 |
 | mcp | 8766 | MCP 门面（要 `~/.config/mcp-http-token`） |
 | voice-rt | 8767 | 实时语音中继 |
 | rbi | 8769 | 远程浏览器（Playwright Chromium） |
@@ -71,7 +71,7 @@ Python 侧的「本地应用数据」靠环境变量 `LOCALAPPDATA=~/BW/data`（
 
 **对外**：`tailscale serve` 48 条路由（Windows 原配置 47 条 + 2026-09-26 补的 `/assistant-attachments`
 —— Windows 上就漏了它，所以侧栏发图一直报「上传失败」；返回 `404 page not found` 纯文本的就是 serve 没转发），
-443 → 5000/8766/8767/8769/43128 各路径，8443 → 43132（服务器网页界面）。
+443 → 5055（webapp，原 5000）/8766/8767/8769/43128 各路径，8443 → 43132（服务器网页界面）。
 核对桥路由有没有漏转发：`tailscale serve status` 列出的前缀 vs `DirectBridgeServer.cs` 里的 `MapMethods`
 路径（`/voice-core/*` 只给本机，本就不转发）。
 ⚠ serve 配置绑在**主机名**上：Tailscale 改名后必须 `serve reset` 再重配（Windows 改名后就是因此全断）。
@@ -79,8 +79,11 @@ Python 侧的「本地应用数据」靠环境变量 `LOCALAPPDATA=~/BW/data`（
 ⚠ **5000 端口与「隔空播放接收器」（2026-09-26 实锤）**：macOS 的 AirPlay 接收器（进程 `ControlCe`）默认监听 `*:5000`，
 与 webapp 的 `127.0.0.1:5000` 并存。症状极具迷惑性：Mac 本机 `curl 127.0.0.1:5000/...` 与经 tailnet 地址的 curl
 都正常（302、`server: Werkzeug`），但 iPad 的部分 `/api/...` 请求随机收到 **403**，且 webapp 日志里**没有**这些请求。
-修法：系统设置 → 通用 → 隔空投送与接力 → 关闭「隔空播放接收器」。`deploy_mac.py` 部署完会用 `lsof` 检查并提醒。
-排查口诀：iPad 报 403 而 webapp 日志里没有对应请求 → 先 `lsof -nP -iTCP:5000 -sTCP:LISTEN`。
+**已根治（用户选「换端口」）**：webapp 改听 **5055**。`deploy_mac.py` 给所有服务下发 `BW_WEBAPP_PORT=5055`，
+webapp 自身、MCP 门面、实时语音中继、后台守护、CLI 语音的侧栏历史、KJ 扫书 / 桥的 KJ 客户端都从它推地址
+（没设时仍默认 5000，Windows / Pi 不受影响）。tailscale serve 里原来指向 5000 的 Flask 路由用
+`extensions/bw-reader-webext/mac/retarget_serve.sh 5055` 一次改过去；部署完脚本还会检查是否仍有路由指向 5000。
+隔空播放接收器因此可以重新打开。排查口诀仍然有效：iPad 报 403 而 webapp 日志里没有对应请求 → 先 `lsof` 看端口被谁占。
 
 ## 4. 部署
 

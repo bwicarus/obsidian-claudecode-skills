@@ -145,9 +145,10 @@ internal static class KjPageClient
         get
         {
             string? env = Environment.GetEnvironmentVariable("BW_KJ_WEBAPP_BASE");
-            return string.IsNullOrWhiteSpace(env)
-                ? "http://127.0.0.1:5000"
-                : env.Trim().TrimEnd('/');
+            if (!string.IsNullOrWhiteSpace(env)) return env.Trim().TrimEnd('/');
+            // 端口可配：Mac 上 5000 被「隔空播放接收器」占着，deploy_mac 设 BW_WEBAPP_PORT=5055
+            string? port = Environment.GetEnvironmentVariable("BW_WEBAPP_PORT");
+            return "http://127.0.0.1:" + (string.IsNullOrWhiteSpace(port) ? "5000" : port.Trim());
         }
     }
 

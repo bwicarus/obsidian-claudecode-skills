@@ -274,7 +274,7 @@ def page_text_via_flask(rel: str | None, page: int) -> str | None:
     try:
         import urllib.parse
         import urllib.request
-        base = os.environ.get("BW_KJ_WEBAPP_BASE") or "http://127.0.0.1:5000"
+        base = os.environ.get("BW_KJ_WEBAPP_BASE") or f"http://127.0.0.1:{os.environ.get('BW_WEBAPP_PORT') or 5000}"
         url = base + "/pdf/api/page-text?" + urllib.parse.urlencode({"file": rel, "page": page})
         req = urllib.request.Request(url, headers={"Authorization": "Bearer " + tok})
         with urllib.request.urlopen(req, timeout=30) as resp:
