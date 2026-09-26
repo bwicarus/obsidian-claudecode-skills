@@ -347,6 +347,16 @@ final class NativeStreamDiarizer {
     static let sampleRate: Double = 16_000
 
     let diarizer: SortformerDiarizer
+    /// 分离器在自己的队列上跑（模型慢时不能堵住识别结果与周期任务），查询在 work 队列上 —— 一把锁隔开。
+    private let lock = NSRecursiveLock()   // 查询之间互相调用（activeSpeakers → elapsed / segments）
+    /// 已排队、还没处理的样本数（判断是否跟不上实时）。
+    private var pendingStorage = 0
+    var pendingSamples: Int { lock.lock(); defer { lock.unlock() }; return pendingStorage }
+    /// 累计处理耗时 / 已处理音频时长（实时率 = 前者 / 后者）。
+    private var busyStorage = 0.0
+    var busySeconds: Double { lock.lock(); defer { lock.unlock() }; return busyStorage }
+    func enqueued(_ count: Int) -> Int { lock.lock(); defer { lock.unlock() }; pendingStorage += count; return pendingStorage }
+    func locked<T>(_ body: () throws -> T) rethrows -> T { lock.lock(); defer { lock.unlock() }; return try body() }
     /// 登记声纹对应的说话人槽位；没登记声纹时为 nil（调用方按「说话最多的人」兜底）。
     /// 熟人不占槽位：分离器只回答「哪几段是同一个人」，是谁由 NativeSpeakerEmbedder 做声纹比对。
     private(set) var userIndex: Int?
@@ -361,36 +371,43 @@ final class NativeStreamDiarizer {
     }
 
     /// 已送入的音频时长（秒，从本实例创建算起）。
-    var elapsed: Double { Double(fedSamples) / Self.sampleRate }
+    var elapsed: Double { lock.lock(); defer { lock.unlock() }; return Double(fedSamples) / Self.sampleRate }
 
     /// 已定稿的时间线推进到哪一秒（分离器时间轴）。早于它的「谁在说」不会再变。
-    private(set) var finalizedUntil = 0.0
+    private var finalizedUntilStorage = 0.0
+    var finalizedUntil: Double { lock.lock(); defer { lock.unlock() }; return finalizedUntilStorage }
 
     /// 送 16 kHz 单声道；够一个分块时模型才会真正跑。
     @discardableResult
     func feed(_ samples: [Float]) throws -> DiarizerTimelineUpdate? {
+        lock.lock(); defer { lock.unlock() }
+        let started = CFAbsoluteTimeGetCurrent()
+        defer { busyStorage += CFAbsoluteTimeGetCurrent() - started; pendingStorage = max(0, pendingStorage - samples.count) }
         fedSamples += samples.count
         let update = try diarizer.process(samples: samples, sourceSampleRate: nil)
         if let chunk = update?.chunkResult {
             let frames = chunk.startFrame + chunk.finalizedFrameCount
-            finalizedUntil = max(finalizedUntil, Double(frames) * Double(NativeSortformerModels.config.frameDurationSeconds))
+            finalizedUntilStorage = max(finalizedUntilStorage, Double(frames) * Double(NativeSortformerModels.config.frameDurationSeconds))
         }
         return update
     }
 
     /// 全部人已定稿的说话片段（分离器时间轴），按开始时间排序。
     func finalizedSegments() -> [(speaker: Int, start: Double, end: Double)] {
-        diarizer.timeline.speakers.values
+        lock.lock(); defer { lock.unlock() }
+        return diarizer.timeline.speakers.values
             .flatMap { slot in slot.finalizedSegments.map { (speaker: slot.index, start: Double($0.startTime), end: Double($0.endTime)) } }
             .sorted { $0.start < $1.start }
     }
 
     private func segments() -> [DiarizerSegment] {
-        diarizer.timeline.speakers.values.flatMap { $0.finalizedSegments + $0.tentativeSegments }
+        lock.lock(); defer { lock.unlock() }
+        return diarizer.timeline.speakers.values.flatMap { $0.finalizedSegments + $0.tentativeSegments }
     }
 
     /// 最近 `window` 秒里，说话累计超过 `minSpeech` 秒的说话人。
     func activeSpeakers(within window: Double, minSpeech: Double) -> [Int] {
+        lock.lock(); defer { lock.unlock() }
         let from = elapsed - window
         var talk: [Int: Double] = [:]
         for segment in segments() where Double(segment.endTime) > from {
@@ -402,6 +419,7 @@ final class NativeStreamDiarizer {
 
     /// [from, to] 里说话重叠最多的人。
     func dominantSpeaker(from: Double, to: Double) -> Int? {
+        lock.lock(); defer { lock.unlock() }
         var overlap: [Int: Double] = [:]
         for segment in segments() {
             let value = min(to, Double(segment.endTime)) - max(from, Double(segment.startTime))
@@ -412,12 +430,14 @@ final class NativeStreamDiarizer {
 
     /// 某个槽位的已定稿说话区间（分离器时间轴），新的在后。
     func finalizedSpeech(of speaker: Int) -> [ClosedRange<Double>] {
+        lock.lock(); defer { lock.unlock() }
         guard let slot = diarizer.timeline.speakers[speaker] else { return [] }
         return slot.finalizedSegments.map { Double($0.startTime)...Double($0.endTime) }
     }
 
     /// 除「我」以外、已定稿说话时长（秒）。
     func finalizedSpeechSeconds() -> [Int: Double] {
+        lock.lock(); defer { lock.unlock() }
         var out: [Int: Double] = [:]
         for (index, slot) in diarizer.timeline.speakers where index != userIndex {
             out[index] = Double(slot.finalizedSpeechDuration)
@@ -427,12 +447,14 @@ final class NativeStreamDiarizer {
 
     /// 至今说话最多的人（没登记声纹时当作「我」：离麦克风最近、说得最多的通常是用户本人）。
     func mostTalkative() -> Int? {
-        diarizer.timeline.speakers.values.max { $0.speechDuration < $1.speechDuration }?.index
+        lock.lock(); defer { lock.unlock() }
+        return diarizer.timeline.speakers.values.max { $0.speechDuration < $1.speechDuration }?.index
     }
 
     /// 某人在 [from, to] 里的说话区间（含暂定结果）。
     func speech(of speaker: Int, from: Double, to: Double) -> [ClosedRange<Double>] {
-        segments().compactMap { segment in
+        lock.lock(); defer { lock.unlock() }
+        return segments().compactMap { segment in
             guard segment.speakerIndex == speaker,
                   Double(segment.endTime) >= from, Double(segment.startTime) <= to else { return nil }
             return Double(segment.startTime)...Double(segment.endTime)
@@ -441,7 +463,61 @@ final class NativeStreamDiarizer {
 
     /// 分离结果已经覆盖到哪一秒（定稿 + 暂定）。晚于它的时刻「还不知道是谁」。
     var analyzedUntil: Double {
-        segments().map { Double($0.endTime) }.max() ?? 0
+        lock.lock(); defer { lock.unlock() }
+        return segments().map { Double($0.endTime) }.max() ?? 0
+    }
+}
+
+// MARK: - 送识别器前的自动增益
+
+/// 远处的声音（隔着房间的电影、别人说话）进麦克风很小：分离器照样认得出有人在说，
+/// 系统听写却判「没有语音」（1110），主线一句都出不来（2026-09-27 实测：6 分钟 0 句、重转 8 段全空）。
+/// 送识别器前按平滑后的音量把它拉到正常说话的电平；峰值用 tanh 软限幅，不削波。只影响送识别器的那一份。
+final class NativeAmbientGain {
+    static let targetRMS: Float = 0.05          // ≈ -26 dBFS：近讲说话的典型电平
+    static let maxGain: Float = 16
+    private let lock = NSLock()
+    private var smoothedRMS: Float = 0.05
+    private var gain: Float = 1
+    // 诊断：本统计周期的电平与增益
+    private var sumSquares: Double = 0, count = 0, peak: Float = 0, gainSum: Double = 0, buffers = 0
+
+    /// 单声道、增益后的一份（原生采样率），给识别请求用。
+    func process(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let source = buffer.floatChannelData?[0], buffer.frameLength > 0,
+              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: buffer.format.sampleRate, channels: 1, interleaved: false),
+              let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameLength),
+              let target = out.floatChannelData?[0] else { return nil }
+        let n = Int(buffer.frameLength)
+        var squares: Float = 0, localPeak: Float = 0
+        for i in 0..<n { let v = source[i]; squares += v * v; localPeak = max(localPeak, abs(v)) }
+        let rms = sqrt(squares / Float(n))
+        lock.lock()
+        smoothedRMS = smoothedRMS * 0.9 + rms * 0.1
+        let wanted = min(Self.maxGain, max(1, Self.targetRMS / max(smoothedRMS, 1e-5)))
+        gain = gain * 0.8 + wanted * 0.2
+        let g = gain
+        sumSquares += Double(squares); count += n; peak = max(peak, localPeak); gainSum += Double(g); buffers += 1
+        lock.unlock()
+        for i in 0..<n { target[i] = tanh(source[i] * g) }
+        out.frameLength = buffer.frameLength
+        return out
+    }
+
+    /// 本周期的平均电平 / 峰值（dBFS）与平均增益，读完清零。
+    func drainStats() -> (rmsDB: Double, peakDB: Double, gain: Double)? {
+        lock.lock(); defer { sumSquares = 0; count = 0; peak = 0; gainSum = 0; buffers = 0; lock.unlock() }
+        guard count > 0, buffers > 0 else { return nil }
+        let rms = sqrt(sumSquares / Double(count))
+        return (20 * log10(max(rms, 1e-7)), 20 * log10(Double(max(peak, 1e-7))), gainSum / Double(buffers))
+    }
+
+    /// 一整段（逐段重转用）：按整段音量一次性拉到目标电平，tanh 软限幅。
+    static func normalize(_ samples: [Float]) -> [Float] {
+        guard !samples.isEmpty else { return samples }
+        let rms = sqrt(samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count))
+        let g = min(maxGain, max(1, targetRMS / max(rms, 1e-5)))
+        return g == 1 ? samples : samples.map { tanh($0 * g) }
     }
 }
 

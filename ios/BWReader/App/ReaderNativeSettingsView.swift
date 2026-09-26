@@ -117,6 +117,7 @@ struct ReaderNativeSettingsView: View {
     @State private var naming = false
     @State private var profileName = ""
     @State private var deleting: String?
+    @State private var showAmbientTimeline = false
 
     var body: some View {
         NavigationStack {
@@ -135,7 +136,7 @@ struct ReaderNativeSettingsView: View {
                 }
                 if tab == "models" { modelSections }
                 else if tab == "voice" { voiceSections }
-                else if tab == "ambient" { NativeAmbientSettingsSections() }
+                else if tab == "ambient" { NativeAmbientSettingsSections(showTimeline: $showAmbientTimeline) }
                 else { computerSections }
             }
             .scrollContentBackground(.hidden).background(ReaderNativeTheme.canvas)
@@ -168,6 +169,7 @@ struct ReaderNativeSettingsView: View {
                 }
             } message: { Text("删除“\(deleting ?? "")”？当前生效的模型配置会保留。") }
         }.tint(ReaderNativeTheme.accent)
+        .fullScreenCover(isPresented: $showAmbientTimeline) { NativeAmbientTimelineView() }
     }
 
     @ViewBuilder private var modelSections: some View {

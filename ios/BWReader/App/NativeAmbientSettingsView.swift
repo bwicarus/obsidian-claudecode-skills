@@ -8,7 +8,9 @@ struct NativeAmbientSettingsSections: View {
     @State private var gateEnabled = NativeNoisyVoiceGate.isEnabled
     @State private var promptIsolation = NativeNoisyVoiceGate.promptsSystemIsolation
     @State private var forceUserOnly = NativeNoisyVoiceGate.forceUserOnly
-    @State private var showTimeline = false
+    /// 打开时间轴的开关由设置页顶层持有：这里是列表里的一行，旁听日志每几秒一刷就重建，
+    /// 挂在这里的全屏面板会跟着被关掉（2026-09-27 用户：「点开面板会失败、自动关闭」）。
+    @Binding var showTimeline: Bool
     @State private var candidates = Set(NativeSegmentTranscriber.candidateLocales)
     @State private var hasVoiceprint = NativeVoiceprint.exists
     @State private var enrolling = false
@@ -29,7 +31,6 @@ struct NativeAmbientSettingsSections: View {
         } footer: {
             Text("多人说话按时间轴分块显示；点块看、改这个人的名字、介绍、AI 整理和对话历史。资料写在 Obsidian 的 KJ 人物页。")
         }
-        .fullScreenCover(isPresented: $showTimeline) { NativeAmbientTimelineView() }
         voiceprintSection
         peopleSection
         ambientSection

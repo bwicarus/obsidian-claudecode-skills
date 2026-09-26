@@ -101,7 +101,8 @@ actor NativeSegmentTranscriber {
         return chosen
     }
 
-    private func run(_ samples: [Float], locale: String) async -> Result? {
+    private func run(_ original: [Float], locale: String) async -> Result? {
+        let samples = NativeAmbientGain.normalize(original)   // 远处的声音太小，识别器会判「没有语音」
         guard let recognizer = recognizer(locale),
               let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: NativeStreamDiarizer.sampleRate,
                                          channels: 1, interleaved: false),

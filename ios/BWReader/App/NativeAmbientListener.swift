@@ -445,6 +445,9 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private let work = DispatchQueue(label: "space.bwicarus.reader.ambient", qos: .utility)
     private let tapLock = NSLock()
+    private let gain = NativeAmbientGain()      // 送识别器前的自动增益（远处的声音太小会被判成没有语音）
+    private let diarizerQueue = DispatchQueue(label: "space.bwicarus.reader.ambient.diarizer", qos: .utility)
+    static let diarizerMaxLag = 8.0             // 秒：分离器积压超过这么久就从当前时刻重建（宁可少分人，不能拖住转写）
     private var request: SFSpeechAudioBufferRecognitionRequest?   // 主线识别的当前请求（tap 往里追加）
     private var streamFrames: Int64 = 0         // 原生采样率下已收到的帧数（整条管线的时钟）
     private var sampleRate: Double = 48_000
@@ -465,6 +468,10 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private var windowDueSince: Date?
     // 诊断计数：每 30 秒有变化就写一行日志（「没有记录」时一眼看出卡在哪一步）
     private var stats = (streamed: 0, cut: 0, done: 0, empty: 0, revised: 0, sent: 0)
+    // 主线识别器自身的计数：任务数 / 中间结果 / 定稿 / 出错（区分「识别器没听到」和「听到了但后面丢了」）
+    private var recStats = (tasks: 0, partials: 0, finals: 0, errors: 0, lastError: 0)
+    private var workLastTick = 0.0, workMaxGap = 0.0   // 周期任务间隔：work 队列被堵住时这里会变大
+    private var diarizerResets = 0
     private var lastStatsLine = ""
     private var lastStatsAt = Date.distantPast
     private var slotLangVotes: [Int: [String: Int]] = [:]
@@ -636,7 +643,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private func captured(_ buffer: AVAudioPCMBuffer) {
         tapLock.lock()
         guard running else { tapLock.unlock(); return }
-        request?.append(buffer)
+        if let request { request.append(gain.process(buffer) ?? buffer) }
         streamFrames += Int64(buffer.frameLength)
         let end = Double(streamFrames) / sampleRate
         tapLock.unlock()
@@ -673,18 +680,29 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             ring.removeFirst(drop)
             ringStart += Double(drop) / NativeStreamDiarizer.sampleRate
         }
-        // 说话人分离
+        // 说话人分离：在自己的队列上跑。模型慢于实时时不能堵住 work（识别结果、周期任务都在 work 上）。
         if let diarizer {
-            do {
-                if try diarizer.feed(pcm16k) != nil {
+            let pending = diarizer.enqueued(pcm16k.count)
+            if Double(pending) / NativeStreamDiarizer.sampleRate > Self.diarizerMaxLag {
+                diarizerResets += 1
+                NativeAmbientLog.note("旁听：说话人分离跟不上（积压 \(Int(Double(pending) / NativeStreamDiarizer.sampleRate)) 秒），从当前时刻重建", level: "error")
+                self.diarizer = nil
+                transcribedUntil = [:]
+                loadDiarizer()
+                return
+            }
+            diarizerQueue.async { [weak self] in
+                do {
+                    guard try diarizer.feed(pcm16k) != nil else { return }
                     let speakers = diarizer.activeSpeakers(within: 15, minSpeech: 1).count
-                    if speakers != lastSpeakerCount {
-                        lastSpeakerCount = speakers
-                        emit(.speakers(speakers))
+                    self?.work.async {
+                        guard let self, self.diarizer === diarizer, speakers != self.lastSpeakerCount else { return }
+                        self.lastSpeakerCount = speakers
+                        self.emit(.speakers(speakers))
                     }
+                } catch {
+                    NativeAmbientLog.note("旁听：说话人分离出错 \(error.localizedDescription)", level: "error")
                 }
-            } catch {
-                NativeAmbientLog.note("旁听：说话人分离出错 \(error.localizedDescription)", level: "error")
             }
         }
     }
@@ -746,6 +764,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         request.addsPunctuation = true
         request.taskHint = .dictation
         taskGeneration += 1
+        recStats.tasks += 1
         let generation = taskGeneration
         let start = now
         taskStarts[generation] = start
@@ -776,6 +795,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                 // 嘈杂环境里音量永远不低，拿音量判停顿会一直判不出；改看「识别文字多久没变」
                 lastText = text
                 lastTextAt = now
+                if !text.isEmpty { recStats.partials += 1 }
                 heardTextInTask = heardTextInTask || !text.isEmpty
                 emit(.partial(text))
             }
@@ -783,7 +803,10 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                 let segments = result.bestTranscription.segments.map {
                     (text: $0.substring, start: base + $0.timestamp, end: base + $0.timestamp + $0.duration)
                 }
-                if !segments.isEmpty { pendingFinals.append((ready: now + Self.assignDelay, segments: segments)) }
+                if !segments.isEmpty {
+                    recStats.finals += 1
+                    pendingFinals.append((ready: now + Self.assignDelay, segments: segments))
+                }
                 taskStarts[generation] = nil
             }
         }
@@ -793,6 +816,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             // 1110 = 没检测到语音、216/203 = 任务被取消 / 结束：旋转时的正常结局，不算故障
             let benign = [1110, 216, 203, 301].contains(code)
             if !benign {
+                recStats.errors += 1; recStats.lastError = code
                 NativeAmbientLog.note("旁听：主线识别出错 code=\(code) \(error.localizedDescription)", level: "error")
             }
             if generation == taskGeneration && isRunning {
@@ -826,6 +850,8 @@ final class NativeAmbientPipeline: @unchecked Sendable {
 
     private func periodic() {
         let t = now
+        if workLastTick > 0 { workMaxGap = max(workMaxGap, t - workLastTick) }
+        workLastTick = t
         if t - lastIdentifyCheck >= Self.identifyEvery {
             lastIdentifyCheck = t
             identifyNextSlot()
@@ -1046,6 +1072,20 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         let line = "旁听统计：主线 \(stats.streamed) 句；重转排队 \(stats.cut) 段、已转 \(stats.done)（空 \(stats.empty)、修正 \(stats.revised)），"
             + "队列里还有 \(backfill.count)；本窗 \(utterances.count) 句，已送 \(stats.sent) 窗"
             + (diarizer == nil ? "（分离器未就绪）" : "")
+        // 下面这行是给排查用的实时数字，每 30 秒都写（上面那行没变化时不重复写）
+        var detail = "旁听诊断：识别任务 \(recStats.tasks)、中间结果 \(recStats.partials)、定稿 \(recStats.finals)、出错 \(recStats.errors)"
+            + (recStats.lastError != 0 ? "（最近 code=\(recStats.lastError)）" : "")
+        if let level = gain.drainStats() {
+            detail += String(format: "；电平 平均 %.0f dBFS、峰值 %.0f dBFS，增益 ×%.1f", level.rmsDB, level.peakDB, level.gain)
+        }
+        if let diarizer {
+            let audio = diarizer.elapsed
+            let factor = audio > 0 ? diarizer.busySeconds / audio : 0
+            detail += String(format: "；分离器 实时率 %.2f、积压 %.1f 秒", factor, Double(diarizer.pendingSamples) / NativeStreamDiarizer.sampleRate)
+        }
+        detail += String(format: "；周期最大间隔 %.1f 秒", workMaxGap) + (diarizerResets > 0 ? "；分离器重建 \(diarizerResets) 次" : "")
+        workMaxGap = 0
+        NativeAmbientLog.note(detail)
         guard line != lastStatsLine else { return }
         lastStatsLine = line
         NativeAmbientLog.note(line)

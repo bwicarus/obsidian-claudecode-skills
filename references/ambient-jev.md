@@ -30,7 +30,7 @@ iPad 麦克风（平时）/ 通话引擎上行旁路（通话中）
 
 | 位置 | 作用 |
 |---|---|
-| `_server_deploy/jev_judge.py` | **独立 jev 模块**：状态文本 + 选择题 → 概率。不依赖语音进程；密钥 `JEV_KEY_FILE` 或 `~/Desktop/jev api.txt` |
+| `_server_deploy/jev_judge.py` | **独立 jev 模块**：状态文本 + 选择题 → 概率。不依赖语音进程；密钥按序找 `JEV_KEY_FILE` → `~/BW/config/jev-api.txt`（Mac）→ `~/Desktop/jev api.txt`（旧 Windows） |
 | `_server_deploy/ambient_jev.py` | `/api/ambient/judge·feed·context`；落盘 `state/ambient/{log,feed}.jsonl`、`context.json` |
 | `ios/BWReader/App/NativeAmbientListener.swift` | 旁听外壳（MainActor，开关/来源切换/送判断/执行动作）+ 管线 |
 | `ios/BWReader/App/NativeAmbientSupport.swift` | 日志出口、服务器请求、Sortformer 模型、**声纹特征比对 NativeSpeakerEmbedder**、流式分离、声纹与熟人、重采样 |

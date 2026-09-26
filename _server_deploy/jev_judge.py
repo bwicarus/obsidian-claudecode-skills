@@ -30,7 +30,14 @@ class JevUnavailable(RuntimeError):
 
 def key_file() -> Path:
     configured = os.environ.get("JEV_KEY_FILE")
-    return Path(configured) if configured else Path.home() / "Desktop" / "jev api.txt"
+    if configured:
+        return Path(configured)
+    # Mac 服务器上密钥在 ~/BW/config（references/mac-server.md）；Windows 时代在桌面。
+    # 2026-09-27：只认桌面那一处 → Mac 上每次判断都 credential_unavailable。
+    for candidate in (Path.home() / "BW" / "config" / "jev-api.txt", Path.home() / "Desktop" / "jev api.txt"):
+        if candidate.is_file():
+            return candidate
+    return Path.home() / "BW" / "config" / "jev-api.txt"
 
 
 def _read_key() -> str:
