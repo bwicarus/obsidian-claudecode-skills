@@ -4148,7 +4148,6 @@
     try {
       tid = String(tid || '');
       if (window.__bwNativeConversationFeed !== true || !/^[A-Za-z0-9_.:-]{1,160}$/.test(tid)) return false;
-      if (_modeNorm(_assistantMode) !== 'normal') return false;
       _adoptLiveTurn(tid);
       return true;
     } catch (e) {
@@ -4157,12 +4156,12 @@
     }
   };
 
-  // 迁出 P2（2026-09-26）：App 里普通会话的消息列表由原生对话流维护（历史 + 实时事件），
-  // 网页不再渲染这两类，免得两边各写一份轮次。复习会话仍由这里处理。
+  // 迁出 P2/P4b（2026-09-26）：App 里普通与复习会话的消息列表都由原生对话流维护（历史 + 实时事件），
+  // 网页不再渲染这两类，免得两边各写一份轮次。旧网页界面（原生界面关掉时）不设这个标记，仍由这里处理。
   function onHistoryEvent(ev) {
     try {
       if (!ev || !thread) return;
-      if (window.__bwNativeConversationFeed === true && _modeNorm(ev.assistant_mode || ev.mode || 'normal') === 'normal') return;
+      if (window.__bwNativeConversationFeed === true) return;
       var tid = String(ev.turn_id || '');
       if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(tid)) return;
       var state = _streamState(tid, ev);
@@ -4383,7 +4382,7 @@
   function loadHistory(mode, options) {   // Pi 权威端在线重载；异步回包不得跨模式落进 DOM
     mode = _modeNorm(mode || _assistantMode);
     options = options || {};
-    if (window.__bwNativeConversationFeed === true && mode === 'normal') return Promise.resolve({ ok: true, count: 0, skipped: 0, turnIds: [], native: true });
+    if (window.__bwNativeConversationFeed === true) return Promise.resolve({ ok: true, count: 0, skipped: 0, turnIds: [], native: true });
     var historyScope = _historyUrl(mode);
     var histToken = ++_historyEpoch, modeEpoch = _modeEpoch;
     var liveVersion = RC.turnCard && RC.turnCard.streamVersion ? RC.turnCard.streamVersion() : 0;

@@ -315,14 +315,16 @@ final class ReaderNativeConversationFeed {
     var readHistory: ((String) async throws -> [Any])?
     var subscribe: ((@escaping @MainActor ([String: Any]) -> Void) async throws -> Void)?
     var acknowledge: ((String) -> Void)?
-    var publish: (([[String: Any]]) -> Void)?
+    var publish: (([[String: Any]], String) -> Void)?
     var log: ((String) -> Void)?
     /// 迁出 P3：语音轮开始（stream:"start"）时把服务器的轮次号交给网页，
     /// App 现场执行的工具/结果卡就挂进同一轮（网页 __bwLiveTurnId）。
     var announceLiveTurn: ((String) -> Void)?
-    /// 迁出 P3：网页那条轮次通道（RC.turnCard）写进来的轮次，只在普通会话时收编进对话流。
+    /// 迁出 P3：网页那条轮次通道（RC.turnCard）写进来的轮次，只在对话流当前会话与侧栏一致时收编。
     var adoptsWebTurns: (() -> Bool)?
 
+    /// 迁出 P4b：对话流跟随侧栏的会话（普通 / 复习）；历史、事件、清空都按这个会话。
+    private(set) var mode = "normal"
     private(set) var started = false
     private var history: [Entry] = []
     private var live: [(tid: String, id: String)] = []
@@ -340,9 +342,22 @@ final class ReaderNativeConversationFeed {
     func start() {
         guard !started else { return }
         started = true
-        log?("对话流：原生接管普通会话")
+        log?("对话流：原生接管" + (mode == "review" ? "复习" : "普通") + "会话")
         reloadHistory(reason: "start")
         startEvents()
+        // 历史回来之前先出一次（空列表 → 侧栏显示本机缓存），网页已不再投影消息，别让侧栏空着。
+        emit()
+    }
+
+    /// 侧栏切换普通 / 复习会话：两边的消息、进行中轮次、事件闸门互不相干，整体换一套再按服务器重读。
+    /// 立即出一次空列表，让侧栏先显示新会话的本机缓存，而不是停在旧会话上。
+    func setMode(_ next: String) {
+        let value = next == "review" ? "review" : "normal"
+        guard value != mode else { return }
+        let wasStarted = started
+        reset()
+        mode = value
+        if wasStarted { start() }
     }
 
     func reset() {
@@ -362,7 +377,7 @@ final class ReaderNativeConversationFeed {
             defer { if self.generation == ticket { self.historyTask = nil } }
             do {
                 guard let read = self.readHistory else { return }
-                let records = try await read("normal")
+                let records = try await read(self.mode)
                 guard self.generation == ticket, !Task.isCancelled else { return }
                 try self.adopt(records)
                 self.log?("对话流：历史 \(records.count) 条（\(reason)），实时 \(self.live.count) 条")
@@ -383,7 +398,7 @@ final class ReaderNativeConversationFeed {
             let fallback = Self.historyID(record, index: index)
             let id = turnID.map { Self.messageID(turn: $0, role: role) } ?? "h:" + fallback
             if role == "assistant", let parts = record["parts"] as? [Any], !parts.isEmpty {
-                let tid = turnID ?? "hist_normal_" + fallback
+                let tid = turnID ?? "hist_" + mode + "_" + fallback
                 commands.append(["action": "open", "tid": tid, "historyReplay": true,
                                  "meta": ["via": record["via"] ?? "", "threadId": record["thread_id"] ?? "", "turnId": tid]])
                 commands.append(["action": "import", "tid": tid, "parts": parts])
@@ -450,8 +465,8 @@ final class ReaderNativeConversationFeed {
 
     func handle(_ event: [String: Any]) {
         guard started, event["kind"] as? String == "assistant-history" else { return }
-        let mode = (event["assistant_mode"] as? String) ?? (event["mode"] as? String) ?? "normal"
-        guard mode == "normal" || mode.isEmpty else { return }
+        let eventMode = (event["assistant_mode"] as? String) ?? (event["mode"] as? String) ?? "normal"
+        guard (eventMode == "review" ? "review" : "normal") == mode else { return }
         guard let tid = event["turn_id"] as? String, tid.range(of: "^[A-Za-z0-9_.:-]{1,160}$", options: .regularExpression) != nil else { return }
         let stream = event["stream"] as? String ?? ""
         let origin = event["origin"] as? String ?? "runner", role = event["role"] as? String ?? "assistant"
@@ -571,8 +586,9 @@ final class ReaderNativeConversationFeed {
     // MARK: 退回网页文字助手时（语音核心不在）
 
     func appendExtra(_ message: [String: Any]) { extras.append(message); emit() }
-    /// 普通会话清空后：本地列表一起清，再按服务器重读。
-    func cleared() {
+    /// 会话清空后：本地列表一起清，再按服务器重读（只清对话流当前这一种会话）。
+    func cleared(mode cleared: String) {
+        guard cleared == mode else { return }
         history = []; live = []; extras = []; streams = [:]
         emit(); reloadHistory(reason: "cleared")
     }
@@ -599,6 +615,75 @@ final class ReaderNativeConversationFeed {
         }
         for message in extras { add(message) }
         for item in live { add(turnMessage?(item.tid, item.id)) }
-        publish?(output)
+        publish?(output, mode)
+    }
+}
+
+/// 迁出 P4b：复习会话里助手回答的「选用」选择项由原生生成（原为网页 rc-review `_presentationSelections`
+/// 按 DOM 节点登记，投影时附在消息上）。身份算法与网页一致：整条 `review-answer:<fnv(卡\n问\n答)>`，
+/// 段落 `<整条>:part:<序号>:<fnv("native\n"+段落)>`；记录字段与网页 `_recordSelection` 同形，
+/// 原生选择图（ReaderNativeContextSelection）直接收，`selectReview` / `reviewPairs` 不用改。
+/// 一条回答第一次以「已完成」出现时绑定当时的复习卡；只有绑定的卡仍是当前卡才给选择项（与网页一致）。
+struct ReaderNativeReviewAnswers {
+    private var bindings: [String: String] = [:]
+
+    /// 与 rc-review `_hash` 同一算法（按 UTF-16 码元的 FNV-1a，32 位，小写十六进制不补零）。
+    static func hash(_ value: String) -> String {
+        var h: UInt32 = 2_166_136_261
+        for unit in value.utf16 { h ^= UInt32(unit); h = h &* 16_777_619 }
+        return String(h, radix: 16)
+    }
+
+    /// 与网页 `text.split(/\n\s*\n/).filter(part => part.trim())` 同义。
+    static func segments(_ text: String) -> [String] {
+        let marker = "\u{1F}"
+        return text.replacingOccurrences(of: #"\n\s*\n"#, with: marker, options: .regularExpression)
+            .components(separatedBy: marker)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    mutating func reset() { bindings = [:] }
+
+    /// 返回带 `reviewSelections` 的消息与要登记进原生选择图的记录。`card` 是当前复习卡（review.current）。
+    mutating func decorate(_ messages: [[String: Any]], card: [String: Any]?,
+                           isSelected: (String) -> Bool) -> (messages: [[String: Any]], records: [[String: Any]]) {
+        guard let card, let cardKey = card["id"] as? String, !cardKey.isEmpty else { return (messages, []) }
+        var identity: [String: Any] = [:]
+        for key in ["card_id", "note_id", "local_id", "entity_id", "source_ref", "source_url", "deck"] {
+            identity[key] = card[key] as? String ?? ""
+        }
+        identity["entity_index"] = card["entity_index"] ?? NSNull()
+        let source: [String: Any] = ["surface": "assistant-review", "card_id": identity["card_id"] ?? "",
+                                     "entity_id": identity["entity_id"] ?? ""]
+        var question = "", output: [[String: Any]] = [], records: [[String: Any]] = []
+        if bindings.count > 2048 { bindings.removeAll() }
+        for var message in messages {
+            let role = message["role"] as? String ?? "", text = message["text"] as? String ?? ""
+            if role == "user" { question = text; output.append(message); continue }
+            guard role == "assistant", message["streaming"] as? Bool != true, let id = message["id"] as? String,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { output.append(message); continue }
+            let bound = bindings[id] ?? cardKey
+            bindings[id] = bound
+            guard bound == cardKey else { output.append(message); continue }
+            let answerID = "review-answer:" + Self.hash(cardKey + "\n" + question + "\n" + text)
+            let parts = Self.segments(text)
+            let childIDs = parts.enumerated().map { answerID + ":part:" + String($0.offset) + ":" + Self.hash("native\n" + $0.element) }
+            func record(_ id: String, _ body: String, _ index: Int) -> [String: Any] {
+                ["id": id, "kind": index < 0 ? "review-answer" : "review-answer-segment",
+                 "label": index < 0 ? "复习整条回答" : "复习回答段落 " + String(index + 1), "text": body,
+                 "parentId": index < 0 ? "" : answerID, "covers": index < 0 ? childIDs : [String](),
+                 "source": source,
+                 "meta": ["review_mode": true, "answer_id": answerID, "segment_index": index, "question": question,
+                          "card_key": cardKey, "card": identity] as [String: Any]]
+            }
+            let batch = [record(answerID, text, -1)] + parts.enumerated().map { record(childIDs[$0.offset], $0.element, $0.offset) }
+            records += batch
+            message["reviewSelections"] = batch.map { item -> [String: Any] in
+                let itemID = item["id"] as? String ?? ""
+                return ["id": itemID, "label": item["label"] ?? "", "text": item["text"] ?? "", "selected": isSelected(itemID)]
+            }
+            output.append(message)
+        }
+        return (output, records)
     }
 }

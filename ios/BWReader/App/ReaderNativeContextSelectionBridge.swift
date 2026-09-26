@@ -85,6 +85,21 @@ final class ReaderNativeContextSelectionBridge: NSObject, WKScriptMessageHandler
         scheduleExpiry(); onProjection?(state.projection)
         return ["session":session,"state":state.projection]
     }
+    func isSelected(_ id: String) -> Bool { state.isSelected(id) }
+    /// 迁出 P4b：复习回答的选择项由原生登记（原来由网页按 DOM 节点登记后经有序通道送来）。
+    /// 只登记、不改选中；内容没变的记录不动版本号。被拒的记录出声，不静默丢。
+    func registerReviewAnswers(_ records: [[String: Any]]) -> [String] {
+        guard !records.isEmpty else { return [] }
+        let now = ProcessInfo.processInfo.systemUptime
+        var candidate = state, rejected: [String] = []
+        for record in records {
+            let id = record["id"] as? String ?? ""
+            do { try candidate.apply(["operation": "upsert", "id": id, "record": record], now: now) }
+            catch { rejected.append(String(id.prefix(60)) + "：" + error.localizedDescription) }
+        }
+        state = candidate
+        return rejected
+    }
     func selectReview(_ id: String, cardKey: String, on: Bool, validate: () throws -> Void) async throws -> [[String: Any]] {
         guard let session, let webView, let current = document(webView.url) else {
             throw ReaderNativeContextSelection.Failure(message: "复习上下文尚未就绪")

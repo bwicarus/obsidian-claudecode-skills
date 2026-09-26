@@ -4,105 +4,43 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 
 const script = readFileSync(new URL('../../ios/BWReader/App/ReaderNativeConversationScript.swift',import.meta.url),'utf8');
-function host() {
-  const from = script.indexOf('function prepareMessageDelta(');
-  const to = script.indexOf('// 选区变化',from);
-  assert.ok(from > 0 && to > from);
-  const context = vm.createContext({});
-  vm.runInContext('let messageRevision=0, messageSignatures=new Map(), messageOrder=[], resetMessages=true;'+script.slice(from,to),context);
-  return context;
-}
-const message = (id,text) => ({id,role:'assistant',text,streaming:false,parts:[]});
-
-function sourceHost() {
-  const from=script.indexOf('function createMessageSources()'),to=script.indexOf('const messageSources =',from);
-  let scope='one';
-  const context=vm.createContext({getScopeKey:()=>scope,messageID:node=>node.id,scheduleMessages(){},resetMessages:true,messagesDirty:true});
+// 迁出 P4（2026-09-26）：侧栏消息全部由原生对话流给，投影脚本不再有消息源 / 增量协议
+// （原 createMessageSources / prepareMessageDelta 的测试随代码一起删除）。留下的薄壳只做一件事：
+// 网页直接写进对话区的提示在挂载时交给原生；其余挂载钩子不再有意义，也不得读 DOM。
+function shimHost(feed) {
+  const from=script.indexOf('const forwardedNotes = new WeakSet();'), to=script.indexOf('function registerAction(',from);
+  assert.ok(from>0 && to>from);
+  const posted=[];
+  const context=vm.createContext({window:{__bwNativeConversationFeed:feed},handler:{postMessage:value=>posted.push(value)},
+    cleanText:node=>node.textContent});
   vm.runInContext(script.slice(from,to),context);
-  return {sources:context.createMessageSources(),changeScope:value=>{scope=value;}};
+  return {messages:context.window.__bwNativeMessages,posted};
 }
-test('message lifecycle preserves late voice ordering without reading hidden DOM children',()=>{
-  const {sources}=sourceHost(),thread={id:'asst-thread',get children(){throw Error('DOM scan');}},answer={id:'answer'},user={id:'user'};
-  sources.publish(answer,thread);sources.publish(user,thread,answer);
-  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['user','answer']);
-  const initial=sources.events(true);
-  const delta=host().prepareMessageDelta([message('user','问'),message('answer','答')],initial);
-  assert.equal(delta.contract,'reader-native-conversation-delta/2');
-  assert.equal(delta.order,undefined);
-  sources.remove(user);
-  assert.equal(sources.events(false)[0].action,'remove');
-  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['answer']);
+const note=(text,turn='')=>({textContent:text,classList:{contains:name=>name==='asst-note'},getAttribute:name=>name==='data-turn'?turn:''});
+test('P4 message shim forwards only direct notes, once, and only when the native feed owns the conversation',()=>{
+  const {messages,posted}=shimHost(true);
+  const warning=note('⚠ 语音:断开');
+  messages.publish(warning,{id:'asst-thread'}); messages.publish(warning,{id:'asst-thread'});
+  messages.replace(note('第二条'),warning,{id:'asst-thread'});
+  messages.publish(note('轮次里的','turn-1'),{id:'asst-thread'});
+  messages.publish({textContent:'普通回答',classList:{contains:()=>false},getAttribute:()=>''},{id:'asst-thread'});
+  for (const name of ['remove','clear','stage','commit']) messages[name]({get children(){throw Error('DOM scan');}});
+  assert.deepEqual(posted.map(x=>[x.type,x.text]),[['feed-note','⚠ 语音:断开'],['feed-note','第二条']]);
+  const legacy=shimHost(undefined);
+  legacy.messages.publish(note('旧界面'),{id:'asst-thread'});
+  assert.equal(legacy.posted.length,0,'legacy web interface renders its own notes');
 });
-test('history adoption preserves a live response and cancellation preserves active messages',()=>{
-  const {sources,changeScope}=sourceHost(),thread={id:'asst-thread'},stage={},old={id:'old'},live={id:'live'},replay={id:'live'},past={id:'past'};
-  sources.publish(old,thread);sources.publish(live,thread);sources.stage(stage);
-  sources.publish(past,stage);sources.publish(replay,stage);
-  assert.equal(sources.sources(thread).length,2,'uncommitted history replaced visible messages');
-  sources.replace(live,replay,stage);sources.commit(stage);sources.clear(stage);
-  const moves=sources.events(false);
-  assert.equal(moves.some(event=>event.action==='remove' && event.id==='live'),false,'discarded replay removed its live replacement');
-  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['past','live']);
-  const aborted={};sources.stage(aborted);sources.publish({id:'never'},aborted);sources.clear(aborted);
-  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['past','live']);
-  sources.publish({id:'nested'},{id:'internal-part'});
-  assert.equal(sources.events(true).some(event=>event.id==='nested'),false,'nested component became a conversation');
-  const stale={};sources.stage(stale);sources.publish({id:'old-account'},stale);
-  changeScope('two');sources.publish({id:'new'},thread);sources.commit(stale);
-  assert.deepEqual(Array.from(sources.sources(thread),node=>node.id),['new']);
-});
-test('conversation batches send only changed messages and retain explicit ordering', () => {
-  const context = host(), a=message('a','已有的大段内容'.repeat(10000)), b=message('b','新回复');
-  const first = context.prepareMessageDelta([a,b]);
-  assert.equal(first.reset,true);
-  assert.equal(first.upserts.length,2);
-  assert.equal(context.prepareMessageDelta([a,b]),null);
-  const updated = {...b,text:'回复完成'};
-  const next = context.prepareMessageDelta([a,updated]);
-  assert.equal(next.baseRevision,first.revision);
-  assert.equal(next.reset,false);
-  assert.deepEqual(Array.from(next.upserts).map(x=>x.id),['b']);
-  assert.ok(JSON.stringify(next).length < 1000,'unchanged long history crossed the bridge again');
-  const reordered = context.prepareMessageDelta([updated,a]);
-  assert.equal(reordered.upserts.length,0);
-  assert.deepEqual(Array.from(reordered.order),['b','a']);
-  const clear = context.prepareMessageDelta([]);
-  assert.equal(clear.order.length,0);
-  assert.equal(context.prepareMessageDelta([]),null);
-});
-test('explicit resync retransmits data even when bodies did not change', () => {
-  const context = host(), a=message('a','保留');
-  const first = context.prepareMessageDelta([a]);
-  vm.runInContext('resetMessages=true;',context);
-  const next = context.prepareMessageDelta([a]);
-  assert.equal(next.reset,true);
-  assert.equal(next.upserts.length,1);
-  assert.ok(next.revision > first.revision);
-});
-
-test('native source references eliminate round-trip bodies while retaining live operation handles', () => {
-  const context=host();
-  const original='完整内容😀'.repeat(20000);
-  const source={id:'turn',nativeTurnRef:{session:'session',tid:'turn',revision:8},role:'assistant',text:original,streaming:false,
-    parts:[{id:'tool',kind:'tool',actionId:'inspect-tool',data:{nativeTurnPart:{id:'p1'},nativeDetail:{kind:'tool',content:{result:original}}}},
-      {id:'card',kind:'anki',data:{nativeTurnPart:{id:'p2',cardIndex:2},nativeDetail:{content:{card:{front:original}}},
-        nativeCardActions:{add:'save-card'},dragId:'drag-card'}},
-      {id:'edited',kind:'images',data:{nativeDetail:{content:{cid:'media',data:{items:[{_gone:1}]}}}}}]};
-  const first=context.prepareMessageDelta([source]);
-  assert.ok(JSON.stringify(first).length<1400,'native originals made another trip through WebKit');
-  const sent=first.upserts[0];
-  assert.equal(sent.text,undefined);
-  assert.equal(sent.parts[0].data.nativeDetail,undefined);
-  assert.equal(sent.parts[1].data.nativeCardActions.add,'save-card');
-  assert.equal(sent.parts[1].data.nativeTurnPart.cardIndex,2);
-  assert.equal(sent.parts[2].data.nativeDetail.content.data.items[0]._gone,1,'uncommitted media state was replaced with an old original');
-  assert.equal(source.parts[0].data.nativeDetail.content.result,original,'packing mutated source used by legacy inspection');
-  assert.equal(context.prepareMessageDelta([source]),null);
-  const next=context.prepareMessageDelta([{...source,nativeTurnRef:{...source.nativeTurnRef,revision:9}}]);
-  assert.equal(next.upserts.length,1,'native text-only update did not refresh presentation');
+test('P4 snapshot carries no message projection or delta',()=>{
+  const from=script.indexOf('      function snapshot() {'), to=script.indexOf('      function schedule() {',from);
+  const body=script.slice(from,to);
+  assert.ok(from>0 && to>from);
+  for (const gone of ['messageDelta','projectMessage','messageSources','prepareMessageDelta','reviewSelections'])
+    assert.equal(body.includes(gone),false,gone+' is still produced by the web snapshot');
+  assert.match(body,/cardInputs: cardInputs\(\)/);
 });
 
 test('native artifact data retains full originals without rendering them for inspection or dropping', () => {
-  const from = script.indexOf('function safeFields('), to = script.indexOf('function projectMessage(', from);
+  const from = script.indexOf('function safeFields('), to = script.indexOf('// 找这组学习卡当前挂着的容器', from);
   const context = vm.createContext({});
   vm.runInContext(`let nativeMode=true;
     const actions=new Map();
@@ -288,24 +226,28 @@ test('plain assistant replies retain Markdown without hidden parsing, media, lay
   context._appendCaret(node); context._streamWrap(node, 0); context._fadeInAfter(node); context.scrollDown(node);
   assert.match(source, /renderMd\(aMsg, _at, false\);[^\n]*\n\s*if \(_nativeOwnsThread\(\)\) \{ _stopReveal\(\); return; \}/);
 
-  const project = vm.createContext({
-    nativeMode:true, window:{},
-    messageID: () => 'message', rc: () => ({}), flashGroup: () => null,
-    cleanText: forbidden, text: value => value || '',
-  });
-  vm.runInContext(script.slice(script.indexOf('function projectMessage('), script.indexOf('// 找这组学习卡当前挂着的容器')), project);
-  const message = project.projectMessage({
-    __bwNativeMessageSource: node.__bwNativeMessageSource, getAttribute: () => '',
-    classList: { contains: () => false }, querySelectorAll: () => [], querySelector: () => null,
-  }, 0);
-  assert.equal(message.text, body, 'native original text was truncated or replaced by DOM text');
-  assert.equal(message.streaming, false);
   const ref={session:'session',tid:'native-reply:request',revision:7};
   node.__bwNativeTurnRef=ref;node.__bwNativeTurnText=body;
   context.renderMd(node,body,true);
   assert.equal(node.__bwNativeTurnRef,ref,'same native body lost its source reference');
   context.renderMd(node,'连接中断，请重试',true);
   assert.equal(node.__bwNativeTurnRef,undefined,'transport error still pointed to the preceding successful answer');
-  const hidden=project.projectMessage({__bwNativeMessageHidden:true},0);
-  assert.equal(hidden,null,'tool takeover repeated the preceding plain reply');
+});
+
+// 迁出 P4b：复习回答的选择项改由原生生成（ReaderNativeReviewAnswers），与网页 rc-review
+// `_presentationSelections` 是同一身份的两份副本 —— 格式与哈希漂移，选用就对不上旧回答。
+test('P4b native review answer identity matches the web rc-review copy',()=>{
+  const swift=readFileSync(new URL('../../ios/BWReader/App/ReaderNativeAssistantHistory.swift',import.meta.url),'utf8');
+  const review=readFileSync(new URL('../../_server_deploy/static/pdf/rc-review.js',import.meta.url),'utf8');
+  const hashSource=review.slice(review.indexOf('  function _hash(value) {'),review.indexOf('\n  }\n',review.indexOf('  function _hash(value) {'))+4);
+  const context=vm.createContext({}); vm.runInContext(hashSource,context);
+  // Swift: FNV-1a over UTF-16 code units, lowercase hex without padding.
+  const fnv=value=>{let h=2166136261;for(const unit of Array.from({length:value.length},(_,i)=>value.charCodeAt(i))){h^=unit;h=Math.imul(h,16777619);}return (h>>>0).toString(16);};
+  for (const sample of ['anki_card_1\n问\n答','native\n段落 😀','']) assert.equal(context._hash(sample),fnv(sample));
+  assert.match(swift,/var h: UInt32 = 2_166_136_261/); assert.match(swift,/h = h &\* 16_777_619/); assert.match(swift,/value\.utf16/);
+  assert.match(review,/'review-answer:' \+ _hash\(cardKey \+ '\\n' \+ question \+ '\\n' \+ text\)/);
+  assert.match(swift,/"review-answer:" \+ Self\.hash\(cardKey \+ "\\n" \+ question \+ "\\n" \+ text\)/);
+  assert.match(review,/answerId \+ ':part:' \+ index \+ ':' \+ _hash\('native\\n' \+ part\)/);
+  assert.match(swift,/answerID \+ ":part:" \+ String\(\$0\.offset\) \+ ":" \+ Self\.hash\("native\\n" \+ \$0\.element\)/);
+  for (const label of ['复习整条回答','复习回答段落 ']) { assert.ok(review.includes(label)); assert.ok(swift.includes(label)); }
 });

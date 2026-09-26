@@ -23,9 +23,9 @@ enum ReaderNativeConversationScript {
       let nativeModeKnown = false;
       let thread = null, threadObserver = null, timer = null, revision = 0;
       let scope = '', scopeKey = '', lastSignature = '', accountSubscription = null, selectionSubscription = null, selectionRegistry = null;
-      let actions = new Map(), nodeIDs = new WeakMap(), previousNodes = [], excludedNodes = new WeakSet();
-      let messagesDirty = true, messageProjection = [], messageActions = new Map();
-      let messageRevision = 0, messageSignatures = new Map(), messageOrder = [], resetMessages = true;
+      let actions = new Map(), nodeIDs = new WeakMap();
+      // 对话流里用到的学习卡组（gid）：卡面/操作的状态仍在 rc-flashcard，快照按需带上（迁出 P4）。
+      let watchedCardGroups = [];
       let controls = null, controlsObserver = null, suspended = false;
       let captionElement = null, captionObserver = null;
       let settingsModels = null, settingsVoice = null;
@@ -45,11 +45,6 @@ enum ReaderNativeConversationScript {
       const rc = () => window.RC || {};
       const pane = () => document.getElementById('side-pane-asst');
       const conversationMode = () => pane()?.dataset.assistantMode === 'review' ? 'review' : 'normal';
-      // 迁出 P4a：普通会话的消息由原生对话流给（历史 + 实时事件 + 语音轮次），这里不再抓 DOM 投影；
-      // 复习会话仍按原样投影（它的发送/回放还在网页）。
-      const feedOwnsMessages = () => nativeMode && window.__bwNativeConversationFeed === true && conversationMode() === 'normal';
-      let lastFeedOwns = null;
-      const forwardedNotes = new WeakSet();
       const drawer = () => rc().sidedrawer;
       const account = () => window.BWReaderRuntime?.accountContext;
       const activeTab = () => document.querySelector('#ep-side-tabs .ep-side-tab.active[data-pane],#ep-side .side-tab.active[data-pane],#side-tabs .side-tab.active[data-pane]')?.dataset.pane || 'asst';
@@ -71,80 +66,21 @@ enum ReaderNativeConversationScript {
         if (!stable) { stable = 'legacy-' + index + '-' + hash(node.classList.contains('asst-u') ? 'user' : 'assistant'); nodeIDs.set(node, stable); }
         return stable;
       }
-      function createMessageSources() {
-        let key = '', serial = 0, groupSerial = 0, pending = [];
-        const groups = new Map(), owners = new Map(), groupIDs = new WeakMap();
-        function fence() {
-          const current = getScopeKey();
-          if (key !== current) { key = current; groups.clear(); owners.clear(); pending = []; resetMessages = true; messagesDirty = true; }
-        }
-        function groupOf(target) {
-          if (target?.id === 'asst-thread') return 'thread';
-          const value = target && groupIDs.get(target);
-          return value?.key === key ? value.id : null;
-        }
-        function emit(value) { pending.push(value); scheduleMessages(); }
-        function unlink(node) {
-          const owner = owners.get(node);
-          if (owner) { const values = groups.get(owner) || []; groups.set(owner,values.filter(value => value !== node)); owners.delete(node); }
-        }
-        function publish(node,target,before) {
-          if (!node || !target) return;
-          fence(); const group = groupOf(target); if (!group) return;
-          const id = messageID(node,++serial);
-          if (before === node) return;
-          const previous = owners.get(node); unlink(node);
-          const values = groups.get(group) || [], index = before ? values.indexOf(before) : -1;
-          if (index >= 0) values.splice(index,0,node); else values.push(node);
-          groups.set(group,values); owners.set(node,group);
-          emit({action:'place',group,id,...(previous && previous !== group ? {from:previous} : {}),...(index >= 0 ? {before:messageID(before,++serial)} : {})});
-        }
-        function remove(node) {
-          fence(); if (!owners.has(node)) return;
-          const group = owners.get(node), id = messageID(node,++serial); unlink(node);
-          if (!(groups.get(group) || []).some(value => messageID(value,++serial) === id)) emit({action:'remove',group,id});
-        }
-        function clear(target) {
-          if (!target) return; fence(); const group = groupOf(target);
-          if (!group) return;
-          for (const node of groups.get(group) || []) owners.delete(node);
-          groups.delete(group); groupIDs.delete(target); emit({action:'clear',group});
-        }
-        function commit(stage) {
-          fence(); const group = groupOf(stage); if (!group) return;
-          const next = groups.get(group) || [];
-          for (const node of groups.get('thread') || []) owners.delete(node);
-          groups.delete(group); groups.set('thread',next);
-          for (const node of next) owners.set(node,'thread');
-          emit({action:'adopt',group});
-        }
-        return Object.freeze({publish,remove,clear,commit,
-          stage(target) { fence(); groupIDs.set(target,{key,id:'history-' + (++groupSerial)}); },
-          replace(node,old,target) { publish(node,target,old); remove(old); },
-          sources(target) { fence(); return [...(groups.get(groupOf(target)) || [])]; },
-          events(reset) {
-            fence();
-            const result = reset ? [...groups].flatMap(([group,values]) => values.map(node => ({action:'place',group,id:messageID(node,++serial)}))) : pending;
-            pending = []; return result;
-          }
-        });
+      // 迁出 P4（2026-09-26）：侧栏消息全部由原生对话流给（历史、实时事件、语音轮次、复习选用），
+      // 这里不再按 DOM 抓取投影。网页生产者仍会调用 __bwNativeMessages 的挂载/移除钩子 ——
+      // 留一个薄壳：只把直接写进对话区的提示（语音出错等）在挂载那一刻交给原生，其余钩子不再有意义。
+      const forwardedNotes = new WeakSet();
+      function forwardNote(node) {
+        if (window.__bwNativeConversationFeed !== true || !node || forwardedNotes.has(node) ||
+            !node.classList?.contains('asst-note') || node.getAttribute?.('data-turn')) return;
+        forwardedNotes.add(node);
+        try { handler.postMessage({ version: 1, type: 'feed-note', text: cleanText(node, 2000) }); }
+        catch (error) { try { window.dlog?.('[对话流] 提示没交到原生：' + (error && error.message || error)); } catch (_) {} }
       }
-      const messageSources = createMessageSources();
-      // Compatibility producers announce semantic mount/remove/history events.
-      // Node references retain legacy action resources, never decide membership
-      // by querying a hidden thread's children during scrolling or selection.
-      // 迁出 P4a：普通会话里网页直接写的提示（语音出错等）在挂载这一刻交给原生对话流，不等抓取。
-      window.__bwNativeMessages = Object.freeze({ ...messageSources, publish(node, target, before) {
-        if (node && feedOwnsMessages() && !forwardedNotes.has(node) && node.classList?.contains('asst-note') && !node.getAttribute('data-turn')) {
-          forwardedNotes.add(node);
-          try { handler.postMessage({ version: 1, type: 'feed-note', text: cleanText(node, 2000) }); }
-          catch (error) { try { window.dlog?.('[对话流] 提示没交到原生：' + (error && error.message || error)); } catch (_) {} }
-        }
-        return messageSources.publish(node, target, before);
-      } });
-      function partID(part, message, index) {
-        return message + '-p-' + hash(String(part.id || part.item_id || part.call_id || part.cid || part.gid || part.card?.cid || (part.seq ?? index)) + ':' + (part.kind || 'artifact'));
-      }
+      window.__bwNativeMessages = Object.freeze({
+        publish(node) { forwardNote(node); }, replace(node) { forwardNote(node); },
+        remove() {}, clear() {}, stage() {}, commit() {}
+      });
       function registerAction(id, node, run) {
         const actionId = scope + ':a:' + hash(id);
         actions.set(actionId, { scope, node, run });
@@ -292,96 +228,6 @@ enum ReaderNativeConversationScript {
           return [result];
         }
         return [artifact(id, node, part.title || part.label || (kind === 'hlcard' ? '操作记录' : '生成物'))];
-      }
-      // App 自己执行语音工具时，工具长条与结果卡是直接插进对话区的（不属于任何轮次）；
-      // 随后服务器那一轮落库回来，同样的工具与卡片又在轮次里出现一次 —— 同一张卡显示两遍
-      // （2026-09-26 实机）。轮次已收编的就不再单独投影；还没收编的（正在跑）照常显示。
-      let turnOwned = { tools: new Set(), cards: new Set() };
-      function cardSignature(card) {
-        if (!card || typeof card !== 'object') return '';
-        // 只比类型+标题：同一张卡在轮次里与现场插入的那份，编号不同（tc_… / 本地 mkCid），
-        // data 的字段顺序也不同，按整份 data 比永远对不上（2026-09-26 实测第一版就是这样漏的）。
-        return String(card.kind || '') + '|' + String(card.title || '');
-      }
-      function collectTurnOwned(nodes) {
-        const owned = { tools: new Set(), cards: new Set() };
-        nodes.forEach(node => {
-          const tid = node.getAttribute?.('data-turn') || '';
-          if (!tid) return;
-          let presentation = null;
-          try { presentation = rc().turnCard?.presentationOf(tid); } catch (_) {}
-          (presentation?.parts || []).forEach(part => {
-            if (part?.kind === 'tool') {
-              // 标签与工具名都记：App 的镜像条并进服务器那条后，轮次里只剩
-              // reader_snapshot.<名字>，长条要按不带命名空间的名字认。
-              if (part.label) owned.tools.add(String(part.label));
-              if (part.tool) { owned.tools.add(String(part.tool)); owned.tools.add(String(part.tool).split('.').pop()); }
-            }
-            if (part?.kind === 'card' && part.card) owned.cards.add(cardSignature(part.card));
-          });
-        });
-        return owned;
-      }
-      function projectMessage(node, index) {
-        if (nativeMode && node.__bwNativeMessageHidden === true) return null;
-        const id = messageID(node, index), tid = node.getAttribute('data-turn') || '';
-        // 迁出 P1：历史占位，内容由 Swift 按 ref 生成（见 ReaderNativeHistoryMessages）。
-        if (nativeMode && typeof node.__bwNativeHistoryRef === 'string') {
-          return { id, role: node.classList.contains('asst-u') ? 'user' : 'assistant', text: '', streaming: false,
-                   parts: [], title: '', statusText: '', progress: null, nativeHistoryRef: node.__bwNativeHistoryRef };
-        }
-        if (nativeMode && !tid && node.__bwToolChip) {
-          const chip = node.__bwToolChip, label = String(chip.label || '工具调用');
-          if (turnOwned.tools.has(label) || (chip.tool && turnOwned.tools.has(String(chip.tool)))) return null;
-          const [part] = nativePartHandles({ kind: 'tool', label, tool: chip.tool || '' }, id + '-tool', node, '');
-          part.status = chip.failed ? 'failed' : chip.busy ? 'running' : 'completed';
-          return { id, role: 'assistant', text: '', streaming: false, parts: [part], title: '', statusText: '', progress: null };
-        }
-        if (nativeMode && !tid) {
-          const liveCard = node.__vcCard || node.querySelector?.('.vc-card')?.__vcCard;
-          if (liveCard && liveCard.title && turnOwned.cards.has(cardSignature(liveCard))) return null;
-        }
-        let presentation = null;
-        try { if (tid) presentation = rc().turnCard?.presentationOf(tid); } catch (_) {}
-        const source = presentation?.parts || [];
-        const role = presentation?.role || (node.classList.contains('asst-u') ? 'user' : 'assistant');
-        const messageSource = !tid && typeof node.__bwNativeMessageSource?.text === 'string' ? node.__bwNativeMessageSource : null;
-        // Structured turns include live drafts without reading a rendered web
-        // bubble. Plain replies carry their original Markdown separately from
-        // the compatibility node used to retain existing action controls.
-        const body = presentation
-          ? source.filter(part => part.kind === 'text').map(part => typeof part.text === 'string' ? part.text : '').join('\n\n')
-          : messageSource ? messageSource.text : (!tid && !node.__vcCard && !flashGroup(node) ? cleanText(node) : '');
-        const streaming = presentation ? presentation.streaming : messageSource ? messageSource.streaming : (!tid && (node.matches('.mfx-streaming,.mfx-typing') || !!node.querySelector('.mfx-streaming,.mfx-typing')));
-        const parts = [];
-        const contentNodes = Array.from(node.querySelectorAll(':scope > .rc-turn-bd > .rc-part:not(.rc-part-text)'));
-        const usedContent = new Set();
-        source.forEach((part, partIndex) => {
-          if (!part || typeof part !== 'object') return;
-          const content = part.kind === 'tool' || part.kind === 'meta' || part.kind === 'text' ? node
-            : (contentNodes.find(el => !usedContent.has(el) && el.classList.contains('rc-part-' + part.kind)) || node);
-          usedContent.add(content);
-          parts.push(...projectPart(part, partID(part, id, partIndex), content, tid));
-        });
-        if (!parts.length && flashGroup(node)) {
-          const group = flashGroup(node);
-          parts.push(...projectPart({ kind: 'cards', cards: group.__fc.cards, gid: group.__fc.gid }, id + '-learning', node, ''));
-        }
-        if (!parts.length && node.__vcCard) parts.push(...projectPart({ kind: 'card', card: node.__vcCard }, id + '-card', node, ''));
-        if (!parts.length && !body && !streaming && (node.matches('.vc-card,.vc-if') || node.querySelector('.vc-card,.fc-wrap,iframe,video'))) {
-          parts.push(artifact(id + '-artifact', node, node.querySelector('.vc-card-hd,.vc-if-hd')?.textContent || '生成物'));
-        }
-        // 原生回复（replyRef）的正文与追问都由 Swift 给，不再把网页那份 HTML 当「完整内容与操作」附上（迁出 P2a）。
-        if (nativeMode && node.__bwNativeTurnRef) { /* 原生已提供 */ }
-        else if ((!presentation && !messageSource && body.length >= 32000) || node.querySelector('iframe,video,img,mjx-container,a,.asst-ctx,.asst-ctx-card,.rc-asst-ctx,.asst-pagelink,.actx-page,.asst-btm,.asst-followups,.asst-clip,.asst-jump,.asst-undo')) {
-          parts.push(artifact(id + '-original', node, '完整内容与操作', cleanText(node.querySelector('.asst-ctx,.asst-ctx-card,.rc-asst-ctx'), 1200)));
-        }
-        return body || parts.length || streaming || presentation?.title ? {
-          id, role, text: presentation || messageSource ? body : text(body), streaming, parts,
-          nativeTurnRef: nativeMode ? window.__bwNativeTurns?.reference?.(presentation) || node.__bwNativeTurnRef || undefined : undefined,
-          title: text(presentation?.title, 240), statusText: text(presentation?.status?.text, 1000),
-          progress: presentation?.progress || null
-        } : null;
       }
       // 找这组学习卡当前挂着的容器。
       //
@@ -978,7 +824,6 @@ enum ReaderNativeConversationScript {
         nativeModeKnown = true;
         rc().turnCard?.setNativePresentation?.(nativeMode);
         rc().flashcard?.setNativePresentation?.(nativeMode);
-        messagesDirty = true;
         applyVisualMode(); schedule();
         return { ok: true };
       }
@@ -996,40 +841,16 @@ enum ReaderNativeConversationScript {
         if (nextKey !== scopeKey) {
           // An account/book switch can precede asynchronous history replacement.
           // Do not relabel the previous DOM as the new account's conversation.
-          if (scopeKey) previousNodes.forEach(node => excludedNodes.add(node));
           scopeKey = nextKey; scope = 'reader-' + hash(nextKey); actions.clear(); lastSignature = '';
-          messagesDirty = true; messageActions.clear(); messageProjection = [];
-          messageRevision = 0; messageSignatures.clear(); messageOrder = []; resetMessages = true;
+          watchedCardGroups = [];
           window.__bwNativeSelection = null;
           nativePageSelectionSequence = 0;
           settingsModels = null; settingsVoice = null;
           searchController?.abort(); searchResults.clear(); searchQuery = ''; searchSequence++;
           tocController?.abort(); tocEntries.clear(); tocOwner = null; tocSequence++;
         }
-        // 普通 ↔ 复习切换时整段重投影：普通会话投影为空（原生对话流接管），复习会话按原样投影。
-        const feedOwns = feedOwnsMessages();
-        if (feedOwns !== lastFeedOwns) { lastFeedOwns = feedOwns; messagesDirty = true; }
-        const rebuildMessages = messagesDirty;
-        actions = messagesDirty ? new Map() : new Map(messageActions);
-        if (messagesDirty) {
-        const all = thread && !feedOwns ? messageSources.sources(thread) : [];
-        turnOwned = nativeMode ? collectTurnOwned(all) : { tools: new Set(), cards: new Set() };
-        let reviewQuestion = '';
-        const messages = all.map((node, index) => {
-          const message = projectMessage(node, index);
-          if (message?.role === 'user') reviewQuestion = message.text;
-          if (nativeMode && conversationMode() === 'review' && message?.role === 'assistant' && !message.streaming && rc().review?.presentationSelections) {
-            message.reviewSelections = rc().review.presentationSelections(node, { question: reviewQuestion, text: message.text });
-          }
-          return message;
-        }).filter(Boolean);
-        previousNodes = all;
-        liveArtifacts(messages);
-        messageProjection = messages;
-        messageActions = new Map(actions);
-        messagesDirty = false;
-        }
-        const messageDelta = rebuildMessages || resetMessages ? prepareMessageDelta(messageProjection,messageSources.events(resetMessages)) : null;
+        // 迁出 P4：侧栏消息由原生对话流给，这里不再投影消息；动作表每次随页卡/工具栏重建。
+        actions = new Map();
         // 原生正文接管 PDF 时，页卡由原生按便签数据自己画 —— 网页不挂、这里也不交。
         // （交了就是两份：一份网页按它自己的页挂出来，一份原生按 PDFKit 画，永远对不上。）
         const nativePageCards = !!window.RC?.readerNavigation?.nativeViewport;
@@ -1056,7 +877,7 @@ enum ReaderNativeConversationScript {
             .filter(item => item.kind === 'card' && String(item.id).startsWith('card:')).map(item => String(item.id).slice(5)),
           favoritesCount: (() => { try { return Number(rc().voiceCard?.favorite?.count?.()) || 0; } catch (_) { return 0; } })(),
           sidebarOpen: nativeOwnsAssistant() ? nativeAssistantOpen : (isOpen() && activeTab() === 'asst'), conversationMode: conversationMode(), voice: voiceState(),
-          messageRevision, capabilities: capabilities() };
+          cardInputs: cardInputs(), capabilities: capabilities() };
         const signature = JSON.stringify(payload);
         if (signature !== lastSignature) {
           lastSignature = signature; payload.revision = ++revision;
@@ -1065,12 +886,10 @@ enum ReaderNativeConversationScript {
           //   pointerup / resize 和四个 MutationObserver 上，而滚动时消息根本没变。
           //   对话越长这份字符串越大，于是"用着用着就崩"和"点什么都崩"是同一件事。
           //   是不是这样，不能靠猜：把字节数报上去，崩的时候跟着现场一起送出来。
-          if (messageDelta) payload.messageDelta = messageDelta;
-          payload.payloadBytes = signature.length + (messageDelta ? JSON.stringify(messageDelta).length : 0);
+          //   （迁出 P4 起快照里已经没有消息，这个数应当稳定在几 KB。）
+          payload.payloadBytes = signature.length;
           try { handler.postMessage(payload); } catch (error) {
-            // 版本号在 prepareMessageDelta 里已经前进：这次没送到，Swift 手上的就落后了，
-            // 下一份增量必判跳序。改为下一份整段重置（Swift 对 reset 不查 base），并出声。
-            resetMessages = true; messagesDirty = true; lastSignature = '';
+            lastSignature = '';
             try { window.dlog?.('[对话] 快照送不出去：' + (error && error.message || error)); } catch (_) {}
           }
         }
@@ -1078,34 +897,25 @@ enum ReaderNativeConversationScript {
       function schedule() {
         if (!suspended && timer == null) timer = setTimeout(snapshot, 60);
       }
-      function scheduleMessages() { messagesDirty = true; schedule(); }
-      function prepareMessageDelta(messages, events) {
-        const next = new Map(), upserts = [], order = [];
-        for (const source of messages) {
-          const message = compactNativeMessage(source);
-          if (next.has(message.id)) continue;
-          const signature = JSON.stringify(message);
-          next.set(message.id, signature); order.push(message.id);
-          if (resetMessages || messageSignatures.get(message.id) !== signature) upserts.push(message);
+      function scheduleMessages() { schedule(); }
+      // 迁出 P4：对话流里的学习卡（gid + 序号）要的卡面、状态与操作仍由 rc-flashcard 给 ——
+      // 原生把用到的卡组告诉这里（watchCards），快照按卡组带上 presentationInput，原生并进消息。
+      function cardInputs() {
+        const result = {};
+        for (const gid of watchedCardGroups) {
+          const group = flashGroup(null, gid);
+          if (!group?.__fc || !Array.isArray(group.__fc.cards)) continue;
+          result[gid] = { idx: group.__fc.idx, cards: group.__fc.cards.map((_, index) => {
+            try { return rc().flashcard?.presentationInput?.(group, index) || null; } catch (_) { return null; }
+          }) };
         }
-        if (!resetMessages && !upserts.length && !(events?.length) && order.length === messageOrder.length && order.every((id,i) => id === messageOrder[i])) return null;
-        const erased = [...messageSignatures.keys()].filter(id => !next.has(id));
-        const delta = {contract:events ? 'reader-native-conversation-delta/2' : 'reader-native-conversation-delta/1', reset:resetMessages,
-          baseRevision:messageRevision, revision:++messageRevision, ...(events ? {events,erased} : {order}), upserts};
-        messageSignatures = next; messageOrder = order; resetMessages = false;
-        return delta;
-      }
-      function compactNativeMessage(message) {
-        if (!message.nativeTurnRef) return message;
-        const result = {...message, parts:message.parts.map(part => {
-          if (!part.data?.nativeTurnPart) return part;
-          const data = {...part.data}; delete data.nativeDetail;
-          return {...part, data};
-        })};
-        // These values already live in ReaderNativeTurnStore. Send revision
-        // and operation handles only; Swift supplies the complete originals.
-        for (const key of ['text','role','streaming','title','statusText','progress']) delete result[key];
         return result;
+      }
+      function watchCards(gids) {
+        const next = Array.isArray(gids) ? [...new Set(gids.filter(gid => typeof gid === 'string' && gid && gid.length <= 160))].slice(0, 64) : [];
+        if (next.length === watchedCardGroups.length && next.every((gid, i) => gid === watchedCardGroups[i])) return { ok: true };
+        watchedCardGroups = next; schedule();
+        return { ok: true };
       }
       // 选区变化不改 DOM，所以不会触发那些 observer —— 不显式听一下的话，
       // 选区操作条要等到别的什么事发生才出现。
@@ -1173,7 +983,7 @@ enum ReaderNativeConversationScript {
         }
         const current = document.getElementById('asst-thread');
         if (current !== thread) {
-          threadObserver?.disconnect(); thread = current; messagesDirty = true;
+          threadObserver?.disconnect(); thread = current;
           if (thread) {
             threadObserver = new MutationObserver(scheduleMessages);
             threadObserver.observe(thread, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'hidden', 'data-turn-id', 'data-turn', 'disabled'] });
@@ -1306,7 +1116,6 @@ enum ReaderNativeConversationScript {
             const target = actions.get(command.actionId);
             if (!command.scope || !target || target.scope !== scope || !target.node?.isConnected) return { ok: false, error: '内容已更新，请重试' };
             await target.run(command);
-            messagesDirty = true;
           } else if (action === 'stop') {
             if (rc().assistant?.conversationService?.stop?.() !== true) return { ok: false, error: '当前没有可停止的文字回复' };
           } else if (action === 'operationAction') {
@@ -1328,7 +1137,8 @@ enum ReaderNativeConversationScript {
           } else if (action === 'snapshot') {
             // 只要一份新快照（末尾统一 schedule）；不重载对话历史。
           } else if (action === 'resyncMessages') {
-            resetMessages = true; messagesDirty = true; lastSignature = '';
+            // 迁出 P4：快照里已没有消息增量；旧版原生仍可能请求重同步，重发一份快照即可。
+            lastSignature = '';
           } else if (action === 'nativePageSelection') {
             const value = command.value;
             if (!value || !Number.isSafeInteger(value.sequence) || value.sequence <= nativePageSelectionSequence ||
@@ -1780,7 +1590,7 @@ enum ReaderNativeConversationScript {
       window.addEventListener('pointerup', schedule, { capture: true, passive: true });
       window.addEventListener('pageshow', () => { suspended = false; mountObserver.observe(document.documentElement, { childList: true, subtree: true }); thread = null; controls = null; drawerElement = null; contextElement = null; toolbarElement = null; schedule(); });
       window.addEventListener('pagehide', () => { suspended = true; threadObserver?.disconnect(); controlsObserver?.disconnect(); drawerObserver?.disconnect(); contextObserver?.disconnect(); toolbarObserver?.disconnect(); mountObserver.disconnect(); if (timer != null) clearTimeout(timer); timer = null; });
-      window.__bwNativeConversation = Object.freeze({ perform, setNativeMode, currentScope: () => scope, snapshot: () => { lastSignature = ''; snapshot(); } });
+      window.__bwNativeConversation = Object.freeze({ perform, setNativeMode, watchCards, currentScope: () => scope, snapshot: () => { lastSignature = ''; snapshot(); } });
       schedule();
     })();
     """#

@@ -492,6 +492,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 迁出 P1：历史消息由原生生成，网页只放占位（见 ReaderNativeHistoryMessages）。
     let nativeHistoryMessages = ReaderNativeHistoryMessages()
     let nativeFeed = ReaderNativeConversationFeed()
+    /// 迁出 P4b：复习回答与复习卡的绑定（回答第一次完成时的当前卡）。
+    private var nativeReviewAnswers = ReaderNativeReviewAnswers()
+    /// 迁出 P4：上次交给网页的学习卡组（空了也要发一次，让网页停掉不再需要的卡组）。
+    private var nativeWatchedCardGroups: [String] = []
     private var reportedMissingHistoryRef = false
 
     /// 把投影里的历史占位换成原生建好的消息。占位对应的批次已被淘汰时出声，并显示一句提示而不是空白。
@@ -4900,7 +4904,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             let nativeContextSelections = ReaderNativeContextSelectionBridge(webView: webView,
                 trustedBaseURL: localRuntimeServer.baseURL)
             self.nativeContextSelections = nativeContextSelections
-            nativeContextSelections.onProjection = { [weak self] value in self?.nativeConversation.acceptContextSelection(value) }
+            nativeContextSelections.onProjection = { [weak self] value in
+                guard let self else { return }
+                self.nativeConversation.acceptContextSelection(value)
+                // 复习回答的「已选用」勾选跟着选择图走（选中/取消/到期）。
+                if self.nativeFeed.mode == "review" { self.nativeFeed.emit() }
+            }
             contentController.addScriptMessageHandler(nativeContextSelections, contentWorld: .page,
                 name: ReaderNativeContextSelectionBridge.messageName)
             contentController.addUserScript(WKUserScript(source: ReaderNativeContextSelectionBridge.script,
@@ -4917,7 +4926,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             }
             nativeAssistantStream.afterHistoryClear = { [weak nativeTurns, weak self] mode, token, cleared in
                 nativeTurns?.endClear(mode,token:token,cleared:cleared)
-                if cleared, mode == "normal" { self?.nativeFeed.cleared() }
+                if cleared { self?.nativeFeed.cleared(mode: mode) }
             }
             self.nativeTurns = nativeTurns
             // 迁出 P2：普通会话的消息列表由原生对话流维护（见 ReaderNativeConversationFeed）。
@@ -4940,7 +4949,30 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 let surface: ReaderNativeInterfaceSurface = self.isEPUBBook ? .epub : .pdf
                 Task { _ = try? await nativeServerGateway.fetchData(path: "/pdf/api/turn-ack", method: "POST", body: body, surface: surface) }
             }
-            nativeFeed.publish = { [weak self] messages in self?.nativeConversation.applyFeed(messages) }
+            nativeFeed.publish = { [weak self] messages, mode in
+                guard let self else { return }
+                // 迁出 P4b：复习会话的「选用回答」由原生按当前复习卡生成并登记（不再靠网页 DOM）。
+                var output = messages
+                if mode == "review", let selections = self.nativeContextSelections {
+                    let decorated = self.nativeReviewAnswers.decorate(messages, card: self.nativeConversation.review["current"] as? [String: Any],
+                                                                       isSelected: { selections.isSelected($0) })
+                    let rejected = selections.registerReviewAnswers(decorated.records)
+                    if !rejected.isEmpty { self.postClientLog("对话流：复习回答选择项未登记 " + rejected.prefix(3).joined(separator: "；")) }
+                    output = decorated.messages
+                }
+                self.nativeConversation.applyFeed(output, mode: mode)
+                // 迁出 P4：对话流里的学习卡要的卡面/状态由网页 rc-flashcard 按卡组带来（快照 cardInputs）。
+                let groups = self.nativeConversation.feedCardGroups
+                if !groups.isEmpty || !self.nativeWatchedCardGroups.isEmpty {
+                    self.nativeWatchedCardGroups = groups
+                    self.webView.callAsyncJavaScript("window.__bwNativeConversation?.watchCards?.(gids); return true;",
+                        arguments: ["gids": groups], in: nil, in: .page, completionHandler: nil)
+                }
+            }
+            nativeConversation.onReviewCardChanged = { [weak self] in
+                guard let self, self.nativeFeed.mode == "review" else { return }
+                self.nativeFeed.emit()
+            }
             nativeFeed.log = { [weak self] line in self?.postClientLog(line) }
             nativeTurns.onNativeReply = { [weak self] tid in self?.nativeFeed.nativeReply(tid) }
             // 迁出 P3：语音事件 —— 原生订阅到本轮开始就把轮次号交给网页；网页轮次通道的变化收编进对话流。
@@ -4952,11 +4984,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     if accepted != true { self.postClientLog("对话流：本轮身份未交到网页（" + String(tid.prefix(40)) + "）") }
                 }
             }
-            nativeFeed.adoptsWebTurns = { [weak self] in self?.nativeConversation.conversationMode == "normal" }
+            nativeFeed.adoptsWebTurns = { [weak self] in
+                guard let self else { return false }
+                return self.nativeConversation.conversationMode == self.nativeFeed.mode
+            }
             nativeTurns.onWebApplied = { [weak self] changed, removed in self?.nativeFeed.observeWebTurns(changed: changed, removed: removed) }
             nativeHistoryMessages.onLiveUser = { [weak self] message in self?.nativeFeed.appendExtra(message) }
-            contentController.addUserScript(WKUserScript(source: "window.__bwNativeConversationFeed = true;",
-                injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            // 旧网页界面（设置里关掉「原生界面」）仍由网页自己回放历史、渲染对话。
+            if !legacyChrome {
+                contentController.addUserScript(WKUserScript(source: "window.__bwNativeConversationFeed = true;",
+                    injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            }
             contentController.addScriptMessageHandler(nativeTurns,contentWorld:.page,name:ReaderNativeTurnBridge.messageName)
             contentController.addUserScript(WKUserScript(source:ReaderNativeTurnBridge.script,injectionTime:.atDocumentStart,forMainFrameOnly:true))
             let nativeServerSyncBridge = ReaderNativeServerSyncBridge(
@@ -5895,6 +5933,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func resetBookUserStateContext(baseURL: URL) {
         nativeFeed.reset()
+        nativeReviewAnswers.reset()
+        nativeWatchedCardGroups = []
         nativePDFNavigationBridge?.flushPendingPosition()
         nativeHTMLNoteActions = [:]; nativeHTMLNoteKey = ""; nativeHTMLNotesEnabled = false; nativeHTMLPinned = []
         nativeConversation.setNativeHTMLNotes(nil)
@@ -8818,6 +8858,7 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
             }
             do {
                 nativeConversation.receive(try nativeTurns?.conversationPayload(resolveNativeHistory(body)) ?? resolveNativeHistory(body))
+                nativeFeed.setMode(nativeConversation.conversationMode)
                 if !nativeFeed.started, nativeConversation.ready, !nativeConversation.scope.isEmpty { nativeFeed.start() }
                 reportedConversationPayloadFailure = nil
                 if !pendingNativeMediaReceipts.isEmpty { Task { @MainActor [weak self] in await self?.flushNativeMediaReceipts() } }

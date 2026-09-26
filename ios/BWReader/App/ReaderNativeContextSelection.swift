@@ -127,6 +127,7 @@ struct ReaderNativeContextSelection {
         return revision != before
     }
     var nextDeadline: TimeInterval? { deadlines.values.min() }
+    func isSelected(_ id: String) -> Bool { selected.contains(key(id)) }
     func covers(_ coverer: Data, _ candidate: Data) -> Bool {
         guard coverer != candidate, let record = records[coverer] else { return false }
         var ancestry = Set<Data>(), current = candidate

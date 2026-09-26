@@ -63,15 +63,30 @@
 - **仍在网页**：语音事件的**传输**（`rc-computer-voice.js` DirectSocket → `acceptRealtimeOutput`）
   和执行（工具长条状态机、后台任务轮询、结果卡渲染）。搬传输属于「3. 语音客户端」。
 
-### ✅ P4a 已完成（2026-09-26，待模拟器验证）：普通会话停抓 DOM
-- `ReaderNativeConversationScript`：普通会话 + 原生对话流时消息投影为空（`feedOwnsMessages`），
-  普通↔复习切换时整段重投影；增量协议不变（`prepareMessageDelta` 始终与自己上次比）。
-- 网页直接写进对话区的提示（`threadMsg('asst-note')` / `addMsg('asst-note')`，语音出错等）
-  在 `__bwNativeMessages.publish` 挂载那一刻以 `feed-note` 交给原生，进对话流为一条「提示」。
-- **P4b 未做（被阻塞）**：投影代码不能删 —— 复习会话的发送/回放仍在网页、仍靠它；
-  要等复习会话迁出后再删 `projectMessage` / `liveArtifacts` 里只服务网页消息的分支。
-- 已知不再显示的：网页写的非轮次 `asst-u/asst-a`（旧 windows-reader-output、GPT RTC 转写），
-  它们都经 `__asstVoiceLog` 落库，约 1 秒后由历史补出。
+### ✅ P4 已完成（2026-09-26，待模拟器验证）：删抓取，复习会话也进原生对话流
+- **P4a**：普通会话停抓 DOM；网页直接写的 `asst-note` 提示在挂载时以 `feed-note` 交给原生。
+- **P4b 复习会话迁出**（原先阻塞删投影的唯一原因）：
+  - 对话流跟随侧栏会话（`ReaderNativeConversationFeed.setMode`）：普通/复习各自读历史、各自过滤事件、
+    各自清空；切换时整套重来并立即出一次（侧栏先显示该会话的本机缓存）。
+  - 网页 `onHistoryEvent` / `loadHistory` 在原生对话流下对两种会话都让位；本轮身份（`__bwNativeFeedLiveTurn`）不再限普通会话。
+  - 「选用回答」原由网页 `rc-review._presentationSelections` 按 DOM 节点登记后随投影附上 → 现由原生
+    `ReaderNativeReviewAnswers` 生成：身份算法与网页一致（契约测试 `P4b native review answer identity…` 守两份副本），
+    记录直接 upsert 进原生选择图（`ReaderNativeContextSelectionBridge.registerReviewAnswers`），`selectReview` /
+    `reviewPairs` 不变；回答第一次完成时绑定当时的复习卡，换卡 / 选中变化时对话流重出。
+- **删抓取**：`ReaderNativeConversationScript` 删掉消息源（`createMessageSources`）、`projectMessage`、
+  轮次收编判定、增量协议（`prepareMessageDelta` / `compactNativeMessage`）和全部消息状态，快照里不再有消息
+  （`payloadBytes` 应稳定在几 KB）。`__bwNativeMessages` 留一个薄壳：只转交提示，其余挂载钩子是空操作。
+  原生模型认「快照里没有消息字段」（不再当跳序去要重同步）。
+- **仍留在网页的动作句柄**（未迁移，按计划保留）：
+  - 学习卡的卡面/状态/操作输入仍在 `rc-flashcard` —— 原生把对话流用到的卡组交给网页（`watchCards`），
+    快照按卡组带 `cardInputs`（`presentationInput`），模型并进学习卡部件；没拿到的标 `card-state-pending`。
+    （P2 起对话流里的学习卡缺这一份，这里一并补上。）
+  - 页卡 / 浮动卡摆放（`pagePlacements` / `floatingPlacements` 仍用 `projectPart` / `liveArtifacts`）、工具栏、选区、
+    设置/搜索/目录面板这些非消息部分照旧。
+- **Swift 里的死代码待清**（这里没有编译器，没敢删）：`ReaderNativeConversationStore` 的增量应用、
+  `ReaderNativeTurnBridge.conversationPayload`、`resolveNativeHistory` 占位解析、模型里的
+  `messageDelta` / `messageRevision` 分支 —— 快照不再带这些字段后它们都不会再走到，在 Mac 上编译通过后可一并删。
+- 旧网页界面（设置里关掉「原生界面」）不注入 `__bwNativeConversationFeed`，网页照旧回放与渲染。
 
 ## 2. 阅读位置
 - 2026-09-26 已完成第一步：原生视口是本机权威（等存储握手再开书；本机写的

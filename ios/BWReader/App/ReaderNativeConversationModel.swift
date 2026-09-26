@@ -185,7 +185,15 @@ final class ReaderNativeConversationModel: ObservableObject {
     @Published private(set) var revision: Int64 = -1
     @Published private(set) var title = "阅读助手"
     @Published private(set) var conversationMode = "normal"
-    @Published private(set) var review: [String: Any] = [:]
+    @Published private(set) var review: [String: Any] = [:] {
+        didSet {
+            // 迁出 P4b：复习回答的「选用」按当前卡登记，换卡时让对话流重出一次。
+            let key = (review["current"] as? [String: Any])?["id"] as? String ?? ""
+            if key != reviewCardKey { reviewCardKey = key; onReviewCardChanged?() }
+        }
+    }
+    private(set) var reviewCardKey = ""
+    var onReviewCardChanged: (() -> Void)?
     private var committedReviewPresentation: [String: Any]?
     private func reviewPresentation(_ incoming: [String: Any]) -> [String: Any] {
         var result = incoming
@@ -496,6 +504,9 @@ final class ReaderNativeConversationModel: ObservableObject {
             }
         } else if let values = payload["messages"] as? [[String:Any]] {
             rawMessages = values; changedMessages = true
+        } else if payload["messageRevision"] == nil {
+            // 迁出 P4：网页不再投影消息，快照里没有消息字段 —— 消息全部来自原生对话流。
+            rawMessages = []; changedMessages = false
         } else {
             guard nextScope == conversationStore.scope,
                   (payload["messageRevision"] as? NSNumber)?.int64Value == conversationStore.revision else {
@@ -565,33 +576,78 @@ final class ReaderNativeConversationModel: ObservableObject {
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
         let nextCaptions = ReaderNativeCaptions(payload["captions"] as? [String: Any] ?? [:])
         if nextCaptions != captions { captions = nextCaptions }
-        if feedActive && nextMode == "normal" { publishFeed() }
+        feedCardInputs = payload["cardInputs"] as? [String: Any] ?? [:]
+        if feedActive { publishFeed() }
         else if changedMessages { messages = nextMessages.map { value in var next = value; next.parts = applyCommittedCards(value.parts); return next } }
         revision = nextRevision
         noteSnapshotCost(payload["payloadBytes"] as? Int ?? 0)
     }
 
-    // MARK: 原生对话流（迁出 P2）
-    /// 设了之后，普通会话的消息只来自原生对话流；网页投影里的消息不再用（复习会话仍走网页）。
+    // MARK: 原生对话流（迁出 P2 / P4b）
+    /// 设了之后，普通与复习会话的消息都只来自原生对话流；网页不再投影消息（P4b 起）。
     private(set) var feedActive = false
     private var feedRaw: [[String: Any]] = []
-    func applyFeed(_ raw: [[String: Any]]) {
-        feedActive = true; feedRaw = raw
-        guard conversationMode == "normal" else { return }
+    private var feedMode = "normal"
+    /// 迁出 P4：对话流里学习卡的卡面/状态/操作输入，按卡组由网页快照带来（rc-flashcard presentationInput）。
+    private var feedCardInputs: [String: Any] = [:]
+    func applyFeed(_ raw: [[String: Any]], mode: String) {
+        feedActive = true; feedRaw = raw; feedMode = mode
         publishFeed()
     }
     private func publishFeed() {
+        // 切换会话的那一刻对话流还拿着另一种会话的消息：先给本机缓存，等对话流按新会话重出。
+        let mode = conversationMode
         var seen = Set<String>()
-        let next = feedRaw.compactMap(ReaderNativeConversationMessage.init).filter { seen.insert($0.id).inserted }
+        let raw = Self.attachingCardInputs(feedRaw, inputs: feedCardInputs)
+        let next = feedMode == mode ? raw.compactMap(ReaderNativeConversationMessage.init).filter { seen.insert($0.id).inserted } : []
         if next.isEmpty {
-            let cached = cachedMessages("normal")
+            let cached = cachedMessages(mode)
             showingCachedMessages = !cached.isEmpty
             messages = cached
             return
         }
-        if ReaderNativeConversationCache.hasConversation(feedRaw) { rememberConversation(feedRaw, mode: "normal") }
+        if ReaderNativeConversationCache.hasConversation(feedRaw) { rememberConversation(feedRaw, mode: mode) }
         showingCachedMessages = false
         messages = next.map { value in var item = value; item.parts = applyCommittedCards(value.parts); return item }
+    }
+
+    /// 对话流的学习卡部件（nativeDetail.kind == "anki"，内容带 gid + cardIndex）并上网页给的卡面输入；
+    /// 还没拿到的标 `card-state-pending`（与原投影 liveArtifacts 同一语义），不静默显示成空卡。
+    static func attachingCardInputs(_ raw: [[String: Any]], inputs: [String: Any]) -> [[String: Any]] {
+        raw.map { message -> [String: Any] in
+            guard let parts = message["parts"] as? [[String: Any]] else { return message }
+            var result = message
+            result["parts"] = parts.map { part -> [String: Any] in
+                guard var data = part["data"] as? [String: Any], data["nativeCard"] == nil,
+                      let detail = data["nativeDetail"] as? [String: Any], detail["kind"] as? String == "anki",
+                      let content = detail["content"] as? [String: Any], let gid = content["gid"] as? String, !gid.isEmpty,
+                      let index = (content["cardIndex"] as? NSNumber)?.intValue else { return part }
+                var updated = part
+                if let group = inputs[gid] as? [String: Any], let cards = group["cards"] as? [Any],
+                   cards.indices.contains(index), let input = cards[index] as? [String: Any] {
+                    data["nativeCard"] = input
+                    data["activeInGroup"] = (group["idx"] as? NSNumber)?.intValue == index
+                    updated["kind"] = "anki"
+                } else { data["liveReason"] = "card-state-pending" }
+                updated["data"] = data
+                return updated
+            }
+            return result
+        }
+    }
+    /// 对话流里用到的学习卡组，交给网页只按需带卡面输入。
+    var feedCardGroups: [String] {
+        var seen = Set<String>(), result: [String] = []
+        for message in feedRaw {
+            for part in message["parts"] as? [[String: Any]] ?? [] {
+                guard let detail = (part["data"] as? [String: Any])?["nativeDetail"] as? [String: Any],
+                      detail["kind"] as? String == "anki",
+                      let gid = (detail["content"] as? [String: Any])?["gid"] as? String, !gid.isEmpty,
+                      seen.insert(gid).inserted else { continue }
+                result.append(gid)
+            }
+        }
+        return result
     }
 
     func requestMessageResync(scope:String) {
