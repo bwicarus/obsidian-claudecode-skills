@@ -30,6 +30,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request, session
 
 import jev_judge
+from ambient_people import AmbientPeople, PeopleError
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", str(Path(__file__).resolve().parents[1])))
 bp = Blueprint("ambient_jev", __name__, url_prefix="/api/ambient")
@@ -250,7 +251,8 @@ def normalize_window(body: dict) -> dict:
             continue
         total += len(text)
         rows.append({"speaker": str(item.get("speaker") or "?")[:24], "isUser": bool(item.get("isUser")),
-                     "text": text[:1200], "t0": float(item.get("t0") or 0), "t1": float(item.get("t1") or 0)})
+                     "text": text[:1200], "t0": float(item.get("t0") or 0), "t1": float(item.get("t1") or 0),
+                     "slotKey": str(item.get("slotKey") or "")[:80]})
     if not rows:
         raise ValueError("empty_transcript")
     if total > MAX_TRANSCRIPT_CHARS:
@@ -263,6 +265,8 @@ def normalize_window(body: dict) -> dict:
         "locale": str(body.get("locale") or "")[:16],
         "source": str(body.get("source") or "ipad-mic")[:24],
         "utterances": rows,
+        # 每个声音块一条：{slotKey, personId?（App 声纹比对认出的人）, vector?（声纹特征，256 维）}
+        "speakers": [sp for sp in (body.get("speakers") or [])[:8] if isinstance(sp, dict)],
     }
 
 
@@ -270,7 +274,7 @@ def transcript_text(window: dict) -> str:
     return "\n".join(f"[{_clock(u['t0'])} {u['speaker']}] {u['text']}" for u in window["utterances"])
 
 
-def build_state(window: dict, summary: str) -> str:
+def build_state(window: dict, summary: str, clues: list[str] | None = None) -> str:
     who = "多人说话" if window["speakerCount"] >= 2 else "只有一个说话人"
     has_user = any(u["isUser"] for u in window["utterances"])
     lines = [
@@ -282,6 +286,8 @@ def build_state(window: dict, summary: str) -> str:
     ]
     if summary:
         lines.append("之前的旁听摘要（只用于理解指代，不要据此判断本段）：" + summary[:1500])
+    if clues:
+        lines.append("在场熟人的资料（用户写的介绍与 AI 整理的关系，只作背景线索）：\n" + "\n".join(clues[:6]))
     lines.append("本段转写：")
     lines.append(transcript_text(window))
     return "\n".join(lines)
@@ -428,8 +434,9 @@ def judge():
         log_event("judge_rejected", reason=str(exc))
         return jsonify({"ok": False, "code": str(exc)}), 400
     summary = load_context().get("summary") or ""
+    clues = _ingest_people(window)
     try:
-        judgments = _predict(build_state(window, summary), QUESTIONS)
+        judgments = _predict(build_state(window, summary, clues), QUESTIONS)
     except JevUnavailable as exc:
         log_event("judge_failed", windowId=window["windowId"], error=str(exc))
         return jsonify({"ok": False, "code": "jev_unavailable", "error": str(exc)}), 503
@@ -445,7 +452,8 @@ def judge():
         feed_append("window", windowId=window["windowId"], source=window["source"], judgments=compact, actions=actions,
                     speakers=window["speakerCount"], text=transcript_text(window)[-800:])
     _spawn(_after_judgment, window, judgments, actions, summary)
-    return jsonify({"ok": True, "windowId": window["windowId"], "judgments": compact, "actions": actions, "ms": ms})
+    return jsonify({"ok": True, "windowId": window["windowId"], "judgments": compact, "actions": actions, "ms": ms,
+                    "names": window.get("names") or {}})
 
 
 @bp.get("/feed")
@@ -462,6 +470,156 @@ def context():
     data = load_context()
     return jsonify({"ok": True, "summary": data.get("summary") or "", "updatedAt": data.get("updatedAt") or 0,
                     "pending": len(data.get("pending") or [])})
+
+
+# ─────────────────────────── 人物 / 时间轴（ambient_people + KJ） ───────────────────────────
+
+_PEOPLE = None
+_PEOPLE_LOCK = threading.Lock()
+SUMMARIZE_AFTER_WINDOWS = 5
+
+
+def people() -> AmbientPeople:
+    """懒加载：人物文字资料写 KJ（与 /kj/api 共用同一个 KJService，渲染进 Obsidian KJ/）。测试替换 _PEOPLE。"""
+    global _PEOPLE
+    with _PEOPLE_LOCK:
+        if _PEOPLE is None:
+            import kj_nodes
+            _PEOPLE = AmbientPeople(state_dir(), kj_nodes._svc())
+        return _PEOPLE
+
+
+def _ingest_people(window: dict) -> list[str]:
+    """记时间轴、更新声音块；按服务器已知的块→人把标签换成名字（用户在时间轴上事后起的名 App 可能还不知道）；
+    返回给 jev 的熟人线索。失败只出声，不拦判断。"""
+    try:
+        store = people()
+        mapping = store.ingest(window, window.get("speakers") or [])
+        names = {}
+        for u in window["utterances"]:
+            pid = mapping.get(u.get("slotKey"))
+            if pid:
+                name = store.person(pid)["name"]
+                u["speaker"] = name
+                u["isUser"] = u["isUser"] or pid == "me"
+                names[u["slotKey"]] = {"personId": pid, "name": name}
+        window["names"] = names
+        present = {v["personId"] for v in names.values() if v["personId"] != "me"}
+        if present:
+            _spawn(_maybe_profile, sorted(present))
+        return store.clues([u["speaker"] for u in window["utterances"]])
+    except Exception as exc:  # noqa: BLE001
+        log_event("people_ingest_failed", windowId=window["windowId"], error=type(exc).__name__, detail=str(exc)[:200])
+        return []
+
+
+def summarize_person(person_id: str) -> str:
+    """让 AI 按这个人的对话历史重写「和我的关系 / 商量过什么 / 近况」，写回 KJ（取代旧的一条）。"""
+    store = people()
+    info = store.person(person_id)
+    windows = store.history(person_id, limit=400)
+    text = []
+    for w in windows[:40]:
+        text.append("\n".join(f"{line.get('name') or line.get('label') or '?'}：{line['text']}" for line in w["lines"]))
+    corpus = "\n---\n".join(text)[-9000:]
+    if not corpus:
+        raise PeopleError("no_history", "还没有这个人的对话记录")
+    prompt = ("下面是用户（「我」）身边的自动语音转写里，和「" + info["name"] + "」有关的对话片段（新的在前，可能有识别错误）。\n"
+              "用户写的介绍：" + (info["intro"] or "（无）") + "\n旧的整理：" + (info["profile"] or "（无）") + "\n\n"
+              "请用中文写一份新的整理，三段，每段以固定标题开头：\n关系：他 / 她和用户是什么关系、怎么称呼。\n"
+              "商量过：一起讨论或约定过的事（带大致日期）。\n近况：最近的状态、在意的事。\n"
+              "只写对话里有依据的事实，没有依据就写「未知」；保留旧整理中仍然成立的内容。总共不超过 500 字。\n\n" + corpus)
+    result = _ai(prompt)
+    if not result:
+        raise PeopleError("empty_summary", "AI 没有返回内容")
+    store.write_profile(info["id"], result, by="ai")
+    log_event("person_summarized", personId=info["id"], chars=len(result), windows=len(windows))
+    return result
+
+
+def _maybe_profile(person_ids: list[str]) -> None:
+    """有新对话的熟人：距上次整理又攒了 5 段对话就自动重写一次整理。"""
+    store = people()
+    for pid in person_ids:
+        try:
+            profile = store.profile_definition(pid)
+            since = int(profile["created_at"]) if profile else 0
+            since_ms = since * 1000 if since < 10_000_000_000 else since
+            fresh = [w for w in store.history(pid, limit=200) if w["t0"] > since_ms]
+            if len(fresh) >= SUMMARIZE_AFTER_WINDOWS:
+                summarize_person(pid)
+        except Exception as exc:  # noqa: BLE001
+            log_event("person_summary_failed", personId=pid, error=type(exc).__name__, detail=str(exc)[:200])
+
+
+def _people_reply(fn):
+    try:
+        return jsonify({"ok": True, **fn()})
+    except PeopleError as exc:
+        log_event("people_rejected", code=exc.code, error=exc.message)
+        return jsonify({"ok": False, "code": exc.code, "error": exc.message}), (404 if exc.code.endswith("not_found") else 400)
+
+
+@bp.get("/people")
+def people_list():
+    return _people_reply(lambda: {"people": people().people()})
+
+
+@bp.get("/people/<person_id>")
+def person_detail(person_id):
+    limit = min(200, int(request.args.get("windows") or 60))
+    return _people_reply(lambda: {"person": people().person(person_id),
+                                  "history": people().history(person_id)[:limit]})
+
+
+@bp.patch("/people/<person_id>")
+def person_update(person_id):
+    body = request.get_json(silent=True) or {}
+    return _people_reply(lambda: {"person": people().update_person(
+        person_id, name=body.get("name"), intro=body.get("intro"), profile=body.get("profile"))})
+
+
+@bp.post("/people/<person_id>/merge")
+def person_merge(person_id):
+    body = request.get_json(silent=True) or {}
+    return _people_reply(lambda: {"person": people().merge(person_id, into=str(body.get("into") or ""))})
+
+
+@bp.post("/people/<person_id>/summarize")
+def person_summarize(person_id):
+    return _people_reply(lambda: {"profile": summarize_person(person_id)})
+
+
+@bp.post("/slots/assign")
+def slot_assign():
+    body = request.get_json(silent=True) or {}
+    return _people_reply(lambda: {"person": people().assign_slot(
+        str(body.get("slotKey") or ""), name=body.get("name"), person_id=body.get("personId"),
+        vector=body.get("vector") if isinstance(body.get("vector"), list) else None)})
+
+
+@bp.post("/slots/unassign")
+def slot_unassign():
+    body = request.get_json(silent=True) or {}
+    return _people_reply(lambda: (people().unassign_slot(str(body.get("slotKey") or "")), {})[1])
+
+
+@bp.get("/timeline")
+def timeline():
+    now = int(time.time() * 1000)
+    try:
+        t_to = int(request.args.get("to") or now)
+        t_from = int(request.args.get("from") or t_to - 3 * 3600 * 1000)
+    except ValueError:
+        return jsonify({"ok": False, "code": "bad_range"}), 400
+    if t_to - t_from > 7 * 86_400_000:
+        return jsonify({"ok": False, "code": "range_too_long", "error": "一次最多 7 天"}), 400
+    return _people_reply(lambda: people().timeline(t_from, t_to))
+
+
+@bp.get("/voiceprints")
+def voiceprints():
+    return _people_reply(lambda: {"people": people().voiceprints()})
 
 
 def register_ambient(app) -> None:

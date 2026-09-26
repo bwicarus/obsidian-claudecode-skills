@@ -106,6 +106,8 @@ WEBAPP_SOURCE_FILES = (
     # 环境旁听的 jev 判断(app.py 顶层 import ambient_jev,它再 import 独立的 jev_judge;2026-09-26)
     "ambient_jev.py",
     "jev_judge.py",
+    # 旁听里的人：声音块 ↔ KJ 人物 ↔ 时间轴（ambient_jev 顶层 import）
+    "ambient_people.py",
     # 复习卡改进的 app-server 多轮 runner + 签名草稿存储。领域 prompt/
     # 校验本体从下方唯一的 _client/core 源映射为同名生产模块。
     "card_improvement_runtime.py",

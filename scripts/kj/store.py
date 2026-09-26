@@ -396,8 +396,10 @@ class Ledger:
                 "INSERT OR REPLACE INTO definitions(id, node_id, text, context_key, source_json, created_at, superseded_by)"
                 " VALUES(?,?,?,?,?,?,NULL)",
                 (p["id"], p["node_id"], p["text"], p.get("context_key") or "", dumps(p.get("source")) if p.get("source") else None, now))
-            if p.get("supersedes"):
-                db.execute("UPDATE definitions SET superseded_by=? WHERE id=?", (p["id"], p["supersedes"]))
+            # supersedes：单个 id（旧事件）或 id 列表（合并节点后一条新定义同时取代多条旧的）
+            olds = p.get("supersedes") or []
+            for old in ([olds] if isinstance(olds, str) else olds):
+                db.execute("UPDATE definitions SET superseded_by=? WHERE id=?", (p["id"], old))
             self._refresh_search(p["node_id"])
         elif k == "record.add":
             db.execute(

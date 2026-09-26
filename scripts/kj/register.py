@@ -231,9 +231,10 @@ def generate_auto_relations(ledger: Ledger, node_id: str, qid: str, *, actor: st
 
 # ── 定义 / 记录 ─────────────────────────────────────────────────────────────
 def add_definition(ledger: Ledger, node_id: str, *, text: str, source: Any, context_key: str = "",
-                   decision: str = "", supersedes: str = "", actor: str = "") -> Event:
+                   decision: str = "", supersedes: Any = "", actor: str = "") -> Event:
     """已有同语境定义时先返回旧正文（definition_exists），AI 比较后带 decision 再来：
-    keep → 不改（返回 no_change）；supersede → 覆盖（要给 supersedes=旧 id）；add → 并存（不同语境）。"""
+    keep → 不改（返回 no_change）；supersede → 覆盖（要给 supersedes=旧 id）；add → 并存（不同语境）。
+    supersedes 也可以是 id 列表：两个节点合并后同一语境并存多条，一条新定义把它们一起取代。"""
     node_id = _node(ledger, node_id)
     text = _text(text, "text")
     src = normalize_source(source, required=True)
@@ -246,12 +247,14 @@ def add_definition(ledger: Ledger, node_id: str, *, text: str, source: Any, cont
     if decision == "keep":
         raise RegisterError("no_change", "保持原定义不变", node_id=node_id, existing=[d["id"] for d in existing])
     if decision == "supersede":
-        if not supersedes or not any(d["id"] == supersedes for d in existing):
+        wanted = [supersedes] if isinstance(supersedes, str) else list(supersedes or [])
+        known = {d["id"] for d in existing}
+        if not wanted or not all(w in known for w in wanted):
             raise RegisterError("bad_supersedes", "supersede 必须指明要覆盖的旧定义 id", existing=[d["id"] for d in existing])
     did = ids.mint("def")
     payload = {"id": did, "node_id": node_id, "text": text, "context_key": context_key, "source": src}
     if decision == "supersede":
-        payload["supersedes"] = supersedes
+        payload["supersedes"] = wanted[0] if len(wanted) == 1 else wanted
     return ledger.append("definition.add", payload, node_ids=[node_id], actor=actor, source=src)
 
 

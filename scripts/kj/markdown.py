@@ -216,16 +216,17 @@ def render_node(ledger: Ledger, node_id: str, *, records_limit: int = 30) -> str
     else:
         out.append("- （无）")
 
-    out += ["", "## 掌握与准备度"]
-    val = "无证据" if m.get("value") is None else f"{m['value']:.2f}（{m.get('level', 0)}/5）"
-    out.append(f"- 掌握度：{val}，进度 {m.get('progress', 'unseen')}，准备度 {m.get('readiness', 'no_prereq_info')}")
-    if weak:
-        out.append("- 显示薄弱的前置：" + "、".join(link_for(ledger, w) for w in weak))
-    if unknown:
-        out.append("- 掌握未知的前置：" + "、".join(link_for(ledger, u) for u in unknown))
-    sig = detail.get("signals") or []
-    if sig:
-        out.append("- 最近证据：" + "；".join(_signal_text(s) for s in sig[-5:]))
+    if n["kind"] != "person":   # 人物（含旁听里的熟人）没有掌握度可言
+        out += ["", "## 掌握与准备度"]
+        val = "无证据" if m.get("value") is None else f"{m['value']:.2f}（{m.get('level', 0)}/5）"
+        out.append(f"- 掌握度：{val}，进度 {m.get('progress', 'unseen')}，准备度 {m.get('readiness', 'no_prereq_info')}")
+        if weak:
+            out.append("- 显示薄弱的前置：" + "、".join(link_for(ledger, w) for w in weak))
+        if unknown:
+            out.append("- 掌握未知的前置：" + "、".join(link_for(ledger, u) for u in unknown))
+        sig = detail.get("signals") or []
+        if sig:
+            out.append("- 最近证据：" + "；".join(_signal_text(s) for s in sig[-5:]))
 
     out += ["", f"## 记录（{rec_total} 条；程序生成的摘要，账本在数据库）"]
     if recs:

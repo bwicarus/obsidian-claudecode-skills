@@ -12,9 +12,12 @@ from flask import Flask
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "_server_deploy"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 import ambient_jev  # noqa: E402
 import jev_judge  # noqa: E402
+from ambient_people import AmbientPeople  # noqa: E402
+from kj.service import KJService  # noqa: E402
 
 
 def answers(**choices):
@@ -40,8 +43,10 @@ class AmbientJevTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="amb"))
         self.vault = self.tmp / "vault"
-        self.old = (ambient_jev.CLAUDE_DIR, ambient_jev._predict, ambient_jev._ai, ambient_jev._spawn)
+        self.old = (ambient_jev.CLAUDE_DIR, ambient_jev._predict, ambient_jev._ai, ambient_jev._spawn, ambient_jev._PEOPLE)
         ambient_jev.CLAUDE_DIR = self.tmp
+        self.kj = KJService(self.tmp / "kj.db", self.tmp / "vault" / "KJ", actor="test")
+        ambient_jev._PEOPLE = AmbientPeople(self.tmp / "state" / "ambient", self.kj)
         self.env = dict(__import__("os").environ)
         __import__("os").environ["OBSIDIAN_VAULT"] = str(self.vault)
         ambient_jev._spawn = lambda target, *args: target(*args)   # 后台动作同步跑，便于断言
@@ -54,7 +59,9 @@ class AmbientJevTests(unittest.TestCase):
         self.client = app.test_client()
 
     def tearDown(self) -> None:
-        ambient_jev.CLAUDE_DIR, ambient_jev._predict, ambient_jev._ai, ambient_jev._spawn = self.old
+        self.kj.close()
+        (ambient_jev.CLAUDE_DIR, ambient_jev._predict, ambient_jev._ai, ambient_jev._spawn,
+         ambient_jev._PEOPLE) = self.old
         __import__("os").environ.clear()
         __import__("os").environ.update(self.env)
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -180,3 +187,104 @@ class AmbientJevTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AmbientPeopleTests(AmbientJevTests):
+    """声音块 ↔ KJ 人物 ↔ 时间轴。继承上面的桩（jev / AI / 临时 KJ）。"""
+
+    def window(self, wid, slot_other="s1:1", other_label="说话人2", **extra):
+        return dict(WINDOW, windowId=wid, startedAt=1_700_000_000_000, endedAt=1_700_000_010_000, utterances=[
+            {"speaker": "我", "isUser": True, "text": "周末去爬山吗", "t0": 1, "t1": 2, "slotKey": "s1:0"},
+            {"speaker": other_label, "isUser": False, "text": "好啊，周六早上八点", "t0": 3, "t1": 5, "slotKey": slot_other},
+        ], **extra)
+
+    def judge(self, body):
+        self.stub(dict(meaningful="meaningful", danger="none", question="none", record="skip"))
+        reply = self.client.post("/api/ambient/judge", json=body).get_json()
+        self.assertTrue(reply["ok"], reply)
+        return reply
+
+    def timeline(self):
+        return self.client.get("/api/ambient/timeline?from=1699990000000&to=1700090000000").get_json()
+
+    def test_timeline_and_naming_blocks(self):
+        self.login()
+        self.judge(self.window("w1"))
+        rows = self.timeline()["utterances"]
+        self.assertEqual([r["name"] for r in rows], ["我", None])
+        self.assertEqual(rows[1]["t0"], 1_700_000_003_000)
+        person = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "小王"}).get_json()["person"]
+        node = self.kj.ledger.node(person["id"])
+        self.assertEqual((node["name"], node["kind"]), ("小王", "person"))
+        # 名字在读的时候解析：事后起名，历史也跟着变
+        self.assertEqual(self.timeline()["utterances"][1]["name"], "小王")
+        # 另一个块设成同一个名字 → 同一个人
+        self.judge(self.window("w2", slot_other="s2:3"))
+        again = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s2:3", "name": "小王"}).get_json()["person"]
+        self.assertEqual(again["id"], person["id"])
+        self.assertEqual(sorted(again["slots"]), ["s1:1", "s2:3"])
+
+    def test_known_person_gets_kj_record_markdown_and_jev_clue(self):
+        self.login()
+        pid = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "小王"}).get_json()["person"]["id"]
+        self.client.patch(f"/api/ambient/people/{pid}", json={"intro": "大学同学，在做芯片"})
+        reply = self.judge(self.window("w1"))
+        self.assertEqual(reply["names"]["s1:1"]["name"], "小王")
+        state = self.calls[-1]["state"]
+        self.assertIn("[00:03 小王] 好啊", state)
+        self.assertIn("小王：大学同学，在做芯片", state)
+        records = self.kj.ledger.records(pid)
+        self.assertEqual([r["kind"] for r in records], ["conversation"])
+        self.assertIn("小王：好啊，周六早上八点", records[0]["text"])
+        page = next((self.tmp / "vault" / "KJ").rglob("*小王*.md")).read_text(encoding="utf-8")
+        self.assertIn("大学同学，在做芯片", page)
+        # 同一窗口重发不重复记
+        self.judge(self.window("w1"))
+        self.assertEqual(len(self.kj.ledger.records(pid)), 1)
+
+    def test_rename_to_existing_merges_kj_nodes(self):
+        self.login()
+        a = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "王老师"}).get_json()["person"]["id"]
+        b = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s2:1", "name": "老王"}).get_json()["person"]["id"]
+        self.client.patch(f"/api/ambient/people/{a}", json={"intro": "数学老师", "profile": "关系：老师"})
+        self.client.patch(f"/api/ambient/people/{b}", json={"intro": "住隔壁", "profile": "商量过：周六爬山"})
+        merged = self.client.patch(f"/api/ambient/people/{b}", json={"name": "王老师"}).get_json()["person"]
+        self.assertEqual(merged["id"], a)
+        self.assertEqual(self.kj.ledger.node(b)["merged_into"], a)
+        self.assertIn("数学老师", merged["intro"])
+        self.assertIn("住隔壁", merged["intro"])
+        self.assertIn("老王", merged["aliases"])
+        self.assertEqual(sorted(merged["slots"]), ["s1:1", "s2:1"])
+        # 两条 AI 整理收拢成一条
+        profiles = [d for d in self.kj.ledger.definitions(a) if d["context_key"] == "ambient-profile"]
+        self.assertEqual(len(profiles), 1)
+        self.assertIn("周六爬山", profiles[0]["text"])
+        self.assertIn("关系：老师", profiles[0]["text"])
+
+    def test_app_identified_speaker_feeds_voiceprints(self):
+        self.login()
+        pid = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s0:1", "name": "小王",
+                                                                  "vector": [0.1, 0.2]}).get_json()["person"]["id"]
+        self.judge(self.window("w1", speakers=[{"slotKey": "s1:1", "personId": pid, "vector": [0.3, 0.4]}]))
+        prints = self.client.get("/api/ambient/voiceprints").get_json()["people"]
+        self.assertEqual(prints[0]["name"], "小王")
+        self.assertEqual(len(prints[0]["vectors"]), 2)
+        self.assertEqual(self.timeline()["utterances"][1]["name"], "小王")
+
+    def test_summarize_writes_profile_into_kj(self):
+        self.login()
+        pid = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "小王"}).get_json()["person"]["id"]
+        self.judge(self.window("w1"))
+        ambient_jev._ai = lambda prompt: "关系：同学\n商量过：周六早上八点爬山\n近况：未知"
+        reply = self.client.post(f"/api/ambient/people/{pid}/summarize").get_json()
+        self.assertTrue(reply["ok"], reply)
+        detail = self.client.get(f"/api/ambient/people/{pid}").get_json()
+        self.assertIn("周六早上八点爬山", detail["person"]["profile"])
+        self.assertEqual(detail["history"][0]["lines"][0]["name"], "我")
+
+    def test_book_persons_are_not_listed(self):
+        self.login()
+        self.kj.create_node(name="高斯", kind="person")
+        self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "小王"})
+        names = [p["name"] for p in self.client.get("/api/ambient/people").get_json()["people"]]
+        self.assertEqual(names, ["我", "小王"])
