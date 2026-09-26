@@ -132,6 +132,10 @@ def read_env() -> dict[str, str]:
     env.setdefault("LOCALAPPDATA", str(DATA))
     env.setdefault("DOTNET_ROOT", str(DOTNET_ROOT))
     env.setdefault("BW_PYTHON", str(PY))
+    # MCP 门面的「ReaderPC 实时工具」代理（reader_pc_tools / reader_pc_call_tool / voice_brief）要起
+    # 桥的 --reader-context-mcp 模式；以前只认 Windows 的 EXE 路径，迁到 Mac 后一直 READER_PC_UNAVAILABLE。
+    env.setdefault("READER_CONTEXT_MCP_COMMAND", str(CURRENT / "bridge" / "bw-reader-bridge"))
+    env.setdefault("READER_CONTEXT_MCP_STATE", str(BRIDGE_ROOT / "runtime" / "reader-context-snapshot.json"))
     env.setdefault("PATH", ":".join([str(PY.parent), str(NODE_BIN), str(DOTNET_ROOT),
                                      "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin",
                                      "/usr/sbin", "/sbin"]))

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import httpx
 from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ToolAnnotations
 
@@ -69,36 +69,34 @@ _READER_PC_TOOL_NAMES = frozenset({
 })
 
 
+# 子进程要带过去的环境变量。MCP SDK 默认只传 HOME/PATH/SHELL/TERM —— Mac 上的桥是依赖框架的
+# .NET 程序（运行时在 ~/.dotnet），不带 DOTNET_ROOT 就起不来；LOCALAPPDATA 决定它读哪份数据根。
+_READER_PC_ENV_KEYS = ("DOTNET_ROOT", "LOCALAPPDATA", "USERPROFILE", "APPDATA", "READER_CONTEXT_MCP_STATE")
+
+
 def _reader_pc_server_parameters() -> StdioServerParameters:
+    home = Path(os.environ.get("USERPROFILE") or Path.home())
     command = os.environ.get("READER_CONTEXT_MCP_COMMAND", "").strip()
-    if not command and os.name == "nt":
-        command = str(
-            Path(os.environ.get("USERPROFILE") or Path.home())
-            / "bw-computer-voice-bridge"
-            / "native-host"
-            / "bw-computer-voice-audio.exe"
-        )
+    if not command:
+        # Windows：ReaderPC 原生 EXE；Mac（2026-09-25 起的服务器）：同一份源码编出的 bw-reader-bridge，
+        # 部署在 ~/BW/runtime/current/bridge（deploy_mac.py）。服务里通常已由环境变量指定，这里是退路。
+        command = str(home / "bw-computer-voice-bridge" / "native-host" / "bw-computer-voice-audio.exe") \
+            if os.name == "nt" else str(Path.home() / "BW" / "runtime" / "current" / "bridge" / "bw-reader-bridge")
     state = os.environ.get("READER_CONTEXT_MCP_STATE", "").strip()
-    if not state and os.name == "nt":
-        state = str(
-            Path(os.environ.get("USERPROFILE") or Path.home())
-            / "bw-computer-voice-bridge"
-            / "runtime"
-            / "reader-context-snapshot.json"
-        )
-    if not command or not Path(command).is_file():
+    if not state:
+        # Mac 上 ~/bw-computer-voice-bridge 链到 ~/BW/data/bridge（见 references/mac-server.md）。
+        state = str(home / "bw-computer-voice-bridge" / "runtime" / "reader-context-snapshot.json")
+    if not Path(command).is_file():
         raise FileNotFoundError(
-            "Windows Reader MCP executable is unavailable; set "
+            f"Reader MCP executable is unavailable (looked at {command}); set "
             "READER_CONTEXT_MCP_COMMAND on the ReaderPC host"
         )
-    if not state:
-        raise FileNotFoundError(
-            "Windows Reader snapshot path is unavailable; set "
-            "READER_CONTEXT_MCP_STATE on the ReaderPC host"
-        )
+    env = dict(get_default_environment())
+    env.update({key: os.environ[key] for key in _READER_PC_ENV_KEYS if os.environ.get(key)})
     return StdioServerParameters(
         command=command,
         args=["--reader-context-mcp", "--state", state],
+        env=env,
     )
 
 
@@ -442,6 +440,55 @@ def user_situation() -> dict:
         },
         "unknown": gaps,
     }
+
+
+# ───────────────────────── 语音开场：一次拿全（GPT 普通聊天语音）─────────────────────────
+# 2026-09-26 用户提议：ChatGPT 普通聊天的语音也能调 MCP 了，但那里没有 jev 判断、也没有任何上下文注入
+# —— 模型只能自己来问。所以给它一个「一次拿全」的入口：现况（在哪 / 什么设备 / 在做什么）
+# + 阅读器全量快照（旧版那种带各种状态信息的完整快照，复用 ReaderPC 的 reader_context_snapshot，
+# 不在这里另拼一份）。少一次往返，慢速语音里就少一段沉默。
+_VOICE_BRIEF_SNAPSHOT_LIMIT = 12000
+
+
+def _call_result_text(result) -> tuple[str, bool]:
+    texts = []
+    for item in getattr(result, "content", None) or []:
+        kind = item.get("type") if isinstance(item, dict) else getattr(item, "type", "")
+        if kind == "text":
+            texts.append(item.get("text", "") if isinstance(item, dict) else getattr(item, "text", ""))
+    return "\n".join(t for t in texts if t), bool(getattr(result, "isError", False))
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+))
+async def voice_brief() -> dict:
+    """语音对话的开场工具：**一次**拿到用户此刻的现况与阅读器全量快照。
+    适用于没有上下文注入的语音（如 ChatGPT 普通聊天的语音模式）：对话开始、或用户提到
+    「这本书 / 这一页 / 这句 / 我在干嘛」时先调它，不要分几次去问。
+    返回 situation（在哪、什么设备、在读哪本第几页、是否在复习、是否醒着；known=false = 不知道，不等于否）
+    与 reader（阅读器快照原文：当前书页、选区、页上卡片、复习卡等；过长会截断）。
+    要操作书本（高亮、制卡、翻页…）再用 reader_pc_tools / reader_pc_call_tool。
+    回答用户时口语化、简短 —— 这是语音。"""
+    situation = user_situation()
+    reader = await _reader_pc_call("reader_context_snapshot", {})
+    text, failed = _call_result_text(reader)
+    truncated = len(text) > _VOICE_BRIEF_SNAPSHOT_LIMIT
+    brief = {
+        "ok": True,
+        "situation": situation,
+        "reader": {
+            "ok": not failed and bool(text),
+            "snapshot": text[:_VOICE_BRIEF_SNAPSHOT_LIMIT],
+            "truncated": truncated,
+        },
+    }
+    if failed or not text:
+        brief["reader"]["why"] = text or "阅读器快照为空"
+    return brief
 
 
 # ───────────────────────── 词汇 / 语言 ─────────────────────────

@@ -52,7 +52,23 @@
 
 写操作便捷封装:`make_anki_card(text,file,page)`、`add_highlight(file,page,texts,color)`(texts 须页面原文逐字,先 read_page 照抄)。
 
+## 语音开场：`voice_brief`（2026-09-26）
+
+给**没有上下文注入**的语音用（如 ChatGPT 普通聊天的语音模式调 MCP：那里没有 jev 判断、没有阅读器状态注入，
+模型只能自己问）。一次返回：
+- `situation`：即 `user_situation()`（在哪 / 设备 / 在读哪本第几页 / 复习 / 醒着；known=false = 不知道）；
+- `reader`：ReaderPC `reader_context_snapshot` 的**全量**快照原文（不传 brief；超过 12000 字截断并标 truncated），
+  不可用时 `ok:false` + `why`。
+
+工具说明里要求口语化、简短，并提示要操作书本再用 `reader_pc_call_tool`。
+
 ## Windows ReaderPC 实时工具代理
+
+> ⚠ 迁到 Mac（2026-09-25）后这组代理一直 `READER_PC_UNAVAILABLE`：只认 Windows EXE 路径，且 MCP SDK
+> 起子进程默认只传 HOME/PATH/SHELL/TERM，Mac 上依赖框架的 `bw-reader-bridge` 拿不到 `DOTNET_ROOT` 起不来。
+> 2026-09-26 起：`deploy_mac.py` 给服务设 `READER_CONTEXT_MCP_COMMAND`（`~/BW/runtime/current/bridge/bw-reader-bridge`）
+> 与 `READER_CONTEXT_MCP_STATE`（`~/BW/data/bridge/runtime/reader-context-snapshot.json`），代码里也有同样的退路；
+> 子进程额外带 `DOTNET_ROOT / LOCALAPPDATA / USERPROFILE / APPDATA / READER_CONTEXT_MCP_STATE`（不带令牌类变量）。
 
 | MCP 工具 | 作用 |
 |---|---|
