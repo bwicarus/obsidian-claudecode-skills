@@ -4943,6 +4943,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             nativeFeed.publish = { [weak self] messages in self?.nativeConversation.applyFeed(messages) }
             nativeFeed.log = { [weak self] line in self?.postClientLog(line) }
             nativeTurns.onNativeReply = { [weak self] tid in self?.nativeFeed.nativeReply(tid) }
+            // 迁出 P3：语音事件 —— 原生订阅到本轮开始就把轮次号交给网页；网页轮次通道的变化收编进对话流。
+            nativeFeed.announceLiveTurn = { [weak self] tid in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let accepted = try? await self.webView.callAsyncJavaScript("return window.__bwNativeFeedLiveTurn?.(tid) === true;",
+                        arguments: ["tid": tid], in: nil, contentWorld: .page) as? Bool
+                    if accepted != true { self.postClientLog("对话流：本轮身份未交到网页（" + String(tid.prefix(40)) + "）") }
+                }
+            }
+            nativeFeed.adoptsWebTurns = { [weak self] in self?.nativeConversation.conversationMode == "normal" }
+            nativeTurns.onWebApplied = { [weak self] changed, removed in self?.nativeFeed.observeWebTurns(changed: changed, removed: removed) }
             nativeHistoryMessages.onLiveUser = { [weak self] message in self?.nativeFeed.appendExtra(message) }
             contentController.addUserScript(WKUserScript(source: "window.__bwNativeConversationFeed = true;",
                 injectionTime: .atDocumentStart, forMainFrameOnly: true))
@@ -8797,6 +8808,12 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                     }
                     publishNativeFigureProjection()
                 }
+                return
+            }
+            // 迁出 P4a：普通会话里网页直接写进对话区的提示，挂载时交给原生对话流（不再靠抓取）。
+            if body["type"] as? String == "feed-note" {
+                guard let text = body["text"] as? String, text.utf16.count <= 8000 else { return }
+                nativeFeed.appendNote(text)
                 return
             }
             do {

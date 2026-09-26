@@ -47,6 +47,8 @@ final class ReaderNativeTurnBridge: NSObject, WKScriptMessageHandlerWithReply {
     }
     func feedMessage(tid: String, id: String) -> [String:Any]? { store.feedMessage(tid:tid,id:id) }
     var onNativeReply: ((String) -> Void)?
+    /// 网页那条序号协议一批提交后：(有变化的非回放轮次, 被移除的轮次)。
+    var onWebApplied: (([String], [String]) -> Void)?
 
     func conversationPayload(_ input: [String:Any]) throws -> [String:Any] {
         guard var batch = input["messageDelta"] as? [String:Any], let messages = batch["upserts"] as? [[String:Any]] else { return input }
@@ -133,6 +135,9 @@ final class ReaderNativeTurnBridge: NSObject, WKScriptMessageHandlerWithReply {
             // silently retried under a new session or interpreted as empty history.
             store = candidate; sequence = next
             replyHandler(["ok":true,"session":requested,"sequence":sequence,"result":result],nil)
+            // 迁出 P3：网页轮次通道（语音工具/结果卡）的变化交给原生对话流；网页自己的历史回放不算。
+            let live = changed.values.filter { $0["historyReplay"] as? Bool != true }.compactMap { $0["id"] as? String }.sorted()
+            onWebApplied?(live, Array(removed))
         } catch { onFailure?(error.localizedDescription); replyHandler(nil,error.localizedDescription) }
     }
 

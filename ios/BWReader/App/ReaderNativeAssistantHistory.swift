@@ -317,6 +317,11 @@ final class ReaderNativeConversationFeed {
     var acknowledge: ((String) -> Void)?
     var publish: (([[String: Any]]) -> Void)?
     var log: ((String) -> Void)?
+    /// 迁出 P3：语音轮开始（stream:"start"）时把服务器的轮次号交给网页，
+    /// App 现场执行的工具/结果卡就挂进同一轮（网页 __bwLiveTurnId）。
+    var announceLiveTurn: ((String) -> Void)?
+    /// 迁出 P3：网页那条轮次通道（RC.turnCard）写进来的轮次，只在普通会话时收编进对话流。
+    var adoptsWebTurns: (() -> Bool)?
 
     private(set) var started = false
     private var history: [Entry] = []
@@ -463,7 +468,12 @@ final class ReaderNativeConversationFeed {
         }
         do {
             switch stream {
-            case "start": return
+            case "start":
+                // 迁出 P3：P2 让网页不再看事件流，连「本轮身份」一起丢了 —— 语音工具长条与结果卡
+                // 因此落进网页的本地临时轮次，对话流里看不见。现在由原生把轮次号交给网页。
+                guard streams[tid + "|final"] == nil else { return }
+                announceLiveTurn?(tid)
+                return
             case "delta":
                 let item = event["item_id"] as? String ?? ""
                 guard state(role, item), streams[tid + "|final"] == nil else { return }
@@ -513,6 +523,50 @@ final class ReaderNativeConversationFeed {
             self?.reloadHistory(reason: "final")
         }
     }
+
+    // MARK: 语音事件（迁出 P3）
+
+    /// 网页轮次通道（rc-voicecall 的工具长条 busy/idle、结果卡、流程进度、草稿镜像）一批提交之后调用。
+    /// 已在对话流里的轮次只重出一次；新轮次在普通会话时收编（按首次出现排在末尾），
+    /// 被改名/丢弃的轮次退出「进行中」列表 —— 与 P2 同一个消息身份 `m:assistant:<轮次>`，
+    /// 服务器那条落库后自然由历史接手。
+    func observeWebTurns(changed: [String], removed: [String]) {
+        guard started, !(changed.isEmpty && removed.isEmpty) else { return }
+        var dirty = false
+        if !removed.isEmpty {
+            let gone = Set(removed), before = live.count
+            live.removeAll { gone.contains($0.tid) }
+            dirty = live.count != before
+        }
+        let known = Set(live.map(\.tid)).union(history.compactMap { entry -> String? in
+            if case .turn(let tid, _) = entry { return tid }
+            return nil
+        })
+        let adopt = adoptsWebTurns?() ?? false
+        var adopted: [String] = []
+        for tid in changed {
+            if known.contains(tid) { dirty = true; continue }
+            // 用户话由服务器事件驱动（user:<轮次>）；网页这条只收助手侧的轮次。
+            guard adopt, !tid.hasPrefix("user:"), !tid.hasPrefix("hist_") else { continue }
+            track(tid, id: Self.messageID(turn: tid, role: "assistant"))
+            adopted.append(tid); dirty = true
+        }
+        if !adopted.isEmpty { log?("对话流：收编语音轮次 " + adopted.map { String($0.prefix(40)) }.joined(separator: " ")) }
+        if dirty { emit() }
+    }
+
+    /// 迁出 P4a：普通会话里网页直接写进对话区的提示（语音出错等）不再经 DOM 抓取，
+    /// 由网页在挂载那一刻交给原生，作为一条「提示」进对话流。
+    func appendNote(_ text: String) {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard started, !value.isEmpty else { return }
+        noteSerial += 1
+        extras.append(["id": "note:" + String(noteSerial), "role": "system", "text": String(value.prefix(2000)),
+                       "streaming": false, "title": "", "statusText": "", "parts": [[String: Any]]()])
+        if extras.count > 24 { extras.removeFirst(extras.count - 24) }
+        emit()
+    }
+    private var noteSerial = 0
 
     // MARK: 退回网页文字助手时（语音核心不在）
 

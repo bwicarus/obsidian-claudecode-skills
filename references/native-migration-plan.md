@@ -41,18 +41,37 @@
 - 网页：`window.__bwNativeConversationFeed = true`（documentStart 注入）→ 普通模式的 `onHistoryEvent`/`loadHistory` 让位。
 - 退回路径（语音核心不在 → 网页 `send`）：用户话（P2a 原生占位）与原生回复（replyRef 轮次）也进对话流。
 - **未迁**：复习会话仍走网页；hlcard「撤销/重做」仍靠网页 turnCard（对话流里的历史轮网页不认识 → 需原生化）；
-  视频/旧撤销卡/EPUB 动作卡（历史里出现会记日志）；App 端工具「长条」即时反馈（__bwToolChip）不再显示。
+  视频/旧撤销卡/EPUB 动作卡（历史里出现会记日志）；~~App 端工具「长条」即时反馈不再显示~~ → P3 修复。
 
 ### 原 P2 打字发送与流式（网页 send，仅退回路径用）
 - 原生输入框直接调 stream bridge；`sentCtx` 由原生组（可见页正文、选区、页码、图）。
 - 把 `_handleEv` 的事件表搬进 Swift（delta/parts/final/tool/cards/status/progress/task/cli/gone）。
 - JS `__asstSend` 退为兼容入口。
 
-### P3 语音事件
-- `rc-voicecall` 的 runner 事件 → 轮次命令搬进 Swift（桥的事件流由 Swift 直接订阅）。
+### ✅ P3 已完成（2026-09-26，待模拟器验证）：语音事件进原生对话流
+- **根因（P2 回归）**：P2 让网页 `onHistoryEvent` 在普通会话整段让位，连 `stream:"start"` 里
+  「服务器轮次号 → `__bwLiveTurnId`」这一步也丢了 → App 现场执行的语音工具长条（busy/idle）、
+  结果卡、流程进度都写进网页本地临时轮次 `_vTid`，原生对话流从不认识它 → 侧栏看不见。
+- **现在**：
+  - 原生对话流订阅到 `start` → `announceLiveTurn` → 网页 `window.__bwNativeFeedLiveTurn(tid)`
+    （`rc-assistant.js` 的 `_adoptLiveTurn`，与原 start 分支同一段逻辑：设 `__bwLiveTurnId`、
+    未认领的本地容器改名并补存）。
+  - `ReaderNativeTurnBridge` 在网页序号协议每批提交后回调 `onWebApplied(changed, removed)`；
+    对话流 `observeWebTurns`：已在流里的轮次重出，新轮次（普通会话、非回放、非 `user:`/`hist_`）
+    按首次出现收编，身份仍是 `m:assistant:<轮次>` → 服务器那条落库后历史自然接手，不闪不重；
+    被改名/丢弃的轮次退出「进行中」。
+- **仍在网页**：语音事件的**传输**（`rc-computer-voice.js` DirectSocket → `acceptRealtimeOutput`）
+  和执行（工具长条状态机、后台任务轮询、结果卡渲染）。搬传输属于「3. 语音客户端」。
 
-### P4 删抓取
-- `ReaderNativeConversationScript` 的消息投影部分删除；只保留仍未迁移的动作句柄。
+### ✅ P4a 已完成（2026-09-26，待模拟器验证）：普通会话停抓 DOM
+- `ReaderNativeConversationScript`：普通会话 + 原生对话流时消息投影为空（`feedOwnsMessages`），
+  普通↔复习切换时整段重投影；增量协议不变（`prepareMessageDelta` 始终与自己上次比）。
+- 网页直接写进对话区的提示（`threadMsg('asst-note')` / `addMsg('asst-note')`，语音出错等）
+  在 `__bwNativeMessages.publish` 挂载那一刻以 `feed-note` 交给原生，进对话流为一条「提示」。
+- **P4b 未做（被阻塞）**：投影代码不能删 —— 复习会话的发送/回放仍在网页、仍靠它；
+  要等复习会话迁出后再删 `projectMessage` / `liveArtifacts` 里只服务网页消息的分支。
+- 已知不再显示的：网页写的非轮次 `asst-u/asst-a`（旧 windows-reader-output、GPT RTC 转写），
+  它们都经 `__asstVoiceLog` 落库，约 1 秒后由历史补出。
 
 ## 2. 阅读位置
 - 2026-09-26 已完成第一步：原生视口是本机权威（等存储握手再开书；本机写的

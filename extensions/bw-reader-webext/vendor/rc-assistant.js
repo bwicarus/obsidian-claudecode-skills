@@ -4130,6 +4130,36 @@ if (window.__bwPwaProviderOnly) return;
       if (Object.keys(_historyPendingTurns).length) _legacyTurnTimer = setTimeout(_legacyTurnDrain, 400);
     });
   }
+  // 语音轮开始：服务器的轮次号成为本轮容器身份（__asstVoiceTid 的唯一来源）。
+  // Only an unclaimed local container can be adopted. A completed voice
+  // response or a different known turn must never be folded into this one.
+  function _adoptLiveTurn(tid) {
+    var previous = window.__bwLiveTurnId;
+    window.__bwLiveTurnId = tid;
+    _turnModes[tid] = _assistantMode;
+    if (!previous && _vTid && !_vAnswered && !_liveSeen[_vTid] && RC.turnCard && RC.turnCard.has(_vTid) && _vTid !== tid) {
+      var old = _vTid;
+      clearTimeout(_psT[old]); delete _psT[old];
+      RC.turnCard.rename(old, tid); _vTid = null;
+      _syncPartsNow(tid, [old]);
+    }
+  }
+  // 迁出 P3（2026-09-26）：App 里事件流由原生订阅（onHistoryEvent 在普通会话让位），
+  // 本轮开始时原生把轮次号交到这里 —— 否则 App 现场执行的工具长条/结果卡会落进
+  // 本地临时轮次，原生对话流里看不见（P2 之后的实测回归）。
+  window.__bwNativeFeedLiveTurn = function (tid) {
+    try {
+      tid = String(tid || '');
+      if (window.__bwNativeConversationFeed !== true || !/^[A-Za-z0-9_.:-]{1,160}$/.test(tid)) return false;
+      if (_modeNorm(_assistantMode) !== 'normal') return false;
+      _adoptLiveTurn(tid);
+      return true;
+    } catch (e) {
+      try { window.dlog && window.dlog('[对话流] 本轮身份未采用：' + ((e && e.message) || e)); } catch (_) {}
+      return false;
+    }
+  };
+
   // 迁出 P2（2026-09-26）：App 里普通会话的消息列表由原生对话流维护（历史 + 实时事件），
   // 网页不再渲染这两类，免得两边各写一份轮次。复习会话仍由这里处理。
   function onHistoryEvent(ev) {
@@ -4142,17 +4172,7 @@ if (window.__bwPwaProviderOnly) return;
       if (!state) return;
       if (ev.stream === 'start') {
         if (state.final) return;
-        // Only an unclaimed local container can be adopted. A completed voice
-        // response or a different known turn must never be folded into this one.
-        var previous = window.__bwLiveTurnId;
-        window.__bwLiveTurnId = tid;
-        _turnModes[tid] = _assistantMode;
-        if (!previous && _vTid && !_vAnswered && !_liveSeen[_vTid] && RC.turnCard && RC.turnCard.has(_vTid) && _vTid !== tid) {
-          var old = _vTid;
-          clearTimeout(_psT[old]); delete _psT[old];
-          RC.turnCard.rename(old, tid); _vTid = null;
-          _syncPartsNow(tid, [old]);
-        }
+        _adoptLiveTurn(tid);
         return;
       }
       if (ev.stream === 'delta') {

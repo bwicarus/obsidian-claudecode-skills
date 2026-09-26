@@ -45,6 +45,11 @@ enum ReaderNativeConversationScript {
       const rc = () => window.RC || {};
       const pane = () => document.getElementById('side-pane-asst');
       const conversationMode = () => pane()?.dataset.assistantMode === 'review' ? 'review' : 'normal';
+      // 迁出 P4a：普通会话的消息由原生对话流给（历史 + 实时事件 + 语音轮次），这里不再抓 DOM 投影；
+      // 复习会话仍按原样投影（它的发送/回放还在网页）。
+      const feedOwnsMessages = () => nativeMode && window.__bwNativeConversationFeed === true && conversationMode() === 'normal';
+      let lastFeedOwns = null;
+      const forwardedNotes = new WeakSet();
       const drawer = () => rc().sidedrawer;
       const account = () => window.BWReaderRuntime?.accountContext;
       const activeTab = () => document.querySelector('#ep-side-tabs .ep-side-tab.active[data-pane],#ep-side .side-tab.active[data-pane],#side-tabs .side-tab.active[data-pane]')?.dataset.pane || 'asst';
@@ -128,7 +133,15 @@ enum ReaderNativeConversationScript {
       // Compatibility producers announce semantic mount/remove/history events.
       // Node references retain legacy action resources, never decide membership
       // by querying a hidden thread's children during scrolling or selection.
-      window.__bwNativeMessages = messageSources;
+      // 迁出 P4a：普通会话里网页直接写的提示（语音出错等）在挂载这一刻交给原生对话流，不等抓取。
+      window.__bwNativeMessages = Object.freeze({ ...messageSources, publish(node, target, before) {
+        if (node && feedOwnsMessages() && !forwardedNotes.has(node) && node.classList?.contains('asst-note') && !node.getAttribute('data-turn')) {
+          forwardedNotes.add(node);
+          try { handler.postMessage({ version: 1, type: 'feed-note', text: cleanText(node, 2000) }); }
+          catch (error) { try { window.dlog?.('[对话流] 提示没交到原生：' + (error && error.message || error)); } catch (_) {} }
+        }
+        return messageSources.publish(node, target, before);
+      } });
       function partID(part, message, index) {
         return message + '-p-' + hash(String(part.id || part.item_id || part.call_id || part.cid || part.gid || part.card?.cid || (part.seq ?? index)) + ':' + (part.kind || 'artifact'));
       }
@@ -993,10 +1006,13 @@ enum ReaderNativeConversationScript {
           searchController?.abort(); searchResults.clear(); searchQuery = ''; searchSequence++;
           tocController?.abort(); tocEntries.clear(); tocOwner = null; tocSequence++;
         }
+        // 普通 ↔ 复习切换时整段重投影：普通会话投影为空（原生对话流接管），复习会话按原样投影。
+        const feedOwns = feedOwnsMessages();
+        if (feedOwns !== lastFeedOwns) { lastFeedOwns = feedOwns; messagesDirty = true; }
         const rebuildMessages = messagesDirty;
         actions = messagesDirty ? new Map() : new Map(messageActions);
         if (messagesDirty) {
-        const all = thread ? messageSources.sources(thread) : [];
+        const all = thread && !feedOwns ? messageSources.sources(thread) : [];
         turnOwned = nativeMode ? collectTurnOwned(all) : { tools: new Set(), cards: new Set() };
         let reviewQuestion = '';
         const messages = all.map((node, index) => {
