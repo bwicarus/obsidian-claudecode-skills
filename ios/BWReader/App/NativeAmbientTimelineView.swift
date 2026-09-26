@@ -92,6 +92,65 @@ enum NativeAmbientPalette {
     }
 }
 
+/// 时间轴译文的本机记录（2026-09-27 用户）：本机翻译记在本地；AI 精翻覆盖同一条；
+/// 原文（这一块的句子）被删 / 被替换时绑定一起删。按块的第一句 id 记，带上整块的句子 id 与原文。
+@MainActor
+final class NativeAmbientTranslationStore {
+    static let shared = NativeAmbientTranslationStore()
+    struct Record: Codable {
+        var ids: [String]          // 这一块全部句子的 id（绑定：任何一句没了 = 原文变了 / 被删了）
+        var t0: Double
+        var t1: Double
+        var sourceText: String
+        var text: String
+        var source: String         // "apple" | "ai"
+        var updatedAt: Double
+    }
+    private(set) var records: [String: Record] = [:]
+    private let url: URL = {
+        let base = (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                    ?? FileManager.default.temporaryDirectory).appendingPathComponent("BWReader", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("ambient-translations.json")
+    }()
+
+    private init() {
+        if let data = try? Data(contentsOf: url), let decoded = try? JSONDecoder().decode([String: Record].self, from: data) {
+            records = decoded
+        }
+    }
+
+    /// 这一块当前有效的译文（原文没变才算）。
+    func translation(for block: NativeAmbientTimelineModel.Block) -> Record? {
+        guard let record = records[block.first.id], record.sourceText == block.text else { return nil }
+        return record
+    }
+
+    /// 记一条。本机翻译不覆盖同一原文的 AI 精翻；AI 精翻一律覆盖。
+    func put(_ block: NativeAmbientTimelineModel.Block, text: String, source: String) {
+        if source == "apple", let old = translation(for: block), old.source == "ai" { return }
+        records[block.first.id] = Record(ids: block.lines.map(\.id), t0: block.t0, t1: block.t1, sourceText: block.text,
+                                         text: text, source: source, updatedAt: Date().timeIntervalSince1970)
+    }
+
+    /// 绑定删除：已加载的时间范围 [from, to] 内，句子已不在服务器上的记录删掉（原文被删 / 被重转替换）。
+    @discardableResult
+    func prune(loadedFrom from: Double, to: Double, present: Set<String>) -> Int {
+        let stale = records.filter { $0.value.t0 >= from && $0.value.t1 <= to && !$0.value.ids.allSatisfy(present.contains) }.map(\.key)
+        for key in stale { records.removeValue(forKey: key) }
+        if records.count > 20_000 {   // 容量上限：删最旧的
+            for key in records.sorted(by: { $0.value.updatedAt < $1.value.updatedAt }).prefix(records.count - 20_000).map(\.key) {
+                records.removeValue(forKey: key)
+            }
+        }
+        return stale.count
+    }
+
+    func save() {
+        if let data = try? JSONEncoder().encode(records) { try? data.write(to: url, options: .atomic) }
+    }
+}
+
 @MainActor
 final class NativeAmbientTimelineModel: ObservableObject {
     enum Span: String, CaseIterable, Identifiable {
@@ -109,10 +168,9 @@ final class NativeAmbientTimelineModel: ObservableObject {
 
     // 批量翻译（2026-09-27 用户：「加一个翻译按钮批量翻译，结果放在原句下面，默认用 Apple 的翻译」）
     @Published var translateOn = false
-    @Published var translations: [String: String] = [:]   // 块全文 → 中文译文
+    @Published var storeRevision = 0                     // 本机译文记录有变化 → 重画
     @Published var translationVersion = 0                 // 变了 = 有新的待翻（翻译器据此开下一组）
     @Published var translationNote: String?
-    @Published var refined: [String: String] = [:]      // 块全文 → AI 精翻译文（优先于 Apple 机翻）
     @Published var refining = false
     private var translationInFlight: Set<String> = []
     private var translationFailed: Set<String> = []
@@ -123,7 +181,8 @@ final class NativeAmbientTimelineModel: ObservableObject {
         var byLanguage: [String: [String]] = [:], order: [String] = []
         for block in groups.flatMap(\.blocks) {
             let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty, translations[text] == nil, !translationInFlight.contains(text), !translationFailed.contains(text) else { continue }
+            guard !text.isEmpty, NativeAmbientTranslationStore.shared.translation(for: block) == nil,
+                  !translationInFlight.contains(text), !translationFailed.contains(text) else { continue }
             let detected = Self.sourceLanguage(of: text)
             if detected == .simplifiedChinese || detected == .traditionalChinese { continue }
             let key = detected?.rawValue ?? ""
@@ -147,7 +206,11 @@ final class NativeAmbientTimelineModel: ObservableObject {
 
     func finishTranslation(_ texts: [String], results: [String: String], error: String?) {
         translationInFlight.subtract(texts)
-        for (key, value) in results { translations[key] = value }
+        let store = NativeAmbientTranslationStore.shared
+        for block in groups.flatMap(\.blocks) {
+            if let value = results[block.text.trimmingCharacters(in: .whitespacesAndNewlines)] { store.put(block, text: value, source: "apple") }
+        }
+        if !results.isEmpty { store.save(); storeRevision += 1 }
         let missing = texts.filter { results[$0] == nil }
         if let error {
             translationFailed.formUnion(missing)
@@ -173,10 +236,13 @@ final class NativeAmbientTimelineModel: ObservableObject {
             let reply = try await NativeAmbientServer.post("api/ambient/translate", body: ["lines": lines], timeout: 300)
             let out = reply["translations"] as? [String] ?? []
             var count = 0
+            let store = NativeAmbientTranslationStore.shared
             for (block, text) in zip(blocks, out) where !text.isEmpty {
-                refined[block.text.trimmingCharacters(in: .whitespacesAndNewlines)] = text
+                store.put(block, text: text, source: "ai")   // AI 精翻覆盖本机翻译
                 count += 1
             }
+            store.save()
+            storeRevision += 1
             translationNote = "AI 精翻完成：\(count) / \(blocks.count) 块"
             NativeAmbientLog.note("时间轴：精翻 \(count)/\(blocks.count) 块")
         } catch {
@@ -187,10 +253,9 @@ final class NativeAmbientTimelineModel: ObservableObject {
 
     /// 这一块显示的译文：精翻优先，其次 Apple 机翻；与原文相同（本来就是中文）不显示。
     func translation(for block: Block) -> String? {
-        guard translateOn else { return nil }
-        let key = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let value = refined[key] ?? translations[key], value != key else { return nil }
-        return value
+        guard translateOn, let record = NativeAmbientTranslationStore.shared.translation(for: block) else { return nil }
+        let original = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return record.text == original ? nil : record.text
     }
 
     func toggleTranslation() {
@@ -225,6 +290,13 @@ final class NativeAmbientTimelineModel: ObservableObject {
         do {
             let timeline = try await NativeAmbientServer.get("api/ambient/timeline?from=\(Int(from))&to=\(Int(to))")
             utterances = (timeline["utterances"] as? [[String: Any]] ?? []).compactMap(NativeAmbientUtterance.init)
+            // 绑定删除：这段时间里原文已不在的译文记录一起删
+            let removed = NativeAmbientTranslationStore.shared.prune(loadedFrom: from, to: to, present: Set(utterances.map(\.id)))
+            if removed > 0 {
+                NativeAmbientTranslationStore.shared.save()
+                storeRevision += 1
+                NativeAmbientLog.note("时间轴：原文已删，同时删掉 \(removed) 条译文记录")
+            }
             if translateOn { translationVersion += 1 }   // 自动刷新进来的新句子也翻
             let list = try await NativeAmbientServer.get("api/ambient/people")
             people = (list["people"] as? [[String: Any]] ?? []).compactMap(NativeAmbientPersonInfo.init)
