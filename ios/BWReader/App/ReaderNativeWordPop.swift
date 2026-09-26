@@ -31,16 +31,15 @@ struct ReaderNativeWordPop: View {
 
     var body: some View {
         // 内边距由正文各段自己给（原版各段 padding 14，底部按钮条黑底通栏），这里只管外框。
-        ScrollView {
-            ReaderNativeLookupContent(model: model)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .scrollBounceBehavior(.basedOnSize)
+        // 滚动由正文自己管：按钮条固定在底部，其余内容在上面滚动。
+        ReaderNativeLookupContent(model: model)
         .frame(width: 340)
         .frame(maxHeight: 540)   // 原版 max-height:80vh：例句 / 汉字 / AI 解释都在框里，别截得太矮
-        .background(WordPopStyle.surface.opacity(0.98))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(WordPopStyle.accentBorder, lineWidth: 1))
+        // 与页卡/侧栏卡同一套设计语言（原版 .vc-card）：深色卡面、0.5pt 白 14% 描边、圆角 16。
+        // 卡面比页卡更实一点（0.97）：小框盖在正文上，字要清楚。
+        .background(Color(red: 30 / 255, green: 30 / 255, blue: 34 / 255).opacity(0.97))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(ReaderNativeCardStyle.border, lineWidth: 0.5))
         .overlay(alignment: .topTrailing) {
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -53,7 +52,7 @@ struct ReaderNativeWordPop: View {
             .padding(4)
             .accessibilityLabel("关闭词典")
         }
-        .shadow(color: .black.opacity(0.55), radius: 12, y: 6)
+        .shadow(color: .black.opacity(0.4), radius: 20, y: 12)   // .vc-card box-shadow 0 12px 40px
         .environment(\.colorScheme, .dark)
         .task { await model.load() }
     }

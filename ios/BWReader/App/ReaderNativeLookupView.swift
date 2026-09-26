@@ -347,12 +347,9 @@ struct ReaderNativeLookupView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                ReaderNativeLookupContent(model: model)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .scrollContentBackground(.hidden)
-            .background(WordPopStyle.surface)
+            // 滚动由正文自己管（按钮条固定在最下方，不跟着滚走）。
+            ReaderNativeLookupContent(model: model, fillsHeight: true)
+            .background(Color(red: 30 / 255, green: 30 / 255, blue: 34 / 255))
             .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -391,8 +388,53 @@ enum WordPopStyle {
 /// 词头行 → 变形/源词 → 词锚卡 → 释义区（释义、来源、例句、展开）→ 汉字 → AI → 底部按钮条。
 struct ReaderNativeLookupContent: View {
     @ObservedObject var model: ReaderNativeLookupModel
+    /// 底部面板里按钮条贴到面板最底；贴词小框里紧跟内容。
+    var fillsHeight = false
 
+    /// 按钮条**固定在最下方**，其余内容在上面滚动（2026-09-26 用户：翻译卡和选词卡高度不够时
+    /// 下方的控制按钮显示不出来）。内容放得下时不套滚动框，卡片照旧贴合内容高度。
     var body: some View {
+        VStack(spacing: 0) {
+            ViewThatFits(in: .vertical) {
+                main
+                ScrollView { main }.scrollBounceBehavior(.basedOnSize)
+            }
+            if fillsHeight { Spacer(minLength: 0) }
+            footer
+        }
+        .foregroundStyle(.white)
+        .task(id: model.value["stale"] as? Bool == true) { await model.refreshStaleEntry() }
+    }
+
+    /// 固定在底部的按钮条（没有按钮的状态不出）。
+    @ViewBuilder private var footer: some View {
+        if model.loading || (model.error != nil && model.value.isEmpty) || model.mode == "explain" {
+            EmptyView()
+        } else if model.mode == "translate" || (model.isPhrase && !model.isJapanese) {
+            if model.isPhrase {
+                actionBar {
+                    barButton(model.favorited ? "已保存词组" : "保存词组",
+                              icon: model.favorited ? "star.fill" : "star", on: model.favorited,
+                              busy: model.favoriting) { Task { await model.toggleFavorite() } }
+                        .accessibilityHint("收藏后这几个字之后会当作一个词来分词")
+                    masterButton
+                }
+            }
+        } else {
+            actionBar {
+                if !model.isPhrase { masterButton }
+                barButton(model.ankiState.map { "Anki " + $0 } ?? "Anki", icon: "rectangle.stack.badge.plus",
+                          on: model.ankiState == "已加入" || model.ankiState == "已更新", busy: model.ankiBusy) {
+                    Task { await model.addToAnki() }
+                }
+                .accessibilityHint("把这个词加入 Anki")
+                barButton("语法", icon: "chart.bar.doc.horizontal") { model.grammar() }
+                    .accessibilityHint("对这个词所在的整句做语法分析")
+            }
+        }
+    }
+
+    private var main: some View {
         Group {
             if model.loading {
                 ProgressView().tint(WordPopStyle.muted)
@@ -409,8 +451,7 @@ struct ReaderNativeLookupContent: View {
                 dictionary
             }
         }
-        .foregroundStyle(.white)
-        .task(id: model.value["stale"] as? Bool == true) { await model.refreshStaleEntry() }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: 翻译 / 解释 / 非日语词组
@@ -437,15 +478,6 @@ struct ReaderNativeLookupContent: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14).padding(.vertical, 10)
             .overlay(alignment: .top) { divider }
-            if model.isPhrase {
-                actionBar {
-                    barButton(model.favorited ? "已保存词组" : "保存词组",
-                              icon: model.favorited ? "star.fill" : "star", on: model.favorited,
-                              busy: model.favoriting) { Task { await model.toggleFavorite() } }
-                        .accessibilityHint("收藏后这几个字之后会当作一个词来分词")
-                    masterButton
-                }
-            }
         }
     }
 
@@ -476,16 +508,6 @@ struct ReaderNativeLookupContent: View {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.system(size: 12)).foregroundStyle(.orange)
                     .padding(.horizontal, 14).padding(.bottom, 8)
-            }
-            actionBar {
-                if !model.isPhrase { masterButton }
-                barButton(model.ankiState.map { "Anki " + $0 } ?? "Anki", icon: "rectangle.stack.badge.plus",
-                          on: model.ankiState == "已加入" || model.ankiState == "已更新", busy: model.ankiBusy) {
-                    Task { await model.addToAnki() }
-                }
-                .accessibilityHint("把这个词加入 Anki")
-                barButton("语法", icon: "chart.bar.doc.horizontal") { model.grammar() }
-                    .accessibilityHint("对这个词所在的整句做语法分析")
             }
         }
     }
@@ -738,12 +760,13 @@ struct ReaderNativeLookupContent: View {
         .accessibilityHint("标记掌握后这个词不再画生词下划线；再点取消")
     }
 
+    /// 底部按钮条：与卡片同一套设计语言 —— 不再是纯黑通栏，改成卡面上一道细分隔线。
     private func actionBar<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         HStack(spacing: 8) { content() }
-            .padding(.horizontal, 14).padding(.vertical, 9)
+            .padding(.horizontal, 12).padding(.top, 9).padding(.bottom, 11)
             .frame(maxWidth: .infinity)
-            .background(Color.black)
-            .overlay(alignment: .top) { divider }
+            .background(Color.white.opacity(0.03))
+            .overlay(alignment: .top) { Rectangle().fill(ReaderNativeCardStyle.hairline).frame(height: 0.5) }
     }
 
     private func barButton(_ title: String, icon: String, on: Bool = false, busy: Bool = false,
@@ -754,10 +777,12 @@ struct ReaderNativeLookupContent: View {
                 .lineLimit(1).minimumScaleFactor(0.8)
                 .foregroundStyle(on ? Color(red: 0x7e / 255, green: 0xe2 / 255, blue: 0xb8 / 255) : Color.white)
                 .frame(maxWidth: .infinity).padding(.vertical, 8)
-                .background(on ? Color(red: 0x13 / 255, green: 0x35 / 255, blue: 0x1f / 255) : WordPopStyle.raised,
-                            in: RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6)
-                    .stroke(on ? WordPopStyle.success : WordPopStyle.border, lineWidth: 1))
+                // 卡上按钮：半透明白底 + 0.5pt 细边、圆角 8（与 .vc-card 上的小按钮同一口径）；
+                // 已完成态保留绿色语义。
+                .background(on ? Color(red: 0x13 / 255, green: 0x35 / 255, blue: 0x1f / 255).opacity(0.85) : Color.white.opacity(0.08),
+                            in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .stroke(on ? WordPopStyle.success.opacity(0.7) : ReaderNativeCardStyle.border, lineWidth: 0.5))
                 .opacity(busy ? 0.6 : 1)
         }
         .buttonStyle(.plain)
