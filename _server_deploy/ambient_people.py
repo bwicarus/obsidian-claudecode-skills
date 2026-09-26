@@ -167,8 +167,9 @@ class AmbientPeople:
         data = self._load()
         known = {r["id"] for r in rows}
         # 只列旁听里出现过的人（KJ 里书中人物也是 person，不该混进来）
-        ids = [pid for pid in known if pid in data["persons"]
-               or any(self._alive(v.get("personId")) == pid for v in data["slots"].values())]
+        hidden = set(data.get("hidden") or [])
+        ids = [pid for pid in known if pid not in hidden and (pid in data["persons"]
+               or any(self._alive(v.get("personId")) == pid for v in data["slots"].values()))]
         return [self.person(ME)] + [self.person(pid) for pid in ids]
 
     # ─────────────── 编辑 ───────────────
@@ -252,6 +253,26 @@ class AmbientPeople:
             self._save(data)
         return self.person(into)
 
+    def delete_person(self, person_id: str) -> dict:
+        """从旁听里删掉这个人（2026-09-27 用户：「每个说话人打开后可以进行删除」）：声纹删掉、他名下的声音块
+        退回未定人、人物列表里不再出现。KJ 人物页与过去的对话记录不动（KJ 是只增账本，没有删节点），
+        要彻底删就在 Obsidian 里删那一页。以后再把某个声音块定成同名的人，会重新出现。"""
+        person_id = self._alive(person_id)
+        if not person_id or person_id == ME:
+            raise PeopleError("bad_delete", "不能删除「我」或不存在的人")
+        with self._lock:
+            data = self._load()
+            removed = len(data["persons"].pop(person_id, {}).get("voiceprints", []))
+            freed = 0
+            for slot in data["slots"].values():
+                if self._alive(slot.get("personId")) == person_id:
+                    slot["personId"] = None
+                    freed += 1
+            hidden = [h for h in (data.get("hidden") or []) if h != person_id] + [person_id]
+            data["hidden"] = hidden[-500:]
+            self._save(data)
+        return {"deleted": person_id, "voiceprints": removed, "slots": freed}
+
     def assign_slot(self, slot_key: str, *, name: str | None = None, person_id: str | None = None,
                     vector: list | None = None) -> dict:
         """给一个声音块定人：已有同名的人 → 就是他（「不同的块设成同一个名字就当作一个人」）；否则新建。
@@ -266,6 +287,8 @@ class AmbientPeople:
             data = self._load()
             slot = data["slots"].setdefault(slot_key, {"firstSeen": _now(), "lastSeen": _now(), "utterances": 0})
             slot["personId"] = target
+            if target in (data.get("hidden") or []):
+                data["hidden"] = [h for h in data["hidden"] if h != target]   # 又被定回来：重新出现
             vec = vector or slot.get("vector")
             if vec and target != ME:
                 self._add_voiceprint(data, target, vec, source=slot_key)
@@ -507,17 +530,23 @@ class AmbientPeople:
                     day_rows.append(json.loads(line))
                 except ValueError:
                     continue
-            hit = {r["windowId"] for r in day_rows if r.get("slotKey") in mine or (person_id == ME and r.get("isUser"))}
+            # 逐段重转补记的句子没有所属窗口（windowId="revise"），按分钟各自成段 —— 以前它们全挤进一个
+            # 「revise」窗口，跨了整场对话，把历史的先后顺序搅乱（2026-09-27 用户：「希望从新到旧」）
+            def group(row: dict) -> str:
+                wid = row.get("windowId") or ""
+                return wid if wid and wid != "revise" else "revise:" + str(int(row.get("t0") or 0) // 60_000)
+            hit = {group(r) for r in day_rows if r.get("slotKey") in mine or (person_id == ME and r.get("isUser"))}
             for row in day_rows:
-                if row["windowId"] in hit:
-                    if row["windowId"] not in windows:
-                        windows[row["windowId"]] = []
-                        order.append(row["windowId"])
-                    windows[row["windowId"]].append(row)
+                key = group(row)
+                if key in hit:
+                    if key not in windows:
+                        windows[key] = []
+                        order.append(key)
+                    windows[key].append(row)
             if sum(len(v) for v in windows.values()) >= limit:
                 break
         out = []
-        for wid in sorted(order, key=lambda w: windows[w][0]["t0"], reverse=True):
+        for wid in sorted(order, key=lambda w: max(int(r.get("t0") or 0) for r in windows[w]), reverse=True):
             rows = sorted(windows[wid], key=lambda r: r["t0"])
             out.append({"windowId": wid, "t0": rows[0]["t0"], "t1": rows[-1]["t1"],
                         "lines": self.timeline(rows[0]["t0"], rows[-1]["t0"])["utterances"]})

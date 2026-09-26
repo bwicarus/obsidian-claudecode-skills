@@ -108,6 +108,12 @@ enum NativeAmbientServer {
         return try await send(request)
     }
 
+    static func delete(_ path: String, timeout: TimeInterval = 20) async throws -> [String: Any] {
+        var request = try authorizedRequest(path, timeout: timeout)
+        request.httpMethod = "DELETE"
+        return try await send(request)
+    }
+
     static func get(_ path: String, timeout: TimeInterval = 15) async throws -> [String: Any] {
         var request = try authorizedRequest(path, timeout: timeout)
         request.httpMethod = "GET"

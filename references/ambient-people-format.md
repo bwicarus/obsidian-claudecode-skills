@@ -59,8 +59,9 @@ iPad 页面：设置 →「旁听与降噪」→「对话时间轴与人物」�
 | POST | `/judge` | 窗口（utterances 带 `slotKey`；`speakers: [{slotKey, personId?, vector?}]`）→ 判断 + 记时间轴；回 `names: {slotKey: {personId, name}}` |
 | GET | `/timeline?from=&to=` | 时间轴（≤7 天）：`utterances`（带解析后的 `personId`/`name`）+ `speakers` |
 | GET | `/people` | 人物列表（首位是「我」） |
-| GET | `/people/<id>` | 资料 + 对话历史（按窗口，含同窗口里所有人的话，新的在前） |
+| GET | `/people/<id>` | 资料 + 对话历史（按窗口，含同窗口里所有人的话，新的在前；按窗口里最后一句排序，重转补记的句子按分钟各自成段） |
 | PATCH | `/people/<id>` | 改 `name` / `intro` / `profile`（改成已有名字 = 合并） |
+| DELETE | `/people/<id>` | 从旁听里删掉：声纹删、名下声音块退回未定人、列表隐藏（`speakers.json` 的 `hidden`）；KJ 页与记录保留（只增账本）；再被定回来就重新出现。不能删「我」 |
 | POST | `/people/<id>/merge` | `{into}` 显式合并 |
 | POST | `/people/<id>/summarize` | 让 AI 按历史重写整理 |
 | POST | `/revise` | `{slotKey, t0, t1, text, lang, langConfirmed}` App 空闲时逐段重转后修正时间轴那一段（替换该块在该时段的句子，标 `revised`） |

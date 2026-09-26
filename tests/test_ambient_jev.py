@@ -308,6 +308,37 @@ class AmbientPeopleTests(AmbientJevTests):
         bad = self.client.patch(f"/api/ambient/people/{pid}", json={"language": "日本語"})
         self.assertEqual(bad.status_code, 400)
 
+    def test_delete_person_frees_blocks_and_hides_until_reassigned(self):
+        self.login()
+        self.judge(self.window("w1"))
+        pid = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "小王"}).get_json()["person"]["id"]
+        reply = self.client.delete(f"/api/ambient/people/{pid}").get_json()
+        self.assertEqual(reply["slots"], 1)
+        names = [p["name"] for p in self.client.get("/api/ambient/people").get_json()["people"]]
+        self.assertNotIn("小王", names)
+        self.assertEqual([r["name"] for r in self.timeline()["utterances"]], ["我", None])   # 块退回未定人
+        self.assertEqual(self.client.delete("/api/ambient/people/me").status_code // 100, 4)  # 不能删「我」
+        self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "小王"})
+        names = [p["name"] for p in self.client.get("/api/ambient/people").get_json()["people"]]
+        self.assertIn("小王", names)   # 又定回来就重新出现
+
+    def test_history_newest_first_with_revised_rows_grouped_by_minute(self):
+        self.login()
+        pid = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "田中"}).get_json()["person"]["id"]
+        for i, wid in enumerate(["w1", "w2"]):
+            body = self.window(wid)
+            body["startedAt"] = 1_700_000_000_000 + i * 600_000
+            body["endedAt"] = body["startedAt"] + 10_000
+            self.judge(body)
+        # 两条不对应任何窗口的补记，分别在两窗之前和之后
+        for t in (1_699_999_000_000, 1_700_000_900_000):
+            self.client.post("/api/ambient/revise", json={"slotKey": "s1:1", "t0": t, "t1": t + 2000,
+                                                          "text": "補記", "lang": "ja-JP", "langConfirmed": False})
+        history = self.client.get(f"/api/ambient/people/{pid}").get_json()["history"]
+        starts = [h["t0"] for h in history]
+        self.assertEqual(starts, sorted(starts, reverse=True))
+        self.assertEqual(len(history), 4)
+
     def test_revise_before_window_supersedes_late_stream_rows(self):
         # 重转先到（App 空闲时后台转完就送），主线那一窗后到：同一块同一时段的主线残片不再记
         self.login()

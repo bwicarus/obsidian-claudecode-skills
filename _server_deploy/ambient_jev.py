@@ -584,6 +584,15 @@ def person_update(person_id):
         language=body.get("language"))})
 
 
+@bp.delete("/people/<person_id>")
+def person_delete(person_id):
+    def go():
+        result = people().delete_person(person_id)
+        log_event("person_deleted", **result)
+        return result
+    return _people_reply(go)
+
+
 @bp.post("/people/<person_id>/merge")
 def person_merge(person_id):
     body = request.get_json(silent=True) or {}
