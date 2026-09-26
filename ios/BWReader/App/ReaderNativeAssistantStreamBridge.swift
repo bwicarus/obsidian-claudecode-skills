@@ -28,7 +28,10 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     var commitPDFEvents: ((ReaderNativeAssistantDocumentSession, [[String:Any]], Int) throws -> [String:Any])?
     var preparePDFBody: (([String:Any]) async throws -> [String:Any])?
     var prepareReaderPCContext: (([String:Any]) async throws -> [String:Any])?
-    private var contextTask: Task<Void,Never>?
+    /// 在跑的正文请求。⚠ 不再「新请求取消旧请求」（2026-09-27）：网页里可能同时有两个上下文泵
+    /// （日志 pump#1 / pump#2），互相取消的结果是谁都拿不到正文 —— 桥上快照一直 pending，
+    /// 语音 AI 说「阅读器离线」。过期结果由网页按 generation / 当前页丢弃，这里只在换书时统一取消。
+    private var contextTasks: [UUID: Task<Void,Never>] = [:]
     var replyReference: ((String,String,Bool,[String]) throws -> [String:Any])?
     /// 设了就由原生生成历史消息内容（网页只放占位）。
     var historyMessages: ReaderNativeHistoryMessages?
@@ -43,7 +46,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     }
 
     deinit {
-        contextTask?.cancel()
+        contextTasks.values.forEach { $0.cancel() }
         if let observer { NotificationCenter.default.removeObserver(observer) }
         tasks.values.forEach { $0.cancel() }
         watchers.values.forEach { $0.cancel() }
@@ -51,7 +54,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     }
 
     func invalidate() {
-        contextTask?.cancel(); contextTask = nil
+        contextTasks.values.forEach { $0.cancel() }; contextTasks.removeAll()
         documents.values.forEach { $0.close() }; documents.removeAll()
         let previousHistory = history
         history = nil; historyContext = nil
@@ -107,12 +110,15 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             guard requestedSurface == .pdf, let current = command["current"] as? [String:Any], let prepareReaderPCContext else {
                 replyHandler(nil,"原生阅读状态尚未就绪"); return
             }
-            let lease = epoch, context = gateway.contextRevision
-            contextTask?.cancel()
-            contextTask = Task { @MainActor [weak self] in
+            let lease = epoch, context = gateway.contextRevision, key = UUID()
+            contextTasks[key] = Task { @MainActor [weak self] in
+                defer { self?.contextTasks[key] = nil }
                 do {
                     let value = try await prepareReaderPCContext(current)
-                    guard let self, !Task.isCancelled, self.epoch == lease, self.gateway.contextRevision == context else { throw CancellationError() }
+                    guard let self, !Task.isCancelled else { throw CancellationError() }
+                    guard self.epoch == lease, self.gateway.contextRevision == context else {
+                        throw ReaderNativeAssistantRequest.Failure(message: "正文构建期间换了书或服务器上下文，已作废")
+                    }
                     replyHandler(["ok":true,"context":value],nil)
                 } catch { replyHandler(nil,error.localizedDescription) }
             }
