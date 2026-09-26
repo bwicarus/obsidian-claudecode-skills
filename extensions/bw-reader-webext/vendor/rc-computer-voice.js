@@ -13399,7 +13399,13 @@ if (window.__bwPwaProviderOnly) return;
         if (contextDeliveryMode === CONTEXT_DELIVERY_LEGACY) return null;
         var active = localActiveReadingSnapshot();
         if (!plainObject(active)) return null;
-        return JSON.parse(JSON.stringify({ active: active, linked: !!snapshotLink }));
+        return JSON.parse(JSON.stringify({
+          active: active,
+          linked: !!snapshotLink,
+          // 原生沿用同一个来源编号登记：桥看到的仍是「这台 App 的这个阅读器」，
+          // 回前台后网页重新登记也是它，排队的输出不会被判成别人的。
+          sourceInstanceId: currentReaderSourceInstanceId()
+        }));
       } catch (error) {
         try {
           if (typeof window.dlog === "function") {

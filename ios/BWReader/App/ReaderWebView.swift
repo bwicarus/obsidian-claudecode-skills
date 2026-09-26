@@ -3,6 +3,7 @@ import CoreFoundation
 import SwiftUI
 import UIKit
 import WebKit
+import PDFKit
 
 private let nativeComputerVoiceMessageName = "bwNativeComputerVoice"
 private let nativeComputerContextMessageName = "bwNativeComputerContext"
@@ -7482,9 +7483,83 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             guard !Task.isCancelled, !self.readerForeground, self.backgroundCallActive else { return }
-            await self.nativeBackgroundContext.start(active: activeValue, pageContext: pageContext, keepAlive: { [weak self] in
-                await MainActor.run { self.map { !$0.readerForeground && $0.backgroundCallActive } ?? false }
-            })
+            await self.nativeBackgroundContext.start(active: activeValue, pageContext: pageContext,
+                sourceInstanceId: handoff["sourceInstanceId"] as? String,
+                answer: { [weak self] query, params in
+                    await self?.answerBackgroundQuery(query, params) ?? .unavailable
+                },
+                keepAlive: { [weak self] in
+                    await MainActor.run { self.map { !$0.readerForeground && $0.backgroundCallActive } ?? false }
+                })
+        }
+    }
+
+    /// 迁出 3b-2：后台时由原生回答桥的查询（PDF）。与网页本机运行时同形的结果：
+    /// page-text（PDFKit 页文字，1500 字截断，segments 为空 —— 字符层下标只有网页有）、
+    /// highlights（本机数据库，页 / 文字过滤，32KB 预算）、toc（PDF 书签大纲）。其余回 unavailable。
+    private func answerBackgroundQuery(_ query: String, _ params: DirectJSONValue) -> ReaderNativeBackgroundContext.QueryAnswer {
+        typealias Answer = ReaderNativeBackgroundContext.QueryAnswer
+        let input = params.objectValue ?? [:]
+        guard let book = currentLocalBook, book.format == .pdf, let pdf = nativePDFDocument?.view.document else {
+            postClientLog("[后台快照] 查询 \(query)：当前不是原生 PDF，回不可用")
+            return .unavailable
+        }
+        func answer(_ result: [String: Any], truncated: Bool = false) -> Answer {
+            guard let value = ReaderNativeBackgroundContext.jsonValue(result) else { return .unavailable }
+            return Answer(status: "ok", result: value, truncated: truncated)
+        }
+        func budgeted(_ rows: [[String: Any]]) -> (kept: [[String: Any]], truncated: Bool) {
+            var used = 0, kept: [[String: Any]] = []
+            for row in rows {
+                let size = ((try? JSONSerialization.data(withJSONObject: row))?.count ?? 0) + 1
+                if used + size > 32 * 1024 { return (kept, true) }
+                used += size; kept.append(row)
+            }
+            return (kept, false)
+        }
+        switch query {
+        case "page-text":
+            guard let raw = input["page"]?.unsignedIntegerValue, raw >= 1, raw <= UInt64(pdf.pageCount),
+                  let full = pdf.page(at: Int(raw) - 1)?.string else { return .unavailable }
+            let text = String(full.prefix(1500))
+            return answer(["ok": true, "surface": "pdf", "page": Int(raw), "text": text,
+                           "truncated": full.count >= 1500, "segments": [Any]()], truncated: full.count >= 1500)
+        case "highlights":
+            let wantPage = input["page"]?.unsignedIntegerValue.map { Int($0) }
+            let needle = (input["contains"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard let store = try? nativeDataStoreHost.bridge(for: "bw-reader-native-v1-document").store,
+                  let items = try? ReaderNativeBookProjection(store: store).highlights("document-highlights", bookID: book.id).items else {
+                return .unavailable
+            }
+            let matched = items.compactMap { item -> [String: Any]? in
+                let page = (item["page"] as? NSNumber ?? item["section"] as? NSNumber)?.intValue
+                if let wantPage, page != wantPage { return nil }
+                let text = item["text"] as? String ?? ""
+                if !needle.isEmpty, !text.lowercased().contains(needle) { return nil }
+                return ["id": (item["id"] as? String) ?? (item["id"] as? NSNumber)?.stringValue ?? "",
+                        "page": page.map { $0 as Any } ?? NSNull(), "color": item["color"] as? String ?? "",
+                        "text": String(text.prefix(600))]
+            }.sorted { (($0["page"] as? Int) ?? 0) < (($1["page"] as? Int) ?? 0) }
+            let kept = budgeted(matched)
+            return answer(["ok": true, "surface": "pdf", "highlights": kept.kept, "matched": matched.count,
+                           "returned": kept.kept.count, "truncated": kept.truncated], truncated: kept.truncated)
+        case "toc":
+            var entries: [[String: Any]] = []
+            func walk(_ node: PDFOutline, level: Int) {
+                for index in 0..<node.numberOfChildren {
+                    guard let child = node.child(at: index) else { continue }
+                    let page = child.destination?.page.map { pdf.index(for: $0) + 1 }
+                    entries.append(["title": String((child.label ?? "").prefix(200)),
+                                    "page": page.map { $0 as Any } ?? NSNull(), "level": level])
+                    if entries.count < 2000 { walk(child, level: level + 1) }
+                }
+            }
+            if let root = pdf.outlineRoot { walk(root, level: 1) }
+            let kept = budgeted(entries)
+            return answer(["ok": true, "entries": kept.kept, "matched": entries.count,
+                           "returned": kept.kept.count, "truncated": kept.truncated], truncated: kept.truncated)
+        default:
+            return .unavailable
         }
     }
 

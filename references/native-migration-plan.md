@@ -121,14 +121,16 @@
   `native-background-snapshot` 守合同名、动作与心跳窗口。
   **效果**：熄屏通话时桥上的快照保持 ready，语音 AI 能读当前页/阅读状态。**仍不行**：查询（高亮/笔记/搜索）、
   截图、实时输出（卡片/高亮/草稿）—— 不登记 visual 来源，桥把它们留在队列等网页回来（下一步 3b-2）。
-- **3b-2 后台时回答查询 / 截图**：通话中进后台时，由 Swift 用 `DirectVoiceSocket(.readerContext)`
-  登记 visual 来源并回答：
-  - 上下文：从原生发送队列（`native-outgoing-journal`）与 PDFKit 当前页直接上行；
-  - 查询：highlights / notes / search 由原生数据库回答（PDF 优先）；
-  - 视觉：PDFKit 渲当前页图，按原合同分块（`reader-visual/2`，≤768KB、24 块）；
-  - 实时输出：一律回可重试的 `…_UNAVAILABLE`，让桥留在队列里，回前台后由网页执行（桥已有这条重放语义）。
-  需要：Swift 侧补 context 会话的事件类型（现只收 `status`）、与网页链接的交接（同一 App 同时只一个
-  context 所有者），以及桥端对「来源切换」的验证 —— 这几步都得在设备上验。
+- ✅ **3b-2 后台时应答桥的事件（2026-09-26，待设备验证）**：原生沿用网页交出的来源编号 `visual-register`，
+  桥发来的事件由 `ReaderNativeBackgroundContext.handleReaderEvent` 应答：
+  - 查询：`page-text`（PDFKit 页文字，1500 字截断；segments 为空 —— 字符层下标只有网页有）、
+    `highlights`（本机数据库，页 / 文字过滤，32KB 预算）、`toc`（PDF 书签大纲）由原生回答；其余回 `unavailable`；
+  - 截图（笔迹视觉 `capture-composite`）：回 `unavailable`（要对笔迹版本，后台没有网页笔迹层）；
+  - 实时输出：回 `rejected` + `BW_READER_REALTIME_OUTPUT_UNAVAILABLE` —— 桥把持久输出（带 bind 的卡）留在队列，
+    回前台网页重新登记同一来源后重放；非持久输出（工具状态等）按原合同不进队列；
+  - 结果投递：回 `rejected`（原合同不带 sessionId）。
+  契约测试守动作名、字段与 UNAVAILABLE 约定。
+  **仍缺**：EPUB（后台原生没有 EPUB 正文）；便签 / 搜索 / 学习卡等查询；后台截图。
 - **3c 前台也由原生持有**：网页快照链接删除；输出执行器（卡片/高亮/草稿）仍在网页时，由原生转交。
 - **3d 录音/播放/会话状态收拢到原生**，`rc-computer-voice.js` 在 App 里只剩兼容入口。
 

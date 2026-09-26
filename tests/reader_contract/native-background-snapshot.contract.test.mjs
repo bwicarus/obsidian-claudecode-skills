@@ -36,3 +36,22 @@ test('handoff runs before the background JS and only while a native call is acti
   assert.match(web,/backgroundSnapshotHandoff: function \(\) \{/);
   assert.match(web,/if \(contextDeliveryMode === CONTEXT_DELIVERY_LEGACY\) return null;/);
 });
+
+// 3b-2：后台时原生登记来源并应答桥的事件 —— 动作名与字段必须与网页 DirectSocket 同一份。
+test('native background replies use the web snapshot link actions and fields',()=>{
+  for (const [constant,value] of [['READER_QUERY_RESPONSE','reader-query'],['READER_VISUAL_CHUNK','reader-visual'],
+      ['READER_REALTIME_OUTPUT_ACK','reader-realtime-output-ack'],['READER_RESULT_ACK','reader-result-ack']]) {
+    assert.match(web,new RegExp('var '+constant+' = "'+value+'";'));
+    assert.ok(swift.includes('"'+value+'"'),value+' missing in native replies');
+  }
+  assert.match(web,/state\.channel\.request\("visual-register", \{\s*sessionId: state\.sessionId,\s*sourceInstanceId: sourceInstanceId,/);
+  assert.match(swift,/action: "visual-register",\s*fields: \["sourceInstanceId": \.string\(sourceInstanceId\)\], includeSession: true/);
+  // 结果回执按原合同不带 sessionId；其余都带。
+  assert.match(web,/var ackFields = \{\s*correlation: delivery\.correlation,\s*outcome: receipt\.outcome,\s*\};/);
+  assert.match(swift,/action: "reader-result-ack", fields: fields, includeSession: false/);
+  // 输出被拒必须带 UNAVAILABLE —— 桥靠这个词把持久输出留在队列里等网页回来。
+  assert.match(swift,/BW_READER_REALTIME_OUTPUT_UNAVAILABLE/);
+  for (const key of ['correlation','sourceInstanceId','snapshotRevision','file','page','drawingRevision','scope','selectionId'])
+    assert.ok(new RegExp('"'+key+'"').test(swift),'visual decline identity field '+key);
+  assert.match(web,/sourceInstanceId: currentReaderSourceInstanceId\(\)/);
+});

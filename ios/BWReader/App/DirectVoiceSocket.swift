@@ -31,6 +31,8 @@ actor DirectVoiceSocket {
     private var uplinkSendTail: Task<Void, Error>?
     private var uplinkSendGeneration: UInt64 = 0
     private var downlinkNextSequence: UInt32 = 0
+    /// 迁出 3b-2：后台快照会话登记了阅读器来源后，桥发来的查询 / 截图 / 输出事件交给它回答。
+    private var readerEventHandler: (@Sendable (String, DirectJSONValue) -> Void)?
     private var downlinkLastTimestamp: UInt64?
 
     init(
@@ -89,6 +91,23 @@ actor DirectVoiceSocket {
             throw failure("BW_READER_CONTEXT_ACK", "Windows 快照上行回执无效", retryable: false)
         }
         return reply
+    }
+
+    func setReaderEventHandler(_ handler: (@Sendable (String, DirectJSONValue) -> Void)?) {
+        readerEventHandler = configuration == .readerContext ? handler : nil
+    }
+
+    /// 迁出 3b-2：后台快照会话对桥的应答 —— 登记来源、回查询、回截图、回输出/结果回执。
+    /// 与网页快照链接同一组动作与字段；`reader-result-ack` 按原合同不带 sessionId。
+    func replyReader(action: String, fields: [String: DirectJSONValue], includeSession: Bool) async throws -> DirectJSONValue {
+        guard configuration == .readerContext, state == .ready, let sessionID = contextSessionID,
+              ["visual-register", "reader-query", "reader-visual", "reader-realtime-output-ack", "reader-result-ack"].contains(action),
+              fields["sessionId"] == nil else {
+            throw failure("BW_READER_CONTEXT_REQUEST", "快照应答未授权或连接已失效", retryable: false)
+        }
+        var input = fields
+        if includeSession { input["sessionId"] = .string(sessionID) }
+        return try await request(action: action, fields: input, timeoutNanoseconds: DirectVoiceProtocol.requestTimeoutNanoseconds)
     }
 
     /// One export uses its own context socket; long Anki operations cannot
@@ -717,6 +736,10 @@ actor DirectVoiceSocket {
         // 不因此断掉快照会话（桥会把它们留在队列里，等网页的快照链接回来处理）。
         if configuration == .readerContext,
            ["reader-result", "reader-visual-request", "reader-query-request", "reader-realtime-output"].contains(name) {
+            if let readerEventHandler, let payload = envelope["payload"] {
+                readerEventHandler(name, payload)
+                return
+            }
             eventHandler(.transientRetry(failure("BW_READER_CONTEXT_EVENT_UNHANDLED",
                 "数据连接收到未接管的阅读器事件 \(name)，已忽略", retryable: true), attempt: 0))
             return
