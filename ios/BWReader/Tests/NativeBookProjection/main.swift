@@ -398,6 +398,19 @@ check((try positionRead.state("pdf-viewport",bookID:book).payload as! [String:An
 _ = try positionWriter.perform(["bookID":book,"mutationId":"remote-position","operation":"reading-position","value":["kind":"pdf","pos":100,"ts":700]])
 let clampedPosition = try ReaderNativeReadingPosition.restore(store:positionStore,bookID:book,total:90)!
 check(clampedPosition["page"] as? Int == 90 && clampedPosition["fraction"] as? Int == 0,"remote page reused previous page fraction or exceeded document")
+// 同一设备写的 reading-position（接管前的网页层）不能盖过本机原生视口；别的设备写的仍然赢。
+let ownStore = try ReaderNativeDataStore(path:":memory:")
+let ownWriter = ReaderNativeBookStore(store:ownStore,bookID:book,deviceID:"ipad",now:{600_000})
+_ = try ownWriter.perform(["bookID":book,"mutationId":"native-viewport","operation":"pdf-position",
+    "value":["page":3,"fraction":0.2,"scale":1.0,"mode":"continuous","spreadOffset":0,"cropEnabled":false]])
+let lateWeb = ReaderNativeBookStore(store:ownStore,bookID:book,deviceID:"ipad",now:{900_000})
+_ = try lateWeb.perform(["bookID":book,"mutationId":"web-stale","operation":"reading-position","value":["kind":"pdf","pos":80,"ts":900]])
+let ownRestore = try ReaderNativeReadingPosition.restore(store:ownStore,bookID:book,total:80,deviceID:"ipad")!
+check(ownRestore["page"] as? Int == 3,"same-device stale reading position overrode native viewport")
+let phone = ReaderNativeBookStore(store:ownStore,bookID:book,deviceID:"iphone",now:{950_000})
+_ = try phone.perform(["bookID":book,"mutationId":"phone-position","operation":"reading-position","value":["kind":"pdf","pos":12,"ts":950]])
+let phoneRestore = try ReaderNativeReadingPosition.restore(store:ownStore,bookID:book,total:80,deviceID:"ipad")!
+check(phoneRestore["page"] as? Int == 12,"newer position from another device lost")
 print("Native reading position: durable continuation, scroll coalescing, atomic replication and remote-page arbitration passed")
 
 let createStore = try ReaderNativeDataStore(path: ":memory:")

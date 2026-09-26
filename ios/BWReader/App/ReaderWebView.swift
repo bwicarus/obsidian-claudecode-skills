@@ -1232,6 +1232,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             ])
         }
         if native {
+            let pages = surfaces.compactMap { $0["id"] as? String }.joined(separator: ",")
+            if pages != lastPublishedInkPages {
+                lastPublishedInkPages = pages
+                postClientLog("[pencil] 书写表面更新：\(pages.isEmpty ? "无" : pages)（可见页 \(document.position.visiblePages)）")
+            }
             nativePencilInk.updateLayout(from: ["type":"layout", "documentToken":nativeInkDocumentToken, "surfaces":surfaces])
             return
         }
@@ -1866,6 +1871,18 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         let generation = bookUserStateContextGeneration
         let digest = try await currentLocalContentDigest(localBookId: access.record.id, generation: generation)
+        // ⚠ 续读页码要从**本机存储**取（原生视口记录）。存储握手（readingStoreReady）一般比这里晚
+        //   一百毫秒左右；不等的话 initialPosition 只能拿网页层自己仲裁的页码（常是陈旧的
+        //   localStorage 或服务端 p.1），书就开在那一页 —— 2026-09-26「每次开书都跳到尾页 / 回到第 1 页」。
+        //   最多等 5 秒，超时出声后照旧用网页层页码。
+        var waited = 0
+        while nativeReadingStoreBookID != access.record.id, waited < 50 {
+            try await Task.sleep(for: .milliseconds(100)); waited += 1
+            guard generation == bookUserStateContextGeneration else { throw ReaderBookUserStateWebAdapterError.contextChanged }
+        }
+        if nativeReadingStoreBookID != access.record.id {
+            postClientLog("[native-pdf] 续读：等本机存储握手超时（5s），按网页层页码")
+        }
         let position = try await bridge.initialPosition()
         let domains = try await readingDomains(localBookID: access.record.id)
         guard generation == bookUserStateContextGeneration, currentLocalBookAccess === access,
@@ -4478,6 +4495,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 手写层（全屏 PKCanvasView）。可书写表面必须按**它**的坐标归一化 —— 它就是拿自己的
     /// bounds 去命中这些表面的。
     private weak var nativePencilCanvasView: UIView?
+    private var lastPublishedInkPages = ""
 
     func bindNativeVisualCaptureCanvas(_ canvas: UIView) {
         nativePencilCanvasView = canvas
@@ -4741,9 +4759,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         if let localRuntimeServer {
             let navigationBridge = ReaderNativePDFNavigationBridge(webView: webView, trustedBaseURL: localRuntimeServer.baseURL)
             navigationBridge.restorePosition = { [weak self] total in
-                guard let self, let bookID = self.nativeReadingStoreBookID, bookID == self.currentLocalBook?.id else { return nil }
+                guard let self else { return nil }
+                guard let bookID = self.nativeReadingStoreBookID, bookID == self.currentLocalBook?.id else {
+                    self.postClientLog("[native-pdf] 续读：本机存储未就绪（\(self.nativeReadingStoreBookID == nil ? "未握手" : "书不符")），按网页层页码")
+                    return nil
+                }
                 let store = try self.nativeDataStoreHost.bridge(for:"bw-reader-native-v1-document").store
-                guard var value = try ReaderNativeReadingPosition.restore(store:store,bookID:bookID,total:total) else { return nil }
+                guard var value = try ReaderNativeReadingPosition.restore(store:store,bookID:bookID,total:total,
+                        deviceID:self.nativeReadingStoreDeviceID,
+                        note:{ [weak self] line in self?.postClientLog("[native-pdf] 续读：" + line) }) else { return nil }
                 if let page = self.nativeRequestedPDFPage {
                     value["page"] = min(total,max(1,page)); value["fraction"] = 0
                 }

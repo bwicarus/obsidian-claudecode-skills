@@ -55,8 +55,11 @@ test("③ 原生按可见页算屏幕矩形，并在布局变化时重推", () =
   const publish = body(WEBVIEW, "func publishNativeInkSurfaces()", "/// 原生正文接管时拖动页卡");
   assert.match(publish, /document\.position\.visiblePages/, "只算可见页，不是整本");
   assert.match(publish, /"id": "page:\\\(page\)"/);
-  assert.match(publish, /local\.minX \/ webView\.bounds\.width/,
-    "按 webView 归一化 —— 墨迹层的触点也是按同一个框归一化的");
+  // 原生接管时按手写层（PKCanvasView）归一化 —— 手写层命中表面用的是它自己的 bounds；
+  // 非原生（网页渲页）时仍按 webView。
+  assert.match(publish, /nativePencilCanvasView \?\? webView/, "原生接管要按手写层归一化");
+  assert.match(publish, /local\.minX \/ reference\.bounds\.width/,
+    "矩形与触点必须按同一个框归一化");
   assert.match(publish, /__bwNativeInkSurfacesChanged/, "推完要让网页那边重发 layout");
 
   assert.match(WEBVIEW, /document\.onGeometry = \{ \[weak self\] in[\s\S]{0,160}scheduleNativeInkSurfacePublish/,

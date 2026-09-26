@@ -135,15 +135,31 @@ enum ReaderNativeReadingPosition {
         return result
     }
 
-    static func restore(store:ReaderNativeDataStore,bookID:String,total:Int) throws -> [String:Any]? {
+    static func restore(store:ReaderNativeDataStore,bookID:String,total:Int,deviceID:String? = nil,
+                        note:((String) -> Void)? = nil) throws -> [String:Any]? {
         guard total > 0 else { return nil }
         let read = ReaderNativeBookProjection(store:store)
         return try store.inTransaction {
-            guard let raw = try read.state("pdf-viewport",bookID:bookID).payload as? [String:Any] else { return nil }
+            guard let raw = try read.state("pdf-viewport",bookID:bookID).payload as? [String:Any] else {
+                note?("本机还没有原生视口记录"); return nil
+            }
             var viewport = try validated(raw)
             let page = viewport["page"] as! Int
-            let position = try read.state("reading-position",bookID:bookID).payload as? [String:Any]
-            let saved = (position?["pos"] as? NSNumber)?.intValue ?? page
+            // 本机的原生视口是本机位置的权威。reading-position 只在**别的设备**更晚写过时才压过它
+            //（跨设备续读）；本机写的那条可能来自接管前的网页层（陈旧页码，见 native-local-runtime
+            // 的 reading-pos 路由），不能拿它覆盖原生自己存的视口。
+            var saved = page
+            if let position = try read.state("reading-position",bookID:bookID).payload as? [String:Any],
+               let pos = (position["pos"] as? NSNumber)?.intValue {
+                let meta = { (kind:String) -> (by:String?, at:Int64) in
+                    guard let record = try? store.record(collection:"native-" + kind,id:bookID + ":" + kind) else { return (nil, 0) }
+                    let json = (try? JSONSerialization.jsonObject(with:Data(record.json.utf8))) as? [String:Any]
+                    return (json?["updatedBy"] as? String, record.updatedAt)
+                }
+                let mine = meta("pdf-viewport"), theirs = meta("reading-position")
+                if deviceID == nil || (theirs.by != deviceID && theirs.at >= mine.at) { saved = pos }
+                note?("视口 p.\(page) / 续读记录 p.\(pos)（\(theirs.by == deviceID ? "本机" : "他机")写，\(theirs.at >= mine.at ? "较新" : "较旧")）→ p.\(saved)")
+            } else { note?("视口 p.\(page)，无续读记录") }
             let resolved = min(total,max(1,saved))
             if resolved != page { viewport["fraction"] = 0 }
             viewport["page"] = resolved; viewport["total"] = total; viewport["file"] = "localbook:" + bookID

@@ -7450,11 +7450,18 @@
         if (body.kind !== 'pdf' && body.kind !== 'epub') {
           throw outgoingRequestError('续读位置类型无效', code, 400);
         }
-        if (body.kind === 'pdf' && root.RC?.readerNavigation?.nativeViewport?.persistsNatively === true) {
+        if (body.kind === 'pdf' && (root.RC?.readerNavigation?.nativeViewport?.persistsNatively === true ||
+            root.__BW_NATIVE_DATA_STORE_REQUIRED__ === true)) {
           // Context reporting observes the committed native page. A delayed
           // web report must not rewind it or enqueue another replication.
+          // ⚠ App 里 PDF 一律原生阅读，位置只由原生写。原生视口接管**之前**网页层也会写：
+          //   它按自己 localStorage 里的陈旧记录做续读仲裁并回写（「续读仲裁:local 胜 p.80」），
+          //   原生恢复又信这条 → 每次开书都跳到同一页（2026-09-26 用户报「无论之前哪页都跳到尾页」）。
           return readState('reading-position', null).then(function (position) {
-            if (!position || position.kind !== 'pdf') throw outgoingRequestError('原生阅读位置尚未保存', code, 409);
+            if (!position || position.kind !== 'pdf') {
+              if (typeof root.dlog === 'function') root.dlog('续读位置：网页层写入已忽略（原生阅读位置负责）p.' + body.pos);
+              return { ok: true, pos: body.pos, ignored: true };
+            }
             return { ok: true, pos: position.pos };
           });
         }
