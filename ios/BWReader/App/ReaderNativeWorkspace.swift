@@ -40,6 +40,25 @@ struct ReaderNativeWorkspace<Document: View>: View {
             conversation.readingTools.filter { $0.key == "page" } + ReaderNativePDFToolbar.controls()
     }
 
+    /// 顶栏上钉住的工具：有图标只画图标，认不出图标的才用短名 —— 完整说明留给长按提示与读屏。
+    @ViewBuilder
+    private func pinnedToolButton(_ control: ReaderNativeControl) -> some View {
+        let face = ReaderNativePDFToolbar.face(for: control)
+        Button { runReadingTool(control) } label: {
+            if let symbol = face.symbol {
+                Image(systemName: symbol).frame(width: 30, height: 30)
+            } else {
+                Text(face.short).font(.caption.weight(.medium))
+                    .lineLimit(1).padding(.horizontal, 8).frame(height: 30)
+            }
+        }
+        .readerGlass(in: RoundedRectangle(cornerRadius: 9), fallback: ReaderNativeTheme.accentWash)
+        .disabled(control.disabled)
+        .help(control.title)
+        .accessibilityLabel(face.short)
+        .accessibilityHint(control.title)
+    }
+
     private func toolIdentity(_ control: ReaderNativeControl) -> String {
         control.key.isEmpty ? "t:" + control.title : "k:" + control.key
     }
@@ -267,19 +286,14 @@ struct ReaderNativeWorkspace<Document: View>: View {
             //   挑错了就是"我要的那个又得点两下"。
             if enabled {
                 ForEach(pinnedTools) { control in
-                    Button(control.title) { runReadingTool(control) }
-                        .font(.caption.weight(.medium))
-                        .padding(.horizontal, 8).frame(height: 30)
-                        .readerGlass(in: RoundedRectangle(cornerRadius: 9),
-                                     fallback: ReaderNativeTheme.accentWash)
-                        .disabled(control.disabled)
-                        .accessibilityLabel(control.title)
+                    pinnedToolButton(control)
                 }
             }
             if enabled && !readingTools.isEmpty {
                 Menu {
                     ForEach(readingTools.filter { $0.key != "page" }) { control in
-                        Button(control.title) { runReadingTool(control) }
+                        let face = ReaderNativePDFToolbar.face(for: control)
+                        Button(control.title, systemImage: face.symbol ?? "circle.dashed") { runReadingTool(control) }
                             .disabled(control.disabled)
                     }
                     Divider()

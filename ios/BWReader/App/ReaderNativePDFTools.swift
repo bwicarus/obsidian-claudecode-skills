@@ -19,6 +19,40 @@ enum ReaderNativePDFToolbar {
     static func controls() -> [ReaderNativeControl] {
         entries.compactMap { ReaderNativeControl(["id": "native-pdf-" + $0.0, "key": $0.1, "title": $0.2]) }
     }
+
+    /// 钉到顶栏时画什么：图标 + 短名。title 是完整说明（给菜单和读屏用），
+    /// 直接拿它当按钮字会把顶栏撑成一整句话。
+    private static let faces: [String: (String, String)] = [
+        "spread": ("rectangle.split.2x1", "双页"),
+        "favorite": ("star", "收藏本页"),
+        "fit": ("arrow.left.and.right.square", "适应页宽"),
+        "ruby": ("character.phonetic", "注音"),
+        "translation": ("translate", "整页翻译"),
+        "crop": ("crop", "去边"),
+        "search": ("magnifyingglass", "搜索"),
+        "note": ("note.text", "便签"),
+        "insert": ("doc.badge.plus", "插入我的页"),
+        "edit": ("square.and.pencil", "编辑我的页"),
+        "library": ("books.vertical", "书架"),
+        "settings": ("gearshape", "AI 设置")
+    ]
+    /// EPUB 的工具来自网页按钮，只有说明文字 —— 按关键词认图标。
+    private static let keywordSymbols: [(String, String)] = [
+        ("翻译", "translate"), ("搜索", "magnifyingglass"), ("收藏", "star"), ("便签", "note.text"),
+        ("振假名", "character.phonetic"), ("音标", "character.phonetic"), ("书架", "books.vertical"),
+        ("书库", "books.vertical"), ("目录", "list.bullet"), ("设置", "gearshape"), ("字号", "textformat.size"),
+        ("双页", "rectangle.split.2x1"), ("插入", "doc.badge.plus"), ("编辑", "square.and.pencil"),
+        ("高亮", "highlighter"), ("墨迹", "pencil.tip"), ("手写", "pencil.tip"), ("朗读", "speaker.wave.2")
+    ]
+
+    static func face(for control: ReaderNativeControl) -> (symbol: String?, short: String) {
+        if control.id.hasPrefix("native-pdf-"), let face = faces[String(control.id.dropFirst("native-pdf-".count))] {
+            return (face.0, face.1)
+        }
+        let symbol = keywordSymbols.first { control.title.contains($0.0) }?.1
+        let head = control.title.split(whereSeparator: { "(（:：。,，;；/ ".contains($0) }).first.map(String.init) ?? control.title
+        return (symbol, String(head.prefix(6)))
+    }
 }
 
 /// PDF toolbar forms own their input and committed state. No hidden HTML
