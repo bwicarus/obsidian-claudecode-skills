@@ -821,12 +821,9 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             if handedOver {
                 // ⚠ 不能在这个回调里当场改 drawing：PencilKit 在它之后还会把刚完成的笔画写回画布，
                 //   当场删等于没删（2026-09-26 实测：笔画仍停在屏幕上）。下一轮再按创建时刻精确删掉这几笔。
-                let handed = Set(newStrokes.map { $0.path.creationDate })
-                DispatchQueue.main.async { [weak canvasView] in
-                    guard let canvasView else { return }
-                    let kept = canvasView.drawing.strokes.filter { !handed.contains($0.path.creationDate) }
-                    if kept.count != canvasView.drawing.strokes.count { canvasView.drawing = PKDrawing(strokes: kept) }
-                }
+                // ⚠ 也不能下一轮就删：那时下一笔/橡皮可能已经开始，改 drawing 会把它打断
+                //   （2026-09-26：「第二笔立刻画不上」「橡皮要擦两次」）。记下来，等不在书写时再删。
+                handedStrokeDates.formUnion(newStrokes.map { $0.path.creationDate })
                 enqueue(NativeInkOperation(id: operationID, documentToken: documentToken,
                                            kind: .commit, segments: segments, canvasStrokeCount: 0))
                 return
@@ -1166,8 +1163,16 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             }
         }
 
+        /// 已交给书页「待确认笔迹」的笔画（按创建时刻认）。不在书写时从手写层删掉。
+        private var handedStrokeDates = Set<Date>()
+
         private func finishDeferredCanvasWorkIfIdle() {
             guard !interactionActive, let canvas else { return }
+            if !handedStrokeDates.isEmpty {
+                let kept = canvas.drawing.strokes.filter { !handedStrokeDates.contains($0.path.creationDate) }
+                handedStrokeDates.removeAll()
+                if kept.count != canvas.drawing.strokes.count { canvas.drawing = PKDrawing(strokes: kept) }
+            }
             if resetCanvasWhenIdle {
                 canvas.drawing = PKDrawing()
                 queuedStrokeCount = 0
