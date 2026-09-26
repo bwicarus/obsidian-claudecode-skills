@@ -430,6 +430,30 @@ final class ReaderNativeDataStore {
     /// ⚠ 只能在**还没有任何连接**打开 `path` 时调用（Host 在首次打开前调）。
     /// ⚠ 替换靠 rename 原子完成；旧库 WAL 没合并干净就放弃 —— 残留的旧 WAL
     ///   配上新库文件会被 SQLite 当成新库的日志重放，那是真正的损坏。
+    /// 只删掉「派生缓存」集合留下的日志与变更记录，再压缩文件。其它集合一条不动，
+    /// 日志游标保持连续（文档库里是用户数据，同步靠游标追踪；不能像 device 库那样整表重建）。
+    /// 2026-09-26：iPad 文档库 1.28 GB，其中 1.2 GB 是叠加层缓存 1074 次整份写入的副本。
+    static func purgeDerivedHistory(path: String, collections: [String]) throws -> (before: Int64, after: Int64) {
+        let files = FileManager.default
+        func size(_ p: String) -> Int64 {
+            ["", "-wal"].reduce(0) { $0 + (((try? files.attributesOfItem(atPath: p + $1))?[.size] as? NSNumber)?.int64Value ?? 0) }
+        }
+        let before = size(path)
+        let store = try ReaderNativeDataStore(path: path)
+        defer { store.close() }
+        try store.inTransaction {
+            for collection in collections {
+                let marker = "\"collection\":\"" + collection + "\""
+                try store.execute("DELETE FROM journal WHERE instr(json, ?) > 0", bind: [.text(marker)])
+                try store.execute("DELETE FROM mutations WHERE instr(json, ?) > 0", bind: [.text(marker)])
+            }
+        }
+        try store.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        try store.execute("VACUUM")
+        try store.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return (before, size(path))
+    }
+
     static func rebuildKeepingLiveData(path: String, keepMutations: Int64 = 100,
                                        maxMutationBytes: Int64 = 65_536) throws -> (before: Int64, after: Int64) {
         let files = FileManager.default

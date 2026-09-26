@@ -14181,6 +14181,12 @@
         nativePDFWriterAccepting;
     };
     var local = localPageOverlay(url);
+    // 原生正文接管 PDF 时，叠加层由原生自己取增强、自己缓存（ReaderNativePageOverlayStore，不留副本）。
+    // 这边再去服务端拿一遍、整份写一次缓存 —— 每次写都连带日志与变更记录各一份整拷贝：
+    // 2026-09-26 iPad 文档库 1.28 GB，其中 1.2 GB 就是这份缓存 1074 次写入的副本，
+    // 而真实数据只有 3.9 MB。白跑的网络与计算也在发热账上。原生接管时只回本地结果。
+    var nativeOwnsOverlay = !!(root.RC && root.RC.readerNavigation && root.RC.readerNavigation.nativeViewport);
+    if (nativeOwnsOverlay) return local;
     var localRevision = local.then(function (response) {
       if (!response || !response.ok) return '';
       return response.clone().json().then(nativePageOverlayLocalRevision);

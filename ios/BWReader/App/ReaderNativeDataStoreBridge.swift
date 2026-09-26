@@ -237,6 +237,7 @@ final class ReaderNativeDataStoreHost {
         if let existing = stores[name] { return ReaderNativeDataStoreBridge(store: existing) }
         let path = root.appendingPathComponent(name + ".sqlite").path
         if name == "bw-reader-native-v1-device" { reclaimOversizedDeviceStore(path: path) }
+        if name == "bw-reader-native-v1-document" { reclaimDerivedDocumentHistory(path: path) }
         let store = try ReaderNativeDataStore(path: path)
         stores[name] = store
         return ReaderNativeDataStoreBridge(store: store)
@@ -258,6 +259,27 @@ final class ReaderNativeDataStoreHost {
                 + String(format: "%.1fs", Date().timeIntervalSince(started))
         } catch {
             message = "device 库重建失败(\(size / 1_048_576)MB): \(error)"
+        }
+        NSLog("[BWReader] %@", message)
+        Task { @MainActor in ReaderNativeFaultReporter.shared.note("store", message) }
+    }
+
+    /// document 库超过 128MB：几乎一定是派生缓存的历史副本（真实数据通常只有几 MB）。
+    /// 只清派生缓存那几类的日志/变更记录，用户数据与游标不动（见 purgeDerivedHistory）。
+    static let documentStorePurgeBytes: Int64 = 128 * 1024 * 1024
+    static let derivedCollections = ["native-page-overlay-enrichment-cache-v1"]
+    private func reclaimDerivedDocumentHistory(path: String) {
+        let files = FileManager.default
+        let size = ["", "-wal"].reduce(Int64(0)) { $0 + (((try? files.attributesOfItem(atPath: path + $1))?[.size] as? NSNumber)?.int64Value ?? 0) }
+        guard size > Self.documentStorePurgeBytes else { return }
+        let started = Date()
+        let message: String
+        do {
+            let result = try ReaderNativeDataStore.purgeDerivedHistory(path: path, collections: Self.derivedCollections)
+            message = "document 库清派生缓存历史 \(result.before / 1_048_576)MB→\(result.after / 1_048_576)MB "
+                + String(format: "%.1fs", Date().timeIntervalSince(started))
+        } catch {
+            message = "document 库清理失败(\(size / 1_048_576)MB): \(error)"
         }
         NSLog("[BWReader] %@", message)
         Task { @MainActor in ReaderNativeFaultReporter.shared.note("store", message) }
