@@ -474,6 +474,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private var recStats = (tasks: 0, partials: 0, finals: 0, errors: 0, lastError: 0)
     private var workLastTick = 0.0, workMaxGap = 0.0   // 周期任务间隔：work 队列被堵住时这里会变大
     private var diarizerResets = 0
+    private var skippedForeign: [String: Int] = [:]   // 主线因「这人说别的语言」没记的词段数（按语言）
     private var lastStatsLine = ""
     private var lastStatsAt = Date.distantPast
     private var slotLangVotes: [Int: [String: Int]] = [:]
@@ -897,8 +898,15 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private func assign(_ segments: [(text: String, start: Double, end: Double)]) {
         for segment in segments {
             let speaker = diarizer?.dominantSpeaker(from: segment.start - diarizerOrigin, to: segment.end - diarizerOrigin)
-            let middle = (segment.start + segment.end) / 2
-            if let speaker, replaced.contains(where: { $0.speaker == speaker && $0.start <= middle && middle <= $0.end }) {
+            // 已被逐段重转替换的时段让出：按「有重叠」判，不按中点 —— 主线词段与分离器的起止常差零点几秒，
+            // 按中点判会漏（2026-09-27 实测「Ye」706.7–708.0 与重转「You. Yeah.」707.9–708.6 并存）
+            if let speaker, replaced.contains(where: { $0.speaker == speaker && segment.start < $0.end && segment.end > $0.start }) {
+                continue
+            }
+            // 已知说别的语言的人（人物页登记的语言，或逐段重转推测稳定了）：主线用「我的语言」转他
+            // 只会出错语言的残片（英语台词被中文识别器转成「Whas」），直接不记，交给逐段重转
+            if let speaker, let other = foreignLanguage(of: speaker) {
+                skippedForeign[other, default: 0] += 1
                 continue
             }
             if var last = utterances.last, last.fromStream, last.speaker == speaker, segment.start - last.end < 1.5 {
@@ -1121,6 +1129,17 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         return (nil, false)
     }
 
+    /// 这个人确定说「我的语言」以外的语言时返回那种语言；还不知道 / 就是我的语言返回 nil。
+    private func foreignLanguage(of speaker: Int) -> String? {
+        if speaker == diarizer?.userIndex || slotNames[speaker] == "我" || slotPersonIds[speaker] == "me" { return nil }
+        if let person = slotPersonIds[speaker], let registered = personLanguage[person], !registered.isEmpty {
+            return registered == locale ? nil : registered
+        }
+        guard let votes = slotLangVotes[speaker], let top = votes.max(by: { $0.value < $1.value }) else { return nil }
+        let share = Double(top.value) / Double(max(1, votes.values.reduce(0, +)))
+        return share >= 0.75 && top.key != locale ? top.key : nil
+    }
+
     private func fetchPersonLanguage(_ person: String) {
         personLanguage[person] = personLanguage[person]   // 占位防重复
         Task.detached(priority: .utility) { [weak self] in
@@ -1149,6 +1168,9 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             let audio = diarizer.elapsed
             let factor = audio > 0 ? diarizer.busySeconds / audio : 0
             detail += String(format: "；分离器 实时率 %.2f、积压 %.1f 秒", factor, Double(diarizer.pendingSamples) / NativeStreamDiarizer.sampleRate)
+        }
+        if !skippedForeign.isEmpty {
+            detail += "；主线让给重转 " + skippedForeign.map { "\(NativeSegmentTranscriber.displayName($0.key)) \($0.value) 段" }.sorted().joined(separator: "、")
         }
         detail += String(format: "；周期最大间隔 %.1f 秒", workMaxGap) + (diarizerResets > 0 ? "；分离器重建 \(diarizerResets) 次" : "")
         workMaxGap = 0

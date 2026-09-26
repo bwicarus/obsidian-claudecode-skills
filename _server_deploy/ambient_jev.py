@@ -497,6 +497,8 @@ def _ingest_people(window: dict) -> list[str]:
     try:
         store = people()
         mapping = store.ingest(window, window.get("speakers") or [])
+        if getattr(store, "last_superseded", 0):
+            log_event("stream_rows_superseded", windowId=window.get("windowId"), dropped=store.last_superseded)
         names = {}
         for u in window["utterances"]:
             pid = mapping.get(u.get("slotKey"))

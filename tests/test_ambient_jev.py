@@ -308,6 +308,20 @@ class AmbientPeopleTests(AmbientJevTests):
         bad = self.client.patch(f"/api/ambient/people/{pid}", json={"language": "日本語"})
         self.assertEqual(bad.status_code, 400)
 
+    def test_revise_before_window_supersedes_late_stream_rows(self):
+        # 重转先到（App 空闲时后台转完就送），主线那一窗后到：同一块同一时段的主线残片不再记
+        self.login()
+        self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "田中"})
+        reply = self.client.post("/api/ambient/revise", json={
+            "slotKey": "s1:1", "t0": 1_700_000_003_000, "t1": 1_700_000_005_000,
+            "text": "土曜日の朝八時にしよう", "lang": "ja-JP", "langConfirmed": False}).get_json()
+        self.assertEqual(reply["replaced"], 0)
+        self.judge(self.window("w1"))
+        rows = self.timeline()["utterances"]
+        tanaka = [r for r in rows if r["name"] == "田中"]
+        self.assertEqual([r["text"] for r in tanaka], ["土曜日の朝八時にしよう"])
+        self.assertEqual(rows[0]["text"], "周末去爬山吗")   # 别人的句子照记
+
     def test_revise_replaces_stream_text_for_that_block(self):
         self.login()
         self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "田中"})

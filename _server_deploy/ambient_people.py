@@ -352,6 +352,15 @@ class AmbientPeople:
                              "langConfirmed": bool(u.get("langConfirmed", True))})
             self._save(data)
             path = self.root / "timeline" / (time.strftime("%Y-%m-%d", time.localtime(started / 1000)) + ".jsonl")
+            # 逐段重转可能先于主线这一窗到（它在 App 空闲时后台跑，主线要等认人、凑窗）：那一段已按
+            # 说话人的语言重转过，主线用「我的语言」转出来的同一段是错语言的残片（「Ye」「Whas」）——不再记，
+            # 否则时间轴上同一句一真一假并存（2026-09-27 实测）。只看非本人的句子。
+            revised = self._revised_spans(path, {r["slotKey"] for r in rows if r["slotKey"] and not r["isUser"]})
+            dropped = [r for r in rows if not r["isUser"] and any(
+                r["slotKey"] == key and r["t0"] < t1 + 300 and r["t1"] > t0 - 300 for key, t0, t1 in revised)]
+            if dropped:
+                rows = [r for r in rows if r not in dropped]
+            self.last_superseded = len(dropped)   # 调用方记日志（本模块不写 log）
             with path.open("a", encoding="utf-8") as handle:
                 for row in rows:
                     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -359,6 +368,20 @@ class AmbientPeople:
                        if k in {u.get("slotKey") for u in window["utterances"]}}
         self._record_conversation(window, rows, mapping)
         return mapping
+
+    @staticmethod
+    def _revised_spans(path: Path, keys: set) -> list:
+        if not keys or not path.is_file():
+            return []
+        spans = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("revised") and row.get("slotKey") in keys:
+                spans.append((row["slotKey"], int(row.get("t0") or 0), int(row.get("t1") or 0)))
+        return spans
 
     def revise(self, slot_key: str, t0: int, t1: int, text: str, *, lang: str = "", confirmed: bool = True) -> int:
         """逐段重转的事后修正（App 空闲时后台转完才送来）：把这个声音块在 [t0, t1] 前后 0.3 秒内的句子
