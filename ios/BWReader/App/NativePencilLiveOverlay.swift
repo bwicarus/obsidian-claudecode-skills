@@ -55,6 +55,10 @@ final class NativePencilInkController: ObservableObject {
     @Published private(set) var paletteVisible = false
     /// 「落笔未命中」日志的节流时刻。
     var lastMissReport = Date.distantPast
+    var lastHitReport = Date.distantPast
+    /// 最近一次 Pencil 悬停（手写层坐标 + 时刻）。命中测试时系统还没给出这次触摸的类型，
+    /// 靠「刚在附近悬停过」认出是笔（见 captureRule）。
+    var lastHover: (point: CGPoint, at: Date)?
     @Published var colorHex = "#ff3b30"
     @Published var width: CGFloat = 4
     @Published private(set) var paletteAnchor: CGPoint?
@@ -523,11 +527,20 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             // recognizer receive it; allowedTouchTypes below still limits the
             // recognizer itself to Apple Pencil.
             if event?.type == .hover { return true }
+            // ⚠ 命中测试时，这次新触摸往往还不在 event.allTouches 里（类型拿不到）。以前据此一律
+            //   判「不是笔」→ 落笔交给了正文滚动，写不上字（2026-09-26 iPad：「笔落下后就和手指
+            //   按住的反应相同，直接把画面移动了」）。Pencil 落笔前必有悬停：半秒内、40pt 内刚悬停过
+            //   就认作笔。手指没有悬停，照常滚动。
+            let touchSaysPencil = event?.allTouches?.contains(where: { $0.type == .pencil }) == true
+            let touchSaysFinger = event?.allTouches?.contains(where: { $0.type == .direct && $0.phase == .began }) == true
+            let hoverSaysPencil = controller.flatMap { c in c.lastHover.map { h in
+                Date().timeIntervalSince(h.at) < 0.5 && hypot(h.point.x - point.x, h.point.y - point.y) < 40
+            } } ?? false
             guard
                 let controller,
                 bounds.width > 0,
                 bounds.height > 0,
-                event?.allTouches?.contains(where: { $0.type == .pencil }) == true
+                touchSaysPencil || (hoverSaysPencil && !touchSaysFinger)
             else {
                 return false
             }
@@ -545,6 +558,10 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 } ?? "无表面"
                 reader?.postClientLog(String(format: "[pencil] 落笔未命中书写表面 落点(%.2f,%.2f) 表面数=%d ", normalized.x, normalized.y,
                                              controller.layout.surfaces.count) + first)
+            }
+            if hit, Date().timeIntervalSince(controller.lastHitReport) > 10 {
+                controller.lastHitReport = Date()
+                reader?.postClientLog("[pencil] 手写层接住落笔（依据：" + (touchSaysPencil ? "触摸类型" : "刚才的悬停") + "）")
             }
             return hit
         }
@@ -995,6 +1012,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             guard let canvas else { return }
             switch gesture.state {
             case .began, .changed, .ended:
+                controller.lastHover = (gesture.location(in: canvas), Date())
                 controller.updateRecentPencilAnchor(
                     gesture.location(in: canvas),
                     in: canvas.bounds
