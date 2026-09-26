@@ -124,7 +124,7 @@ final class NativeAmbientTimelineModel: ObservableObject {
         for block in groups.flatMap(\.blocks) {
             let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty, translations[text] == nil, !translationInFlight.contains(text), !translationFailed.contains(text) else { continue }
-            let detected = NLLanguageRecognizer.dominantLanguage(for: text)
+            let detected = Self.sourceLanguage(of: text)
             if detected == .simplifiedChinese || detected == .traditionalChinese { continue }
             let key = detected?.rawValue ?? ""
             if byLanguage[key] == nil { order.append(key) }
@@ -135,6 +135,16 @@ final class NativeAmbientTimelineModel: ObservableObject {
         return (key.isEmpty ? nil : key, Array(texts))
     }
 
+    /// 原文语言：只在常见语言里判（2026-09-27 实测：不限候选时「Right.」「Who I」这种短句会被判成冷门语言，
+    /// 一句一组、全部 Unable to Translate）。判不出来返回 nil（交给翻译框架自己认）。
+    static func sourceLanguage(of text: String) -> NLLanguage? {
+        let recognizer = NLLanguageRecognizer()
+        recognizer.languageConstraints = [.english, .japanese, .korean, .simplifiedChinese, .traditionalChinese,
+                                          .french, .german, .spanish]
+        recognizer.processString(text)
+        return recognizer.dominantLanguage
+    }
+
     func finishTranslation(_ texts: [String], results: [String: String], error: String?) {
         translationInFlight.subtract(texts)
         for (key, value) in results { translations[key] = value }
@@ -142,7 +152,7 @@ final class NativeAmbientTimelineModel: ObservableObject {
         if let error {
             translationFailed.formUnion(missing)
             translationNote = "翻译失败：" + error
-            NativeAmbientLog.note("时间轴：翻译失败（\(missing.count) 句）\(error)", level: "error")
+            NativeAmbientLog.note("时间轴：翻译失败（\(missing.count) 句，首句「\(missing.first?.prefix(40) ?? "")」）\(error)", level: "error")
         }
         translationVersion += 1   // 接着翻下一组
     }
@@ -637,13 +647,15 @@ struct NativeAmbientTranslator: View {
                 let texts = group
                 var results: [String: String] = [:]
                 var failure: String?
+                let pair = "\(config?.source?.minimalIdentifier ?? "自动")→\(config?.target?.minimalIdentifier ?? "?")"
                 do {
+                    try await session.prepareTranslation()   // 语言包没装：系统弹窗让用户下载
                     let requests = texts.map { TranslationSession.Request(sourceText: $0, clientIdentifier: $0) }
                     for try await response in session.translate(batch: requests) {
                         if let key = response.clientIdentifier { results[key] = response.targetText }
                     }
                 } catch {
-                    failure = error.localizedDescription
+                    failure = "\(pair) \(String(describing: error))"
                 }
                 await MainActor.run {
                     busy = false
@@ -658,6 +670,24 @@ struct NativeAmbientTranslator: View {
         group = next.texts
         let source = next.language.map { Locale.Language(identifier: $0) }
         let target = Locale.Language(identifier: "zh-Hans")
+        if let source {
+            // 先问系统这对语言支不支持：不支持的整组直接出声跳过，不必进翻译框架再失败
+            Task { @MainActor in
+                let status = await LanguageAvailability().status(from: source, to: target)
+                if status == .unsupported {
+                    busy = false
+                    model.finishTranslation(next.texts, results: [:],
+                                            error: "Apple 翻译不支持 \(source.minimalIdentifier)→简体中文")
+                    return
+                }
+                run(source: source, target: target)
+            }
+            return
+        }
+        run(source: nil, target: target)
+    }
+
+    private func run(source: Locale.Language?, target: Locale.Language) {
         if var current = config, current.source == source, current.target == target {
             current.invalidate()     // 同一对语言：让 translationTask 再跑一次
             config = current
