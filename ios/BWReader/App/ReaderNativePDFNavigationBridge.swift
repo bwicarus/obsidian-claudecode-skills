@@ -34,10 +34,25 @@ final class ReaderNativePDFNavigationBridge: NSObject, WKScriptMessageHandlerWit
     }
 
     func initialPosition() async throws -> [String: Any] {
-        guard let webView, trusted(webView.url) else { throw unavailable() }
-        let value = try await webView.callAsyncJavaScript(
-            "const state = window.RC?.readerNavigation?.nativeState(); return state && {...state, pageOffset: window._pageOffset?.() || 0};",
-            arguments: [:], in: nil, contentWorld: .page)
+        // 网页层的 PDF 还在加载时 nativeState 会抛「本机 PDF 尚未准备好」（或导航对象还没建）。
+        // 那是**要等**，不是打不开 —— 以前直接当失败，首次开书先闪一条「正文没能打开」、
+        // 等别的时机再挂一次才好（2026-09-26 一天 34 次）。每 150ms 再问一次，最多 15 秒；
+        // 其它错误照旧立即抛。
+        var value: Any?
+        for attempt in 0..<100 {
+            guard let webView, trusted(webView.url) else { throw unavailable() }
+            do {
+                value = try await webView.callAsyncJavaScript(
+                    "const state = window.RC?.readerNavigation?.nativeState(); return state && {...state, pageOffset: window._pageOffset?.() || 0};",
+                    arguments: [:], in: nil, contentWorld: .page)
+            } catch {
+                let reason = (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String ?? String(describing: error)
+                guard reason.contains("尚未准备好"), attempt < 99 else { throw error }
+                value = nil
+            }
+            if value is [String: Any] { break }
+            try await Task.sleep(nanoseconds: 150_000_000)
+        }
         guard let result = value as? [String: Any], let file = result["file"] as? String,
               !file.isEmpty, (result["total"] as? NSNumber)?.intValue ?? 0 > 0 else { throw unavailable() }
         pageOffset = min(10_000_000,max(-10_000_000,(result["pageOffset"] as? NSNumber)?.intValue ?? 0))
