@@ -109,8 +109,9 @@ enum ReaderNativeFavoritePlacement {
         var body: [String: Any] = ["file": file,
             "id": "c_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
             "anchor": ["kind": "pdf", "page": page, "x": x, "y": y],
-            "color": "#0d1322", "w": width > 0 ? max(240, min(480, (width * 0.44).rounded())) : 300,
-            "h": 210, "collapsed": false]
+            // 默认宽度接近侧栏里卡片的宽（~360）；高度由页卡按内容自动定，h 只是上限。
+            "color": "#0d1322", "w": width > 0 ? max(240, min(360, (width * 0.36).rounded())) : 300,
+            "h": 460, "collapsed": false]
         var cards = (record["payload"] as? [String: Any])?["cards"] as? [[String: Any]]
         if cards == nil, record["kind"] as? String == "cards" || record["gid"] != nil,
            let raw = record["raw"] as? String {

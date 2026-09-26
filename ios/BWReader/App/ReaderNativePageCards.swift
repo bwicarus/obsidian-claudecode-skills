@@ -303,6 +303,10 @@ struct ReaderNativePlacedCard: View {
     @State private var resizing: CGSize?
     @State private var resizeStart: CGSize?
     @State private var headerHeight: CGFloat = 44
+    /// 正文实际内容高度：页卡按内容自动定高（像侧栏里一样），用户拖出的高度只作上限。
+    @State private var contentHeight: CGFloat?
+    /// 尺寸已提交、但新的便签几何还没到：先保持在新尺寸上，别先弹回旧尺寸再跳过去。
+    @State private var awaitingGeometry = false
 
     /// 「加入上下文」的控件 id 与当前选中态。
     ///
@@ -416,6 +420,11 @@ struct ReaderNativePlacedCard: View {
     private var bodyHeight: CGFloat? {
         (resizing ?? savedSize).map { max(64, min($0.height, available.height) - headerHeight - 0.5) }
     }
+    private var fittedBodyHeight: CGFloat {
+        let cap = bodyHeight ?? max(120, min(460, min(rect.height, available.height - headerHeight - 0.5)))
+        guard let contentHeight, contentHeight > 0 else { return cap }
+        return max(44, min(contentHeight, cap))
+    }
 
     /// 正在拖。整张卡本身跟着手指走 —— 不再留一张淡掉的原卡在原位。
     /// ⚠ 上一版是"原卡淡到 .22 + 只拖一条标题影子"，用户看到的就是一块残影
@@ -425,6 +434,12 @@ struct ReaderNativePlacedCard: View {
 
     var body: some View {
         card
+            // 新尺寸的便签几何到了：放开暂存尺寸（接得上，不会先弹回旧尺寸）。
+            .onChange(of: rect.size) { _, size in
+                guard awaitingGeometry, let target = resizing,
+                      abs(size.width - target.width) < 2 || savedSize != nil else { return }
+                awaitingGeometry = false; resizing = nil
+            }
             // 蓄力：卡片在按住的 420ms 里轻轻"按进去"（系统长按菜单同一手感，不用进度条 ——
             // 2026-09-23 用户："不一定非要用进度条，完全可以用苹果的特效来显示"）。
             .scaleEffect(press == .charging ? 0.96 : 1)
@@ -506,6 +521,7 @@ struct ReaderNativePlacedCard: View {
                 ScrollView {
                     ReaderNativePageCardBody(parts: item.parts, model: model)
                         .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 16)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
                 }
                 // 长按＝带入/移出对话，**只在卡身**（原版 pinBind 的长按目标是 .vc-card-bd，
                 // 上面那条标题栏是拖动把手）。阈值取原版 LP_MS = 600ms；
@@ -513,8 +529,9 @@ struct ReaderNativePlacedCard: View {
                 .simultaneousGesture(
                     LongPressGesture(minimumDuration: 0.6).onEnded { _ in toggleContext() }
                 )
-                .frame(height: bodyHeight)
-                .frame(maxHeight: bodyHeight ?? max(120, min(460, min(rect.height, available.height - headerHeight - 0.5))))
+                // 高度 = 内容高度，封顶 = 用户拖出的高度（或默认上限）。以前滚动框按上限撑满，
+                // 内容少时下面空一大块（2026-09-26 用户：「像侧边栏内一样自动优化比例和大小」）。
+                .frame(height: fittedBodyHeight)
                 .overlay {
                     if let inkID = item.controls["ink"] {
                         ReaderNativeCardInkLayer(item: item, reader: reader, actionID: inkID,
@@ -759,8 +776,11 @@ struct ReaderNativePlacedCard: View {
     }
 
     private var resizeGesture: some Gesture {
-        DragGesture(minimumDistance: 3)
+        // ⚠ 位移必须在**卡片外层**坐标系里量。在手柄自己的坐标系里量时，手柄随卡变大而移动，
+        //   量到的位移跟着变 → 尺寸来回跳（2026-09-26 用户：「右下角调大小时会抽搐」）。
+        DragGesture(minimumDistance: 3, coordinateSpace: space)
             .onChanged { value in
+                awaitingGeometry = false
                 if resizeStart == nil { resizeStart = savedSize ?? rect.size }
                 let base = resizeStart ?? rect.size
                 resizing = boundedSize(CGSize(width: base.width + value.translation.width, height: base.height + value.translation.height))
@@ -793,8 +813,15 @@ struct ReaderNativePlacedCard: View {
                 let saved = await model.perform("liveAction", parameters: [
                     "actionId": action, "value": ["w": Double(units.width), "h": Double(units.height)]])
                 if scope == model.scope {
-                    resizing = nil
-                    if !saved { operationError = model.error ?? "尺寸尚未保存，请重试。" }
+                    if saved {
+                        // 等新几何到了再放手（见 onChange(of: rect.size)），最多等 2 秒。
+                        awaitingGeometry = true
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        if awaitingGeometry { awaitingGeometry = false; resizing = nil }
+                    } else {
+                        resizing = nil
+                        operationError = model.error ?? "尺寸尚未保存，请重试。"
+                    }
                 }
                 return
             }
