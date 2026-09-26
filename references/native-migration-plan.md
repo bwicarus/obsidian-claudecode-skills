@@ -91,13 +91,37 @@
 ## 2. 阅读位置
 - 2026-09-26 已完成第一步：原生视口是本机权威（等存储握手再开书；本机写的
   reading-position 不压原生视口；App 内网页层不再写 PDF 续读）。
-- 剩：EPUB 续读、`ctxSync.report` 的当前页上报改由原生发。
+- 剩下两项**都被别的块挡着**（2026-09-26 查实）：
+  - EPUB 续读：App 里 EPUB 仍由网页 `epub-html.js` 渲染（原生只解析 OPF/目录），位置天然来自网页 ——
+    要等 EPUB 原生渲染才有「由原生负责」可言，不单独做。
+  - 当前页上报（`ctxSync.report`）：App 里它的出口是网页里的快照链接（见 3），原生已能把 PDF
+    page.context 写进本机发送队列（`publishReadingContext`），但**传输**仍在网页 → 随 3b 一起搬。
 
-## 3. 语音客户端
-（P3 之后细化：录音/播放/会话状态目前在 `rc-computer-voice.js` + Swift 各一半。）
+## 3. 语音客户端（2026-09-26 细化）
+### 现状（查实）
+- 通话音频：已是原生（`NativeVoiceBridge` + `DirectVoiceSocket` + `NativeAudioEngine`），通话时 Swift 独占语音 WSS。
+- **阅读器快照链接**：仍在网页 `rc-computer-voice.js`（`reconcileSnapshotLink` 一族，约 5000 行），走独立的
+  context 端点。它管：上下文上行（context pump / active-reading pump）、服务器下发的查询
+  （`READER_QUERY_HANDLERS`：highlights / notes / search …，答案来自网页 `_nativeReader*`）、视觉请求（截图）、
+  结果与实时输出（高亮、卡片、制卡草稿 → rc-voicecall 执行）。
+- **熄屏断连的机制**：进后台 → 原生 `setReaderForeground(false)`（停本机 runtime）→ 网页
+  `readerContextSurfaceVisible()` 读到 `__BW_NATIVE_READER_FOREGROUND__=false` → `snapshotLinkWanted()` 为假 →
+  **主动关快照链接**；即便不关，iOS 也会挂起后台 App 的 WebKit 网页进程。所以熄屏期间通话音频可以继续，
+  但语音 AI 的阅读器工具全部失效 —— 只能靠原生链接解决，网页层修不了。
 
-## 4. 摆放逻辑
-（卡片/收藏落页的摆放目前在 JS `placement`，原生 `ReaderNativeFavoritePlacement` 已有一部分。）
+### 分阶段
+- ✅ **3a 诊断出口（2026-09-26）**：网页关快照链接时 `dlog` 写明是哪一条条件关的、是否在通话中；
+  原生进后台时若电脑语音仍在通话，`postClientLog` 出声。→ 先拿一次熄屏通话的真实日志再动 3b。
+- **3b 后台通话期间的原生快照链接**：通话中进后台时，由 Swift 用 `DirectVoiceSocket(.readerContext)`
+  接管 context 会话：
+  - 上下文：从原生发送队列（`native-outgoing-journal`）与 PDFKit 当前页直接上行；
+  - 查询：highlights / notes / search 由原生数据库回答（PDF 优先）；
+  - 视觉：PDFKit 渲当前页图，按原合同分块（`reader-visual/2`，≤768KB、24 块）；
+  - 实时输出：一律回可重试的 `…_UNAVAILABLE`，让桥留在队列里，回前台后由网页执行（桥已有这条重放语义）。
+  需要：Swift 侧补 context 会话的事件类型（现只收 `status`）、与网页链接的交接（同一 App 同时只一个
+  context 所有者），以及桥端对「来源切换」的验证 —— 这几步都得在设备上验。
+- **3c 前台也由原生持有**：网页快照链接删除；输出执行器（卡片/高亮/草稿）仍在网页时，由原生转交。
+- **3d 录音/播放/会话状态收拢到原生**，`rc-computer-voice.js` 在 App 里只剩兼容入口。
 
 ## 规则
 - 每步都要**出声**：未迁移的分支 dlog/postClientLog，不静默丢。

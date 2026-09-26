@@ -7431,6 +7431,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // ⚠ 放在 setReaderForeground 之前 —— 那一步会停掉本机 runtime，
             //   而导出要在页面里执行 JS，runtime 停了就取不到了。
             publishBookUserStateSnapshot()
+            // 迁出 3a：熄屏/切走时若电脑语音仍在通话，出声 —— 下面一步会停本机 runtime、网页随即关快照链接，
+            // 通话中的阅读器工具（读页、看页、卡片、高亮）此后都不可用（用户报「软件语音时熄屏后语音链接会断开」）。
+            if let bridge = nativeVoiceBridge, bridge.state.phase != .idle {
+                postClientLog("[语音] 进入后台时电脑语音仍在通话（\(bridge.state.phase)）：阅读器快照链接与本机运行时将停止")
+            }
             setReaderForeground(false, restartLocalRuntime: false)
         case .inactive:
             // 先不动连接，给一个宽限期；期间回到 .active 就当什么都没发生。

@@ -11833,8 +11833,34 @@ if (window.__bwPwaProviderOnly) return;
     return state.foregroundProbePromise;
   }
 
+  // 迁出 3a（2026-09-26）：快照链接被关的原因要出声 —— 用户报「软件语音时熄屏后语音链接会断开」，
+  // 而 App 里熄屏 = 原生置 __BW_NATIVE_READER_FOREGROUND__=false → 这里主动关链接；
+  // 通话中关掉，语音 AI 就拿不到阅读上下文、送不出卡片/高亮。先让日志说清楚是哪一条让它关的。
+  function snapshotLinkBlockers() {
+    var independentOfVoice = nativeReaderOwnsSnapshotLifecycle();
+    var out = [];
+    if (!ownsReaderUi()) out.push("not-reader-ui");
+    if (independentOfVoice ? contextDeliveryMode === CONTEXT_DELIVERY_LEGACY : contextDeliveryMode !== CONTEXT_DELIVERY_SNAPSHOT) {
+      out.push("mode=" + String(contextDeliveryMode));
+    }
+    if (contextModeChanging) out.push("mode-changing");
+    if (!readerContextSurfaceVisible()) out.push(independentOfVoice ? "native-background" : "document-hidden");
+    if (!independentOfVoice && (active || dialPending || nativeComputerVoiceOwnsWss())) out.push("voice-owns-wss");
+    return out;
+  }
+
   function reconcileSnapshotLink() {
     if (!snapshotLinkWanted()) {
+      if (snapshotLink) {
+        var voice = nativeComputerVoiceState();
+        var calling = !!(voice && (voice.active === true || voice.busy === true)) || !!active;
+        try {
+          if (typeof window.dlog === "function") {
+            window.dlog("[快照链接] 关闭：" + snapshotLinkBlockers().join(",") +
+              (calling ? "（语音通话中 —— 通话期间阅读器上下文/输出将不可用）" : ""));
+          }
+        } catch (_) {}
+      }
       return stopSnapshotLink();
     }
     if (snapshotLink) {
