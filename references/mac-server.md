@@ -76,6 +76,12 @@ Python 侧的「本地应用数据」靠环境变量 `LOCALAPPDATA=~/BW/data`（
 路径（`/voice-core/*` 只给本机，本就不转发）。
 ⚠ serve 配置绑在**主机名**上：Tailscale 改名后必须 `serve reset` 再重配（Windows 改名后就是因此全断）。
 
+⚠ **5000 端口与「隔空播放接收器」（2026-09-26 实锤）**：macOS 的 AirPlay 接收器（进程 `ControlCe`）默认监听 `*:5000`，
+与 webapp 的 `127.0.0.1:5000` 并存。症状极具迷惑性：Mac 本机 `curl 127.0.0.1:5000/...` 与经 tailnet 地址的 curl
+都正常（302、`server: Werkzeug`），但 iPad 的部分 `/api/...` 请求随机收到 **403**，且 webapp 日志里**没有**这些请求。
+修法：系统设置 → 通用 → 隔空投送与接力 → 关闭「隔空播放接收器」。`deploy_mac.py` 部署完会用 `lsof` 检查并提醒。
+排查口诀：iPad 报 403 而 webapp 日志里没有对应请求 → 先 `lsof -nP -iTCP:5000 -sTCP:LISTEN`。
+
 ## 4. 部署
 
 ```bash

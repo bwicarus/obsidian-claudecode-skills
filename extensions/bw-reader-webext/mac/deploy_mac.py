@@ -355,7 +355,24 @@ def main() -> int:
     write_plists(env, names)
     if not args.no_restart:
         restart(names)
+    check_port_5000()
     return 0
+
+
+def check_port_5000() -> None:
+    """webapp 在 127.0.0.1:5000。macOS 的「隔空播放接收器」（ControlCenter）默认也听 *:5000，
+    经 tailscale serve 进来的部分请求会被它接走并回 403 —— 2026-09-26 iPad 时间轴与设置页因此报 403，
+    而 Mac 本机 curl 却一切正常（302），极易误判。部署完查一次，占着就大声提醒。"""
+    try:
+        out = subprocess.run(["lsof", "-nP", "-iTCP:5000", "-sTCP:LISTEN"], capture_output=True, text=True).stdout
+    except OSError as exc:
+        log(f"⚠ 没能检查 5000 端口占用（{exc}）")
+        return
+    others = sorted({line.split()[0] for line in out.splitlines()[1:] if line and not line.startswith("python")})
+    if others:
+        log("⚠⚠ 5000 端口还被这些进程监听：" + ", ".join(others) +
+            " —— 若是 ControlCe（隔空播放接收器），iPad 请求会随机收到 403。"
+            "关掉：系统设置 → 通用 → 隔空投送与接力 → 隔空播放接收器。")
 
 
 if __name__ == "__main__":
