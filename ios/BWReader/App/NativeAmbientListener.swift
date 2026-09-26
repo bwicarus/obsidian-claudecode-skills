@@ -449,6 +449,8 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private let diarizerQueue = DispatchQueue(label: "space.bwicarus.reader.ambient.diarizer", qos: .utility)
     static let diarizerMaxLag = 8.0             // 秒：分离器积压超过这么久就从当前时刻重建（宁可少分人，不能拖住转写）
     private var request: SFSpeechAudioBufferRecognitionRequest?   // 主线识别的当前请求（tap 往里追加）
+    private var liveFeed: AnyObject?            // 主线用新识别接口时的连续识别器（NativeLiveTranscriber，iOS 26+）
+    private var liveActive = false              // work 上：主线在用新接口（不用按停顿换任务）
     private var streamFrames: Int64 = 0         // 原生采样率下已收到的帧数（整条管线的时钟）
     private var sampleRate: Double = 48_000
     private var running = false
@@ -553,7 +555,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         startEpochMs = Date().timeIntervalSince1970 * 1000
         work.sync {
             resampler = NativeResampler16k(sourceRate: format.sampleRate)
-            beginRecognitionTask()
+            beginMainLine()
         }
         input.installTap(onBus: 0, bufferSize: 4_096, format: format) { [weak self] buffer, _ in
             self?.captured(buffer)
@@ -578,7 +580,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         startEpochMs = Date().timeIntervalSince1970 * 1000
         work.sync {
             resampler = NativeResampler16k(sourceRate: NativeAudioEngine.sampleRate)
-            beginRecognitionTask()
+            beginMainLine()
         }
         NativeAudioEngine.microphoneTap.set { [weak self] frame in self?.callFrame(frame) }
         startTimerAndDiarizer()
@@ -612,8 +614,13 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         running = false
         let current = request
         request = nil
+        let live = liveFeed
+        liveFeed = nil
         tapLock.unlock()
         current?.endAudio()
+        if #available(iOS 26.0, *), let live = live as? NativeLiveTranscriber {
+            Task.detached { await live.finish() }   // 最后一句的定稿会在停下后回来，由 onFinal 当场认人送出
+        }
         if source == .call {
             NativeAudioEngine.microphoneTap.set(nil)
         } else {
@@ -643,7 +650,12 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private func captured(_ buffer: AVAudioPCMBuffer) {
         tapLock.lock()
         guard running else { tapLock.unlock(); return }
-        if let request { request.append(gain.process(buffer) ?? buffer) }
+        let streamTime = Double(streamFrames) / sampleRate
+        if let live = liveFeed {
+            if #available(iOS 26.0, *), let live = live as? NativeLiveTranscriber {
+                live.append(gain.process(buffer) ?? buffer, streamTime: streamTime)
+            }
+        } else if let request { request.append(gain.process(buffer) ?? buffer) }
         streamFrames += Int64(buffer.frameLength)
         let end = Double(streamFrames) / sampleRate
         tapLock.unlock()
@@ -751,7 +763,62 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         return ("说话人\(index + 1)", false)
     }
 
-    // MARK: 主线：「我的语言」连续识别（按停顿切任务拿定稿）
+    // MARK: 主线：「我的语言」连续识别
+
+    /// iOS 26+ 且新接口支持这种语言 → SpeechTranscriber 一条流连续识别；否则旧接口按停顿切任务。
+    private func beginMainLine() {
+        guard #available(iOS 26.0, *) else { beginRecognitionTask(); return }
+        let live = NativeLiveTranscriber()
+        tapLock.lock(); liveFeed = live; tapLock.unlock()
+        liveActive = true
+        recStats.tasks += 1
+        let locale = self.locale
+        Task.detached(priority: .utility) { [weak self] in
+            guard await NativeLiveTranscriber.supports(locale) else {
+                self?.work.async { self?.fallBackToLegacy("新识别接口不支持「\(NativeSegmentTranscriber.displayName(locale))」") }
+                return
+            }
+            do {
+                try await live.start(locale: locale,
+                    onVolatile: { text in self?.work.async { self?.liveVolatile(text) } },
+                    onFinal: { segments in self?.work.async { self?.liveFinal(segments) } },
+                    onError: { error in self?.work.async { self?.fallBackToLegacy("新识别接口出错 \(error.localizedDescription)") } })
+                NativeAmbientLog.note("旁听：主线改用新识别接口（SpeechTranscriber，\(NativeSegmentTranscriber.displayName(locale))）")
+            } catch {
+                self?.work.async { self?.fallBackToLegacy("新识别接口启动失败 \(error.localizedDescription)") }
+            }
+        }
+    }
+
+    private func fallBackToLegacy(_ reason: String) {
+        tapLock.lock(); let wasLive = liveFeed != nil; liveFeed = nil; tapLock.unlock()
+        liveActive = false
+        recStats.errors += 1
+        NativeAmbientLog.note("旁听：\(reason)，主线退回旧识别接口", level: "error")
+        if wasLive && isRunning { beginRecognitionTask() }
+    }
+
+    private func liveVolatile(_ text: String) {
+        guard text != lastText else { return }
+        lastText = text
+        lastTextAt = now
+        if !text.isEmpty { recStats.partials += 1; heardTextInTask = true }
+        emit(.partial(text))
+    }
+
+    private func liveFinal(_ segments: [(text: String, start: Double, end: Double)]) {
+        recStats.finals += 1
+        lastTextAt = now
+        lastText = ""
+        if isRunning {
+            pendingFinals.append((ready: now + Self.assignDelay, segments: segments))
+        } else {
+            assign(segments)
+            flushWindow(force: true)
+        }
+    }
+
+    // MARK: 主线（旧接口）：按停顿切任务拿定稿
 
     private func beginRecognitionTask() {
         guard let recognizer else {
@@ -857,7 +924,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             identifyNextSlot()
         }
         // 1) 主线：识别出文字后 1.2 秒没新字（或本任务满 45 秒）就换任务拿定稿；定稿满 1.5 秒的认人合句
-        if heardTextInTask && t - lastTextAt >= Self.silenceToFinalize || t - rotationClock >= Self.maxRecognitionSeconds {
+        if !liveActive, heardTextInTask && t - lastTextAt >= Self.silenceToFinalize || !liveActive && t - rotationClock >= Self.maxRecognitionSeconds {
             if heardTextInTask { rotateRecognition() } else { rotationClock = t }
         }
         while let first = pendingFinals.first, first.ready <= t {

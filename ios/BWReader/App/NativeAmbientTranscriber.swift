@@ -103,6 +103,14 @@ actor NativeSegmentTranscriber {
 
     private func run(_ original: [Float], locale: String) async -> Result? {
         let samples = NativeAmbientGain.normalize(original)   // 远处的声音太小，识别器会判「没有语音」
+        if #available(iOS 26.0, *), await NativeLiveTranscriber.supports(locale) {
+            do {
+                let value = try await NativeLiveTranscriber.transcribeOnce(samples, locale: locale)
+                return value.text.isEmpty ? nil : Result(text: value.text, locale: locale, confidence: value.confidence)
+            } catch {
+                NativeAmbientLog.note("分段转写：新识别接口出错（\(Self.displayName(locale))）\(error.localizedDescription)，改用旧接口", level: "error")
+            }
+        }
         guard let recognizer = recognizer(locale),
               let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: NativeStreamDiarizer.sampleRate,
                                          channels: 1, interleaved: false),
@@ -179,5 +187,183 @@ actor NativeSegmentTranscriber {
         }
         let probability = wanted.compactMap { hypotheses[$0] }.max() ?? 0
         return Float(max(0.05, probability))
+    }
+}
+
+// MARK: - 新识别接口（iOS 26+）：SpeechAnalyzer + SpeechTranscriber
+
+/// 旧的 SFSpeechRecognizer 是为近讲听写设计的：2026-09-27 实测旁听（电影 / 远处多人），
+/// 电平正常（平均 -20 dBFS）的 3 分钟里 15 个识别任务只出 2 个定稿，重转 9 段中日英三种语言全空。
+/// SpeechTranscriber 是苹果为长时、远场、对话音频做的新接口：一条流连续识别不用每 45 秒换任务，
+/// 带逐词时间（认人更准），不弹语音识别授权，模型由系统管理（首次按语言下载）。
+@available(iOS 26.0, *)
+final class NativeLiveTranscriber: @unchecked Sendable {
+    typealias Segment = (text: String, start: Double, end: Double)
+
+    private let lock = NSLock()
+    private var continuation: AsyncStream<AnalyzerInput>.Continuation?
+    private var converter: AVAudioConverter?
+    private var converterSource: AVAudioFormat?
+    private var targetFormat: AVAudioFormat?
+    private var backlog: [AVAudioPCMBuffer] = []   // 模型就绪前到的音频（最多约 20 秒）
+    private var origin: Double?                    // 第一块音频对应的管线时刻（识别结果的时间从它算起）
+    private var analyzer: SpeechAnalyzer?
+    private var results: Task<Void, Never>?
+    private var stopped = false
+
+    static func supports(_ locale: String) async -> Bool {
+        let wanted = Locale(identifier: locale).identifier(.bcp47)
+        return await SpeechTranscriber.supportedLocales.contains { $0.identifier(.bcp47) == wanted }
+    }
+
+    /// 模型没装就装（首次需要联网）。
+    static func prepare(_ transcriber: SpeechTranscriber, locale: String) async throws {
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            NativeAmbientLog.note("新识别接口：正在下载「\(NativeSegmentTranscriber.displayName(locale))」模型")
+            try await request.downloadAndInstall()
+            NativeAmbientLog.note("新识别接口：「\(NativeSegmentTranscriber.displayName(locale))」模型已装好")
+        }
+    }
+
+    /// 开始连续识别。音频可以在这之前就开始 append（会先攒着）。
+    func start(locale: String,
+               onVolatile: @escaping @Sendable (String) -> Void,
+               onFinal: @escaping @Sendable ([Segment]) -> Void,
+               onError: @escaping @Sendable (Error) -> Void) async throws {
+        let transcriber = SpeechTranscriber(locale: Locale(identifier: locale), transcriptionOptions: [],
+                                            reportingOptions: [.volatileResults], attributeOptions: [.audioTimeRange])
+        try await Self.prepare(transcriber, locale: locale)
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            throw NSError(domain: "BWAmbient", code: 2, userInfo: [NSLocalizedDescriptionKey: "新识别接口没有可用的音频格式"])
+        }
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        results = Task { [weak self] in
+            do {
+                for try await result in transcriber.results {
+                    guard let self else { return }
+                    let base = self.lock.withLock { self.origin } ?? 0
+                    if result.isFinal {
+                        var segments: [Segment] = []
+                        for run in result.text.runs {
+                            guard let range = run.audioTimeRange else { continue }
+                            let text = String(result.text[run.range].characters)
+                            if text.trimmingCharacters(in: .whitespaces).isEmpty { continue }
+                            segments.append((text, base + range.start.seconds, base + range.end.seconds))
+                        }
+                        let whole = String(result.text.characters)
+                        if segments.isEmpty, !whole.trimmingCharacters(in: .whitespaces).isEmpty {
+                            segments = [(whole, base + result.range.start.seconds, base + result.range.end.seconds)]
+                        }
+                        if !segments.isEmpty { onFinal(segments) }
+                    } else {
+                        onVolatile(String(result.text.characters))
+                    }
+                }
+            } catch {
+                if !(error is CancellationError) { onError(error) }
+            }
+        }
+        try await analyzer.start(inputSequence: stream)
+        let pending: [AVAudioPCMBuffer] = lock.withLock {
+            self.analyzer = analyzer
+            self.targetFormat = format
+            self.continuation = continuation
+            defer { backlog = [] }
+            return backlog
+        }
+        for buffer in pending { yield(buffer) }
+    }
+
+    /// 录音线程上调用。模型还没就绪时先攒着。
+    func append(_ buffer: AVAudioPCMBuffer, streamTime: Double) {
+        lock.lock()
+        if stopped { lock.unlock(); return }
+        if origin == nil { origin = streamTime }
+        if continuation == nil {
+            backlog.append(buffer)
+            let seconds = backlog.reduce(0.0) { $0 + Double($1.frameLength) / $1.format.sampleRate }
+            if seconds > 20 { backlog.removeFirst() }   // 模型迟迟没好：只保留最近 20 秒
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        yield(buffer)
+    }
+
+    private func yield(_ buffer: AVAudioPCMBuffer) {
+        lock.lock(); defer { lock.unlock() }
+        guard let target = targetFormat, let continuation else { return }
+        if converterSource != buffer.format || converter == nil {
+            converter = AVAudioConverter(from: buffer.format, to: target)
+            converterSource = buffer.format
+        }
+        guard let converter else { return }
+        let ratio = target.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 256
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
+        var supplied = false
+        var error: NSError?
+        converter.convert(to: out, error: &error) { _, status in
+            if supplied { status.pointee = .noDataNow; return nil }
+            supplied = true
+            status.pointee = .haveData
+            return buffer
+        }
+        if error == nil, out.frameLength > 0 { continuation.yield(AnalyzerInput(buffer: out)) }
+    }
+
+    /// 停止：把已收到的音频识别完再结束（最后一句也能出定稿）。
+    func finish() async {
+        let (analyzer, continuation): (SpeechAnalyzer?, AsyncStream<AnalyzerInput>.Continuation?) = lock.withLock {
+            stopped = true
+            return (self.analyzer, self.continuation)
+        }
+        continuation?.finish()
+        if let analyzer { try? await analyzer.finalizeAndFinishThroughEndOfInput() }
+        _ = await results?.value
+    }
+
+    /// 一整段（逐段重转用，16 kHz 单声道）：识别完返回文字与平均置信度。
+    static func transcribeOnce(_ samples: [Float], locale: String) async throws -> (text: String, confidence: Float) {
+        let transcriber = SpeechTranscriber(locale: Locale(identifier: locale), transcriptionOptions: [],
+                                            reportingOptions: [], attributeOptions: [.transcriptionConfidence])
+        try await prepare(transcriber, locale: locale)
+        guard let target = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]),
+              let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false),
+              let input = AVAudioPCMBuffer(pcmFormat: source, frameCapacity: AVAudioFrameCount(samples.count)),
+              let channel = input.floatChannelData?[0],
+              let converter = AVAudioConverter(from: source, to: target),
+              let out = AVAudioPCMBuffer(pcmFormat: target,
+                                         frameCapacity: AVAudioFrameCount(Double(samples.count) * target.sampleRate / 16_000) + 256) else {
+            throw NSError(domain: "BWAmbient", code: 3, userInfo: [NSLocalizedDescriptionKey: "音频格式转换失败"])
+        }
+        input.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { channel.update(from: $0.baseAddress!, count: samples.count) }
+        var supplied = false
+        var error: NSError?
+        converter.convert(to: out, error: &error) { _, status in
+            if supplied { status.pointee = .endOfStream; return nil }
+            supplied = true
+            status.pointee = .haveData
+            return input
+        }
+        if let error { throw error }
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let collect = Task { () -> (String, Float) in
+            var text = "", total: Double = 0, count = 0
+            for try await result in transcriber.results where result.isFinal {
+                text += String(result.text.characters)
+                for run in result.text.runs { if let c = run.transcriptionConfidence { total += c; count += 1 } }
+            }
+            return (text, count > 0 ? Float(total / Double(count)) : 0.5)
+        }
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        try await analyzer.start(inputSequence: stream)
+        continuation.yield(AnalyzerInput(buffer: out))
+        continuation.finish()
+        try await analyzer.finalizeAndFinishThroughEndOfInput()
+        let (text, confidence) = try await collect.value
+        return (text.trimmingCharacters(in: .whitespacesAndNewlines), confidence)
     }
 }
