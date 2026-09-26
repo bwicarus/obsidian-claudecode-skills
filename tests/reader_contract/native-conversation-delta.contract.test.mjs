@@ -251,3 +251,22 @@ test('P4b native review answer identity matches the web rc-review copy',()=>{
   assert.match(swift,/answerID \+ ":part:" \+ String\(\$0\.offset\) \+ ":" \+ Self\.hash\("native\\n" \+ \$0\.element\)/);
   for (const label of ['复习整条回答','复习回答段落 ']) { assert.ok(review.includes(label)); assert.ok(swift.includes(label)); }
 });
+
+// P2 遗留：对话流里操作记录卡的撤销/重做 —— 轮次在原生，记录由原生交给网页执行器，结果写回原生轮次。
+test('feed operation cards run the web executor on the native record and write the state back natively',()=>{
+  const view=readFileSync(new URL('../../ios/BWReader/App/ReaderWebView.swift',import.meta.url),'utf8');
+  const turncard=readFileSync(new URL('../../_server_deploy/static/pdf/rc-turncard.js',import.meta.url),'utf8');
+  const store=readFileSync(new URL('../../ios/BWReader/App/ReaderNativeTurnStore.swift',import.meta.url),'utf8');
+  assert.match(view,/if let result = await performNativeOperationCommand\(command\) \{ return result \}/);
+  assert.ok(view.indexOf('performNativeOperationCommand(command)') < view.indexOf('let allowed: Set<String> = ["send"'),
+    'native interception must run before the generic web forward (web turn table has no feed turns)');
+  assert.match(view,/window\.RC\.turnCard\.performOperationItem\(input\)/);
+  assert.match(view,/"action": "operationState", "tid": tid, "parts": \[\["id": partID, "items": \[update\]\]\]/);
+  assert.match(turncard,/performOperationItem: performOperationItem/);
+  // 网页执行器只执行、不按网页轮次表找记录。
+  const from=turncard.indexOf('async function performOperationItem('), to=turncard.indexOf('function markOp(',from);
+  assert.ok(from>0 && to>from);
+  assert.equal(turncard.slice(from,to).includes('_lookup('),false);
+  // 原生写回的字段必须是 TurnStore operationState 认的那几个。
+  for (const key of ['"index"','"undone"','"gone"','"id"','"note"']) assert.ok(store.includes('value['+key+']'),key);
+});

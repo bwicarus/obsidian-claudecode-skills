@@ -40,7 +40,7 @@
 - 消息身份 `m:<role>:<turn_id>`：实时与落库同一个 id，过渡不闪不重。
 - 网页：`window.__bwNativeConversationFeed = true`（documentStart 注入）→ 普通模式的 `onHistoryEvent`/`loadHistory` 让位。
 - 退回路径（语音核心不在 → 网页 `send`）：用户话（P2a 原生占位）与原生回复（replyRef 轮次）也进对话流。
-- **未迁**：复习会话仍走网页；hlcard「撤销/重做」仍靠网页 turnCard（对话流里的历史轮网页不认识 → 需原生化）；
+- **未迁**：~~复习会话仍走网页~~（P4b 已迁）；~~hlcard「撤销/重做」仍靠网页 turnCard~~ → 2026-09-26 补：原生取 TurnStore 记录交网页执行器 `performOperationItem`，结果以 `operationState` 写回原生轮次并落库；
   视频/旧撤销卡/EPUB 动作卡（历史里出现会记日志）；~~App 端工具「长条」即时反馈不再显示~~ → P3 修复。
 
 ### 原 P2 打字发送与流式（网页 send，仅退回路径用）
@@ -133,6 +133,11 @@
   **仍缺**：EPUB（后台原生没有 EPUB 正文）；便签 / 搜索 / 学习卡等查询；后台截图。
 - **3c 前台也由原生持有**：网页快照链接删除；输出执行器（卡片/高亮/草稿）仍在网页时，由原生转交。
 - **3d 录音/播放/会话状态收拢到原生**，`rc-computer-voice.js` 在 App 里只剩兼容入口。
+
+## 4. 摆放逻辑（2026-09-26 查实）
+- **PDF 已是原生**：侧栏卡片拖到页上 → 原生按 PDFKit 解出页内落点 → `ReaderNativeFavoritePlacement` 生成卡片 HTML →
+  `ReaderNativeBookStore` 的 `note-create` 直接写本机便签库 → 通知网页刷新；原生正文接管时页卡也由原生按便签数据绘制。
+- **EPUB 仍走网页** `rc-stickynote.placeCardAt / placeHtmlAt`：EPUB 的排版位置只有网页渲染层知道，随 EPUB 原生渲染一起搬。
 
 ## 规则
 - 每步都要**出声**：未迁移的分支 dlog/postClientLog，不静默丢。

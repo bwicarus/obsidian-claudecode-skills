@@ -1379,6 +1379,44 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         } catch { nativeConversation.report("注解卡读取失败：" + error.localizedDescription) }
     }
 
+    /// P2 遗留（2026-09-26 补）：对话流里操作记录卡（hlcard）的撤销 / 重做 / 跳转。
+    /// 轮次在原生 TurnStore，网页 performOperation 按网页轮次表找记录 → 落空（「操作记录已变化」）。
+    /// 现在：原生取记录并核对 → 网页执行器 performOperationItem 只执行 → 结果以 operationState
+    /// 写回原生轮次、对话流重出、按原路落库。
+    private func performNativeOperationCommand(_ command: [String:Any]) async -> [String:Any]? {
+        guard command["action"] as? String == "operationAction", let value = command["value"] as? [String:Any],
+              let tid = value["tid"] as? String, let partID = value["partID"] as? String,
+              let index = (value["index"] as? NSNumber)?.intValue, let action = value["action"] as? String,
+              let turns = nativeTurns else { return nil }
+        func idString(_ raw: Any?) -> String { (raw as? String) ?? (raw as? NSNumber)?.stringValue ?? "" }
+        guard let part = turns.operationPart(tid: tid, partID: partID), let items = part["items"] as? [[String:Any]],
+              items.indices.contains(index), items[index]["gone"] as? Bool != true,
+              idString(items[index]["id"]) == idString(value["expectedID"]),
+              (items[index]["undone"] as? Bool == true) == (value["expectedUndone"] as? Bool == true) else {
+            return ["ok": false, "error": "操作记录已变化，请重新选择"]
+        }
+        guard isTrustedReaderURL(webView.url), !isLoading else { return ["ok": false, "error": "阅读页尚未准备好，请稍后重试"] }
+        do {
+            let raw = try await webView.callAsyncJavaScript(
+                "if (!window.RC?.turnCard?.performOperationItem) throw new Error('操作记录执行器尚未就绪'); return await window.RC.turnCard.performOperationItem(input);",
+                arguments: ["input": ["file": part["file"] as? String ?? "", "item": items[index], "action": action]], in: nil, contentWorld: .page)
+            guard let result = raw as? [String:Any], result["ok"] as? Bool == true else { return ["ok": false, "error": "操作未完成，请重试"] }
+            guard action == "toggle" else { return ["ok": true] }
+            var update: [String:Any] = ["index": index, "gone": result["gone"] as? Bool == true,
+                                        "undone": result["undone"] as? Bool ?? (items[index]["undone"] as? Bool == true)]
+            if let id = result["id"] as? String { update["id"] = id } else if let id = result["id"] as? NSNumber { update["id"] = id }
+            if let note = result["note"] as? [String:Any] { update["note"] = note }
+            try turns.applyNative([["action": "operationState", "tid": tid, "parts": [["id": partID, "items": [update]]]]])
+            nativeFeed.emit()
+            let file = currentLocalBook.map { "localbook:" + $0.id } ?? (part["file"] as? String ?? "")
+            turns.persistNative(tid: tid, mode: nativeFeed.mode, file: file, page: nativePDFDocument?.position.page ?? 0)
+            return ["ok": true]
+        } catch {
+            postClientLog("[操作记录] 执行失败：" + error.localizedDescription)
+            return ["ok": false, "error": error.localizedDescription]
+        }
+    }
+
     private func performNativeHTMLNoteCommand(_ command: [String:Any]) async -> [String:Any]? {
         guard let token = command["actionId"] as? String, token.hasPrefix("native-note-") else { return nil }
         do {
@@ -4483,6 +4521,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         if let result = await performNativeLookupCommand(command) { return result }
         if let result = await performNativeCardCommand(command) { return result }
         if let result = await performNativeHTMLNoteCommand(command) { return result }
+        if let result = await performNativeOperationCommand(command) { return result }
         let allowed: Set<String> = ["send", "stop", "openModels", "openSettings", "openReview",
             // "showLegacy" 已删除：旧网页界面不再是一个可以被请求的目的地。
             // "openArtifact" / "action" 一并删除：它们唯一的实现是把旧网页界面

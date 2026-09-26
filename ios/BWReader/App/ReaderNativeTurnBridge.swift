@@ -47,6 +47,17 @@ final class ReaderNativeTurnBridge: NSObject, WKScriptMessageHandlerWithReply {
     }
     func feedMessage(tid: String, id: String) -> [String:Any]? { store.feedMessage(tid:tid,id:id) }
     var onNativeReply: ((String) -> Void)?
+    /// 对话流里操作记录卡的原件（撤销/重做由原生取记录，见 ReaderWebView.performNativeOperationCommand）。
+    func operationPart(tid: String, partID: String) -> [String:Any]? {
+        store.turns[tid]?.parts.first { $0["kind"] as? String == "hlcard" && $0["_nativeID"] as? String == partID }
+    }
+    /// 原生改过的轮次（如操作记录状态）按网页 persist 同一条路落库。
+    func persistNative(tid: String, mode: String, file: String, page: Int) {
+        guard let webView, let current = document(webView.url) else { return }
+        persist(["action":"persist","tid":tid,"metadata":["mode":mode,"file":file,"page":page]], document: current) { [weak self] _, error in
+            if let error { self?.onFailure?(error) }
+        }
+    }
     /// 网页那条序号协议一批提交后：(有变化的非回放轮次, 被移除的轮次)。
     var onWebApplied: (([String], [String]) -> Void)?
 

@@ -446,6 +446,27 @@
       return {ok:true};
     } finally { nativeOperationBusy.delete(key); }
   }
+  // 对话流里的轮次在原生 TurnStore（迁出 P2 起网页不再回放历史），performOperation 按网页轮次表
+  // 找记录就会落空（「操作记录已变化」）。这个入口只做执行：记录由原生从 TurnStore 交来（副本），
+  // 执行后的状态回传，原生写回轮次并落库。
+  async function performOperationItem(input) {
+    var item = input && input.item && typeof input.item === 'object' && !Array.isArray(input.item)
+      ? JSON.parse(JSON.stringify(input.item)) : null;
+    if (!item) throw new Error('操作记录无效');
+    if (input.action === 'jump') {
+      var page = _opPage(item).pdf;
+      if (!page || typeof window.jumpWithBack !== 'function') throw new Error('这条记录没有可跳转的位置');
+      await window.jumpWithBack(page); return {ok:true};
+    }
+    if (input.action !== 'toggle') throw new Error('操作记录指令无效');
+    var result = await _opToggle(String(input.file || ''), item);
+    if (result === 'gone') { try { if (window._reloadHighlights) window._reloadHighlights(); } catch (e) {} _opsChanged(); return {ok:true, gone:true}; }
+    if (!result) throw new Error('操作未成功，已保留记录');
+    try { if (!item.op && window._reloadHighlights) window._reloadHighlights(); } catch (e) {}
+    _opsChanged();
+    return {ok:true, gone:false, undone:!!item.undone, id:item.id == null ? null : item.id,
+      note:item.note && typeof item.note === 'object' ? item.note : null};
+  }
   function markOp(pred, undone) {   // 别处(如卡片操作的小提示条)改了状态 → 同步条目并重画
     var hit = false;
     opItems(0).forEach(function (e) {
@@ -1230,7 +1251,7 @@
     trackCli: trackCli,
     has: function (tid) { return !!_lookup(tid); },
     // 操作条(高亮/卡片改删/便签/自建页)的统一出口:顶部「操作」tab 用
-    opItems: opItems, opAction: opAction, markOp: markOp, performOperation: performOperation,
+    opItems: opItems, opAction: opAction, markOp: markOp, performOperation: performOperation, performOperationItem: performOperationItem,
     rename: rename, openFlow: openFlow, flowOpen: flowOpen, tidByTurnId: tidByTurnId,
     onOpsChange: function (fn) { if (typeof fn === 'function') _opsListeners.push(fn); },
     opsChanged: _opsChanged,
