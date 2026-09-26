@@ -192,7 +192,6 @@ struct ReaderNativeConversationArtifacts: View {
     }
 }
 
-@MainActor
 /// 原网页卡片的视觉（rc-voicecall `.vc-card` / `.vc-if-*`、rc-flashcard `.fc-card`），数值逐项照搬。
 /// 2026-09-26 用户：「颜色、质感、字号和整体排版不如原网页设计 —— 先复现原设计，玻璃适度」。
 /// 原版无论深浅色都是深色卡：卡内一律按深色方案取色，次要文字自然落到原版的暗灰。
@@ -214,6 +213,7 @@ enum ReaderNativeCardStyle {
     static let flashBorder = Color(red: 125/255, green: 211/255, blue: 252/255).opacity(0.16)
 }
 
+@MainActor
 private struct ReaderNativeConversationArtifactCard: View {
     let part: ReaderNativeConversationPart
     @ObservedObject var model: ReaderNativeConversationModel

@@ -96,6 +96,9 @@ struct ReaderNativeWorkspace<Document: View>: View {
                             .dropDestination(for: ReaderNativeCardTransfer.self) { values, location in
                                 // ⚠ 这里以前一律 `return false` 就完事：拖过去、卡飞回侧栏、
                                 //   一个字都没有。放不下也要说是为什么。
+                                // 放下即收起虚线框：isTargeted 在成功放下后不一定回 false，
+                                // 框会一直挂在正文上（2026-09-26 用户：「拖动后屏幕区域出现了虚线勾边」）。
+                                dropTarget = false
                                 reader.postClientLog("[card-drop] received n=\(values.count)")
                                 guard let payload = values.first, page.size.width > 0, page.size.height > 0 else {
                                     reader.showTransientNotice("没能读出这张卡，请重试。")

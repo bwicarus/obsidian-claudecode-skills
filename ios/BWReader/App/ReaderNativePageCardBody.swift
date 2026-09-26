@@ -102,6 +102,46 @@ private struct ReaderNativePageCardFact: View {
     }
 }
 
+/// 天气（原版 .vc-if-w）：温度 26px 半粗 → 天况 14px → 地点日期 12px → 细线 + 提示 12px。与侧栏同一套数值。
+private struct ReaderNativePageCardWeather: View {
+    let temperature: String, condition: String, place: String, tip: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if !temperature.isEmpty {
+                Text(temperature).font(.system(size: 26, weight: .semibold)).kerning(-0.5).monospacedDigit()
+            }
+            if !condition.isEmpty { Text(condition).font(.system(size: 14)) }
+            if !place.isEmpty { Text(place).font(.system(size: 12)).foregroundStyle(ReaderNativeCardStyle.muted) }
+            if !tip.isEmpty {
+                Rectangle().fill(ReaderNativeCardStyle.hairline).frame(height: 0.5).padding(.top, 6)
+                Text(tip).font(.system(size: 12)).foregroundStyle(ReaderNativeCardStyle.tip).padding(.top, 4)
+            }
+        }
+        .foregroundStyle(ReaderNativeCardStyle.text)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 新闻（原版 .vc-if-n）：标题 13px 半粗 #e8eefb、摘要 12px #9fb0cf、条目间细线。
+private struct ReaderNativePageCardNews: View {
+    let items: [(title: String, summary: String, source: String)]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                if index > 0 { Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5) }
+                VStack(alignment: .leading, spacing: 1) {
+                    if !item.title.isEmpty { Text(item.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(ReaderNativeCardStyle.newsTitle) }
+                    if !item.summary.isEmpty { Text(item.summary).font(.system(size: 12)).foregroundStyle(ReaderNativeCardStyle.newsSummary) }
+                    if !item.source.isEmpty { Text(item.source).font(.system(size: 11)).foregroundStyle(ReaderNativeCardStyle.newsSummary.opacity(0.65)) }
+                }
+            }
+        }
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// 原版渲染器产出的卡片 HTML → 按 class 分派成原生块。
 @MainActor
 struct ReaderNativeCardHTML: View {
@@ -127,6 +167,10 @@ struct ReaderNativeCardHTML: View {
                     ReaderNativeRichDocument(content: html, format: "html", onSelection: onSelection,
                                              inlineImages:images,imageModel:imageModel,
                                              font: .preferredFont(forTextStyle: .body), color: ReaderNativeCardInk.text)
+                case .weather(let temperature, let condition, let place, let tip):
+                    ReaderNativePageCardWeather(temperature: temperature, condition: condition, place: place, tip: tip)
+                case .news(let items):
+                    ReaderNativePageCardNews(items: items)
                 case .dictionary(let entry):
                     ReaderNativeCardDictionary(entry: entry)
                 case .video(let video):
@@ -149,6 +193,11 @@ struct ReaderNativeCardDictionaryEntry {
 }
 
 private enum ReaderNativeCardHTMLBlock {
+    /// 原版 .vc-if-w / .vc-if-n：按字段取出，交给与侧栏同一套数值的原生视图画。
+    /// ⚠ 不能走通用富文本：UITextView 排「26px 一行 + 几行小字」时中间空出一大截、
+    ///   后两行被挤出可见区（2026-09-26 用户截图：天气卡拖到页上排版就变了）。
+    case weather(temperature: String, condition: String, place: String, tip: String)
+    case news([(title: String, summary: String, source: String)])
     case fact(answer: String, detail: String)
     case general(String)
     case rich(String)
@@ -194,6 +243,20 @@ private enum ReaderNativeCardHTMLParser {
                 }
             } else if element.hasClass("vc-dict-sec") || element.hasClass("rc-note-dict") {
                 flush(); result.append(.dictionary(dictionary(element)))
+            } else if element.hasClass("vc-if-w") {
+                flush()
+                func field(_ name: String) -> String { text(try? element.select("." + name).first()) }
+                result.append(.weather(temperature: field("vc-if-wt"), condition: field("vc-if-wc"),
+                                       place: field("vc-if-ws"), tip: field("vc-if-tip")))
+            } else if element.hasClass("vc-if-n") {
+                flush()
+                let items = ((try? element.select(".vc-if-ni").array()) ?? []).map { item -> (title: String, summary: String, source: String) in
+                    let source = text(try? item.select(".vc-if-src").first())
+                    var summary = text(try? item.select(".vc-if-ns").first())
+                    if !source.isEmpty, summary.hasSuffix(source) { summary = String(summary.dropLast(source.count)).trimmingCharacters(in: .whitespaces) }
+                    return (text(try? item.select(".vc-if-nt").first()), summary, source.replacingOccurrences(of: "— ", with: ""))
+                }
+                result.append(.news(items))
             } else if element.hasClass("vc-if-f") {
                 flush()
                 let answer = (try? element.select(".vc-if-fa").first()?.html()) ?? nil
