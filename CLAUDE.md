@@ -4,7 +4,7 @@
 
 ### 🍎 2026-09-25 起：服务器与开发都在 Mac mini（先读这段，覆盖下面所有「Windows 是服务器」的说法）
 
-**详细见 [`references/mac-server.md`](references/mac-server.md)。** 要点：
+**详细见 [`references/mac-server.md`](references/mac-server.md)。** 👉 **最新交接（进度 / 没验证的 / 问题 / 待办）：[`references/handoff-20260926.md`](references/handoff-20260926.md)** —— 新会话先读它。要点：
 
 - **服务器 = Mac mini**（M6 / macOS 27，用户 `xuehaoyan`）。Tailscale 名 `bwicarus-2.taile44d0c.ts.net`
   现在指向 Mac —— 靠设备改名实现，App 一行没改。**Windows 改名 `windows-pc`，服务器进程全停**，
