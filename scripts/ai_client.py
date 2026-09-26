@@ -185,6 +185,9 @@ _AUTH_ERROR_LINE = re.compile(
     r"invalid authentication credentials\.?|"
     r"could not refresh (?:the )?oauth session\.?|"
     r"please run /login\.?|"
+    # 2026-09-27 Mac 实测 CLI 原文「Not logged in · Please run /login」—— 整行不是单独的 please run /login，漏判后
+    # 报错被当成答复返回（旁听精翻 / 人物整理拿到的都是这句），auto-claude 也就不改走 Codex
+    r"not logged in(?:\s*[·•:\-–—]\s*please run /login)?\.?|"
     r"please log in to continue\.?|"
     r"login required:\s*(?:please )?(?:run /login|log in to continue)\.?"
     r")"

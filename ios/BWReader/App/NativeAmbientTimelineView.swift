@@ -1,4 +1,6 @@
+import NaturalLanguage
 import SwiftUI
+import Translation
 
 // 对话时间轴与人物（2026-09-26 用户：「系统地查看多人说话时的声音区分，时间轴 + 不同的块表示不同的发音者，
 // 随时点块查看登记的资料（姓名 / 自定义介绍 / AI 整理 / 对话历史），都能直接编辑；
@@ -104,6 +106,89 @@ final class NativeAmbientTimelineModel: ObservableObject {
     @Published var oldestEdge: Double?
     /// 「现在」：自动刷新时更新，范围随之往前走。
     @Published var now = Date()
+
+    // 批量翻译（2026-09-27 用户：「加一个翻译按钮批量翻译，结果放在原句下面，默认用 Apple 的翻译」）
+    @Published var translateOn = false
+    @Published var translations: [String: String] = [:]   // 块全文 → 中文译文
+    @Published var translationVersion = 0                 // 变了 = 有新的待翻（翻译器据此开下一组）
+    @Published var translationNote: String?
+    @Published var refined: [String: String] = [:]      // 块全文 → AI 精翻译文（优先于 Apple 机翻）
+    @Published var refining = false
+    private var translationInFlight: Set<String> = []
+    private var translationFailed: Set<String> = []
+
+    /// 下一组待翻的块（同一种原文语言一组，最多 60 句）；中文的不翻。
+    func nextTranslationGroup() -> (language: String?, texts: [String])? {
+        guard translateOn else { return nil }
+        var byLanguage: [String: [String]] = [:], order: [String] = []
+        for block in groups.flatMap(\.blocks) {
+            let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty, translations[text] == nil, !translationInFlight.contains(text), !translationFailed.contains(text) else { continue }
+            let detected = NLLanguageRecognizer.dominantLanguage(for: text)
+            if detected == .simplifiedChinese || detected == .traditionalChinese { continue }
+            let key = detected?.rawValue ?? ""
+            if byLanguage[key] == nil { order.append(key) }
+            byLanguage[key, default: []].append(text)
+        }
+        guard let key = order.first, let texts = byLanguage[key]?.prefix(60) else { return nil }
+        translationInFlight.formUnion(texts)
+        return (key.isEmpty ? nil : key, Array(texts))
+    }
+
+    func finishTranslation(_ texts: [String], results: [String: String], error: String?) {
+        translationInFlight.subtract(texts)
+        for (key, value) in results { translations[key] = value }
+        let missing = texts.filter { results[$0] == nil }
+        if let error {
+            translationFailed.formUnion(missing)
+            translationNote = "翻译失败：" + error
+            NativeAmbientLog.note("时间轴：翻译失败（\(missing.count) 句）\(error)", level: "error")
+        }
+        translationVersion += 1   // 接着翻下一组
+    }
+
+    /// 精翻（2026-09-27 用户）：只翻滑条选中范围内的对话 —— 按时间先后整理成「说话人：原文」一次交给 AI，
+    /// 结合上下文（含出场人物的介绍）整体翻译、按顺序逐条给回。一次最多 200 块（取最新的）。
+    func refineVisible() async {
+        let blocks = Array(groups.reversed().flatMap { $0.blocks.reversed() }.suffix(200))
+        guard !blocks.isEmpty, !refining else { return }
+        refining = true
+        translateOn = true
+        translationNote = "AI 精翻中…（\(blocks.count) 块，要十几秒到一两分钟）"
+        defer { refining = false }
+        let lines: [[String: Any]] = blocks.map {
+            ["speaker": $0.first.displayName, "text": $0.text, "personId": $0.first.personId ?? ""]
+        }
+        do {
+            let reply = try await NativeAmbientServer.post("api/ambient/translate", body: ["lines": lines], timeout: 300)
+            let out = reply["translations"] as? [String] ?? []
+            var count = 0
+            for (block, text) in zip(blocks, out) where !text.isEmpty {
+                refined[block.text.trimmingCharacters(in: .whitespacesAndNewlines)] = text
+                count += 1
+            }
+            translationNote = "AI 精翻完成：\(count) / \(blocks.count) 块"
+            NativeAmbientLog.note("时间轴：精翻 \(count)/\(blocks.count) 块")
+        } catch {
+            translationNote = "精翻失败：\(error.localizedDescription)"
+            NativeAmbientLog.note("时间轴：精翻失败 \(error.localizedDescription)", level: "error")
+        }
+    }
+
+    /// 这一块显示的译文：精翻优先，其次 Apple 机翻；与原文相同（本来就是中文）不显示。
+    func translation(for block: Block) -> String? {
+        guard translateOn else { return nil }
+        let key = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = refined[key] ?? translations[key], value != key else { return nil }
+        return value
+    }
+
+    func toggleTranslation() {
+        translateOn.toggle()
+        translationNote = nil
+        translationFailed = []
+        translationVersion += 1
+    }
     @Published private(set) var utterances: [NativeAmbientUtterance] = []
     @Published private(set) var people: [NativeAmbientPersonInfo] = []
     @Published private(set) var loading = false
@@ -130,6 +215,7 @@ final class NativeAmbientTimelineModel: ObservableObject {
         do {
             let timeline = try await NativeAmbientServer.get("api/ambient/timeline?from=\(Int(from))&to=\(Int(to))")
             utterances = (timeline["utterances"] as? [[String: Any]] ?? []).compactMap(NativeAmbientUtterance.init)
+            if translateOn { translationVersion += 1 }   // 自动刷新进来的新句子也翻
             let list = try await NativeAmbientServer.get("api/ambient/people")
             people = (list["people"] as? [[String: Any]] ?? []).compactMap(NativeAmbientPersonInfo.init)
             error = nil
@@ -291,6 +377,7 @@ struct NativeAmbientTimelineView: View {
             List {
                 controls
                 if let error = model.error { Section { Text(error).foregroundStyle(.red) } }
+                if let note = model.translationNote { Section { Text(note).font(.caption).foregroundStyle(.secondary) } }
                 timeline
                 peopleSection
             }
@@ -301,6 +388,19 @@ struct NativeAmbientTimelineView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("刷新", systemImage: "arrow.clockwise") { Task { await model.reload() } }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("精翻", systemImage: "sparkles") { Task { await model.refineVisible() } }
+                        .disabled(model.refining || model.groups.isEmpty)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(model.translateOn ? "隐藏译文" : "翻译", systemImage: "translate") {
+                        if #available(iOS 18.0, *) { model.toggleTranslation() }
+                        else { model.translationNote = "批量翻译需要 iOS 18 以上" }
+                    }
+                }
+            }
+            .background {
+                if #available(iOS 18.0, *) { NativeAmbientTranslator(model: model) }
             }
             .task { await model.reload() }
             .onChange(of: model.range) { _, _ in model.newestEdge = nil; model.oldestEdge = nil; Task { await model.reload() } }
@@ -346,7 +446,8 @@ struct NativeAmbientTimelineView: View {
                 NativeAmbientRangeSlider(newer: $model.newerFraction, older: $model.olderFraction, from: from, to: to)
             }
         } footer: {
-            Text("左边是现在，往右越早。拖两端的圆点调显示范围；左端拉到最左就一直跟着现在。每 10 秒自动刷新。下面新的在上，一个人连着说的合成一块；点一块查看、定人或删除。")
+            Text("「精翻」只翻滑条选中的范围（最多 200 块），交给 AI 结合上下文与人物介绍整体翻译；「翻译」用 Apple 本机翻译。"
+                 + "左边是现在，往右越早。拖两端的圆点调显示范围；左端拉到最左就一直跟着现在。每 10 秒自动刷新。下面新的在上，一个人连着说的合成一块；点一块查看、定人或删除。")
         }
     }
 
@@ -368,7 +469,7 @@ struct NativeAmbientTimelineView: View {
                         ForEach(NativeAmbientTimelineModel.ticks(from: block.t1, to: newer).reversed(), id: \.self) { tick in
                             NativeAmbientTickRow(time: tick)
                         }
-                        NativeAmbientTimelineRow(block: block)
+                        NativeAmbientTimelineRow(block: block, translation: model.translation(for: block))
                             .contentShape(Rectangle())
                             .onTapGesture { selected = block.first }
                     }
@@ -414,6 +515,7 @@ struct NativeAmbientTimelineView: View {
 /// 时间轴的一块：一个人连着说的几句 —— 起止时间 · 说话人 · 全文（长句换行显示完整）。
 struct NativeAmbientTimelineRow: View {
     let block: NativeAmbientTimelineModel.Block
+    var translation: String?
 
     var body: some View {
         let first = block.first
@@ -430,9 +532,8 @@ struct NativeAmbientTimelineRow: View {
                 .frame(width: 70, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 Text(block.text).font(.callout).fixedSize(horizontal: false, vertical: true)
-                if !first.lang.isEmpty && first.lang != "zh-CN" {
-                    Text(NativeSegmentTranscriber.displayName(first.lang) + (first.langConfirmed ? "" : "（推测）"))
-                        .font(.caption2).foregroundStyle(.secondary)
+                if let translation, !translation.isEmpty {
+                    Text(translation).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -515,6 +616,52 @@ struct NativeAmbientRangeSlider: View {
             .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
             .overlay(Circle().stroke(Color.accentColor, lineWidth: 1.5))
             .allowsHitTesting(false)
+    }
+}
+
+/// Apple 翻译（Translation 框架，本机翻译）：按原文语言分组，一组一批翻成简体中文。
+/// 语言包没装时系统会弹窗让用户下载。
+@available(iOS 18.0, *)
+struct NativeAmbientTranslator: View {
+    @ObservedObject var model: NativeAmbientTimelineModel
+    @State private var config: TranslationSession.Configuration?
+    @State private var group: [String] = []
+    @State private var busy = false
+
+    var body: some View {
+        Color.clear
+            .onChange(of: model.translationVersion) { _, _ in startNext() }
+            .translationTask(config) { session in
+                let texts = group
+                var results: [String: String] = [:]
+                var failure: String?
+                do {
+                    let requests = texts.map { TranslationSession.Request(sourceText: $0, clientIdentifier: $0) }
+                    for try await response in session.translate(batch: requests) {
+                        if let key = response.clientIdentifier { results[key] = response.targetText }
+                    }
+                } catch {
+                    failure = error.localizedDescription
+                }
+                await MainActor.run {
+                    busy = false
+                    model.finishTranslation(texts, results: results, error: failure)
+                }
+            }
+    }
+
+    private func startNext() {
+        guard !busy, let next = model.nextTranslationGroup() else { return }
+        busy = true
+        group = next.texts
+        let source = next.language.map { Locale.Language(identifier: $0) }
+        let target = Locale.Language(identifier: "zh-Hans")
+        if var current = config, current.source == source, current.target == target {
+            current.invalidate()     // 同一对语言：让 translationTask 再跑一次
+            config = current
+        } else {
+            config = TranslationSession.Configuration(source: source, target: target)
+        }
     }
 }
 

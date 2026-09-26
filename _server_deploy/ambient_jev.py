@@ -21,6 +21,7 @@ jev 调用在独立模块 ``jev_judge.py``：不依赖语音进程，任何时�
 from __future__ import annotations
 
 import json
+import re
 import os
 import sys
 import threading
@@ -644,6 +645,61 @@ def revise():
         log_event("revised", slotKey=body.get("slotKey"), replaced=count, lang=body.get("lang"))
         return {"replaced": count}
     return _people_reply(go)
+
+
+def refine_translation(lines: list[dict]) -> list[str]:
+    """精翻（2026-09-27 用户）：整段对话连同说话人一起交给 AI，结合上下文翻成简体中文，按顺序逐行给回。
+    输入每项 {speaker, text, personId?}；说话人数量不限。定了人且写过介绍 / 有 AI 整理的，附在提示里当背景。
+    返回与输入等长的译文列表（没对上的行为空串，不错位）。"""
+    items = [l for l in lines if isinstance(l, dict) and str(l.get("text") or "").strip()]
+    rows = [(str(l.get("speaker") or "?").strip()[:40], str(l.get("text") or "").strip()[:1500]) for l in items]
+    if not rows:
+        raise PeopleError("empty", "没有要翻译的句子")
+    if len(rows) > 200 or sum(len(t) for _, t in rows) > 16000:
+        raise PeopleError("too_long", "一次最多 200 句 / 16000 字，把显示范围缩小一些再试")
+    numbered = "\n".join(f"{i + 1}. {speaker}：{text}" for i, (speaker, text) in enumerate(rows))
+    # 出场人物的介绍（人物页里用户写的 + AI 整理），帮 AI 理解称呼、关系、话题
+    profiles = []
+    store = people()
+    for pid in dict.fromkeys(str(l.get("personId") or "") for l in items):
+        if not pid or pid == "me":
+            continue
+        try:
+            info = store.person(pid)
+        except Exception:  # noqa: BLE001 — 人被删 / 合并了就不带介绍
+            continue
+        about = " ".join(x.strip() for x in (info.get("intro") or "", (info.get("profile") or "")[:400]) if x.strip())
+        if about:
+            profiles.append(f"- {info['name']}：{about[:600]}")
+    background = ("出场人物（供理解上下文，不用翻译）：\n" + "\n".join(profiles) + "\n\n") if profiles else ""
+    prompt = ("下面是按时间顺序的多人对话（自动语音转写，可能有识别错误），每行是「序号. 说话人：原文」。\n"
+              "请结合上下文把每一行翻译成自然的简体中文；识别错误按上下文合理还原。\n"
+              f"严格输出 {len(rows)} 行，与输入一一对应、顺序相同，每行格式「序号. 译文」，译文里不要带说话人；"
+              "原文已经是中文的行照抄；不要输出任何别的内容。\n\n" + background + numbered)
+    answer = _ai(prompt) or ""
+    out = [""] * len(rows)
+    for raw in answer.splitlines():
+        m = re.match(r"\s*(\d+)\s*[.、)）:：]\s*(.*)$", raw)
+        if not m:
+            continue
+        index = int(m.group(1)) - 1
+        if 0 <= index < len(out) and not out[index]:
+            text = m.group(2).strip()
+            speaker = rows[index][0]
+            if speaker and text.startswith(speaker + "："):
+                text = text[len(speaker) + 1:].strip()
+            out[index] = text
+    got = sum(1 for t in out if t)
+    log_event("refined", lines=len(rows), translated=got)
+    if not got:
+        raise PeopleError("empty_translation", "AI 没有按格式返回译文")
+    return out
+
+
+@bp.post("/translate")
+def translate():
+    body = request.get_json(silent=True) or {}
+    return _people_reply(lambda: {"translations": refine_translation(body.get("lines") or [])})
 
 
 @bp.get("/timeline")

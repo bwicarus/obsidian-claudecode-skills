@@ -322,6 +322,24 @@ class AmbientPeopleTests(AmbientJevTests):
         names = [p["name"] for p in self.client.get("/api/ambient/people").get_json()["people"]]
         self.assertIn("小王", names)   # 又定回来就重新出现
 
+    def test_refine_translation_keeps_order_and_alignment(self):
+        self.login()
+        import ambient_jev
+        ambient_jev._ai = lambda prompt: (self.ai_prompts.append(prompt) or "1. 你好\n3. 田中：明天见\n无关的一行")
+        reply = self.client.post("/api/ambient/translate", json={"lines": [
+            {"speaker": "田中", "text": "Hello"}, {"speaker": "我", "text": "嗯"}, {"speaker": "田中", "text": "See you tomorrow"}]}).get_json()
+        self.assertEqual(reply["translations"], ["你好", "", "明天见"])   # 缺的行留空，不错位；译文去掉说话人
+        self.assertIn("2. 我：嗯", self.ai_prompts[-1])
+
+    def test_refine_translation_includes_person_intro(self):
+        self.login()
+        import ambient_jev
+        pid = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "田中"}).get_json()["person"]["id"]
+        self.client.patch(f"/api/ambient/people/{pid}", json={"intro": "大学同学，在东京做设计"})
+        ambient_jev._ai = lambda prompt: (self.ai_prompts.append(prompt) or "1. 你好")
+        self.client.post("/api/ambient/translate", json={"lines": [{"speaker": "田中", "text": "Hi", "personId": pid}]})
+        self.assertIn("田中：大学同学，在东京做设计", self.ai_prompts[-1])
+
     def test_delete_person_with_all_utterances_and_unnamed_block(self):
         self.login()
         self.judge(self.window("w1"))

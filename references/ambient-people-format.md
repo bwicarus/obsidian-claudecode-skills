@@ -61,6 +61,7 @@ iPad 页面：设置 →「旁听与降噪」→「对话时间轴与人物」�
 | GET | `/people` | 人物列表（首位是「我」） |
 | GET | `/people/<id>` | 资料 + 对话历史（按窗口，含同窗口里所有人的话，新的在前；按窗口里最后一句排序，重转补记的句子按分钟各自成段） |
 | PATCH | `/people/<id>` | 改 `name` / `intro` / `profile`（改成已有名字 = 合并） |
+| POST | `/translate` | 精翻：`{lines:[{speaker,text,personId?}]}` → `{translations:[…]}`（与输入等长、按序号对齐，缺的留空）；出场人物的介绍 / AI 整理附在提示里；走 `ai_client`（Claude 登录失效自动改走 Codex） |
 | POST | `/slots/delete` | `{slotKey}` 删掉一个声音块（未定人的「说话人N」）的全部句子 |
 | DELETE | `/people/<id>` | `?purge=1` 连同他在时间轴上的全部句子一起删；否则只从旁听里删掉：声纹删、名下声音块退回未定人、列表隐藏（`speakers.json` 的 `hidden`）；KJ 页与记录保留（只增账本）；再被定回来就重新出现。不能删「我」 |
 | POST | `/people/<id>/merge` | `{into}` 显式合并 |
