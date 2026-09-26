@@ -241,6 +241,7 @@ final class NativeAmbientListener: ObservableObject {
             lastJudgment = summary + (actions.isEmpty ? "" : " → " + actions.joined(separator: ","))
             NativeAmbientLog.note("旁听判断 \(window.id)（\(window.utteranceCount) 句 \(window.speakerCount) 人）：\(lastJudgment)")
             perform(actions, window: window)
+            if let names = reply["names"] as? [String: Any], !names.isEmpty { pipeline?.applyServerNames(names) }
             await flushOutbox()
         } catch {
             NativeAmbientLog.note("旁听判断失败 \(window.id)：\(error.localizedDescription)（本段留在本机待重发）", level: "error")
@@ -356,6 +357,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         let heardAt: Date
         let slot: Int
         let session: Int
+        let slotKey: String
     }
 
     struct Utterance {
@@ -375,6 +377,8 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         let speakerCount: Int
         let locale: String
         let source: String
+        /// 每个声音块：{slotKey, personId?, vector?}（服务器据此记时间轴、给块归人、补声纹库）
+        var speakers: [[String: Any]] = []
 
         var utteranceCount: Int { utterances.count }
         var lastLine: String {
@@ -384,7 +388,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         var payload: [String: Any] {
             ["windowId": id, "startedAt": Int(startedAt.timeIntervalSince1970 * 1000),
              "endedAt": Int(endedAt.timeIntervalSince1970 * 1000), "speakerCount": speakerCount,
-             "locale": locale, "source": source, "utterances": utterances]
+             "locale": locale, "source": source, "utterances": utterances, "speakers": speakers]
         }
     }
 
@@ -435,7 +439,10 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private var heard: [HeardSpeaker] = []
     // 声纹比对（熟人不占分离器槽位）：槽位 → 名字，按分离器会话隔离
     private var diarizerSession = 0
+    private var sessionID = ""                  // 声音块编号 slotKey = "<sessionID>:<槽位>"，服务器按它记时间轴
     private var slotNames: [Int: String] = [:]
+    private var slotPersonIds: [Int: String] = [:]
+    private var slotVectors: [Int: [Float]] = [:]
     private var slotCheckedSpeech: [Int: Double] = [:]  // 上次比对时该槽位的定稿说话秒数
     private var slotChecks: [Int: Int] = [:]
     private var identifying = false
@@ -650,7 +657,10 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                         self.diarizer = diarizer
                         self.diarizerOrigin = self.ring.isEmpty ? 0 : self.ringStart + Double(self.ring.count) / NativeStreamDiarizer.sampleRate
                         self.diarizerSession += 1
+                        self.sessionID = String(UUID().uuidString.prefix(8)).lowercased()
                         self.slotNames = [:]
+                        self.slotPersonIds = [:]
+                        self.slotVectors = [:]
                         self.slotCheckedSpeech = [:]
                         self.slotChecks = [:]
                         NativeAmbientLog.note("旁听：说话人分离已接上（\(voiceprint == nil ? "没有声纹，「我」靠比对也认不出" : "用声纹认出「我」")"
@@ -807,14 +817,22 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         let rows: [[String: Any]] = taken.map { utterance in
             let (label, isUser) = speakerLabel(utterance.speaker)
             return ["speaker": label, "isUser": isUser, "text": utterance.text,
-                    "t0": max(0, utterance.start - first.start), "t1": max(0, utterance.end - first.start)]
+                    "t0": max(0, utterance.start - first.start), "t1": max(0, utterance.end - first.start),
+                    "slotKey": utterance.speaker.map(slotKey) ?? ""]
+        }
+        let speakerRows: [[String: Any]] = Set(taken.compactMap(\.speaker)).sorted().map { index in
+            var row: [String: Any] = ["slotKey": slotKey(index)]
+            if let person = slotPersonIds[index] { row["personId"] = person }
+            else if index == diarizer?.userIndex { row["personId"] = "me" }
+            if let vector = slotVectors[index] { row["vector"] = vector }
+            return row
         }
         let speakers = Set(taken.compactMap(\.speaker)).count
         collectHeard(taken)
         let window = Window(id: "amb-" + Self.stamp.string(from: started) + "-" + String(UUID().uuidString.prefix(4)),
                             startedAt: started, endedAt: Date(), streamStart: first.start, streamEnd: last.end,
                             utterances: rows, speakerCount: max(1, speakers), locale: locale,
-                            source: source.wireName)
+                            source: source.wireName, speakers: speakerRows)
         emit(.window(window))
     }
 
@@ -852,7 +870,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                 do {
                     let vector = try await NativeSpeakerEmbedder.shared.embedding(of: voiced)
                     let match = await NativeSpeakerEmbedder.shared.identify(vector)
-                    self?.work.async { self?.identified(slot: index, match: match, session: session) }
+                    self?.work.async { self?.identified(slot: index, match: match, vector: vector, session: session) }
                 } catch {
                     NativeAmbientLog.note("声纹比对：说话人\(index + 1) 的特征算不出来 \(error.localizedDescription)", level: "error")
                     self?.work.async { self?.identifying = false }
@@ -862,9 +880,13 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         }
     }
 
-    private func identified(slot: Int, match: NativeSpeakerEmbedder.Match, session: Int) {
+    private func slotKey(_ index: Int) -> String { sessionID + ":" + String(index) }
+
+    private func identified(slot: Int, match: NativeSpeakerEmbedder.Match, vector: [Float], session: Int) {
         identifying = false
         guard session == diarizerSession else { return }
+        slotVectors[slot] = vector
+        if let person = match.personId, match.name != nil { slotPersonIds[slot] = person }
         let detail = String(format: "最近 %@ %.2f，次近 %.2f", match.nearest ?? "无", match.distance, match.runnerUp)
         if let name = match.name {
             if slotNames[slot] != name {
@@ -890,7 +912,8 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         let fresh = byIndex.map { index, rows in
             HeardSpeaker(id: UUID().uuidString, label: "说话人\(index + 1)",
                          sample: String(rows.map(\.text).joined(separator: " ").prefix(60)),
-                         ranges: rows.map { $0.start...$0.end }, heardAt: Date(), slot: index, session: diarizerSession)
+                         ranges: rows.map { $0.start...$0.end }, heardAt: Date(), slot: index, session: diarizerSession,
+                         slotKey: slotKey(index))
         }
         // 同一会话同一槽位只留最新的一条
         let freshSlots = Set(fresh.map(\.slot))
@@ -923,6 +946,21 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                 self.emit(.heard(self.heard))
                 // 起名即生效：这个槽位就是他，不必等比对
                 if speaker.session == self.diarizerSession { self.slotNames[speaker.slot] = name }
+                // 同步到服务器：块归这个人（同名即同一人，KJ 人物节点随之建立或复用），声纹特征进他的声纹库
+                let key = speaker.slotKey
+                Task.detached(priority: .utility) {
+                    var body: [String: Any] = ["slotKey": key, "name": name]
+                    if let vector = try? await NativeSpeakerEmbedder.shared.embedding(of: voiced) { body["vector"] = vector }
+                    do {
+                        let reply = try await NativeAmbientServer.post("api/ambient/slots/assign", body: body)
+                        let person = (reply["person"] as? [String: Any])?["id"] as? String
+                        await NativeSpeakerEmbedder.shared.invalidateServer()
+                        self.work.async { if let person, speaker.session == self.diarizerSession { self.slotPersonIds[speaker.slot] = person } }
+                        NativeAmbientLog.note("熟人声纹：「\(name)」已同步到服务器（KJ 人物页）")
+                    } catch {
+                        NativeAmbientLog.note("熟人声纹：「\(name)」同步服务器失败 \(error.localizedDescription)", level: "error")
+                    }
+                }
                 let message = String(format: "已记住「%@」（样本共 %.0f 秒），之后靠声纹比对认出他", name, total)
                 NativeAmbientLog.note("熟人声纹：" + message)
                 done(message)
@@ -930,6 +968,24 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                 NativeAmbientLog.note("熟人声纹：\(name) 保存失败 \(error.localizedDescription)", level: "error")
                 done("保存失败：\(error.localizedDescription)")
             }
+        }
+    }
+
+    /// 判断回执里的 names：服务器已知的块 → 人（用户在时间轴上事后起的名 / 合并后的名字），当前会话的块立刻改标。
+    func applyServerNames(_ names: [String: Any]) {
+        work.async {
+            for (key, value) in names {
+                guard let info = value as? [String: Any], let name = info["name"] as? String else { continue }
+                let parts = key.split(separator: ":")
+                guard parts.count == 2, String(parts[0]) == self.sessionID, let index = Int(parts[1]) else { continue }
+                if self.slotNames[index] != name {
+                    self.slotNames[index] = name
+                    NativeAmbientLog.note("旁听：服务器把说话人\(index + 1) 标为「\(name)」")
+                }
+                if let person = info["personId"] as? String { self.slotPersonIds[index] = person }
+                self.heard.removeAll { $0.session == self.diarizerSession && $0.slot == index }
+            }
+            self.emit(.heard(self.heard))
         }
     }
 

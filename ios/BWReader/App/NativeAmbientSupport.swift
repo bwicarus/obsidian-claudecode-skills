@@ -100,6 +100,14 @@ enum NativeAmbientServer {
         return try await send(request)
     }
 
+    static func patch(_ path: String, body: [String: Any], timeout: TimeInterval = 20) async throws -> [String: Any] {
+        var request = try authorizedRequest(path, timeout: timeout)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return try await send(request)
+    }
+
     static func get(_ path: String, timeout: TimeInterval = 15) async throws -> [String: Any] {
         var request = try authorizedRequest(path, timeout: timeout)
         request.httpMethod = "GET"
@@ -183,6 +191,35 @@ actor NativeSpeakerEmbedder {
         let nearest: String?
         let distance: Float
         let runnerUp: Float
+        /// 服务器上的人物编号（KJ 节点 id，或 "me"）；只有本机样本、服务器还不认识时为 nil。
+        var personId: String? = nil
+    }
+
+    /// 服务器声纹库（/api/ambient/voiceprints）：每人全部向量。5 分钟刷新一次；编辑人物后立即作废。
+    private var serverPeople: [(personId: String, name: String, vectors: [[Float]])] = []
+    private var serverFetchedAt = Date.distantPast
+    private var loggedServerFailure = false
+
+    func invalidateServer() { serverFetchedAt = .distantPast }
+
+    private func refreshServerIfStale() async {
+        guard Date().timeIntervalSince(serverFetchedAt) > 300 else { return }
+        serverFetchedAt = Date()
+        do {
+            let reply = try await NativeAmbientServer.get("api/ambient/voiceprints")
+            let rows = reply["people"] as? [[String: Any]] ?? []
+            serverPeople = rows.compactMap { row -> (personId: String, name: String, vectors: [[Float]])? in
+                guard let id = row["personId"] as? String, let name = row["name"] as? String else { return nil }
+                let vectors = (row["vectors"] as? [[Any]] ?? []).map { $0.compactMap { ($0 as? NSNumber)?.floatValue } }
+                return (personId: id, name: name, vectors: vectors.filter { !$0.isEmpty })
+            }
+            loggedServerFailure = false
+        } catch {
+            if !loggedServerFailure {
+                loggedServerFailure = true
+                NativeAmbientLog.note("声纹比对：取服务器声纹库失败，只用本机样本（\(error.localizedDescription)）", level: "error")
+            }
+        }
     }
 
     private var manager: DiarizerManager?
@@ -233,20 +270,29 @@ actor NativeSpeakerEmbedder {
         return Self.normalized(sum)
     }
 
-    /// 和「我」及全部熟人比。
+    /// 和「我」、本机熟人样本、服务器声纹库里的全部人比（同一个人多个来源取最近的那个）。
     func identify(_ vector: [Float]) async -> Match {
-        var scored: [(String, Float)] = []
-        if let user = await userVector() { scored.append(("我", Self.distance(vector, user))) }
+        await refreshServerIfStale()
+        var scored: [(name: String, distance: Float, personId: String?)] = []
+        if let user = await userVector() { scored.append(("我", Self.distance(vector, user), "me")) }
         for person in NativeVoiceprint.people() {
             guard let reference = await personVector(person) else { continue }
-            scored.append((person.name, Self.distance(vector, reference)))
+            let server = serverPeople.first { $0.name == person.name }?.personId
+            scored.append((person.name, Self.distance(vector, reference), server))
         }
-        scored.sort { $0.1 < $1.1 }
+        for person in serverPeople {
+            for reference in person.vectors where reference.count == vector.count {
+                scored.append((person.name, Self.distance(vector, reference), person.personId))
+            }
+        }
+        scored.sort { $0.distance < $1.distance }
         guard let best = scored.first else { return Match(name: nil, nearest: nil, distance: 2, runnerUp: 2) }
         // 同名（同一人多个来源）不算次近
-        let runnerUp = scored.first { $0.0 != best.0 }?.1 ?? 2
-        let accepted = best.1 < Self.matchDistance && runnerUp - best.1 >= Self.ambiguityMargin
-        return Match(name: accepted ? best.0 : nil, nearest: best.0, distance: best.1, runnerUp: runnerUp)
+        let runnerUp = scored.first { $0.name != best.name }?.distance ?? 2
+        let accepted = best.distance < Self.matchDistance && runnerUp - best.distance >= Self.ambiguityMargin
+        let personId = best.personId ?? scored.first { $0.name == best.name && $0.personId != nil }?.personId
+        return Match(name: accepted ? best.name : nil, nearest: best.name, distance: best.distance, runnerUp: runnerUp,
+                     personId: personId)
     }
 
     private func personVector(_ person: NativeVoiceprint.Person) async -> [Float]? {

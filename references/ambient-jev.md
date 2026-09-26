@@ -64,6 +64,18 @@ iPad 麦克风（平时）/ 通话引擎上行旁路（通话中）
 - iPad：设置 →「旁听与降噪」→ 日志（同时送 client-log，`surface=native-ambient`）。
 - 服务器：`state/ambient/log.jsonl`（每次判断、路由、解答、摘要的成败）。
 
+## 人物、时间轴、「只响应我的声音」（2026-09-26 第二批）
+
+- **只响应我的声音**（`NativeNoisyVoiceGate.forceUserOnly`）：主动开启，不等检测到多人，通话一开始就只放行声纹「我」。
+  耗电与自动模式相同（通话中分离模型本来就在跑），代价是上行一直多 0.6 秒延迟；没登记声纹时开关不可用。
+  通话中切换立即生效（`settingsChanged` 通知 → 各闸门按需加载模型 / 进出隔离）。
+- **人物与时间轴**：文字资料联动 KJ 人物节点（Obsidian `KJ/`），向量与时间在 `state/ambient/`。
+  完整格式与合并规则见 [`ambient-people-format.md`](ambient-people-format.md)。
+  iPad：设置 →「旁听与降噪」→「对话时间轴与人物」（`NativeAmbientTimelineView.swift`）。
+- App 每句带 `slotKey`（分离器会话:槽位），每窗带 `speakers[{slotKey, personId?, vector?}]`；
+  声纹比对同时用本机样本与服务器声纹库（`/api/ambient/voiceprints`，5 分钟刷新，编辑人物后立即作废）；
+  判断回执的 `names` 让服务器已知的名字立刻用在当前会话的块上；本机「起名」同步到服务器建 / 复用 KJ 人物。
+
 ## 未做
 
 手表 / 眼镜接入；通话降噪仍靠分离器里的「我」槽位（没用嵌入复核）；把旁听摘要主动注入 CLI 语音的 jev 上下文（现在只经 MCP `voice_brief`）；

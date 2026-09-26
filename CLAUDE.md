@@ -236,7 +236,7 @@ node 契约全量 + 拼合/vendor 一致 + 语法 + 网络审计，几分钟内�
 
 **参考规范**（各 skill 按需加载）
 - `references/kj-node-system.md` — **KJ 知识节点系统**（2026-09-06 首期）：事件账本 + 可重建投影、掌握度折叠（近因加权/先验/自评一次性/更正重算）、准备度（weak/unknown 前置分开）、关系随时登记与改变（prereq 必带原文依据、成环拒绝）、Wikidata 公共目录与自动关系、Anki 绑卡与快照、Markdown 页布局、CLI/HTTP/助手工具三套接口、未做清单。设计讨论原件在 Obsidian `AI助手专用/已有项目/KJ知识点系统设计讨论.md`
-- `references/ambient-jev.md` — **iPad 环境旁听 + 独立 jev 判断 + 嘈杂环境人声隔离 + 熟人声纹**（2026-09-26）：本机转写 + FluidAudio 分人 → `/api/ambient/judge`（`_server_deploy/jev_judge.py` 独立模块，任何时候可用，与语音无关）→ 危险录音 / 存原声 / AI 解答 / 滚动摘要；通话中改接通话上行；通话多人时只放行「我」；熟人靠 WeSpeaker 声纹特征比对认人，数量不限
+- `references/ambient-jev.md` — **iPad 环境旁听 + 独立 jev 判断 + 嘈杂环境人声隔离 + 熟人声纹**（2026-09-26）：本机转写 + FluidAudio 分人 → `/api/ambient/judge`（`_server_deploy/jev_judge.py` 独立模块，任何时候可用，与语音无关）→ 危险录音 / 存原声 / AI 解答 / 滚动摘要；通话中改接通话上行；通话多人时只放行「我」；熟人靠 WeSpeaker 声纹特征比对认人，数量不限；人物文字资料联动 KJ 人物节点（格式见 `references/ambient-people-format.md`），iPad 有对话时间轴页；「只响应我的声音」开关
 - `references/index-format.md` / `vault-structure.md` / `obsidian-syntax.md`
 - `references/anki-selection-rules.md` / `anki-card-format.md`
 - `references/pdf-annotation-format.md`

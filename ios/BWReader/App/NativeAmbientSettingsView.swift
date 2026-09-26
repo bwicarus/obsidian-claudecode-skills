@@ -7,6 +7,8 @@ struct NativeAmbientSettingsSections: View {
     @ObservedObject private var log = NativeAmbientLog.shared
     @State private var gateEnabled = NativeNoisyVoiceGate.isEnabled
     @State private var promptIsolation = NativeNoisyVoiceGate.promptsSystemIsolation
+    @State private var forceUserOnly = NativeNoisyVoiceGate.forceUserOnly
+    @State private var showTimeline = false
     @State private var hasVoiceprint = NativeVoiceprint.exists
     @State private var enrolling = false
     @State private var enrollNote = ""
@@ -17,6 +19,16 @@ struct NativeAmbientSettingsSections: View {
     @State private var peopleNote = ""
 
     var body: some View {
+        Section {
+            Button {
+                showTimeline = true
+            } label: {
+                Label("对话时间轴与人物", systemImage: "person.2.wave.2")
+            }
+        } footer: {
+            Text("多人说话按时间轴分块显示；点块看、改这个人的名字、介绍、AI 整理和对话历史。资料写在 Obsidian 的 KJ 人物页。")
+        }
+        .fullScreenCover(isPresented: $showTimeline) { NativeAmbientTimelineView() }
         voiceprintSection
         peopleSection
         ambientSection
@@ -184,20 +196,21 @@ struct NativeAmbientSettingsSections: View {
 
     private var gateSection: some View {
         Section {
-            Toggle("多人说话时只放行我的声音", isOn: $gateEnabled)
-                .onChange(of: gateEnabled) { _, value in
-                    NativeNoisyVoiceGate.isEnabled = value
-                    NativeAmbientLog.note("通话降噪：\(value ? "已开启（下次通话生效）" : "已关闭（下次通话生效）")")
-                }
+            Toggle("只响应我的声音", isOn: $forceUserOnly)
+                .disabled(!hasVoiceprint)
+                .onChange(of: forceUserOnly) { _, value in NativeNoisyVoiceGate.forceUserOnly = value }
+            Toggle("多人说话时自动只放行我的声音", isOn: $gateEnabled)
+                .onChange(of: gateEnabled) { _, value in NativeNoisyVoiceGate.isEnabled = value }
             Toggle("同时提示开启系统「人声突显」", isOn: $promptIsolation)
                 .onChange(of: promptIsolation) { _, value in NativeNoisyVoiceGate.promptsSystemIsolation = value }
             if gate.status.running {
                 LabeledContent("本次通话", value: gateStatusText)
             }
         } header: { Text("嘈杂环境人声隔离") } footer: {
-            Text("通话时持续分辨说话人；只有检测到有别人也在说话时才介入：别人的声音被静音、只把你的声音发给 AI，"
-                 + "此时上行多约 0.6 秒延迟；30 秒只剩你一个人就自动退出。苹果的「人声突显」只能由你在控制中心切换，"
-                 + "开了这项会在第一次检测到多人时把那个面板弹出来。需要先登记声纹才准。")
+            Text("「只响应我的声音」：主动开启，通话一开始就只把你的声音发给 AI（需先登记声纹）。"
+                 + "「自动」：只有检测到别人也在说话时才介入，30 秒只剩你一个人就退出。"
+                 + "两者耗电一样（通话中分离模型本来就在跑），隔离期间上行多约 0.6 秒延迟；通话中切换立即生效。"
+                 + "苹果的「人声突显」只能由你在控制中心切换，开了提示会在第一次进入隔离时把面板弹出来。")
         }
     }
 

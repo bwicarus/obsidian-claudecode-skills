@@ -21,11 +21,30 @@ import Foundation
 final class NativeNoisyVoiceGate: @unchecked Sendable {
     static let enabledKey = "bw.noisyGate.enabled"
     static let promptIsolationKey = "bw.noisyGate.promptIsolation"
+    static let forceUserOnlyKey = "bw.noisyGate.forceUserOnly"
+    /// 设置变了（通话中也要立刻生效）：各闸门收到后按新设置加载模型 / 进出隔离。
+    static let settingsChanged = Notification.Name("space.bwicarus.reader.noisy-gate-settings")
 
     static var isEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: enabledKey) }
-        set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: enabledKey)
+            NotificationCenter.default.post(name: settingsChanged, object: nil)
+        }
     }
+
+    /// 「只响应我的声音」（2026-09-26 用户）：不等检测到多人，通话一开始就只放行声纹「我」。
+    /// 耗电与自动模式相同（模型本来就在跑），代价是上行一直多 0.6 秒延迟；没登记声纹时不生效。
+    static var forceUserOnly: Bool {
+        get { UserDefaults.standard.bool(forKey: forceUserOnlyKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: forceUserOnlyKey)
+            NotificationCenter.default.post(name: settingsChanged, object: nil)
+        }
+    }
+
+    /// 两个开关任一开着就要在通话中跑分离模型。
+    static var needsModel: Bool { isEnabled || forceUserOnly }
 
     static var promptsSystemIsolation: Bool {
         get { UserDefaults.standard.object(forKey: promptIsolationKey) as? Bool ?? true }
@@ -67,17 +86,47 @@ final class NativeNoisyVoiceGate: @unchecked Sendable {
     // 分离器的时间线正被模型队列改写，跨线程读就是数据竞争。
     private var userRanges: [ClosedRange<Double>] = []
     private var analyzedUntil = 0.0
+    private var callActive = false
+    private var loading = false
+    private var settingsObserver: NSObjectProtocol?
+
+    init() {
+        settingsObserver = NotificationCenter.default.addObserver(forName: Self.settingsChanged, object: nil, queue: nil) {
+            [weak self] _ in self?.settingsDidChange()
+        }
+    }
+
+    deinit {
+        if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
+    }
+
+    /// 通话中切换开关：需要模型而还没加载就加载；强制模式关掉且没有多人时，下一个分析周期按常规规则退出。
+    private func settingsDidChange() {
+        lock.lock()
+        let shouldLoad = callActive && diarizer == nil && !loading && Self.needsModel
+        lock.unlock()
+        if shouldLoad { loadModel() }
+        NativeAmbientLog.note("通话降噪：设置已更新（只响应我的声音 \(Self.forceUserOnly ? "开" : "关")）")
+    }
 
     // MARK: 生命周期
 
-    /// 通话音频开始时调。设置关着就什么都不做（出声一次，免得以为坏了）。
+    /// 通话音频开始时调。两个开关都关着就不加载模型（原样放行）。
     func begin() {
         lock.lock()
         generation += 1
-        let ticket = generation
         resetLocked()
+        callActive = true
         lock.unlock()
-        guard Self.isEnabled else { return }
+        guard Self.needsModel else { return }
+        loadModel()
+    }
+
+    private func loadModel() {
+        lock.lock()
+        let ticket = generation
+        loading = true
+        lock.unlock()
         publish { $0 = Status(running: true) }
         Task.detached(priority: .userInitiated) { [weak self] in
             do {
@@ -88,6 +137,7 @@ final class NativeNoisyVoiceGate: @unchecked Sendable {
                     do {
                         let diarizer = try NativeStreamDiarizer(models: models, voiceprint: voiceprint)
                         self.lock.lock()
+                        self.loading = false
                         guard ticket == self.generation else { self.lock.unlock(); return }
                         self.diarizer = diarizer
                         self.diarizerOrigin = Double(self.frameIndex) * Self.frameSeconds
@@ -98,10 +148,12 @@ final class NativeNoisyVoiceGate: @unchecked Sendable {
                             ? "通话降噪：已就绪（用登记的声纹认你）"
                             : "通话降噪：已就绪，但没登记声纹 —— 多人时按「说话最多的人」当作你，建议去设置登记")
                     } catch {
+                        self.lock.lock(); self.loading = false; self.lock.unlock()
                         NativeAmbientLog.note("通话降噪：分离器创建失败 \(error.localizedDescription)，本通话原样放行", level: "error")
                     }
                 }
             } catch {
+                if let self { self.lock.lock(); self.loading = false; self.lock.unlock() }
                 NativeAmbientLog.note("通话降噪：模型不可用，本通话原样放行（\(error.localizedDescription)）", level: "error")
             }
         }
@@ -112,6 +164,7 @@ final class NativeNoisyVoiceGate: @unchecked Sendable {
         generation += 1
         let wasEngaged = engaged
         resetLocked()
+        callActive = false
         lock.unlock()
         publish { $0 = Status() }
         if wasEngaged { NativeAmbientLog.note("通话降噪：通话结束，退出隔离") }
@@ -131,6 +184,7 @@ final class NativeNoisyVoiceGate: @unchecked Sendable {
         failures = 0
         userRanges = []
         analyzedUntil = 0
+        loading = false
     }
 
     // MARK: 逐帧
@@ -196,8 +250,9 @@ final class NativeNoisyVoiceGate: @unchecked Sendable {
         userRanges = ranges
         analyzedUntil = analyzed
         var event: String?
-        if speakers.count >= 2 {
-            lastMultiSpeakerAt = now
+        let forced = Self.forceUserOnly && user != nil
+        if speakers.count >= 2 || forced {
+            if speakers.count >= 2 { lastMultiSpeakerAt = now }
             if !engaged {
                 engaged = true
                 delayLine = Array(repeating: [Int16](repeating: 0, count: NativeAudioEngine.samplesPerFrame),
@@ -205,7 +260,7 @@ final class NativeNoisyVoiceGate: @unchecked Sendable {
                 lastKept = true
                 event = "engage"
             }
-        } else if engaged, now - lastMultiSpeakerAt >= Self.releaseQuietSeconds,
+        } else if engaged, !Self.isEnabled || now - lastMultiSpeakerAt >= Self.releaseQuietSeconds,
                   !userSpeakingLocked(from: now - 1, to: now) {
             engaged = false
             delayLine = []
@@ -219,10 +274,12 @@ final class NativeNoisyVoiceGate: @unchecked Sendable {
         publish { $0.engaged = isEngaged; $0.speakers = speakers.count }
         switch event {
         case "engage":
-            NativeAmbientLog.note("通话降噪：检测到 \(speakers.count) 人在说话，进入隔离（只放行你的声音，上行多 0.6 秒延迟）")
+            NativeAmbientLog.note(forced && speakers.count < 2
+                ? "通话降噪：「只响应我的声音」已开，进入隔离（上行多 0.6 秒延迟）"
+                : "通话降噪：检测到 \(speakers.count) 人在说话，进入隔离（只放行你的声音，上行多 0.6 秒延迟）")
             if prompt { Self.promptSystemVoiceIsolation() }
         case "release":
-            NativeAmbientLog.note("通话降噪：30 秒只剩一个人，退出隔离")
+            NativeAmbientLog.note(Self.isEnabled ? "通话降噪：30 秒只剩一个人，退出隔离" : "通话降噪：「只响应我的声音」已关，退出隔离")
         default: break
         }
     }
