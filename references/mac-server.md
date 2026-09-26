@@ -173,7 +173,9 @@ cd ~/BW/src/claude
 
   模拟器 App 的本机数据可直接读：`xcrun simctl get_app_container <UDID> space.bwicarus.bwreader2 data`
   下的 `Library/Application Support/`（`conversation-cache/normal.json` 是侧栏对话的原样投影，
-  查「显示成双/缺消息」先看它）。客户端日志里模拟器的设备号结尾是 `dc6d7c`，iPad 是 `3cd63a`。
+  查「显示成双/缺消息」先看它）。客户端日志里 **iPad（bwpad）的设备号结尾是 `dc6d7c`**（2026-09-26 装机后按启动日志的
+页宽 1376 核实；此前一版文档写反了）。模拟器每次重装都可能换号（见过 `3cd63a`、`362625`），
+认设备以页宽为准：13 寸 iPad Pro 横屏 1376，模拟器 iPad Pro 11 为 834/1210。
 
 ## 7. Windows 侧现状（已退役）
 
