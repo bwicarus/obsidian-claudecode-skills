@@ -809,9 +809,18 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 )
                 return
             }
+            let operationID = UUID().uuidString
+            // 只落在书页上的笔画：立刻交给书页的「待确认笔迹」（页面坐标，跟着滚），并从手写层擦掉；
+            // 存盘在后台照常进行。落在卡片上的仍走原路（卡片自己的笔迹层另算）。
+            if reader.showPendingNativeInk(id: operationID, segments: segments) {
+                canvasView.drawing = PKDrawing(strokes: Array(allStrokes.prefix(start)))
+                enqueue(NativeInkOperation(id: operationID, documentToken: documentToken,
+                                           kind: .commit, segments: segments, canvasStrokeCount: 0))
+                return
+            }
             queuedStrokeCount += newStrokes.count
             enqueue(NativeInkOperation(
-                id: UUID().uuidString,
+                id: operationID,
                 documentToken: documentToken,
                 kind: .commit,
                 segments: segments,
@@ -1110,6 +1119,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             pending.removeAll()
             abandonedOperations.forEach {
                 reader.signalNativePencilOperationCancelled($0)
+                reader.retirePendingNativeInk(id: $0.id, confirmed: false)
             }
             pumpTask?.cancel()
             queuedStrokeCount = 0
@@ -1187,6 +1197,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                         )
                         self.controller.clearError()
                         self.finishDeferredCanvasWorkIfIdle()
+                        self.reader.retirePendingNativeInk(id: operation.id, confirmed: true)
                     } catch {
                         if Task.isCancelled
                             || generation != self.appliedDocumentGeneration
@@ -1194,6 +1205,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                             break
                         }
                         self.reader.signalNativePencilOperationCancelled(operation)
+                        self.reader.retirePendingNativeInk(id: operation.id, confirmed: false)
                         self.controller.report(error)
                         break
                     }
@@ -1275,6 +1287,33 @@ extension UIColor {
 
 @MainActor
 fileprivate extension ReaderWebViewModel {
+    /// 把刚写下的书页笔画交给原生书页的「待确认笔迹」。有任何一段不在书页上（卡片等）就不接，
+    /// 返回 false，由手写层照旧保留到存盘确认。
+    func showPendingNativeInk(id: String, segments: [NativeInkSegment]) -> Bool {
+        guard let document = nativePDFDocument, !segments.isEmpty else { return false }
+        var strokes: [(page: Int, stroke: ReaderNativeCardStroke)] = []
+        for segment in segments {
+            guard segment.surfaceId.hasPrefix("page:"), let page = Int(segment.surfaceId.dropFirst(5)) else { return false }
+            var raw: [String: Any] = ["pts": segment.points.map { $0.map { Double($0) } },
+                                      "w": Double(segment.width ?? 4), "c": segment.color ?? "#ff3b30"]
+            if let widths = segment.widths { raw["ww"] = widths.map { Double($0) } }
+            guard let stroke = ReaderNativeCardStroke(raw) else { return false }
+            strokes.append((page, stroke))
+        }
+        document.setPendingInk(strokes, id: id)
+        return true
+    }
+
+    /// 存盘确认：稍等正式笔迹接上再撤（避免一帧空白）；失败/放弃：立即撤。
+    func retirePendingNativeInk(id: String, confirmed: Bool) {
+        guard let document = nativePDFDocument, document.pendingInk[id] != nil else { return }
+        guard confirmed else { document.setPendingInk(nil, id: id); return }
+        Task { @MainActor [weak document] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            document?.setPendingInk(nil, id: id)
+        }
+    }
+
     func synchronizeWebInkFallbackStyle(
         tool: NativePencilInkController.Tool,
         colorHex: String,

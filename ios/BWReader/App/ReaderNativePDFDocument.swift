@@ -86,6 +86,13 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     private var lastLayoutKey: [CGFloat] = []
     private var settleTask: Task<Void, Never>?
     @Published private(set) var ink: [Int: [ReaderNativeCardStroke]] = [:] { didSet { refreshDecorations() } }
+    /// 刚写下、还在存盘的笔迹（键 = 操作 id）。画在**页面坐标**里，跟着书页滚；
+    /// 存盘确认后撤掉（正式笔迹接上）。以前这几秒笔画停在屏幕手写层上，滚动时不跟着走
+    /// （2026-09-26 用户：「画出来一瞬间移动书页，笔画不会跟着一起动」）。
+    @Published private(set) var pendingInk: [String: [(page: Int, stroke: ReaderNativeCardStroke)]] = [:] { didSet { refreshDecorations() } }
+    func setPendingInk(_ strokes: [(page: Int, stroke: ReaderNativeCardStroke)]?, id: String) {
+        pendingInk[id] = strokes
+    }
     @Published private(set) var highlights: [Int: [Highlight]] = [:] { didSet { refreshDecorations() } }
     /// 生词下划线由原生词汇投影计算；文档只画归一化矩形。
     @Published private(set) var vocabMarks: [Int: [VocabMark]] = [:] { didSet { refreshDecorations() } }
@@ -1020,6 +1027,11 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
         }
         for stroke in ink[number] ?? [] {
             ReaderNativeInkDrawing.draw(stroke, in: frame, cgContext: context)
+        }
+        for entries in pendingInk.values {
+            for entry in entries where entry.page == number {
+                ReaderNativeInkDrawing.draw(entry.stroke, in: frame, cgContext: context)
+            }
         }
     }
 
