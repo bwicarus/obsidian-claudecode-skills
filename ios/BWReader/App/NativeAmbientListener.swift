@@ -413,6 +413,12 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     static let vadSilence = 0.7                 // 秒：退回静音切分时，静这么久算一段结束
     static let vadThreshold: Float = 0.012
     static let langVotesToTrust = 3             // 同一个人推测出同一种语言这么多次，之后直接沿用
+    // 积压控制（2026-09-26 实测：开着电影时陌生人声源源不断，每段都按候选语言各转一遍，转写远跟不上，
+    // 而分窗又要等「全部转完」—— 结果一窗都没送出去，时间轴一条记录都没有）
+    static let busyBacklog = 3                  // 待转写超过这么多段：不再推测语言，沿用已有票数或「我的语言」
+    static let maxBacklog = 10                  // 超过这么多段：新的一段直接丢（出声），免得越积越多
+    static let guessCooldown = 20.0             // 秒：同一个人两次推测之间至少隔这么久，期间沿用已有票数
+    static let windowWaitLimit = 20.0           // 秒：窗口该送了但还有更早的段没转完，最多等这么久
     static let windowGap = 12.0                 // 秒：两句之间停这么久就切窗口
     static let windowMaxSeconds = 120.0
     static let windowMaxChars = 1500
@@ -437,7 +443,14 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private var ring: [Int16] = []
     private var ringStart = 0.0                 // ring[0] 对应的管线时刻
     private var transcribedUntil: [Int: Double] = [:]  // 每个槽位已送转写到哪一秒（分离器时间轴）
-    private var pendingJobs = 0
+    private var pendingTurns: [Int: Double] = [:]   // 待转写的段：编号 → 段开始时刻（分窗时只等比窗口更早的段）
+    private var nextJobID = 0
+    private var lastGuessAt: [Int: Double] = [:]
+    private var windowDueSince: Date?
+    // 诊断计数：每 30 秒有变化就写一行日志（「没有记录」时一眼看出卡在哪一步）
+    private var stats = (cut: 0, done: 0, empty: 0, dropped: 0, sent: 0)
+    private var lastStatsLine = ""
+    private var lastStatsAt = Date.distantPast
     private var vadActive = false               // 退回静音切分用
     private var vadStart = 0.0
     private var vadLastVoice = 0.0
@@ -689,12 +702,13 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         }
         // 1) 按每个人的起止切段、送转写
         cutTurns(final: false)
+        logStats()
         // 2) 切窗口
         flushWindow(force: false)
         // 3) 危险录音到点
         if dangerFile != nil, Date() >= dangerUntil { closeDangerFile() }
         // 4) 分离器定期换新（时间线会一直长；只在窗口刚清空时换，免得同一窗口里编号变）
-        if let diarizer, utterances.isEmpty, pendingJobs == 0, !identifying,
+        if let diarizer, utterances.isEmpty, pendingTurns.isEmpty, !identifying,
            diarizer.elapsed > Self.diarizerRecycleSeconds {
             self.diarizer = nil
             transcribedUntil = [:]
@@ -777,25 +791,49 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             NativeAmbientLog.note("旁听：一段声音已滚出缓冲，没能转写", level: "error")
             return
         }
+        guard pendingTurns.count < Self.maxBacklog else {
+            stats.dropped += 1
+            if stats.dropped == 1 || stats.dropped % 20 == 0 {
+                NativeAmbientLog.note("旁听：转写跟不上（积压 \(pendingTurns.count) 段），丢弃新段（累计 \(stats.dropped)）", level: "error")
+            }
+            return
+        }
         let samples = ring[a..<b].map { Float($0) / 32_768 }
-        let plan = languagePlan(for: turn.speaker)
-        pendingJobs += 1
+        var plan = languagePlan(for: turn.speaker)
+        let busy = pendingTurns.count >= Self.busyBacklog
+        let fallback = turn.speaker.flatMap(topVote) ?? locale
+        if plan.locale == nil, let speaker = turn.speaker {
+            if busy || now - (lastGuessAt[speaker] ?? -.infinity) < Self.guessCooldown {
+                // 忙或刚推测过：不再按候选语言各转一遍，沿用已有票数（没有就用我的语言），仍标「推测」
+                if plan.personId == nil { plan.locale = fallback }
+            } else {
+                lastGuessAt[speaker] = now
+            }
+        }
+        stats.cut += 1
+        nextJobID += 1
+        let jobID = nextJobID
+        pendingTurns[jobID] = turn.start
         let session = diarizerSession
+        let chosen = plan   // 闭包里只捕获常量（并发闭包不许引用可变的捕获变量）
         Task.detached(priority: .utility) { [weak self] in
-            var locale = plan.locale
-            if locale == nil, let personId = plan.personId {
+            var locale = chosen.locale
+            var registered = false   // 用的是他在人物页登记的语言（=已确认）
+            if locale == nil, let personId = chosen.personId {
                 locale = await NativeSpeakerEmbedder.shared.language(of: personId)
+                registered = locale != nil
+                if locale == nil && busy { locale = fallback }
             }
             let result: NativeSegmentTranscriber.Result?
             let confirmed: Bool
             if let locale {
                 result = await NativeSegmentTranscriber.shared.transcribe(samples, locale: locale)
-                confirmed = plan.confirmed || plan.personId != nil
+                confirmed = chosen.confirmed || registered
             } else {
                 result = await NativeSegmentTranscriber.shared.guess(samples)
                 confirmed = false
             }
-            self?.work.async { self?.transcribed(turn, result: result, confirmed: confirmed, session: session) }
+            self?.work.async { self?.transcribed(turn, jobID: jobID, result: result, confirmed: confirmed, session: session) }
         }
     }
 
@@ -813,9 +851,28 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         return (nil, slotPersonIds[speaker], false)
     }
 
-    private func transcribed(_ turn: Turn, result: NativeSegmentTranscriber.Result?, confirmed: Bool, session: Int) {
-        pendingJobs = max(0, pendingJobs - 1)
-        guard let result, !result.text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+    private func topVote(_ speaker: Int) -> String? {
+        slotLangVotes[speaker]?.max(by: { $0.value < $1.value })?.key
+    }
+
+    private func logStats() {
+        guard Date().timeIntervalSince(lastStatsAt) >= 30 else { return }
+        lastStatsAt = Date()
+        let line = "旁听统计：切出 \(stats.cut) 段，转出文字 \(stats.done) 段（空 \(stats.empty)），待转写 \(pendingTurns.count)，"
+            + "丢弃 \(stats.dropped)，本窗 \(utterances.count) 句，已送 \(stats.sent) 窗"
+            + (diarizer == nil ? "（分离器未就绪）" : "")
+        guard line != lastStatsLine else { return }
+        lastStatsLine = line
+        NativeAmbientLog.note(line)
+    }
+
+    private func transcribed(_ turn: Turn, jobID: Int, result: NativeSegmentTranscriber.Result?, confirmed: Bool, session: Int) {
+        pendingTurns[jobID] = nil
+        guard let result, !result.text.trimmingCharacters(in: .whitespaces).isEmpty else {
+            stats.empty += 1
+            return
+        }
+        stats.done += 1
         if !result.scores.isEmpty {
             let scores = result.scores.map { "\(NativeSegmentTranscriber.displayName($0.key)) \($0.value)" }.sorted().joined(separator: "，")
             NativeAmbientLog.note("分段转写：说话人\((turn.speaker ?? -1) + 1) 推测为\(NativeSegmentTranscriber.displayName(result.locale))（\(scores)）")
@@ -839,7 +896,15 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         let chars = utterances.reduce(0) { $0 + $1.text.count }
         let due = force || t - last.end >= Self.windowGap || last.end - first.start >= Self.windowMaxSeconds
             || chars >= Self.windowMaxChars
-        guard due, pendingJobs == 0 || force else { return }
+        guard due else { windowDueSince = nil; return }
+        // 只等「比这窗最后一句还早」的段转完；之后的段归下一窗。等太久（转写积压）也照送，别让整窗卡死
+        let blocking = pendingTurns.values.contains { $0 < last.end }
+        if blocking && !force {
+            if windowDueSince == nil { windowDueSince = Date() }
+            guard let since = windowDueSince, Date().timeIntervalSince(since) >= Self.windowWaitLimit else { return }
+            NativeAmbientLog.note("旁听：还有更早的段没转完，已等 \(Int(Self.windowWaitLimit)) 秒，先送这一窗")
+        }
+        windowDueSince = nil
         let taken = utterances.sorted { $0.start < $1.start }
         utterances = []
         let started = windowStartedAt
@@ -868,6 +933,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                             startedAt: started, endedAt: Date(), streamStart: first.start, streamEnd: last.end,
                             utterances: rows, speakerCount: max(1, speakers), locale: locale,
                             source: source.wireName, speakers: speakerRows)
+        stats.sent += 1
         emit(.window(window))
     }
 
