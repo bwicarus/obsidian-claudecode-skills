@@ -177,6 +177,21 @@ cd ~/BW/src/claude
 页宽 1376 核实；此前一版文档写反了）。模拟器每次重装都可能换号（见过 `3cd63a`、`362625`），
 认设备以页宽为准：13 寸 iPad Pro 横屏 1376，模拟器 iPad Pro 11 为 834/1210。
 
+- **本机直接出 TestFlight（2026-09-26 实测可行，用户不在 iPad 旁时用）**：Mac 上没有 `gh`、
+  也没有 API key / 发布证书，CI 的 `workflow_dispatch` 触发不了；但 Xcode 登录的账号能云端签名：
+  ```bash
+  cd ios/BWReader && xcodebuild archive -project BWReader.xcodeproj -scheme BWReader \
+    -destination generic/platform=iOS -archivePath ~/BW/xcode-derived/archive/app.xcarchive \
+    -allowProvisioningUpdates CURRENT_PROJECT_VERSION=<构建号>
+  xcodebuild -exportArchive -archivePath ~/BW/xcode-derived/archive/app.xcarchive \
+    -exportOptionsPlist ~/BW/xcode-derived/archive/ExportOptions.plist \
+    -exportPath ~/BW/xcode-derived/archive/export -allowProvisioningUpdates
+  ```
+  ExportOptions：`method=app-store-connect`、`destination=upload`、`signingStyle=automatic`、
+  `teamID=7MDVSLPV8F`、`manageAppVersionAndBuildNumber=false`。⚠ 构建号要高于 CI 用过的
+  `run_number`（最后一次 CI ≈974），本机用 `974.N` 这种带点的号，不和 CI 的整数撞；
+  下次 CI 的整数号仍然更大。第一次：1.1.85 (974.9)。
+
 ## 7. Windows 侧现状（已退役）
 
 - 停掉的：ReaderPC 整棵进程树、桥、网页后端与三个边车、CLI 语音运行器、Obsidian 同步。
