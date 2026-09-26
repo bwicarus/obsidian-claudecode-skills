@@ -475,6 +475,8 @@ final class NativeAmbientPipeline: @unchecked Sendable {
     private var workLastTick = 0.0, workMaxGap = 0.0   // 周期任务间隔：work 队列被堵住时这里会变大
     private var diarizerResets = 0
     private var skippedForeign: [String: Int] = [:]   // 主线因「这人说别的语言」没记的词段数（按语言）
+    private var retroDone: Set<Int> = []                 // 本分离器会话里已回头重转过的槽位
+    private var retroQueued = 0                          // 回头重转排进队列的段数（诊断）
     private var lastStatsLine = ""
     private var lastStatsAt = Date.distantPast
     private var slotLangVotes: [Int: [String: Int]] = [:]
@@ -744,6 +746,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
                         self.slotVectors = [:]
                         self.slotCheckedSpeech = [:]
                         self.slotChecks = [:]
+                        self.retroDone = []
                         NativeAmbientLog.note("旁听：说话人分离已接上（\(voiceprint == nil ? "没有声纹，「我」靠比对也认不出" : "用声纹认出「我」")"
                             + "，\(people) 位熟人靠声纹特征比对）")
                     } catch {
@@ -1056,7 +1059,10 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         if guessed {
             let scores = result.scores.map { "\(NativeSegmentTranscriber.displayName($0.key)) \($0.value)" }.sorted().joined(separator: "，")
             NativeAmbientLog.note("逐段重转：\(job.slotKey) 推测为\(NativeSegmentTranscriber.displayName(result.locale))（\(scores)）")
-            if current { slotLangVotes[job.speaker, default: [:]][result.locale, default: 0] += 1 }
+            if current {
+                slotLangVotes[job.speaker, default: [:]][result.locale, default: 0] += 1
+                if let language = foreignLanguage(of: job.speaker) { retranscribePast(of: job.speaker, language: language) }
+            }
             if result.locale == locale { backfill.finish(job); return }   // 就是我的语言：主线已经转对了
         }
         let confirmed = job.confirmed && !guessed
@@ -1129,6 +1135,39 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         return (nil, false)
     }
 
+    /// 刚确定这个人说别的语言：他此前被主线用「我的语言」转成残片的那些段（还在原声缓冲里的，最近 240 秒），
+    /// 按他的语言重转一遍，结果照常走「本机就地替换 / 修正服务器时间轴」。已被重转过的时段跳过。
+    /// （2026-09-27 用户：「推测出语言后再重新识别一次之前这个声音的对话不就行了」）
+    private func retranscribePast(of speaker: Int, language: String) {
+        guard let diarizer, !retroDone.contains(speaker) else { return }
+        retroDone.insert(speaker)
+        let ringEnd = ringStart + Double(ring.count) / NativeStreamDiarizer.sampleRate
+        var spans: [(start: Double, end: Double)] = []
+        for range in diarizer.finalizedSpeech(of: speaker) {
+            let start = range.lowerBound + diarizerOrigin, end = range.upperBound + diarizerOrigin
+            guard end > ringStart, start < ringEnd else { continue }
+            if let last = spans.last, start - last.end <= Self.turnMergeGap { spans[spans.count - 1].end = max(last.end, end) }
+            else { spans.append((start, end)) }
+        }
+        var queued = 0
+        for span in spans {
+            var start = max(span.start, ringStart + Self.turnPad)
+            let end = min(span.end, ringEnd - Self.turnPad)
+            while end - start >= Self.turnMinSeconds {
+                let piece = min(end, start + Self.turnMaxSeconds)
+                let covered = replaced.contains { $0.speaker == speaker && $0.start <= start && piece <= $0.end }
+                if !covered {
+                    enqueue(Turn(speaker: speaker, start: start, end: piece))
+                    queued += 1
+                }
+                start = piece
+            }
+        }
+        retroQueued += queued
+        NativeAmbientLog.note("旁听：说话人\(speaker + 1) 确定说\(NativeSegmentTranscriber.displayName(language))，"
+            + "回头重转他此前的 \(queued) 段" + (queued == 0 ? "（都已转过或已滚出缓冲）" : ""))
+    }
+
     /// 这个人确定说「我的语言」以外的语言时返回那种语言；还不知道 / 就是我的语言返回 nil。
     private func foreignLanguage(of speaker: Int) -> String? {
         if speaker == diarizer?.userIndex || slotNames[speaker] == "我" || slotPersonIds[speaker] == "me" { return nil }
@@ -1144,7 +1183,13 @@ final class NativeAmbientPipeline: @unchecked Sendable {
         personLanguage[person] = personLanguage[person]   // 占位防重复
         Task.detached(priority: .utility) { [weak self] in
             let language = await NativeSpeakerEmbedder.shared.language(of: person) ?? ""
-            self?.work.async { self?.personLanguage[person] = language }
+            self?.work.async {
+                guard let self else { return }
+                self.personLanguage[person] = language
+                for (slot, owner) in self.slotPersonIds where owner == person {
+                    if let foreign = self.foreignLanguage(of: slot) { self.retranscribePast(of: slot, language: foreign) }
+                }
+            }
         }
     }
 
@@ -1169,6 +1214,7 @@ final class NativeAmbientPipeline: @unchecked Sendable {
             let factor = audio > 0 ? diarizer.busySeconds / audio : 0
             detail += String(format: "；分离器 实时率 %.2f、积压 %.1f 秒", factor, Double(diarizer.pendingSamples) / NativeStreamDiarizer.sampleRate)
         }
+        if retroQueued > 0 { detail += "；回头重转 \(retroQueued) 段" }
         if !skippedForeign.isEmpty {
             detail += "；主线让给重转 " + skippedForeign.map { "\(NativeSegmentTranscriber.displayName($0.key)) \($0.value) 段" }.sorted().joined(separator: "、")
         }
