@@ -178,9 +178,9 @@ cd ~/BW/src/claude
 认设备以页宽为准：13 寸 iPad Pro 横屏 1376，模拟器 iPad Pro 11 为 834/1210。
 
 - **出 TestFlight = 本机官方流程，云端 CI 不再用（2026-09-26 用户拍板）**：
-  `ios/BWReader/testflight_upload.sh`（Xcode 账号自动签名 + 自动取下一个构建号，archive → 直接上传）。
+  `ios/BWReader/testflight_upload.sh`（Xcode 账号自动签名；构建号脚本自算 `976.<提交数>` —— 别交给 Xcode 自动管，它会用工程里的 2）。
   要在 Mac 桌面会话里跑。旧的 `safari-extension-ios.yml` workflow_dispatch 只是历史，别再触发。
-  第一次本机上传是 1.1.85 (974.9)，之后构建号由 Xcode 自动递增。
+  第一次本机上传是 1.1.85 (974.9)，之后用 976.<提交数>。
 
 ## 7. Windows 侧现状（已退役）
 

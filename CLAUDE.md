@@ -18,7 +18,7 @@
 - **App 本机开发**：`ios/BWReader/prepare_local_xcode.sh [--dev]` 后用 Xcode 打开 `ios/BWReader/BWReader.xcodeproj`。
   本机 Xcode 27、云端 26.6 —— 写 Swift 避开「分支类型不同的嵌套三元」「超长 SwiftUI 修饰链」。
 - 🚀 **出 TestFlight 走本机官方流程，不用云端 CI（2026-09-26 用户拍板）**：`ios/BWReader/testflight_upload.sh`
-  （Xcode 自动签名 + 自动构建号）。下文所有「CI `safari-extension-ios.yml` workflow_dispatch / `gh workflow run`」都已过时。
+  （Xcode 自动签名，构建号脚本自算 976.<提交数>）。下文所有「CI `safari-extension-ios.yml` workflow_dispatch / `gh workflow run`」都已过时。
 - ⚠ **远程 SSH 会话不能代码签名**（`errSecInternalComponent`）：装真机、发 TestFlight 要在 Mac 桌面上开的会话里做。
 - 📲 **交付 = 本机装机，不出 TestFlight（2026-09-25 用户拍板）**：现阶段只有用户自己用，改完就用开发签名
   装到他的 iPad（必要时 iPhone），命令见 `references/mac-server.md` §6；功能完善前**不触发**云端构建/上传。
