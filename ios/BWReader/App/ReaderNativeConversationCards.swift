@@ -235,6 +235,15 @@ private struct ReaderNativeConversationArtifactCard: View {
     }
     private var fields: [[String: String]] { part.data["fields"] as? [[String: String]] ?? [] }
     private var isDraft: Bool { part.string("state") == "draft" }
+    /// 拖动预览里的几行正文：天气给温度与天况，其余取正文开头。
+    private var dragSummary: String {
+        if part.kind == "weather" {
+            let low = ReaderWeatherDegrees.bare(field("lo")), high = ReaderWeatherDegrees.bare(field("hi"))
+            return [low.isEmpty || high.isEmpty ? "" : "\(low)–\(high)°C", field("cond")].filter { !$0.isEmpty }.joined(separator: "  ")
+        }
+        let raw = firstText(part.string("answer"), firstText(part.string("text"), part.text))
+        return String(readable(raw).trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))
+    }
     private var dragPayload: ReaderNativeCardTransfer {
         ReaderNativeCardTransfer(scope: model.scope, actionID: part.string("dragId"))
     }
@@ -261,12 +270,9 @@ private struct ReaderNativeConversationArtifactCard: View {
             // （rc-voicecall `_dragToDock` 的 ghost）。默认快照拖的是这一行标题，
             // 看着不像在搬一张卡。
             .draggable(dragPayload) {
-                Label(heading, systemImage: icon)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1).padding(.horizontal, 14).padding(.vertical, 10)
-                    .frame(minWidth: 180, alignment: .leading)
-                    .background(ReaderNativeTheme.card, in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(ReaderNativeTheme.accent.opacity(0.45)))
+                // 拖动时手里拿的是一张**卡片**（原版 _dragToDock 拖的是卡的克隆），不是一条标签。
+                // 2026-09-26 用户：「拖动时首先显示的不是卡片的样式而是一个长条」。
+                ReaderNativeCardDragPreview(heading: heading, icon: icon, isAnki: isAnki, summary: dragSummary)
             }
             .accessibilityHint("长按卡片标题，拖到书页正文放置")
             }
@@ -583,5 +589,35 @@ enum ReaderWeatherDegrees {
     static func bare(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: "\\s*(°\\s*[CcＣ]?|℃|摄氏度|度)\\s*$", with: "", options: .regularExpression)
+    }
+}
+
+
+/// 侧栏卡片拖出时手里那张卡：与卡片同一套原版视觉（深色卡面 / 学习卡深蓝渐变 + 紫色卡头）。
+private struct ReaderNativeCardDragPreview: View {
+    let heading: String
+    let icon: String
+    let isAnki: Bool
+    let summary: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                Text(heading).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+            }
+            .foregroundStyle(ReaderNativeCardStyle.purple)
+            if !summary.isEmpty {
+                Text(summary).font(.system(size: 14)).foregroundStyle(ReaderNativeCardStyle.text).lineLimit(4)
+            }
+        }
+        .padding(.horizontal, 13).padding(.top, 10).padding(.bottom, 12)
+        .frame(width: 260, alignment: .leading)
+        .background {
+            if isAnki { RoundedRectangle(cornerRadius: 12).fill(ReaderNativeCardStyle.flashGradient) }
+            else { RoundedRectangle(cornerRadius: 16).fill(ReaderNativeCardStyle.surface) }
+        }
+        .overlay(RoundedRectangle(cornerRadius: isAnki ? 12 : 16)
+            .stroke(isAnki ? ReaderNativeCardStyle.flashBorder : ReaderNativeCardStyle.border, lineWidth: isAnki ? 1 : 0.5))
+        .environment(\.colorScheme, .dark)
     }
 }

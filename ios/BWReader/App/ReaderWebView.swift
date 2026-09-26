@@ -1562,7 +1562,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             parameters["x"] = 0; parameters["y"] = 0
         } else if let document = nativePDFDocument,
            let placed = document.canonicalPoint(document.view.convert(windowPoint, from: nil), from: document.view) {
-            parameters["value"] = ["page": placed.page, "x": placed.point.x, "y": placed.point.y]
+            // ⚠ 必须存 Double：CGFloat 放进 [String: Any] 后 `as? Double` 取不出来（nil），
+            //   下游一律判成「请把卡片放到当前书页上」—— 2026-09-26 侧栏卡拖到页上全被拒。
+            parameters["value"] = ["page": placed.page, "x": Double(placed.point.x), "y": Double(placed.point.y)]
         } else if nativePDFDocument != nil {
             postClientLog("[card-drop] no page under drop point")
             showTransientNotice("请放到书页正文上。")
@@ -2622,13 +2624,25 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     """,arguments:["scope":nativeConversation.scope,"payload":payload,"gid":group as Any? ?? NSNull(),"x":x,"y":y],in:nil,contentWorld:.page)
                 return ["ok":result as? Bool == true,"committed":result as? Bool == true]
             }
-            guard let book = currentLocalBook, let access = currentLocalBookAccess,
-                  let document = nativePDFDocument, let digest = currentLocalBookContentSHA256,
-                  nativeReadingStoreBookID == book.id, let target = command["value"] as? [String: Any],
-                  let page = target["page"] as? Int, page > 0, page <= (document.view.document?.pageCount ?? 0),
-                  let x = target["x"] as? Double, let y = target["y"] as? Double else {
-                throw ReaderNativeFavoritesService.Failure(message: "请把卡片放到当前书页上")
+            // 逐条判、逐条出声：原来六个条件并成一句「请把卡片放到当前书页上」，
+            // 拒了也说不出是书、存储还是落点的问题。
+            func number(_ value: Any?) -> Double? {
+                if let v = value as? Double { return v }
+                if let v = value as? CGFloat { return Double(v) }
+                return (value as? NSNumber)?.doubleValue
             }
+            func reject(_ reason: String) -> ReaderNativeFavoritesService.Failure {
+                postClientLog("[card-drop] rejected: " + reason)
+                return ReaderNativeFavoritesService.Failure(message: "请把卡片放到当前书页上（\(reason)）")
+            }
+            guard let book = currentLocalBook, let access = currentLocalBookAccess else { throw reject("当前不是本机书") }
+            guard let document = nativePDFDocument else { throw reject("原生正文未就绪") }
+            guard let digest = currentLocalBookContentSHA256 else { throw reject("书的摘要尚未算好") }
+            guard nativeReadingStoreBookID == book.id else { throw reject("本机存储还没切到这本书") }
+            guard let target = command["value"] as? [String: Any],
+                  let page = (target["page"] as? Int) ?? number(target["page"]).map({ Int($0) }),
+                  page > 0, page <= (document.view.document?.pageCount ?? 0),
+                  let x = number(target["x"]), let y = number(target["y"]) else { throw reject("落点不在书页上") }
             let generation = bookUserStateContextGeneration, scope = nativeConversation.scope
             guard nativePDFMutationCommandDepth == 0 else { throw ReaderNativeBookStore.MutationError.unavailable }
             let pending = try await nativePDFMutationActor.hasUnfinishedMutation(book: access)
