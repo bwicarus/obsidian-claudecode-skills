@@ -91,8 +91,16 @@ final class ReaderNativePDFDocument: NSObject, ObservableObject, PDFPageOverlayV
     /// （2026-09-26 用户：「画出来一瞬间移动书页，笔画不会跟着一起动」）。
     @Published private(set) var pendingInk: [String: [(page: Int, stroke: ReaderNativeCardStroke)]] = [:] { didSet { refreshDecorations() } }
     func setPendingInk(_ strokes: [(page: Int, stroke: ReaderNativeCardStroke)]?, id: String) {
+        if let strokes {
+            // 记下交接那一刻各页的正式笔迹数：撤掉待确认笔画要等正式的多出这几笔。
+            for page in Set(strokes.map(\.page)) { pendingBaseline[id + ":\(page)"] = ink[page]?.count ?? 0 }
+        } else {
+            pendingBaseline = pendingBaseline.filter { !$0.key.hasPrefix(id + ":") }
+        }
         pendingInk[id] = strokes
     }
+    private var pendingBaseline: [String: Int] = [:]
+    func inkCountAtHandover(id: String, page: Int) -> Int { pendingBaseline[id + ":\(page)"] ?? (ink[page]?.count ?? 0) }
     @Published private(set) var highlights: [Int: [Highlight]] = [:] { didSet { refreshDecorations() } }
     /// 生词下划线由原生词汇投影计算；文档只画归一化矩形。
     @Published private(set) var vocabMarks: [Int: [VocabMark]] = [:] { didSet { refreshDecorations() } }

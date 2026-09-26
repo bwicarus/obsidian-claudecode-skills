@@ -772,7 +772,10 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 finishEraserCanvasIfIdle()
                 finishDeferredCanvasWorkIfIdle()
             }
-            guard activeCanvasTool == .pen else { return }
+            guard activeCanvasTool == .pen else {
+                reader.postClientLog("[pencil] 抬笔：当前工具不是笔（\(String(describing: activeCanvasTool))），不提交")
+                return
+            }
             let allStrokes = canvasView.drawing.strokes
             if let lastPoint = allStrokes.last?.path.last?.location {
                 controller.updateRecentPencilAnchor(
@@ -788,6 +791,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 let documentToken = strokeLayout.documentToken,
                 documentToken == controller.layout.documentToken
             else {
+                reader.postClientLog("[pencil] 抬笔：书写版面已变（落笔时 \(strokeLayout.documentToken ?? "无") / 现在 \(controller.layout.documentToken ?? "无")），丢弃")
                 canvasView.drawing = PKDrawing(
                     strokes: Array(allStrokes.prefix(start))
                 )
@@ -812,8 +816,17 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             let operationID = UUID().uuidString
             // 只落在书页上的笔画：立刻交给书页的「待确认笔迹」（页面坐标，跟着滚），并从手写层擦掉；
             // 存盘在后台照常进行。落在卡片上的仍走原路（卡片自己的笔迹层另算）。
-            if reader.showPendingNativeInk(id: operationID, segments: segments) {
-                canvasView.drawing = PKDrawing(strokes: Array(allStrokes.prefix(start)))
+            let handedOver = reader.showPendingNativeInk(id: operationID, segments: segments)
+            reader.postClientLog("[pencil] 抬笔：新笔画=\(newStrokes.count) 段=\(segments.count) 表面=\(Set(segments.map(\.surfaceId)).sorted().joined(separator: ",")) 挂到书页=\(handedOver)")
+            if handedOver {
+                // ⚠ 不能在这个回调里当场改 drawing：PencilKit 在它之后还会把刚完成的笔画写回画布，
+                //   当场删等于没删（2026-09-26 实测：笔画仍停在屏幕上）。下一轮再按创建时刻精确删掉这几笔。
+                let handed = Set(newStrokes.map { $0.path.creationDate })
+                DispatchQueue.main.async { [weak canvasView] in
+                    guard let canvasView else { return }
+                    let kept = canvasView.drawing.strokes.filter { !handed.contains($0.path.creationDate) }
+                    if kept.count != canvasView.drawing.strokes.count { canvasView.drawing = PKDrawing(strokes: kept) }
+                }
                 enqueue(NativeInkOperation(id: operationID, documentToken: documentToken,
                                            kind: .commit, segments: segments, canvasStrokeCount: 0))
                 return
@@ -1290,7 +1303,10 @@ fileprivate extension ReaderWebViewModel {
     /// 把刚写下的书页笔画交给原生书页的「待确认笔迹」。有任何一段不在书页上（卡片等）就不接，
     /// 返回 false，由手写层照旧保留到存盘确认。
     func showPendingNativeInk(id: String, segments: [NativeInkSegment]) -> Bool {
-        guard let document = nativePDFDocument, !segments.isEmpty else { return false }
+        guard let document = nativePDFDocument, !segments.isEmpty else {
+            postClientLog("[pencil] 待确认笔迹未挂：" + (nativePDFDocument == nil ? "没有原生正文" : "没有笔画段"))
+            return false
+        }
         var strokes: [(page: Int, stroke: ReaderNativeCardStroke)] = []
         for segment in segments {
             guard segment.surfaceId.hasPrefix("page:"), let page = Int(segment.surfaceId.dropFirst(5)) else { return false }
@@ -1304,12 +1320,25 @@ fileprivate extension ReaderWebViewModel {
         return true
     }
 
-    /// 存盘确认：稍等正式笔迹接上再撤（避免一帧空白）；失败/放弃：立即撤。
+    /// 存盘确认：等书页里这一页的正式笔迹真的多出这几笔再撤（最多 10 秒），否则中间会空一段 ——
+    /// 正式笔迹不是存完立刻刷新的（2026-09-26：撤早了，书页上一时什么都没有）。失败/放弃：立即撤。
     func retirePendingNativeInk(id: String, confirmed: Bool) {
-        guard let document = nativePDFDocument, document.pendingInk[id] != nil else { return }
+        guard let document = nativePDFDocument, let entries = document.pendingInk[id] else { return }
         guard confirmed else { document.setPendingInk(nil, id: id); return }
-        Task { @MainActor [weak document] in
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        var need: [Int: Int] = [:]
+        for entry in entries { need[entry.page, default: 0] += 1 }
+        let baseline = need.keys.reduce(into: [Int: Int]()) { $0[$1] = document.inkCountAtHandover(id: id, page: $1) }
+        Task { @MainActor [weak self, weak document] in
+            var waited = 0
+            var arrived = false
+            for _ in 0..<50 {
+                guard let document else { return }
+                arrived = need.allSatisfy { page, count in (document.ink[page]?.count ?? 0) >= (baseline[page] ?? 0) + count }
+                if arrived { break }
+                waited += 200
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            self?.postClientLog("[pencil] 待确认笔迹撤下：" + (arrived ? "正式笔迹已接上（等了 \(waited)ms）" : "10 秒内正式笔迹没刷新出来"))
             document?.setPendingInk(nil, id: id)
         }
     }
