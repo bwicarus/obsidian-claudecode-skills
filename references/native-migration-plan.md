@@ -1,0 +1,57 @@
+# 网页层迁出计划（2026-09-26 起）
+
+用户拍板的顺序：**对话侧栏数据链 → 阅读位置 → 语音客户端 → 摆放逻辑**。
+目标：App 里隐藏 WKWebView 最终只剩「尚未迁移的动作」，数据与呈现全部原生。
+
+## 0. 现状（迁移前实测）
+
+| 层 | 现在谁做 | 代码 |
+|---|---|---|
+| 请求/流式传输、断线恢复 | Swift | `ReaderNativeAssistantStreamBridge` |
+| 历史读取、分类（user/parts/card/answer） | Swift | `ReaderNativeAssistantHistory`（把分类挂在 `__bwNativeHistory`） |
+| 轮次状态（草稿/工具/卡片/合并） | Swift | `ReaderNativeTurnStore` + `ReaderNativeTurnBridge` |
+| **事件 → 轮次命令**（打字流） | JS | `rc-assistant.js` `_handleEv` / `onHistoryEvent` |
+| **历史 → 轮次**（回放） | JS | `rc-assistant.js` `_historyReplayOne`（混着 `addMsg` DOM 消息、上下文卡、追问、反馈、录音按钮、撤销卡、EPUB 动作卡） |
+| **语音事件 → 轮次命令** | JS | `rc-voicecall.js` |
+| 侧栏呈现 | Swift（SwiftUI） | `ReaderNativeConversationView` 等 |
+| 非轮次消息（`asst-u/asst-a/asst-note`） | JS DOM → **抓取**投影给 Swift | `ReaderNativeConversationScript`（1700+ 行嵌入 JS） |
+
+所以「数据链迁出」= 把三个**生产者**（历史回放、打字流、语音事件）从 JS 搬进 Swift，
+让 TurnStore 直接被 Swift 喂；最后删掉 DOM 抓取。
+
+## 1. 对话侧栏数据链
+
+### P1 历史回放（只读，风险最低，先做）
+- Swift 读到历史后**直接**生成 TurnStore 轮次（不经 JS `renderTurn`）：
+  user（文本 + 上下文摘要：页码/选区/图）、parts（原样）、legacy card、answer
+  （正文去心情标记、追问拆出、`via=voice` 字幕标记、trace、videos、undo_cards、actions）。
+- 原生视图补：上下文小条、追问按钮、步骤/模型（trace）、撤销卡；录音回放按钮、
+  EPUB 动作卡可后置（先显式标「未迁移」而不是静默丢）。
+- 开关：原生模式下 JS 不再回放（`_historyReplayOne` 早退并 dlog）。
+- 验证：模拟器开书看侧栏与迁移前一致（对照 `conversation-cache/normal.json`）。
+
+### P2 打字发送与流式
+- 原生输入框直接调 stream bridge；`sentCtx` 由原生组（可见页正文、选区、页码、图）。
+- 把 `_handleEv` 的事件表搬进 Swift（delta/parts/final/tool/cards/status/progress/task/cli/gone）。
+- JS `__asstSend` 退为兼容入口。
+
+### P3 语音事件
+- `rc-voicecall` 的 runner 事件 → 轮次命令搬进 Swift（桥的事件流由 Swift 直接订阅）。
+
+### P4 删抓取
+- `ReaderNativeConversationScript` 的消息投影部分删除；只保留仍未迁移的动作句柄。
+
+## 2. 阅读位置
+- 2026-09-26 已完成第一步：原生视口是本机权威（等存储握手再开书；本机写的
+  reading-position 不压原生视口；App 内网页层不再写 PDF 续读）。
+- 剩：EPUB 续读、`ctxSync.report` 的当前页上报改由原生发。
+
+## 3. 语音客户端
+（P3 之后细化：录音/播放/会话状态目前在 `rc-computer-voice.js` + Swift 各一半。）
+
+## 4. 摆放逻辑
+（卡片/收藏落页的摆放目前在 JS `placement`，原生 `ReaderNativeFavoritePlacement` 已有一部分。）
+
+## 规则
+- 每步都要**出声**：未迁移的分支 dlog/postClientLog，不静默丢。
+- 每步在模拟器验证后再进下一步；数据格式不变（服务端历史仍是权威）。
