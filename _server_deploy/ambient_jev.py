@@ -587,7 +587,8 @@ def person_update(person_id):
 @bp.delete("/people/<person_id>")
 def person_delete(person_id):
     def go():
-        result = people().delete_person(person_id)
+        purge = request.args.get("purge") in ("1", "true")
+        result = people().delete_person(person_id, purge=purge)
         log_event("person_deleted", **result)
         return result
     return _people_reply(go)
@@ -616,6 +617,16 @@ def slot_assign():
 def slot_unassign():
     body = request.get_json(silent=True) or {}
     return _people_reply(lambda: (people().unassign_slot(str(body.get("slotKey") or "")), {})[1])
+
+
+@bp.post("/slots/delete")
+def slot_delete():
+    body = request.get_json(silent=True) or {}
+    def go():
+        result = people().delete_slot(str(body.get("slotKey") or ""))
+        log_event("slot_deleted", **result)
+        return result
+    return _people_reply(go)
 
 
 @bp.post("/revise")

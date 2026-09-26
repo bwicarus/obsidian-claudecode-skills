@@ -322,6 +322,19 @@ class AmbientPeopleTests(AmbientJevTests):
         names = [p["name"] for p in self.client.get("/api/ambient/people").get_json()["people"]]
         self.assertIn("小王", names)   # 又定回来就重新出现
 
+    def test_delete_person_with_all_utterances_and_unnamed_block(self):
+        self.login()
+        self.judge(self.window("w1"))
+        self.judge(self.window("w2", slot_other="s1:2"))
+        pid = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "小王"}).get_json()["person"]["id"]
+        reply = self.client.delete(f"/api/ambient/people/{pid}?purge=1").get_json()
+        self.assertEqual((reply["slots"], reply["utterances"]), (1, 1))
+        texts = [(r["slotKey"], r["text"]) for r in self.timeline()["utterances"]]
+        self.assertNotIn("s1:1", [k for k, _ in texts])
+        reply = self.client.post("/api/ambient/slots/delete", json={"slotKey": "s1:2"}).get_json()
+        self.assertEqual(reply["utterances"], 1)
+        self.assertEqual({k for k, _ in (r for r in [(r["slotKey"], r["text"]) for r in self.timeline()["utterances"]])}, {"s1:0"})
+
     def test_history_newest_first_with_revised_rows_grouped_by_minute(self):
         self.login()
         pid = self.client.post("/api/ambient/slots/assign", json={"slotKey": "s1:1", "name": "田中"}).get_json()["person"]["id"]

@@ -253,7 +253,43 @@ class AmbientPeople:
             self._save(data)
         return self.person(into)
 
-    def delete_person(self, person_id: str) -> dict:
+    def _purge_rows(self, slot_keys: set) -> int:
+        """时间轴上删掉这些声音块的全部句子（调用方持锁）。返回删掉的句数。"""
+        if not slot_keys:
+            return 0
+        removed = 0
+        for path in sorted((self.root / "timeline").glob("*.jsonl")):
+            lines = path.read_text(encoding="utf-8").splitlines()
+            keep = []
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    keep.append(line)
+                    continue
+                if row.get("slotKey") in slot_keys:
+                    removed += 1
+                else:
+                    keep.append(line)
+            if len(keep) != len(lines):
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text("".join(line + "\n" for line in keep), encoding="utf-8")
+                tmp.replace(path)
+        return removed
+
+    def delete_slot(self, slot_key: str) -> dict:
+        """删掉一个声音块（还没定人的「说话人N」）的全部句子。"""
+        slot_key = (slot_key or "").strip()
+        if not slot_key:
+            raise PeopleError("missing_slot", "缺少声音块编号")
+        with self._lock:
+            data = self._load()
+            data["slots"].pop(slot_key, None)
+            self._save(data)
+            rows = self._purge_rows({slot_key})
+        return {"slotKey": slot_key, "utterances": rows}
+
+    def delete_person(self, person_id: str, *, purge: bool = False) -> dict:
         """从旁听里删掉这个人（2026-09-27 用户：「每个说话人打开后可以进行删除」）：声纹删掉、他名下的声音块
         退回未定人、人物列表里不再出现。KJ 人物页与过去的对话记录不动（KJ 是只增账本，没有删节点），
         要彻底删就在 Obsidian 里删那一页。以后再把某个声音块定成同名的人，会重新出现。"""
@@ -263,15 +299,18 @@ class AmbientPeople:
         with self._lock:
             data = self._load()
             removed = len(data["persons"].pop(person_id, {}).get("voiceprints", []))
-            freed = 0
-            for slot in data["slots"].values():
-                if self._alive(slot.get("personId")) == person_id:
-                    slot["personId"] = None
-                    freed += 1
+            owned = {k for k, v in data["slots"].items() if self._alive(v.get("personId")) == person_id}
+            freed = len(owned)
+            for key in owned:
+                if purge:
+                    data["slots"].pop(key, None)       # 连同他的话一起删：声音块也不留
+                else:
+                    data["slots"][key]["personId"] = None
             hidden = [h for h in (data.get("hidden") or []) if h != person_id] + [person_id]
             data["hidden"] = hidden[-500:]
             self._save(data)
-        return {"deleted": person_id, "voiceprints": removed, "slots": freed}
+            rows = self._purge_rows(owned) if purge else 0
+        return {"deleted": person_id, "voiceprints": removed, "slots": freed, "utterances": rows}
 
     def assign_slot(self, slot_key: str, *, name: str | None = None, person_id: str | None = None,
                     vector: list | None = None) -> dict:
@@ -428,9 +467,10 @@ class AmbientPeople:
             hit = [r for r in rows if r.get("slotKey") == slot_key
                    and int(r.get("t0") or 0) < t1 + pad and int(r.get("t1") or 0) > t0 - pad]
             keep = [r for r in rows if r not in hit]
-            first = hit[0] if hit else {}
+            # 没对上（重转先到）：标签借同一声音块别的句子的，别让时间轴上出现没名字的块
+            first = hit[0] if hit else next((r for r in reversed(rows) if r.get("slotKey") == slot_key and r.get("label")), {})
             keep.append({"contract": UTTERANCE_CONTRACT, "id": uuid.uuid4().hex[:12], "t0": int(t0), "t1": int(t1),
-                         "windowId": first.get("windowId") or "revise", "source": first.get("source") or "",
+                         "windowId": (first.get("windowId") if hit else None) or "revise", "source": first.get("source") or "",
                          "slotKey": slot_key, "isUser": bool(first.get("isUser")), "label": first.get("label") or "",
                          "text": text[:1200], "lang": lang, "langConfirmed": bool(confirmed), "revised": True})
             keep.sort(key=lambda r: int(r.get("t0") or 0))

@@ -41,7 +41,13 @@ struct NativeAmbientUtterance: Identifiable, Hashable {
 
     /// 泳道：定了人按人（同名的块合成一条），没定人按声音块。
     var laneKey: String { personId.map { "p:" + $0 } ?? "s:" + slotKey }
-    var displayName: String { name ?? label }
+    /// 名字 → 记录时的标签 → 由声音块编号推出的「说话人N」（重转补记的句子没有标签）。
+    var displayName: String {
+        if let name, !name.isEmpty { return name }
+        if !label.isEmpty { return label }
+        if let index = slotKey.split(separator: ":").last.flatMap({ Int($0) }) { return "说话人\(index + 1)" }
+        return "?"
+    }
 }
 
 struct NativeAmbientPersonInfo: Identifiable, Hashable {
@@ -92,15 +98,19 @@ final class NativeAmbientTimelineModel: ObservableObject {
     }
 
     @Published var range: Span = .threeHours
-    /// 起始点：0 = 范围的开头，1 = 现在。只看这之后的话（2026-09-27 用户：「时间轴滑条可以调整起始点」）。
-    @Published var startFraction: Double = 0
+    /// 显示范围的两端（绝对时刻，毫秒）。nil = 钉在该端：新端钉在「现在」、旧端钉在范围起点 ——
+    /// 时间流逝范围变长时也还钉着（2026-09-27 用户：「左端拉到最左就锁定为最左，即使时间流逝导致时间条变长」）。
+    @Published var newestEdge: Double?
+    @Published var oldestEdge: Double?
+    /// 「现在」：自动刷新时更新，范围随之往前走。
+    @Published var now = Date()
     @Published private(set) var utterances: [NativeAmbientUtterance] = []
     @Published private(set) var people: [NativeAmbientPersonInfo] = []
     @Published private(set) var loading = false
     @Published var error: String?
 
     func bounds() -> (Double, Double) {
-        let now = Date()
+        let now = self.now
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: now)
         let ms = { (date: Date) in date.timeIntervalSince1970 * 1000 }
@@ -113,6 +123,7 @@ final class NativeAmbientTimelineModel: ObservableObject {
     }
 
     func reload() async {
+        now = Date()
         loading = true
         defer { loading = false }
         let (from, to) = bounds()
@@ -130,34 +141,94 @@ final class NativeAmbientTimelineModel: ObservableObject {
 
     var startTime: Double {
         let (from, to) = bounds()
-        return from + (to - from) * startFraction
+        return min(to, max(from, oldestEdge ?? from))
+    }
+    var endTime: Double {
+        let (from, to) = bounds()
+        return max(startTime, min(to, newestEdge ?? to))
     }
 
-    /// 一段对话：中间停顿超过 60 秒就另起一段。段与段、段内的句子都是新的在上。
+    /// 滑条用：左 = 现在（0），右 = 范围起点（1）。
+    var newerFraction: Double {
+        get { let (from, to) = bounds(); return (to - endTime) / max(1, to - from) }
+        set {
+            let (from, to) = bounds()
+            newestEdge = newValue <= 0.004 ? nil : to - newValue * (to - from)
+        }
+    }
+    var olderFraction: Double {
+        get { let (from, to) = bounds(); return (to - startTime) / max(1, to - from) }
+        set {
+            let (from, to) = bounds()
+            oldestEdge = newValue >= 0.996 ? nil : to - newValue * (to - from)
+        }
+    }
+
+    /// 刻度间隔：让一段时长里大约有 4–8 个刻度。
+    static func tickInterval(for span: Double) -> Double {
+        let minutes: [Double] = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360]
+        return (minutes.first { span / ($0 * 60_000) <= 8 } ?? 720) * 60_000
+    }
+    static func ticks(from: Double, to: Double) -> [Double] {
+        guard to > from else { return [] }
+        let step = tickInterval(for: to - from)
+        let offset = Double(TimeZone.current.secondsFromGMT()) * 1000   // 刻度对齐本地整点 / 整分
+        var t = (((from + offset) / step).rounded(.up)) * step - offset
+        var out: [Double] = []
+        while t <= to && out.count < 50 { out.append(t); t += step }
+        return out
+    }
+
+    /// 一个人连续说的几句合成一块（2026-09-27 用户：「一个人连续说话完全可以结合为一个块」）。
+    struct Block: Identifiable {
+        let lines: [NativeAmbientUtterance]        // 时间先后
+        var id: String { lines.first?.id ?? "" }
+        var first: NativeAmbientUtterance { lines[0] }
+        var t0: Double { lines.first?.t0 ?? 0 }
+        var t1: Double { lines.map(\.t1).max() ?? 0 }
+        var text: String {
+            lines.map(\.text).reduce("") { joined, next in
+                guard let last = joined.last, let head = next.first else { return joined + next }
+                let cjk = { (c: Character) in c.unicodeScalars.contains { (0x3000...0x9FFF).contains($0.value) || (0xFF00...0xFFEF).contains($0.value) } }
+                return joined + (cjk(last) || cjk(head) ? "" : " ") + next
+            }
+        }
+    }
+
+    /// 一段对话：中间停顿超过 60 秒另起一段。段、段里的块都是新的在上。
     struct Group: Identifiable {
-        let id: String
-        let lines: [NativeAmbientUtterance]
-        var start: Double { lines.last?.t0 ?? 0 }
-        var end: Double { lines.first?.t1 ?? 0 }
-        var speakers: Int { Set(lines.map(\.laneKey)).count }
+        let blocks: [Block]
+        var id: String { blocks.first?.id ?? "" }
+        var start: Double { blocks.last?.t0 ?? 0 }
+        var end: Double { blocks.first?.t1 ?? 0 }
+        var sentences: Int { blocks.reduce(0) { $0 + $1.lines.count } }
+        var speakers: Int { Set(blocks.map(\.first.laneKey)).count }
     }
 
     var groups: [Group] {
-        let start = startTime
-        let visible = utterances.filter { $0.t1 >= start }.sorted { $0.t0 > $1.t0 }
-        var out: [[NativeAmbientUtterance]] = []
+        let start = startTime, end = endTime
+        let visible = utterances.filter { $0.t1 >= start && $0.t0 <= end }.sorted { $0.t0 < $1.t0 }
+        var runs: [[NativeAmbientUtterance]] = []   // 先按时间先后切段
         for u in visible {
-            if let newer = out.last?.last, newer.t0 - u.t1 <= 60_000 { out[out.count - 1].append(u) }
-            else { out.append([u]) }
+            if let last = runs.last?.last, u.t0 - last.t1 <= 60_000 { runs[runs.count - 1].append(u) }
+            else { runs.append([u]) }
         }
-        return out.map { Group(id: $0.first?.id ?? UUID().uuidString, lines: $0) }
+        return runs.reversed().map { run in
+            var blocks: [[NativeAmbientUtterance]] = []
+            for u in run {
+                if let last = blocks.last?.last, last.laneKey == u.laneKey { blocks[blocks.count - 1].append(u) }
+                else { blocks.append([u]) }
+            }
+            return Group(blocks: blocks.reversed().map { Block(lines: $0) })
+        }
     }
 
-    func deletePerson(_ id: String) async -> String? {
+    func deletePerson(_ id: String, purge: Bool) async -> String? {
         do {
-            let reply = try await NativeAmbientServer.delete("api/ambient/people/\(id)")
+            let reply = try await NativeAmbientServer.delete("api/ambient/people/\(id)" + (purge ? "?purge=1" : ""))
             await NativeSpeakerEmbedder.shared.invalidateServer()
-            NativeAmbientLog.note("人物：已删除 \(id)（声纹 \(reply["voiceprints"] ?? 0) 条、声音块 \(reply["slots"] ?? 0) 个退回未定人）")
+            NativeAmbientLog.note("人物：已删除 \(id)（声纹 \(reply["voiceprints"] ?? 0) 条、声音块 \(reply["slots"] ?? 0) 个"
+                + (purge ? "、连同 \(reply["utterances"] ?? 0) 句话）" : "退回未定人）"))
             await reload()
             return nil
         } catch {
@@ -179,6 +250,19 @@ final class NativeAmbientTimelineModel: ObservableObject {
             return nil
         } catch {
             NativeAmbientLog.note("时间轴：定人失败 \(error.localizedDescription)", level: "error")
+            return error.localizedDescription
+        }
+    }
+
+    /// 还没定人的「说话人N」：删掉这个声音块的全部话。
+    func deleteSlot(_ slotKey: String) async -> String? {
+        do {
+            let reply = try await NativeAmbientServer.post("api/ambient/slots/delete", body: ["slotKey": slotKey])
+            NativeAmbientLog.note("时间轴：已删除声音块 \(slotKey) 的 \(reply["utterances"] ?? 0) 句话")
+            await reload()
+            return nil
+        } catch {
+            NativeAmbientLog.note("时间轴：删除声音块失败 \(error.localizedDescription)", level: "error")
             return error.localizedDescription
         }
     }
@@ -219,14 +303,25 @@ struct NativeAmbientTimelineView: View {
                 }
             }
             .task { await model.reload() }
-            .onChange(of: model.range) { _, _ in model.startFraction = 0; Task { await model.reload() } }
+            .onChange(of: model.range) { _, _ in model.newestEdge = nil; model.oldestEdge = nil; Task { await model.reload() } }
+            .task {
+                // 自动刷新（2026-09-27 用户：「刷新是自动的」）：每 10 秒拉一次，「现在」跟着往前走
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(10))
+                    guard !Task.isCancelled else { return }
+                    await model.reload()
+                }
+            }
             .confirmationDialog("删除人物", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                                 presenting: deleting) { person in
-                Button("删除「\(person.name)」", role: .destructive) {
-                    Task { if let failure = await model.deletePerson(person.id) { model.error = "删除失败：\(failure)" } }
+                Button("删除「\(person.name)」和他说过的全部话", role: .destructive) {
+                    Task { if let failure = await model.deletePerson(person.id, purge: true) { model.error = "删除失败：\(failure)" } }
+                }
+                Button("只删人物（他的话留在时间轴上）", role: .destructive) {
+                    Task { if let failure = await model.deletePerson(person.id, purge: false) { model.error = "删除失败：\(failure)" } }
                 }
             } message: { person in
-                Text("删掉他的声纹，他名下的声音块退回「说话人N」，人物列表里不再显示。KJ 人物页和过去的对话记录保留（要彻底删在 Obsidian 里删那一页）。")
+                Text("都会删掉他的声纹、从人物列表里去掉。KJ 人物页（Obsidian）保留，要彻底删在 Obsidian 里删那一页。")
             }
             .sheet(item: $selected) { utterance in
                 NativeAmbientBlockSheet(utterance: utterance, model: model)
@@ -240,18 +335,23 @@ struct NativeAmbientTimelineView: View {
                 ForEach(NativeAmbientTimelineModel.Span.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
-            VStack(alignment: .leading, spacing: 4) {
+            let (from, to) = model.bounds()
+            VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("起始点").font(.subheadline)
+                    Text("显示").font(.subheadline)
                     Spacer()
-                    Text(Date(timeIntervalSince1970: model.startTime / 1000).formatted(date: .omitted, time: .shortened))
+                    Text((model.newestEdge == nil ? "现在" : Self.clock(model.endTime)) + " ← " + Self.clock(model.startTime))
                         .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
                 }
-                Slider(value: $model.startFraction, in: 0...1)
+                NativeAmbientRangeSlider(newer: $model.newerFraction, older: $model.olderFraction, from: from, to: to)
             }
         } footer: {
-            Text("新的在上。只显示起始点之后的话；停顿超过 1 分钟另起一段。点一句查看、给说话人定名字。")
+            Text("左边是现在，往右越早。拖两端的圆点调显示范围；左端拉到最左就一直跟着现在。每 10 秒自动刷新。下面新的在上，一个人连着说的合成一块；点一块查看、定人或删除。")
         }
+    }
+
+    static func clock(_ ms: Double) -> String {
+        Date(timeIntervalSince1970: ms / 1000).formatted(date: .omitted, time: .shortened)
     }
 
     @ViewBuilder private var timeline: some View {
@@ -262,17 +362,20 @@ struct NativeAmbientTimelineView: View {
         } else {
             ForEach(model.groups) { group in
                 Section {
-                    ForEach(Array(group.lines.enumerated()), id: \.element.id) { index, line in
-                        let sameSpeaker = index > 0 && group.lines[index - 1].laneKey == line.laneKey
-                        NativeAmbientTimelineRow(utterance: line, showName: !sameSpeaker)
+                    ForEach(Array(group.blocks.enumerated()), id: \.element.id) { index, block in
+                        // 时间刻度：这一块与上面（更新的）一块之间跨过的整点刻度，画成一条刻度线
+                        let newer = index > 0 ? group.blocks[index - 1].t0 : group.end
+                        ForEach(NativeAmbientTimelineModel.ticks(from: block.t1, to: newer).reversed(), id: \.self) { tick in
+                            NativeAmbientTickRow(time: tick)
+                        }
+                        NativeAmbientTimelineRow(block: block)
                             .contentShape(Rectangle())
-                            .onTapGesture { selected = line }
+                            .onTapGesture { selected = block.first }
                     }
                 } header: {
                     let start = Date(timeIntervalSince1970: group.start / 1000)
-                    let end = Date(timeIntervalSince1970: group.end / 1000)
-                    Text("\(start.formatted(date: .abbreviated, time: .shortened)) – \(end.formatted(date: .omitted, time: .shortened))"
-                         + " · \(group.lines.count) 句 · \(group.speakers) 人")
+                    Text("\(start.formatted(date: .abbreviated, time: .shortened)) – \(Self.clock(group.end))"
+                         + " · \(group.sentences) 句 · \(group.speakers) 人")
                 }
             }
         }
@@ -308,24 +411,27 @@ struct NativeAmbientTimelineView: View {
 
 // MARK: - 画布
 
-/// 时间轴的一行：时间 · 说话人 · 整句话（长句换行显示完整）。同一个人连着说时名字只标第一行。
+/// 时间轴的一块：一个人连着说的几句 —— 起止时间 · 说话人 · 全文（长句换行显示完整）。
 struct NativeAmbientTimelineRow: View {
-    let utterance: NativeAmbientUtterance
-    let showName: Bool
+    let block: NativeAmbientTimelineModel.Block
 
     var body: some View {
-        let color = NativeAmbientPalette.color(for: utterance.laneKey)
+        let first = block.first
+        let color = NativeAmbientPalette.color(for: first.laneKey)
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(Date(timeIntervalSince1970: utterance.t0 / 1000).formatted(date: .omitted, time: .standard))
-                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                .frame(width: 62, alignment: .leading)
-            Text(showName ? utterance.displayName : "")
-                .font(.caption.bold()).foregroundStyle(color).lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Self.time(block.t0)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                if block.t1 - block.t0 >= 5_000 {
+                    Text(Self.time(block.t1)).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: 62, alignment: .leading)
+            Text(first.displayName).font(.caption.bold()).foregroundStyle(color).lineLimit(2)
                 .frame(width: 70, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
-                Text(utterance.text).font(.callout).fixedSize(horizontal: false, vertical: true)
-                if !utterance.lang.isEmpty && utterance.lang != "zh-CN" {
-                    Text(NativeSegmentTranscriber.displayName(utterance.lang) + (utterance.langConfirmed ? "" : "（推测）"))
+                Text(block.text).font(.callout).fixedSize(horizontal: false, vertical: true)
+                if !first.lang.isEmpty && first.lang != "zh-CN" {
+                    Text(NativeSegmentTranscriber.displayName(first.lang) + (first.langConfirmed ? "" : "（推测）"))
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
@@ -333,8 +439,82 @@ struct NativeAmbientTimelineRow: View {
         }
         .padding(.leading, 6)
         .overlay(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 1.5).fill(color.opacity(utterance.personId == nil ? 0.45 : 0.9)).frame(width: 3)
+            RoundedRectangle(cornerRadius: 1.5).fill(color.opacity(first.personId == nil ? 0.45 : 0.9)).frame(width: 3)
         }
+    }
+
+    static func time(_ ms: Double) -> String {
+        Date(timeIntervalSince1970: ms / 1000).formatted(date: .omitted, time: .standard)
+    }
+}
+
+/// 句子时间轴上的刻度线（整点 / 整分，间隔随显示范围变）。
+struct NativeAmbientTickRow: View {
+    let time: Double
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(NativeAmbientTimelineView.clock(time)).font(.caption2.monospacedDigit().bold()).foregroundStyle(.secondary)
+            Rectangle().fill(Color.secondary.opacity(0.3)).frame(height: 1)
+        }
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+    }
+}
+
+/// 两端可拖的时间范围滑条，带时间刻度。左 = 现在（0），右 = 范围起点（1）。
+/// 整条只有一个拖动手势：按下时离哪个圆点近就拖哪个（两个圆点各挂手势时，offset 后的命中区域还在原地，
+/// 拖一个会带动另一个 —— 2026-09-27 模拟器实测）。
+struct NativeAmbientRangeSlider: View {
+    @Binding var newer: Double
+    @Binding var older: Double
+    let from: Double
+    let to: Double
+    private let knob: CGFloat = 26
+    private let minGap = 0.01
+    @State private var draggingNewer: Bool?
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = max(1, geo.size.width - knob)
+            let x = { (fraction: Double) in knob / 2 + CGFloat(fraction) * width }
+            let fraction = { (location: CGFloat) in min(1, max(0, Double((location - knob / 2) / width))) }
+            ZStack(alignment: .topLeading) {
+                Capsule().fill(Color.secondary.opacity(0.25))
+                    .frame(width: width, height: 4).offset(x: knob / 2, y: knob / 2 - 2)
+                Capsule().fill(Color.accentColor)
+                    .frame(width: max(0, x(older) - x(newer)), height: 4).offset(x: x(newer), y: knob / 2 - 2)
+                ForEach(NativeAmbientTimelineModel.ticks(from: from, to: to), id: \.self) { tick in
+                    let at = (to - tick) / max(1, to - from)
+                    Rectangle().fill(Color.secondary.opacity(0.6)).frame(width: 1, height: 6)
+                        .offset(x: x(at), y: knob / 2 + 6)
+                    Text(NativeAmbientTimelineView.clock(tick)).font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.secondary).fixedSize()
+                        .frame(width: 44).offset(x: x(at) - 22, y: knob / 2 + 13)
+                }
+                handle(pinned: newer <= 0.004).offset(x: x(newer) - knob / 2)
+                handle(pinned: older >= 0.996).offset(x: x(older) - knob / 2)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 1).onChanged { value in
+                let target = fraction(value.location.x)
+                if draggingNewer == nil {
+                    let start = fraction(value.startLocation.x)
+                    draggingNewer = abs(start - newer) <= abs(start - older)
+                }
+                if draggingNewer == true { newer = min(target, older - minGap) }
+                else { older = max(target, newer + minGap) }
+            }.onEnded { _ in draggingNewer = nil })
+        }
+        .frame(height: 52)
+    }
+
+    /// 钉住的一端（最左 = 跟着现在 / 最右 = 范围起点）填满颜色，一眼看出它会跟着走。
+    private func handle(pinned: Bool) -> some View {
+        Circle().fill(pinned ? Color.accentColor : Color.white).frame(width: knob, height: knob)
+            .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+            .overlay(Circle().stroke(Color.accentColor, lineWidth: 1.5))
+            .allowsHitTesting(false)
     }
 }
 
@@ -345,8 +525,10 @@ struct NativeAmbientBlockSheet: View {
     @ObservedObject var model: NativeAmbientTimelineModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
+    @State private var picked = ""
     @State private var note = ""
     @State private var busy = false
+    @State private var confirmDeleteSlot = false
 
     var body: some View {
         NavigationStack {
@@ -378,6 +560,15 @@ struct NativeAmbientBlockSheet: View {
             .navigationTitle(utterance.displayName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+            .confirmationDialog("删除", isPresented: $confirmDeleteSlot) {
+                Button("删除这个声音块的全部话", role: .destructive) {
+                    busy = true
+                    Task {
+                        if let failure = await model.deleteSlot(utterance.slotKey) { note = failure } else { dismiss() }
+                        busy = false
+                    }
+                }
+            } message: { Text("时间轴上「\(utterance.displayName)」（这个声音块）的每一句都会删掉。") }
         }
     }
 
@@ -396,18 +587,35 @@ struct NativeAmbientBlockSheet: View {
         }
         if !utterance.slotKey.isEmpty && utterance.personId != "me" {
             Section {
-                TextField("名字", text: $name)
-                let suggestions = model.people.filter { !$0.isUser && ($0.name.contains(name) || name.isEmpty) }.prefix(6)
-                ForEach(Array(suggestions)) { person in
-                    Button("是「\(person.name)」") { name = person.name; submit() }
+                // 2026-09-27 用户：「只用一个从已登记表中选择的选项就好」
+                let registered = model.people.filter { !$0.isUser && $0.id != utterance.personId }
+                if !registered.isEmpty {
+                    Picker("从已登记的人里选", selection: $picked) {
+                        Text("请选择").tag("")
+                        ForEach(registered) { person in Text(person.name).tag(person.name) }
+                    }
+                    .onChange(of: picked) { _, value in
+                        guard !value.isEmpty else { return }
+                        name = value
+                        submit()
+                    }
                 }
-                Button(utterance.personId == nil ? "定为这个人" : "改成这个人") { submit() }
-                    .disabled(busy || name.trimmingCharacters(in: .whitespaces).isEmpty)
+                HStack {
+                    TextField("或者输入新名字", text: $name)
+                    Button("定为新的人") { submit() }
+                        .disabled(busy || name.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
                 if !note.isEmpty { Text(note).font(.caption).foregroundStyle(.red) }
             } header: {
                 Text(utterance.personId == nil ? "这是谁？" : "其实是别人？")
             } footer: {
-                Text("填已有的名字就合到那个人（同一个人）；填新名字会在 KJ 里新建人物。这个声音块的全部话都跟着改名。")
+                Text("这个声音块的全部话都会归到选中的人。")
+            }
+            if utterance.personId == nil {
+                Section {
+                    Button("删除「\(utterance.displayName)」说过的全部话", role: .destructive) { confirmDeleteSlot = true }
+                        .disabled(busy)
+                }
             }
         }
     }
@@ -470,7 +678,10 @@ struct NativeAmbientPersonView: View {
             Text("两个人的 KJ 页、对话记录、介绍、AI 整理、声纹都会合到「\(target.name)」。")
         }
         .confirmationDialog("删除人物", isPresented: $confirmDelete) {
-            Button("删除「\(person?.name ?? "")」", role: .destructive) { deletePerson() }
+            Button("删除「\(person?.name ?? "")」和他说过的全部话", role: .destructive) { deletePerson(purge: true) }
+            Button("只删人物（他的话留在时间轴上）", role: .destructive) { deletePerson(purge: false) }
+        } message: {
+            Text("都会删掉他的声纹、从人物列表里去掉。KJ 人物页（Obsidian）保留。")
         }
     }
 
@@ -508,7 +719,7 @@ struct NativeAmbientPersonView: View {
         Section {
             Button("删除这个人", role: .destructive) { confirmDelete = true }.disabled(busy)
         } footer: {
-            Text("删掉他的声纹，他名下的声音块退回「说话人N」，人物列表里不再显示。KJ 人物页和过去的对话记录保留。")
+            Text("可以连同他在时间轴上说过的全部话一起删，也可以只删人物。KJ 人物页（Obsidian）保留。")
         }
     }
 
@@ -621,12 +832,12 @@ struct NativeAmbientPersonView: View {
         }
     }
 
-    private func deletePerson() {
+    private func deletePerson(purge: Bool) {
         busy = true
         Task {
             defer { busy = false }
             do {
-                _ = try await NativeAmbientServer.delete("api/ambient/people/\(personId)")
+                _ = try await NativeAmbientServer.delete("api/ambient/people/\(personId)" + (purge ? "?purge=1" : ""))
                 await NativeSpeakerEmbedder.shared.invalidateServer()
                 NativeAmbientLog.note("人物：已删除 \(personId)")
                 onChange()
