@@ -491,6 +491,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var reportedConversationPayloadFailure: String?
     /// 迁出 P1：历史消息由原生生成，网页只放占位（见 ReaderNativeHistoryMessages）。
     let nativeHistoryMessages = ReaderNativeHistoryMessages()
+    let nativeFeed = ReaderNativeConversationFeed()
     private var reportedMissingHistoryRef = false
 
     /// 把投影里的历史占位换成原生建好的消息。占位对应的批次已被淘汰时出声，并显示一句提示而不是空白。
@@ -4906,16 +4907,45 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 injectionTime: .atDocumentStart, forMainFrameOnly: true))
             let nativeTurns = ReaderNativeTurnBridge(webView:webView,trustedBaseURL:localRuntimeServer.baseURL,gateway:nativeServerGateway)
             nativeTurns.onFailure = { [weak self] message in self?.nativeConversation.report(message) }
-            nativeAssistantStream.replyReference = { [weak nativeTurns] id, text, final in
+            nativeAssistantStream.replyReference = { [weak nativeTurns] id, text, final, followups in
                 guard let nativeTurns else { throw CancellationError() }
-                return try nativeTurns.replyReference(id:id,text:text,final:final)
+                return try nativeTurns.replyReference(id:id,text:text,final:final,followups:followups)
             }
             nativeAssistantStream.beforeHistoryClear = { [weak nativeTurns] mode in
                 guard let nativeTurns else { throw CancellationError() }
                 return try await nativeTurns.beginClear(mode)
             }
-            nativeAssistantStream.afterHistoryClear = { [weak nativeTurns] mode, token, cleared in nativeTurns?.endClear(mode,token:token,cleared:cleared) }
+            nativeAssistantStream.afterHistoryClear = { [weak nativeTurns, weak self] mode, token, cleared in
+                nativeTurns?.endClear(mode,token:token,cleared:cleared)
+                if cleared, mode == "normal" { self?.nativeFeed.cleared() }
+            }
             self.nativeTurns = nativeTurns
+            // 迁出 P2：普通会话的消息列表由原生对话流维护（见 ReaderNativeConversationFeed）。
+            nativeFeed.applyTurns = { [weak nativeTurns] commands in
+                guard let nativeTurns else { throw CancellationError() }
+                try nativeTurns.applyNative(commands)
+            }
+            nativeFeed.turnMessage = { [weak nativeTurns] tid, id in nativeTurns?.feedMessage(tid: tid, id: id) }
+            nativeFeed.readHistory = { [weak nativeAssistantStream, weak self] mode in
+                guard let nativeAssistantStream, let self else { throw CancellationError() }
+                return try await nativeAssistantStream.readHistory(mode: mode, surface: self.isEPUBBook ? .epub : .pdf)
+            }
+            nativeFeed.subscribe = { [weak nativeAssistantStream, weak self] onEvent in
+                guard let nativeAssistantStream, let self else { throw CancellationError() }
+                try await nativeAssistantStream.subscribeReaderEvents(surface: self.isEPUBBook ? .epub : .pdf, onEvent: onEvent)
+            }
+            nativeFeed.acknowledge = { [weak nativeServerGateway, weak self] tid in
+                guard let nativeServerGateway, let self,
+                      let body = try? JSONSerialization.data(withJSONObject: ["turn_id": tid]) else { return }
+                let surface: ReaderNativeInterfaceSurface = self.isEPUBBook ? .epub : .pdf
+                Task { _ = try? await nativeServerGateway.fetchData(path: "/pdf/api/turn-ack", method: "POST", body: body, surface: surface) }
+            }
+            nativeFeed.publish = { [weak self] messages in self?.nativeConversation.applyFeed(messages) }
+            nativeFeed.log = { [weak self] line in self?.postClientLog(line) }
+            nativeTurns.onNativeReply = { [weak self] tid in self?.nativeFeed.nativeReply(tid) }
+            nativeHistoryMessages.onLiveUser = { [weak self] message in self?.nativeFeed.appendExtra(message) }
+            contentController.addUserScript(WKUserScript(source: "window.__bwNativeConversationFeed = true;",
+                injectionTime: .atDocumentStart, forMainFrameOnly: true))
             contentController.addScriptMessageHandler(nativeTurns,contentWorld:.page,name:ReaderNativeTurnBridge.messageName)
             contentController.addUserScript(WKUserScript(source:ReaderNativeTurnBridge.script,injectionTime:.atDocumentStart,forMainFrameOnly:true))
             let nativeServerSyncBridge = ReaderNativeServerSyncBridge(
@@ -5853,6 +5883,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func resetBookUserStateContext(baseURL: URL) {
+        nativeFeed.reset()
         nativePDFNavigationBridge?.flushPendingPosition()
         nativeHTMLNoteActions = [:]; nativeHTMLNoteKey = ""; nativeHTMLNotesEnabled = false; nativeHTMLPinned = []
         nativeConversation.setNativeHTMLNotes(nil)
@@ -7426,6 +7457,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // 显示定位正常而快照始终未知)。
             wireDeviceLocationPushIfNeeded()
         }
+        // 后台期间事件流可能断过、漏过：回前台按服务器补一次（原生对话流）。
+        if foreground, !wasForeground { nativeFeed.reloadHistory(reason: "foreground") }
         if foreground, !wasForeground {
             // 地点维度:进前台取一次定位(开关关着时 refresh 是空操作)。
             ReaderLocationProvider.shared.refresh()
@@ -8768,6 +8801,7 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
             }
             do {
                 nativeConversation.receive(try nativeTurns?.conversationPayload(resolveNativeHistory(body)) ?? resolveNativeHistory(body))
+                if !nativeFeed.started, nativeConversation.ready, !nativeConversation.scope.isEmpty { nativeFeed.start() }
                 reportedConversationPayloadFailure = nil
                 if !pendingNativeMediaReceipts.isEmpty { Task { @MainActor [weak self] in await self?.flushNativeMediaReceipts() } }
             } catch {

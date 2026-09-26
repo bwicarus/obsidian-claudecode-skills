@@ -2820,7 +2820,9 @@
     streaming = true; _setSendMode(true);
     if (_historyWasLoading) _queueHistoryReload({ reason: 'post-stream-history' });
     var uMsg = addMsg('asst-u', esc(text));
-    try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
+    // 迁出 P2a：App 里这条的侧栏内容（正文 + 上下文一行）由原生按定格请求生成。
+    if (nativePrepared && typeof nativePrepared.__bwUserRef === 'string') uMsg.__bwNativeHistoryRef = nativePrepared.__bwUserRef;
+    else { try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {} }
     try { (HOST.clearFigFocus ? HOST.clearFigFocus() : (window.__clearFigFocus && window.__clearFigFocus())); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带(经 HOST:EPUB=__clearFigAttached)
     try { window.__clearNoteAttached && HOST.clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
@@ -4125,9 +4127,12 @@
       if (Object.keys(_historyPendingTurns).length) _legacyTurnTimer = setTimeout(_legacyTurnDrain, 400);
     });
   }
+  // 迁出 P2（2026-09-26）：App 里普通会话的消息列表由原生对话流维护（历史 + 实时事件），
+  // 网页不再渲染这两类，免得两边各写一份轮次。复习会话仍由这里处理。
   function onHistoryEvent(ev) {
     try {
       if (!ev || !thread) return;
+      if (window.__bwNativeConversationFeed === true && _modeNorm(ev.assistant_mode || ev.mode || 'normal') === 'normal') return;
       var tid = String(ev.turn_id || '');
       if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(tid)) return;
       var state = _streamState(tid, ev);
@@ -4358,6 +4363,7 @@
   function loadHistory(mode, options) {   // Pi 权威端在线重载；异步回包不得跨模式落进 DOM
     mode = _modeNorm(mode || _assistantMode);
     options = options || {};
+    if (window.__bwNativeConversationFeed === true && mode === 'normal') return Promise.resolve({ ok: true, count: 0, skipped: 0, turnIds: [], native: true });
     var historyScope = _historyUrl(mode);
     var histToken = ++_historyEpoch, modeEpoch = _modeEpoch;
     var liveVersion = RC.turnCard && RC.turnCard.streamVersion ? RC.turnCard.streamVersion() : 0;

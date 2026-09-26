@@ -358,7 +358,9 @@ enum ReaderNativeConversationScript {
         if (!parts.length && !body && !streaming && (node.matches('.vc-card,.vc-if') || node.querySelector('.vc-card,.fc-wrap,iframe,video'))) {
           parts.push(artifact(id + '-artifact', node, node.querySelector('.vc-card-hd,.vc-if-hd')?.textContent || '生成物'));
         }
-        if ((!presentation && !messageSource && body.length >= 32000) || node.querySelector('iframe,video,img,mjx-container,a,.asst-ctx,.asst-ctx-card,.rc-asst-ctx,.asst-pagelink,.actx-page,.asst-btm,.asst-followups,.asst-clip,.asst-jump,.asst-undo')) {
+        // 原生回复（replyRef）的正文与追问都由 Swift 给，不再把网页那份 HTML 当「完整内容与操作」附上（迁出 P2a）。
+        if (nativeMode && node.__bwNativeTurnRef) { /* 原生已提供 */ }
+        else if ((!presentation && !messageSource && body.length >= 32000) || node.querySelector('iframe,video,img,mjx-container,a,.asst-ctx,.asst-ctx-card,.rc-asst-ctx,.asst-pagelink,.actx-page,.asst-btm,.asst-followups,.asst-clip,.asst-jump,.asst-undo')) {
           parts.push(artifact(id + '-original', node, '完整内容与操作', cleanText(node.querySelector('.asst-ctx,.asst-ctx-card,.rc-asst-ctx'), 1200)));
         }
         return body || parts.length || streaming || presentation?.title ? {

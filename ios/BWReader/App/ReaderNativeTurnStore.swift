@@ -27,6 +27,8 @@ struct ReaderNativeTurnStore {
         var streamVersion = 0
         var historyReplay = false
         var presentationRevision = 0
+        /// 回答后的追问建议（迁出 P2a：原生直接给侧栏，不再从网页 DOM 抓）。
+        var followups: [String] = []
     }
     private(set) var turns: [String:Turn] = [:]
     private(set) var revision = 0
@@ -80,6 +82,7 @@ struct ReaderNativeTurnStore {
             .compactMap { $0["text"] as? String }.joined(separator:"\n\n")
         for key in ["role", "streaming", "title", "progress"] { message[key] = presentation[key] }
         message["statusText"] = turn.status["text"] as? String ?? ""
+        if !turn.followups.isEmpty { message["followups"] = turn.followups }
         message["parts"] = try handles.map { handle -> O in
             var result = handle, data = handle["data"] as? O ?? [:]
             guard let source = data["nativeTurnPart"] as? O else { return handle }
@@ -108,6 +111,58 @@ struct ReaderNativeTurnStore {
             data["nativeDetail"] = detail; result["data"] = data
             return result
         }
+        return message
+    }
+
+    /// 原生对话流（迁出）：直接从轮次生成侧栏的一条消息 —— 正文、工具、卡片、操作记录、追问。
+    /// 与网页投影 nativePartHandles + conversationMessage 的产物同形，侧栏视图不用改。
+    func feedMessage(tid: String, id: String) -> O? {
+        guard let turn = turns[lookup(tid)] else { return nil }
+        let presentation = presentationMetadata(turn)
+        var message: O = ["id": id, "role": presentation["role"] ?? "assistant", "streaming": presentation["streaming"] ?? false,
+                          "title": turn.title, "statusText": turn.status["text"] as? String ?? "",
+                          "progress": turn.progress as Any? ?? NSNull(), "nativeFeedTurn": turn.id]
+        message["text"] = turn.parts.filter { $0["kind"] as? String == "text" }.compactMap { $0["text"] as? String }.joined(separator: "\n\n")
+        var handles: [O] = []
+        for (index, original) in turn.parts.enumerated() {
+            let kind = original["kind"] as? String ?? "artifact"
+            if kind == "text" || kind == "meta" { continue }
+            let partID = original["_nativeID"] as? String ?? String(index)
+            func handle(_ key: String, _ detail: O, extra: O = [:]) -> O {
+                var data: O = ["nativeDetail": detail, "nativeActionKey": key, "nativeParentContextId": "turn:" + turn.id,
+                               "nativeTurnPart": ["id": partID]]
+                for (k, v) in extra { data[k] = v }
+                return ["id": key, "kind": detail["kind"] ?? "artifact", "title": "", "text": "", "status": "unknown",
+                        "data": data, "actionLabel": "查看完整流程"]
+            }
+            let key = id + "-p-" + partID
+            switch kind {
+            case "tool":
+                handles.append(handle(key, ["kind": "tool", "title": original["label"] as? String ?? original["tool"] as? String ?? "工具调用",
+                                            "content": publicPart(original)]))
+            case "cards":
+                for (cardIndex, card) in (original["cards"] as? [O] ?? []).enumerated() {
+                    var value = handle(key + "-c-" + String(cardIndex), ["kind": "anki", "title": card["title"] as? String ?? "学习卡片",
+                        "content": ["gid": original["gid"] as? String ?? "", "cardIndex": cardIndex, "card": card]],
+                        extra: ["gid": original["gid"] as? String ?? "", "draft": original["draft"] as? Bool ?? false])
+                    var data = value["data"] as? O ?? [:]
+                    data["nativeTurnPart"] = ["id": partID, "cardIndex": cardIndex]; value["data"] = data
+                    handles.append(value)
+                }
+            case "card":
+                guard let card = original["card"] as? O else { continue }
+                handles.append(handle(key, ["kind": card["kind"] as? String ?? "artifact", "title": card["title"] as? String ?? "生成物",
+                                            "content": visibleMedia(card)]))
+            case "hlcard":
+                handles.append(handle(key, ["kind": "operations", "title": "操作记录", "content": publicPart(original)],
+                                      extra: ["nativeOperation": ["tid": turn.id, "partID": partID]]))
+            default:
+                handles.append(handle(key, ["kind": "artifact", "title": original["title"] as? String ?? original["label"] as? String ?? "生成物",
+                                            "content": publicPart(original)]))
+            }
+        }
+        message["parts"] = handles
+        if !turn.followups.isEmpty { message["followups"] = turn.followups }
         return message
     }
 
@@ -330,6 +385,7 @@ struct ReaderNativeTurnStore {
             case "status": turn.status = ["text":command["text"] as? String ?? "","done":command["done"] as? Bool == true]
             case "idle": turn.status = ["text":"","done":true]
             case "title": turn.title = command["text"] as? String ?? ""
+            case "followups": turn.followups = (command["items"] as? [String] ?? []).filter { !$0.isEmpty }.prefix(4).map { $0 }
             case "busy": turn.title = command["text"] as? String ?? ""; turn.status = ["text":"处理中","done":false]
             case "task":
                 turn.taskID = command["taskId"] as? String

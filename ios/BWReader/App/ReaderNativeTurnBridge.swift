@@ -20,7 +20,7 @@ final class ReaderNativeTurnBridge: NSObject, WKScriptMessageHandlerWithReply {
     }
     deinit { saves.values.forEach { $0.task.cancel() } }
     func removeMedia(card: [String:Any], index: Int) throws { try store.removeMedia(card:card,index:index) }
-    func replyReference(id: String, text: String, final: Bool) throws -> [String:Any] {
+    func replyReference(id: String, text: String, final: Bool, followups: [String] = []) throws -> [String:Any] {
         guard let session else { throw ReaderNativeTurnStore.Failure(message:"对话消息源尚未就绪") }
         let tid = "native-reply:" + id
         var candidate = store
@@ -28,14 +28,26 @@ final class ReaderNativeTurnBridge: NSObject, WKScriptMessageHandlerWithReply {
             "itemId":"reply","origin":"native-stream","role":"assistant"])
         if final {
             result = try candidate.apply(["action":"freeze","tid":tid,"itemId":"reply","origin":"native-stream","role":"assistant"])
+            if !followups.isEmpty { result = try candidate.apply(["action":"followups","tid":tid,"items":followups]) }
         }
         guard let turn = (result["turns"] as? [[String:Any]])?.first,
               let presentation = turn["presentation"] as? [String:Any], let revision = presentation["revision"] as? Int else {
             throw ReaderNativeTurnStore.Failure(message:"原生回复未提交")
         }
         store = candidate
+        onNativeReply?(tid)
         return ["session":session,"tid":tid,"revision":revision]
     }
+    /// 原生对话流（迁出）直接写轮次，不经网页的序号协议 —— 这些轮次只由原生显示。
+    /// 一批命令整体提交；任何一条被拒，整批不生效（与网页那条路同一语义）。
+    func applyNative(_ commands: [[String:Any]]) throws {
+        var candidate = store
+        for command in commands { _ = try candidate.apply(command) }
+        store = candidate
+    }
+    func feedMessage(tid: String, id: String) -> [String:Any]? { store.feedMessage(tid:tid,id:id) }
+    var onNativeReply: ((String) -> Void)?
+
     func conversationPayload(_ input: [String:Any]) throws -> [String:Any] {
         guard var batch = input["messageDelta"] as? [String:Any], let messages = batch["upserts"] as? [[String:Any]] else { return input }
         batch["upserts"] = try messages.map { message -> [String:Any] in

@@ -176,6 +176,8 @@ actor ReaderNativeAssistantHistory {
 final class ReaderNativeHistoryMessages {
     private var entries: [(token: String, messages: [[String: Any]?])] = []
     var onDiagnostic: ((String) -> Void)?
+    /// 退回网页文字助手（语音核心不在）时，用户那句话同时交给原生对话流。
+    var onLiveUser: (([String: Any]) -> Void)?
 
     /// 建好一批，返回 token；只保留最近几批（重同步会带着旧 ref 再来）。
     func store(_ raw: [Any], mode: String) -> (token: String, built: [Bool]) {
@@ -188,6 +190,24 @@ final class ReaderNativeHistoryMessages {
         let missing = unmigrated.sorted { $0.key < $1.key }.map { "\($0.key)×\($0.value)" }.joined(separator: " ")
         onDiagnostic?("历史原生化：\(mode) 共 \(raw.count) 条，原生生成 \(built) 条" + (missing.isEmpty ? "" : "；尚未迁移：" + missing))
         return (token, messages.map { $0 != nil })
+    }
+
+    /// 正在进行的一轮（迁出 P2a）：单条消息，返回 ref。
+    func storeLive(_ message: [String: Any]) -> String {
+        let token = "live-" + UUID().uuidString
+        entries.append((token, [message]))
+        if entries.count > 24 { entries.removeFirst(entries.count - 24) }
+        return token + "#0"
+    }
+
+    /// 发送时定格的请求 → 侧栏里「你」那一条：正文 + 上下文一行（页码/选中/图）。
+    static func liveUser(_ body: [String: Any]) -> [String: Any] {
+        var message: [String: Any] = ["role": "user", "streaming": false, "title": "", "statusText": "", "parts": [[String: Any]](),
+                                      "text": displayAttachments(body["message"] as? String ?? "")]
+        let context = body["context"] as? [String: Any] ?? [:]
+        let line = contextLine(context)
+        if !line.isEmpty { message["contextLine"] = line }
+        return message
     }
 
     /// 占位消息 → 原生消息（保留占位的 id，部件 id 由它派生）。
@@ -270,5 +290,261 @@ final class ReaderNativeHistoryMessages {
         }
         if let figures = record["figures"] as? [Any], !figures.isEmpty { bits.append("\(figures.count) 张图") }
         return bits.joined(separator: " · ")
+    }
+}
+
+/// SSE 解析器的并发外壳（onChunk 是 @Sendable）。
+actor ReaderNativeFeedSSEBox {
+    private var parser = ReaderNativeAssistantSSE()
+    func append(_ data: Data) throws -> [ReaderNativeAssistantEvent] { try parser.append(data) }
+}
+
+/// 原生对话流（迁出 P2，2026-09-26）：普通会话侧栏的消息列表由 Swift 自己维护 ——
+/// 历史由原生读、语音核心的实时事件（assistant-history）由原生订阅并写进 TurnStore，
+/// 排序、去重、从「进行中」过渡到「已落库」都在这里。网页层不再渲染这两类内容。
+///
+/// 消息身份：有 turn_id 的一律 `m:<role>:<turn_id>` —— 实时那条与落库后的历史那条同一个 id，
+/// 过渡时侧栏不闪、不重复。没有 turn_id 的旧记录用历史编号。
+@MainActor
+final class ReaderNativeConversationFeed {
+    enum Entry { case plain([String: Any]), turn(tid: String, id: String) }
+    private struct StreamState { var revision = -1; var final = false }
+
+    var applyTurns: (([[String: Any]]) throws -> Void)?
+    var turnMessage: ((String, String) -> [String: Any]?)?
+    var readHistory: ((String) async throws -> [Any])?
+    var subscribe: ((@escaping @MainActor ([String: Any]) -> Void) async throws -> Void)?
+    var acknowledge: ((String) -> Void)?
+    var publish: (([[String: Any]]) -> Void)?
+    var log: ((String) -> Void)?
+
+    private(set) var started = false
+    private var history: [Entry] = []
+    private var live: [(tid: String, id: String)] = []
+    private var extras: [[String: Any]] = []      // 退回网页文字助手时的原生用户话（P2a）
+    private var streams: [String: StreamState] = [:]
+    private var historyTask: Task<Void, Never>?
+    private var reloadAgain = false
+    private var eventsTask: Task<Void, Never>?
+    private var reloadTimer: Task<Void, Never>?
+    private var generation = 0
+
+    static func viewID(_ tid: String, role: String) -> String { role == "user" ? "user:" + tid : tid }
+    static func messageID(turn: String, role: String) -> String { "m:" + role + ":" + turn }
+
+    func start() {
+        guard !started else { return }
+        started = true
+        log?("对话流：原生接管普通会话")
+        reloadHistory(reason: "start")
+        startEvents()
+    }
+
+    func reset() {
+        generation += 1
+        historyTask?.cancel(); historyTask = nil; eventsTask?.cancel(); eventsTask = nil; reloadTimer?.cancel(); reloadTimer = nil
+        history = []; live = []; extras = []; streams = [:]; started = false; reloadAgain = false
+    }
+
+    // MARK: 历史
+
+    func reloadHistory(reason: String) {
+        guard started else { return }
+        if historyTask != nil { reloadAgain = true; return }
+        let ticket = generation
+        historyTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if self.generation == ticket { self.historyTask = nil } }
+            do {
+                guard let read = self.readHistory else { return }
+                let records = try await read("normal")
+                guard self.generation == ticket, !Task.isCancelled else { return }
+                try self.adopt(records)
+                self.log?("对话流：历史 \(records.count) 条（\(reason)），实时 \(self.live.count) 条")
+            } catch is CancellationError {
+            } catch {
+                guard self.generation == ticket else { return }
+                self.log?("对话流：历史读取失败（\(reason)）：\(error.localizedDescription)")
+            }
+            if self.generation == ticket, self.reloadAgain { self.reloadAgain = false; self.historyTask = nil; self.reloadHistory(reason: "queued") }
+        }
+    }
+
+    private func adopt(_ records: [Any]) throws {
+        var next: [Entry] = [], commands: [[String: Any]] = [], unmigrated: [String: Int] = [:]
+        for (index, item) in records.enumerated() {
+            guard let record = item as? [String: Any], let role = record["role"] as? String, ["user", "assistant"].contains(role) else { continue }
+            let turnID = (record["turn_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let fallback = Self.historyID(record, index: index)
+            let id = turnID.map { Self.messageID(turn: $0, role: role) } ?? "h:" + fallback
+            if role == "assistant", let parts = record["parts"] as? [Any], !parts.isEmpty {
+                let tid = turnID ?? "hist_normal_" + fallback
+                commands.append(["action": "open", "tid": tid, "historyReplay": true,
+                                 "meta": ["via": record["via"] ?? "", "threadId": record["thread_id"] ?? "", "turnId": tid]])
+                commands.append(["action": "import", "tid": tid, "parts": parts])
+                next.append(.turn(tid: tid, id: id))
+                continue
+            }
+            guard var message = ReaderNativeHistoryMessages.build(record, index: index, unmigrated: &unmigrated) else { continue }
+            message["id"] = id
+            message["parts"] = (message["parts"] as? [[String: Any]] ?? []).enumerated().map { offset, part in
+                var part = part, data = part["data"] as? [String: Any] ?? [:]
+                let partID = id + "-h" + String(offset)
+                part["id"] = partID; data["nativeActionKey"] = partID; part["data"] = data
+                return part
+            }
+            next.append(.plain(message))
+        }
+        try applyTurns?(commands)
+        history = next
+        // 已落库的实时轮退出「进行中」列表（同一个 id 已在历史里）。
+        let known = Set(next.map { entry -> String in
+            switch entry { case .plain(let m): return m["id"] as? String ?? ""; case .turn(_, let id): return id }
+        })
+        live.removeAll { known.contains($0.id) || ($0.tid.hasPrefix("native-reply:") && turnMessage?($0.tid, $0.id)?["streaming"] as? Bool != true) }
+        extras.removeAll { known.contains($0["id"] as? String ?? "") || extras.count > 8 }
+        if !unmigrated.isEmpty { log?("对话流：历史里尚未原生化的附件 " + unmigrated.map { "\($0.key)×\($0.value)" }.sorted().joined(separator: " ")) }
+        emit()
+    }
+
+    private static func historyID(_ record: [String: Any], index: Int) -> String {
+        for key in ["history_id", "id", "rid"] {
+            if let value = record[key] as? String, !value.isEmpty { return value }
+            if let value = record[key] as? NSNumber { return value.stringValue }
+        }
+        return "i" + String(index)
+    }
+
+    // MARK: 实时事件
+
+    private func startEvents() {
+        let ticket = generation
+        eventsTask = Task { @MainActor [weak self] in
+            var failures = 0
+            while let self, self.generation == ticket, !Task.isCancelled {
+                do {
+                    guard let subscribe = self.subscribe else { return }
+                    try await subscribe { [weak self] event in
+                        guard let self, self.generation == ticket else { return }
+                        failures = 0
+                        self.handle(event)
+                    }
+                } catch is CancellationError { return
+                } catch {
+                    failures += 1
+                    if failures == 1 || failures % 10 == 0 { self.log?("对话流：事件流断开（第 \(failures) 次）：\(error.localizedDescription)") }
+                }
+                guard self.generation == ticket, !Task.isCancelled else { return }
+                // 断线期间可能漏掉事件：重连前补读一次历史。
+                self.reloadHistory(reason: "reconnect")
+                let delay = min(30.0, 2.0 * pow(2.0, Double(min(failures, 4))))
+                try? await Task.sleep(for: .seconds(delay))
+            }
+        }
+    }
+
+    func handle(_ event: [String: Any]) {
+        guard started, event["kind"] as? String == "assistant-history" else { return }
+        let mode = (event["assistant_mode"] as? String) ?? (event["mode"] as? String) ?? "normal"
+        guard mode == "normal" || mode.isEmpty else { return }
+        guard let tid = event["turn_id"] as? String, tid.range(of: "^[A-Za-z0-9_.:-]{1,160}$", options: .regularExpression) != nil else { return }
+        let stream = event["stream"] as? String ?? ""
+        let origin = event["origin"] as? String ?? "runner", role = event["role"] as? String ?? "assistant"
+        func state(_ role: String, _ item: String) -> Bool {
+            let key = tid + "|" + origin + ":" + role + ":" + (item.isEmpty ? "legacy" : item)
+            var value = streams[key] ?? StreamState()
+            if let revision = (event["streamRevision"] as? NSNumber)?.intValue {
+                if revision < value.revision { return false }
+                value.revision = revision
+            }
+            streams[key] = value
+            if streams.count > 1024 { streams.removeAll() }
+            return true
+        }
+        do {
+            switch stream {
+            case "start": return
+            case "delta":
+                let item = event["item_id"] as? String ?? ""
+                guard state(role, item), streams[tid + "|final"] == nil else { return }
+                let view = Self.viewID(tid, role: role)
+                try applyTurns?([["action": "draft", "tid": view, "text": event["content"] as? String ?? "", "role": role,
+                                  "itemId": item, "origin": origin]])
+                track(view, id: Self.messageID(turn: tid, role: role))
+            case "parts", "final":
+                let final = stream == "final"
+                var commands: [[String: Any]] = []
+                for message in event["messages"] as? [[String: Any]] ?? [] {
+                    guard let messageRole = message["role"] as? String, ["user", "assistant"].contains(messageRole) else { continue }
+                    let messageTid = (message["turn_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? tid
+                    guard state(messageRole, message["item_id"] as? String ?? "") else { continue }
+                    let messageFinal = final && message["stream_final"] as? Bool != false
+                    let view = Self.viewID(messageTid, role: messageRole)
+                    commands.append(["action": "reconcile", "tid": view, "message": message,
+                                     "options": ["final": messageFinal, "origin": origin]])
+                    track(view, id: Self.messageID(turn: messageTid, role: messageRole))
+                    if messageFinal { streams[messageTid + "|final"] = StreamState(revision: 0, final: true); acknowledge?(messageTid) }
+                }
+                for absorbed in event["absorbed_ids"] as? [String] ?? [] where absorbed != tid && !absorbed.isEmpty {
+                    commands.append(["action": "drop", "tid": absorbed])
+                    live.removeAll { $0.tid == absorbed }
+                }
+                try applyTurns?(commands)
+                if final { scheduleReload() }
+            default:
+                // 旧式通知（只有 turn_id）：服务器只说「这一轮有变化」，按历史补。
+                scheduleReload()
+            }
+            emit()
+        } catch {
+            log?("对话流：实时事件未应用（\(stream)）：\(error.localizedDescription)")
+        }
+    }
+
+    private func track(_ tid: String, id: String) {
+        if !live.contains(where: { $0.id == id }) { live.append((tid, id)) }
+    }
+
+    private func scheduleReload() {
+        reloadTimer?.cancel()
+        reloadTimer = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(900))
+            guard !Task.isCancelled else { return }
+            self?.reloadHistory(reason: "final")
+        }
+    }
+
+    // MARK: 退回网页文字助手时（语音核心不在）
+
+    func appendExtra(_ message: [String: Any]) { extras.append(message); emit() }
+    /// 普通会话清空后：本地列表一起清，再按服务器重读。
+    func cleared() {
+        history = []; live = []; extras = []; streams = [:]
+        emit(); reloadHistory(reason: "cleared")
+    }
+    func nativeReply(_ tid: String) {
+        track(tid, id: "m:reply:" + tid)
+        emit()
+    }
+
+    // MARK: 输出
+
+    func emit() {
+        guard started else { return }
+        var seen = Set<String>(), output: [[String: Any]] = []
+        func add(_ message: [String: Any]?) {
+            guard let message, let id = message["id"] as? String, seen.insert(id).inserted else { return }
+            output.append(message)
+        }
+        let liveIDs = Set(live.map(\.id))
+        for entry in history {
+            switch entry {
+            case .plain(let message): if !liveIDs.contains(message["id"] as? String ?? "") { add(message) }
+            case .turn(let tid, let id): if !liveIDs.contains(id) { add(turnMessage?(tid, id)) }
+            }
+        }
+        for message in extras { add(message) }
+        for item in live { add(turnMessage?(item.tid, item.id)) }
+        publish?(output)
     }
 }

@@ -565,9 +565,33 @@ final class ReaderNativeConversationModel: ObservableObject {
         voice = ReaderNativeConversationVoice(payload["voice"] as? [String: Any] ?? [:])
         let nextCaptions = ReaderNativeCaptions(payload["captions"] as? [String: Any] ?? [:])
         if nextCaptions != captions { captions = nextCaptions }
-        if changedMessages { messages = nextMessages.map { value in var next = value; next.parts = applyCommittedCards(value.parts); return next } }
+        if feedActive && nextMode == "normal" { publishFeed() }
+        else if changedMessages { messages = nextMessages.map { value in var next = value; next.parts = applyCommittedCards(value.parts); return next } }
         revision = nextRevision
         noteSnapshotCost(payload["payloadBytes"] as? Int ?? 0)
+    }
+
+    // MARK: 原生对话流（迁出 P2）
+    /// 设了之后，普通会话的消息只来自原生对话流；网页投影里的消息不再用（复习会话仍走网页）。
+    private(set) var feedActive = false
+    private var feedRaw: [[String: Any]] = []
+    func applyFeed(_ raw: [[String: Any]]) {
+        feedActive = true; feedRaw = raw
+        guard conversationMode == "normal" else { return }
+        publishFeed()
+    }
+    private func publishFeed() {
+        var seen = Set<String>()
+        let next = feedRaw.compactMap(ReaderNativeConversationMessage.init).filter { seen.insert($0.id).inserted }
+        if next.isEmpty {
+            let cached = cachedMessages("normal")
+            showingCachedMessages = !cached.isEmpty
+            messages = cached
+            return
+        }
+        if ReaderNativeConversationCache.hasConversation(feedRaw) { rememberConversation(feedRaw, mode: "normal") }
+        showingCachedMessages = false
+        messages = next.map { value in var item = value; item.parts = applyCommittedCards(value.parts); return item }
     }
 
     func requestMessageResync(scope:String) {

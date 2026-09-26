@@ -29,7 +29,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
     var preparePDFBody: (([String:Any]) async throws -> [String:Any])?
     var prepareReaderPCContext: (([String:Any]) async throws -> [String:Any])?
     private var contextTask: Task<Void,Never>?
-    var replyReference: ((String,String,Bool) throws -> [String:Any])?
+    var replyReference: ((String,String,Bool,[String]) throws -> [String:Any])?
     /// 设了就由原生生成历史消息内容（网页只放占位）。
     var historyMessages: ReaderNativeHistoryMessages?
 
@@ -123,7 +123,18 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
                 guard tasks.isEmpty, let input = command["body"] as? [String: Any] else {
                     throw ReaderNativeAssistantRequest.Failure(message: "上一条对话仍在处理中")
                 }
-                replyHandler(["ok": true, "body": try ReaderNativeAssistantRequest(input).body], nil)
+                let body = try ReaderNativeAssistantRequest(input).body
+                var reply: [String: Any] = ["ok": true, "body": body]
+                // 迁出 P2a：用户这句话的侧栏内容由原生按定格后的请求生成，网页只放占位。
+                if let cache = historyMessages {
+                    var live = ReaderNativeHistoryMessages.liveUser(body)
+                    reply["userRef"] = cache.storeLive(live)
+                    if let turn = body["turn_id"] as? String { live["id"] = ReaderNativeConversationFeed.messageID(turn: turn, role: "user") }
+                    cache.onLiveUser?(live)
+                    let context = body["context"] as? [String: Any] ?? [:]
+                    cache.onDiagnostic?("发送（原生占位）：上下文键 \(context.keys.sorted().joined(separator: ",")) page=\(context["page"] ?? "无") → \(live["contextLine"] as? String ?? "无上下文行")")
+                }
+                replyHandler(reply, nil)
             } catch { replyHandler(nil, error.localizedDescription) }
             return
         }
@@ -298,6 +309,42 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         } catch { replyHandler(nil, error.localizedDescription) }
     }
 
+    /// 原生对话流用：直接读普通/复习会话历史（与网页那条共用同一个合并读取与作废栅栏）。
+    func readHistory(mode: String, surface: ReaderNativeInterfaceSurface) async throws -> [Any] {
+        let route = try ReaderNativeAssistantHistory.route("/api/assistant/history" + (mode == "review" ? "?assistant_mode=review" : ""),
+                                                           operation: "read", mode: mode)
+        let lease = epoch, context = gateway.contextRevision
+        let response = try await historyService(surface: surface, lease: lease, context: context).read(route)
+        guard epoch == lease, gateway.contextRevision == context else { throw CancellationError() }
+        guard (200..<300).contains(response.status),
+              let value = try JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+              value["ok"] as? Bool == true, let messages = value["messages"] as? [Any] else {
+            throw ReaderNativeAssistantHistory.Failure(message: "历史读取失败（HTTP \(response.status)）")
+        }
+        return messages
+    }
+
+    /// 原生对话流用：订阅阅读器事件流（SSE）。只把解析好的事件交出去；断开由调用方退避重连。
+    func subscribeReaderEvents(surface: ReaderNativeInterfaceSurface, onEvent: @escaping @MainActor ([String: Any]) -> Void) async throws {
+        let context = gateway.contextRevision
+        let parser = ReaderNativeFeedSSEBox()
+        try await gateway.streamAssistant(path: "/pdf/api/reader-events", method: "GET", body: Data(), surface: surface,
+                                          expectedContext: context,
+            onResponse: { status in
+                guard status == 200 else { throw ReaderNativeAssistantStream.Failure("事件流 HTTP \(status)") }
+                return true
+            },
+            onChunk: { chunk in
+                let events = try await parser.append(chunk)
+                for event in events where event.name == "change" {
+                    guard let data = event.data.data(using: .utf8),
+                          let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                    await MainActor.run { onEvent(value) }
+                }
+                return true
+            })
+    }
+
     private func historyService(surface:ReaderNativeInterfaceSurface,lease:UUID,context:UInt64) -> ReaderNativeAssistantHistory {
         if history == nil || historyContext != context {
             let previous = history
@@ -315,7 +362,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         guard epoch == lease, gateway.contextRevision == context, let webView, let turn = turns[id] else { throw CancellationError() }
         var result = turn.completion(aborted:aborted,error:error)
         if let replyReference {
-            result["replyRef"] = try replyReference(id,result["finalDisplayText"] as? String ?? "",true)
+            result["replyRef"] = try replyReference(id,result["finalDisplayText"] as? String ?? "",true,result["followups"] as? [String] ?? [])
         }
         let ack = try await webView.callAsyncJavaScript("return window.__bwNativeAssistantStream?.acceptCompletion(id,result);",
             arguments:["id":id,"result":result],in:nil,contentWorld:.page) as? [String:Any]
@@ -385,7 +432,8 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
             if ["answer","error","done"].contains(event.name), !turn.sawTool, !turn.sawCLICard {
                 guard let replyReference else { throw ReaderNativeAssistantStream.Failure("原生回复显示入口未准备好") }
                 let final = event.name != "answer", content = ReaderNativeAssistantTurn.content(turn.answer)
-                state["replyRef"] = try replyReference(id, final ? content.finalDisplayText : content.displayText, final)
+                state["replyRef"] = try replyReference(id, final ? content.finalDisplayText : content.displayText, final,
+                                                       final && event.name == "done" ? content.followups : [])
             }
             return ["name": event.name, "data": event.data, "state":state]
         }
@@ -507,6 +555,7 @@ final class ReaderNativeAssistantStreamBridge: NSObject, WKScriptMessageHandlerW
         async prepare(body) {
           const result = await handler.postMessage({version: 1, action: 'prepare', id: crypto.randomUUID(), body});
           if (!result?.ok || !result.body?.rid || !result.body?.turn_id || !result.body?.context) throw new Error('对话上下文未准备好');
+          if (typeof result.userRef === 'string') Object.defineProperty(result.body, '__bwUserRef', {value: result.userRef, enumerable: false});
           return result.body;
         },
         async run(path, body, consume, signal) {
