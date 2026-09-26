@@ -5933,6 +5933,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func resetBookUserStateContext(baseURL: URL) {
         nativeFeed.reset()
+        backgroundSnapshotHandoffTask?.cancel(); backgroundSnapshotHandoffTask = nil
+        Task { await nativeBackgroundContext.stop(reason: "换书") }
         nativeReviewAnswers.reset()
         nativeWatchedCardGroups = []
         nativePDFNavigationBridge?.flushPendingPosition()
@@ -7434,7 +7436,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // 迁出 3a：熄屏/切走时若电脑语音仍在通话，出声 —— 下面一步会停本机 runtime、网页随即关快照链接，
             // 通话中的阅读器工具（读页、看页、卡片、高亮）此后都不可用（用户报「软件语音时熄屏后语音链接会断开」）。
             if let bridge = nativeVoiceBridge, bridge.state.phase != .idle {
-                postClientLog("[语音] 进入后台时电脑语音仍在通话（\(bridge.state.phase)）：阅读器快照链接与本机运行时将停止")
+                postClientLog("[语音] 进入后台时电脑语音仍在通话（\(bridge.state.phase)）：网页快照链接将关闭，改由原生接管")
+                // 迁出 3b：交接必须排在下面「切后台」那条 JS 之前（evaluate 按调用顺序执行）。
+                beginBackgroundSnapshotHandoff()
             }
             setReaderForeground(false, restartLocalRuntime: false)
         case .inactive:
@@ -7442,6 +7446,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             scheduleReaderInactiveGrace()
         case .active:
             cancelReaderInactiveGrace()
+            // 迁出 3b：回前台先交还后台快照会话，网页随后重建自己的快照链接。
+            backgroundSnapshotHandoffTask?.cancel(); backgroundSnapshotHandoffTask = nil
+            Task { await nativeBackgroundContext.stop(reason: "回到前台") }
             let shouldRestart = readerWasBackgrounded
             readerWasBackgrounded = false
             setReaderForeground(true, restartLocalRuntime: shouldRestart)
@@ -7449,6 +7456,53 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             cancelReaderInactiveGrace()
             setReaderForeground(false, restartLocalRuntime: false)
         }
+    }
+
+    // MARK: 迁出 3b —— 后台通话期间原生保持阅读器快照
+
+    private lazy var nativeBackgroundContext = ReaderNativeBackgroundContext(log: { [weak self] line in
+        Task { @MainActor in self?.postClientLog(line) }
+    })
+    private var backgroundSnapshotHandoffTask: Task<Void, Never>?
+
+    /// 网页交出最后一份 active-reading → 等网页关掉自己的链接（服务器据连接关闭把快照置为 disabled）→
+    /// 仍在后台、仍在通话才由原生开 context 会话、重发当前页正文、续阅读状态。
+    private func beginBackgroundSnapshotHandoff() {
+        backgroundSnapshotHandoffTask?.cancel()
+        let pageContext = backgroundPageContext()
+        backgroundSnapshotHandoffTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let raw = try? await self.webView.callAsyncJavaScript(
+                "return window.RC?.computerVoice?.backgroundSnapshotHandoff?.() ?? null;",
+                arguments: [:], in: nil, contentWorld: .page)
+            guard let handoff = raw as? [String: Any], let active = handoff["active"] as? [String: Any],
+                  let activeValue = ReaderNativeBackgroundContext.jsonValue(active) else {
+                self.postClientLog("[后台快照] 网页没交出阅读状态（不在书里或快照模式未开），不接管")
+                return
+            }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled, !self.readerForeground, self.backgroundCallActive else { return }
+            await self.nativeBackgroundContext.start(active: activeValue, pageContext: pageContext, keepAlive: { [weak self] in
+                await MainActor.run { self.map { !$0.readerForeground && $0.backgroundCallActive } ?? false }
+            })
+        }
+    }
+
+    private var backgroundCallActive: Bool {
+        guard let bridge = nativeVoiceBridge else { return false }
+        return bridge.state.phase != .idle
+    }
+
+    /// 本机发送队列里最新一条 page.context（原生写的那份，网页上下文泵平时也从这里取）。
+    private func backgroundPageContext() -> DirectJSONValue? {
+        guard let deviceID = nativeReadingStoreDeviceID,
+              let store = try? nativeDataStoreHost.bridge(for: "bw-reader-native-v1-device").store,
+              let record = try? store.record(collection: "native-outgoing-journal", id: deviceID + ":outgoing-journal"),
+              !record.deleted else {
+            postClientLog("[后台快照] 本机发送队列读不到（设备库未就绪）")
+            return nil
+        }
+        return ReaderNativeBackgroundContext.latestPageContext(journalJSON: record.json)
     }
 
     private func scheduleReaderInactiveGrace() {

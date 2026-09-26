@@ -13391,6 +13391,24 @@ if (window.__bwPwaProviderOnly) return;
       var state = snapshotLink;
       return !!(state && !state.stopped && directChannelLive(state.channel));
     },
+    // 迁出 3b（2026-09-26）：App 进后台且电脑语音仍在通话时，原生接管快照会话 ——
+    // 这里交出最后一份 active-reading（与本模块快照链接发的同一结构），原生按心跳续发。
+    // 返回 null 表示没有可交的阅读状态（不在书里 / 快照模式未开），原生不接管。
+    backgroundSnapshotHandoff: function () {
+      try {
+        if (contextDeliveryMode === CONTEXT_DELIVERY_LEGACY) return null;
+        var active = localActiveReadingSnapshot();
+        if (!plainObject(active)) return null;
+        return JSON.parse(JSON.stringify({ active: active, linked: !!snapshotLink }));
+      } catch (error) {
+        try {
+          if (typeof window.dlog === "function") {
+            window.dlog("[后台快照] 交接失败：" + ((error && error.message) || error));
+          }
+        } catch (_) {}
+        return null;
+      }
+    },
     lookupJapaneseFallback: lookupJapaneseFallback,
     pushReplicationCommands: pushReplicationCommands,
     addLocalAnkiCard: addLocalAnkiCard,

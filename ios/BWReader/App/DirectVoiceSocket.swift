@@ -74,6 +74,23 @@ actor DirectVoiceSocket {
         return try await request(action:action,fields:input,timeoutNanoseconds:DirectVoiceProtocol.requestTimeoutNanoseconds)
     }
 
+    /// 迁出 3b（2026-09-26）：后台通话期间原生持有的阅读器快照会话只做上下文上行 ——
+    /// 当前页正文（context）与阅读状态（active-reading），与网页快照链接同一合同。
+    func publishReaderContext(action: String, fields: [String: DirectJSONValue]) async throws -> DirectJSONValue {
+        guard configuration == .readerContext, state == .ready, let sessionID = contextSessionID,
+              ["context", "active-reading"].contains(action), fields["sessionId"] == nil else {
+            throw failure("BW_READER_CONTEXT_REQUEST", "快照上行请求未授权或连接已失效", retryable: false)
+        }
+        var input = fields; input["sessionId"] = .string(sessionID)
+        let reply = try await request(action: action, fields: input, timeoutNanoseconds: DirectVoiceProtocol.requestTimeoutNanoseconds)
+        let object = try requireObject(reply, label: action == "context" ? "CONTEXT" : "ACTIVE-READING")
+        guard try object.requireString("sessionId", maximum: 160) == sessionID,
+              ["accepted", "duplicate"].contains(try object.requireString("outcome", maximum: 32)) else {
+            throw failure("BW_READER_CONTEXT_ACK", "Windows 快照上行回执无效", retryable: false)
+        }
+        return reply
+    }
+
     /// One export uses its own context socket; long Anki operations cannot
     /// occupy the microphone or the reading-state replication receive loop.
     func requestReaderAnki(fields: [String: DirectJSONValue]) async throws -> DirectJSONValue {
@@ -695,7 +712,16 @@ actor DirectVoiceSocket {
         try envelope.requireExactKeys([
             "contract", "type", "event", "payload",
         ])
-        guard try envelope.requireString("event", maximum: 32) == "status" else {
+        let name = try envelope.requireString("event", maximum: 32)
+        // 迁出 3b：数据连接不登记阅读器来源，按理收不到这些事件；万一收到，出声并忽略，
+        // 不因此断掉快照会话（桥会把它们留在队列里，等网页的快照链接回来处理）。
+        if configuration == .readerContext,
+           ["reader-result", "reader-visual-request", "reader-query-request", "reader-realtime-output"].contains(name) {
+            eventHandler(.transientRetry(failure("BW_READER_CONTEXT_EVENT_UNHANDLED",
+                "数据连接收到未接管的阅读器事件 \(name)，已忽略", retryable: true), attempt: 0))
+            return
+        }
+        guard name == "status" else {
             throw failure(
                 "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
                 "Windows 桥接器事件类型不受支持",

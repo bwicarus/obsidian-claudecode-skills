@@ -112,8 +112,17 @@
 ### 分阶段
 - ✅ **3a 诊断出口（2026-09-26）**：网页关快照链接时 `dlog` 写明是哪一条条件关的、是否在通话中；
   原生进后台时若电脑语音仍在通话，`postClientLog` 出声。→ 先拿一次熄屏通话的真实日志再动 3b。
-- **3b 后台通话期间的原生快照链接**：通话中进后台时，由 Swift 用 `DirectVoiceSocket(.readerContext)`
-  接管 context 会话：
+- ✅ **3b-1 后台通话期间原生保持快照（2026-09-26，待设备验证）**：`ReaderNativeBackgroundContext`。
+  进后台且电脑语音仍在通话 → 网页交出最后一份 active-reading（`RC.computerVoice.backgroundSnapshotHandoff`，
+  与快照链接发的同一结构，不在原生另造）→ 等 1.5 s 让网页关掉自己的链接 → 原生开 context 会话、
+  重发本机发送队列里最新一条 page.context、发 active-reading 并每 50 s 续（桥窗口 60 s）；每次续前确认
+  仍在后台且仍在通话，否则交还；回前台 / 换书先交还。`DirectVoiceSocket` 只多放行 `context` /
+  `active-reading` 两个动作；数据连接收到阅读器事件改为出声忽略（不断会话）。契约测试
+  `native-background-snapshot` 守合同名、动作与心跳窗口。
+  **效果**：熄屏通话时桥上的快照保持 ready，语音 AI 能读当前页/阅读状态。**仍不行**：查询（高亮/笔记/搜索）、
+  截图、实时输出（卡片/高亮/草稿）—— 不登记 visual 来源，桥把它们留在队列等网页回来（下一步 3b-2）。
+- **3b-2 后台时回答查询 / 截图**：通话中进后台时，由 Swift 用 `DirectVoiceSocket(.readerContext)`
+  登记 visual 来源并回答：
   - 上下文：从原生发送队列（`native-outgoing-journal`）与 PDFKit 当前页直接上行；
   - 查询：highlights / notes / search 由原生数据库回答（PDF 优先）；
   - 视觉：PDFKit 渲当前页图，按原合同分块（`reader-visual/2`，≤768KB、24 块）；
