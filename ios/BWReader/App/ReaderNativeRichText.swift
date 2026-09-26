@@ -254,6 +254,19 @@ enum ReaderNativeTextParser {
         return output
     }
 
+    private static let cardClassStyles: [String: (size: CGFloat, weight: UIFont.Weight, color: UIColor?)] = [
+        "vc-if-wt": (26, .semibold, nil),                                                    // 温度
+        "vc-if-wc": (14, .regular, nil),                                                     // 天况 · 降水
+        "vc-if-ws": (12, .regular, UIColor(red: 235/255, green: 235/255, blue: 245/255, alpha: 0.62)), // 地点日期
+        "vc-if-tip": (12, .regular, UIColor(red: 0xb8/255, green: 0xc6/255, blue: 0xe2/255, alpha: 1)),
+        "vc-if-nt": (13, .semibold, UIColor(red: 0xe8/255, green: 0xee/255, blue: 0xfb/255, alpha: 1)),
+        "vc-if-ns": (12, .regular, UIColor(red: 0x9f/255, green: 0xb0/255, blue: 0xcf/255, alpha: 1)),
+        "vc-if-src": (12, .regular, UIColor(red: 0x9f/255, green: 0xb0/255, blue: 0xcf/255, alpha: 0.65)),
+        "vc-if-fa": (15, .semibold, nil),
+        "vc-if-fd": (12, .regular, UIColor(red: 0xb8/255, green: 0xc6/255, blue: 0xe2/255, alpha: 1)),
+        "vc-if-g": (13, .regular, nil),
+    ]
+
     private static func append(_ node: Node, to output: NSMutableAttributedString, attributes: [NSAttributedString.Key: Any]) {
         if let text = node as? TextNode {
             output.append(NSAttributedString(string: text.getWholeText(), attributes: attributes))
@@ -282,6 +295,16 @@ enum ReaderNativeTextParser {
         let scale: CGFloat = ["h1": 1.6, "h2": 1.4, "h3": 1.2, "h4": 1.1][tag] ?? 1
         if let descriptor = font.fontDescriptor.withSymbolicTraits(traits) { style[.font] = UIFont(descriptor: descriptor, size: font.pointSize * scale) }
         if ["code", "pre"].contains(tag) { style[.font] = UIFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular) }
+        // 原版结果卡的 class（rc-voicecall `.vc-if-*`）：卡片放到页上 / 收藏时正文是这段 HTML，
+        // 只认标签不认 class 的话温度不再是大字、提示不再是灰蓝 —— 2026-09-26 用户：
+        // 「天气卡拖到页面上后内容排版就变了」。数值逐项照原版 CSS。
+        if let classes = try? element.className(), !classes.isEmpty {
+            for name in classes.split(separator: " ") {
+                guard let spec = Self.cardClassStyles[String(name)] else { continue }
+                style[.font] = UIFont.systemFont(ofSize: spec.size, weight: spec.weight)
+                if let color = spec.color { style[.foregroundColor] = color }
+            }
+        }
         if tag == "u" { style[.underlineStyle] = NSUnderlineStyle.single.rawValue }
         if ["s", "del"].contains(tag) { style[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
         if tag == "a", let href = try? element.attr("href"), let url = URL(string: href),
