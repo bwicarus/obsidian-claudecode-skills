@@ -389,14 +389,16 @@ struct NativeAmbientTimelineView: View {
                     Button("刷新", systemImage: "arrow.clockwise") { Task { await model.reload() } }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("精翻", systemImage: "sparkles") { Task { await model.refineVisible() } }
+                    Button("AI 精翻", systemImage: "sparkles") { Task { await model.refineVisible() } }
+                        .labelStyle(.titleAndIcon)
                         .disabled(model.refining || model.groups.isEmpty)
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button(model.translateOn ? "隐藏译文" : "翻译", systemImage: "translate") {
+                    Button(model.translateOn ? "隐藏译文" : "本机翻译", systemImage: "translate") {
                         if #available(iOS 18.0, *) { model.toggleTranslation() }
                         else { model.translationNote = "批量翻译需要 iOS 18 以上" }
                     }
+                    .labelStyle(.titleAndIcon)
                 }
             }
             .background {
@@ -446,7 +448,7 @@ struct NativeAmbientTimelineView: View {
                 NativeAmbientRangeSlider(newer: $model.newerFraction, older: $model.olderFraction, from: from, to: to)
             }
         } footer: {
-            Text("「精翻」只翻滑条选中的范围（最多 200 块），交给 AI 结合上下文与人物介绍整体翻译；「翻译」用 Apple 本机翻译。"
+            Text("「本机翻译」用 Apple 翻译在 iPad 上离线翻；「AI 精翻」只翻滑条选中的范围（最多 200 块），交给服务器上的 AI 结合上下文与人物介绍整体翻译。"
                  + "左边是现在，往右越早。拖两端的圆点调显示范围；左端拉到最左就一直跟着现在。每 10 秒自动刷新。下面新的在上，一个人连着说的合成一块；点一块查看、定人或删除。")
         }
     }
