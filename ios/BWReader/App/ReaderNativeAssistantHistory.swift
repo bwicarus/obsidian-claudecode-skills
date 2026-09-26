@@ -469,14 +469,24 @@ final class ReaderNativeConversationFeed {
                 guard self.generation == ticket, !Task.isCancelled else { return }
                 // 断线期间可能漏掉事件：重连前补读一次历史。
                 self.reloadHistory(reason: "reconnect")
+                self.reloadPermission?()
                 let delay = min(30.0, 2.0 * pow(2.0, Double(min(failures, 4))))
                 try? await Task.sleep(for: .seconds(delay))
             }
         }
     }
 
+    /// 语音核心的权限请求状态（assistant-permission 事件）。
+    var onPermission: (([String: Any]) -> Void)?
+    var reloadPermission: (() -> Void)?
+
     func handle(_ event: [String: Any]) {
-        guard started, event["kind"] as? String == "assistant-history" else { return }
+        guard started else { return }
+        if event["kind"] as? String == "assistant-permission" {
+            if let state = event["permission"] as? [String: Any] { onPermission?(state) }
+            return
+        }
+        guard event["kind"] as? String == "assistant-history" else { return }
         let eventMode = (event["assistant_mode"] as? String) ?? (event["mode"] as? String) ?? "normal"
         guard (eventMode == "review" ? "review" : "normal") == mode else { return }
         guard let tid = event["turn_id"] as? String, tid.range(of: "^[A-Za-z0-9_.:-]{1,160}$", options: .regularExpression) != nil else { return }

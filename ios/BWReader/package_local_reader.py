@@ -179,6 +179,8 @@ MANIFEST_NAME = "bundle-manifest.json"
 NATIVE_INTERFACE_CONTRACT = "reader-native-interface-manifest/2"
 NATIVE_INTERFACE_SOURCE = HERE / "native_reader_interface_manifest.json"
 NATIVE_FORMULA_RECOGNITION_SOURCE = HERE / "App" / "NativeFormulaRecognition.swift"
+# 语音核心 Codex 线程的权限请求（2026-09-27）：原生直接经网关读/答，两种书都在对话面板里
+NATIVE_PERMISSION_SOURCE = HERE / "App" / "ReaderNativePermission.swift"
 NATIVE_INTERFACE_NAME = "native_reader_interface_manifest.json"
 NATIVE_PREFERENCE_NAME = "native_reader_preference_manifest.json"
 NATIVE_PREFERENCE_SOURCE = STATIC / "reader-runtime" / "data-registry.js"
@@ -217,6 +219,8 @@ NATIVE_INTERFACE_SWIFT_CONSUMERS = (
         "ios/BWReader/App/NativeFormulaRecognition.swift",
         NATIVE_FORMULA_RECOGNITION_SOURCE,
     ),
+    ("pdf", "ios/BWReader/App/ReaderNativePermission.swift", NATIVE_PERMISSION_SOURCE),
+    ("epub", "ios/BWReader/App/ReaderNativePermission.swift", NATIVE_PERMISSION_SOURCE),
 )
 
 # The native fetch bridge is part of the compatibility surface, not an opaque

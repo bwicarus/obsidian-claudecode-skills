@@ -181,6 +181,8 @@ struct ReaderNativeContextAttachment: Identifiable {
 /// communicate through scoped commands while their migration is completed.
 @MainActor
 final class ReaderNativeConversationModel: ObservableObject {
+    /// 语音核心那条 Codex 线程的权限请求（见 ReaderNativePermission.swift）。
+    let permissions = ReaderNativePermissionCenter()
     @Published private(set) var scope = ""
     @Published private(set) var revision: Int64 = -1
     @Published private(set) var title = "阅读助手"

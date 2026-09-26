@@ -4962,6 +4962,19 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 guard let nativeAssistantStream, let self else { throw CancellationError() }
                 try await nativeAssistantStream.subscribeReaderEvents(surface: self.isEPUBBook ? .epub : .pdf, onEvent: onEvent)
             }
+            nativeFeed.onPermission = { [weak self] state in self?.nativeConversation.permissions.apply(state) }
+            nativeFeed.reloadPermission = { [weak self] in
+                Task { await self?.nativeConversation.permissions.load() }
+            }
+            nativeConversation.permissions.log = { [weak self] line in self?.postClientLog(line) }
+            nativeConversation.permissions.transport = { [weak nativeServerGateway, weak self] path, method, body in
+                guard let nativeServerGateway, let self else { throw CancellationError() }
+                let bytes = try body.map { try JSONSerialization.data(withJSONObject: $0) } ?? Data()
+                let surface: ReaderNativeInterfaceSurface = self.isEPUBBook ? .epub : .pdf
+                let response = try await nativeServerGateway.fetchData(path: path, method: method, body: bytes, surface: surface)
+                let value = (try? JSONSerialization.jsonObject(with: response.data)) as? [String: Any] ?? [:]
+                return (response.status, value)
+            }
             nativeFeed.acknowledge = { [weak nativeServerGateway, weak self] tid in
                 guard let nativeServerGateway, let self,
                       let body = try? JSONSerialization.data(withJSONObject: ["turn_id": tid]) else { return }

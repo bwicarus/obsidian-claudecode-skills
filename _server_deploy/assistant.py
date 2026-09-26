@@ -11109,6 +11109,72 @@ def assistant_stream_external():
     return jsonify({"ok": True, "delivered": delivered})
 
 
+# ── App 对话里的权限提升（2026-09-27）：语音核心把 Codex 越过沙盒的审批请求挂起，经这里转给 App；
+#    App 的决定经这里交回语音核心（127.0.0.1:43131）。状态只在语音核心里，这里只转发 + 推事件。──
+_VOICE_CORE = "http://127.0.0.1:43131"
+
+
+def _voice_core_json(path, body=None, timeout=10):
+    import urllib.request as _ur
+    data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = _ur.Request(_VOICE_CORE + path, data=data, method="GET" if body is None else "POST",
+                      headers={"Content-Type": "application/json"})
+    with _ur.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+def _permission_publish(uid, state):
+    import reader_events
+    return reader_events.publish("assistant-permission", "", uid, {"permission": state}) or 0
+
+
+@bp.route("/permission/sync", methods=["POST"])
+def assistant_permission_sync():
+    """语音核心推来当前的待确认请求与权限档 → reader-events → App 对话面板。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    b = request.get_json(silent=True) or {}
+    state = {"elevated": bool(b.get("elevated")), "threadId": str(b.get("threadId") or ""),
+             "pending": [p for p in (b.get("pending") or []) if isinstance(p, dict)][:20]}
+    return jsonify({"ok": True, "delivered": _permission_publish(session["user_id"], state)})
+
+
+@bp.route("/permission", methods=["GET"])
+def assistant_permission_state():
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    try:
+        return jsonify(_voice_core_json("/permission"))
+    except Exception as error:   # 语音核心没在跑：没有待确认的请求，但要说清楚
+        return jsonify({"ok": False, "error": "voice-core-unreachable", "detail": str(error)[:200],
+                        "pending": [], "elevated": False}), 503
+
+
+@bp.route("/permission/decide", methods=["POST"])
+def assistant_permission_decide():
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    b = request.get_json(silent=True) or {}
+    decision = str(b.get("decision") or "")
+    if decision not in ("once", "session", "deny"):
+        return jsonify({"ok": False, "error": "decision"}), 400
+    try:
+        result = _voice_core_json("/permission/decide", {"id": str(b.get("id") or ""), "decision": decision}, 20)
+    except Exception as error:
+        return jsonify({"ok": False, "error": "voice-core-unreachable", "detail": str(error)[:200]}), 503
+    return jsonify(result), (200 if result.get("ok") else 409)
+
+
+@bp.route("/permission/revoke", methods=["POST"])
+def assistant_permission_revoke():
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    try:
+        return jsonify(_voice_core_json("/permission/revoke", {}, 20))
+    except Exception as error:
+        return jsonify({"ok": False, "error": "voice-core-unreachable", "detail": str(error)[:200]}), 503
+
+
 @bp.route("/history")
 def assistant_history():
     if not _logged_in():

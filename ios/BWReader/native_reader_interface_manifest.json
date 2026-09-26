@@ -224,6 +224,51 @@
       "description": "Write bounded assistant diagnostics."
     },
     {
+      "path": "/api/assistant/permission",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "GET"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Read the voice-core Codex thread's pending permission requests and elevation state."
+    },
+    {
+      "path": "/api/assistant/permission/decide",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Answer one pending permission request (once / session / deny)."
+    },
+    {
+      "path": "/api/assistant/permission/revoke",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Return the voice-core Codex thread to the read-only sandbox."
+    },
+    {
       "path": "/api/assistant/pref-profiles",
       "match": "exact",
       "owner": "pi",

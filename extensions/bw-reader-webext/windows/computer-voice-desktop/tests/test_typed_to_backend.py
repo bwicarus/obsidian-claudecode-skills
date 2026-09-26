@@ -129,7 +129,7 @@ class TypedTests(unittest.TestCase):
             self.assertEqual(first, again)
             self.assertEqual(len(r.app.calls), 1)
             content = r.app.calls[0][1]["input"]
-            self.assertEqual(content[1], {"type": "localImage", "path": str(Path(d) / "assistant-attachments" / ident / "preview.jpg")})
+            self.assertEqual(content[1], {"type": "localImage", "path": str(Path(d).resolve() / "assistant-attachments" / ident / "preview.jpg")})  # macOS：/var 是 /private/var 的别名
             self.assertIn("original.png", content[0]["text"])
             with self.assertRaisesRegex(ValueError, "内容不一致"):
                 asyncio.run(r.typed("另一个问题", [ident], "b" * 32))

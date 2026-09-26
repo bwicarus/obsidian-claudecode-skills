@@ -90,6 +90,7 @@ struct ReaderNativeConversationView: View {
                 Divider()
             }
             if let error = model.error { errorBanner(error) }
+            ReaderNativePermissionBanner(center: model.permissions)
             if voiceBridge.state.phase == .failed, let detail = voiceBridge.state.detail {
                 Text(detail).font(.caption).foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(12)

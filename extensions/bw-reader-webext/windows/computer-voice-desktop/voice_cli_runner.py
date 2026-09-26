@@ -19,6 +19,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -51,6 +52,19 @@ SETTINGS_PATH = BASE / "settings.json"
 EVENTS_PATH = BASE / "events.jsonl"
 QUOTA_PATH = BASE / "quota-watch.jsonl"   # 额度/实时音频用量采样，见 quota_watch_loop
 STATE_PATH = BASE / "state.json"
+# App 对话里的权限提升（2026-09-27 用户：「希望能有一个提升权限的请求，确认后就能开启权限」）。
+# 基线仍是只读沙盒；线程审批改成 on-request，Codex 要越过沙盒时发审批请求 → 挂起转给 App，
+# 用户点「允许一次 / 本对话都允许 / 拒绝」。「本对话都允许」= 这条线程改 danger-full-access
+# （与 Codex 桌面版同档），清空对话（新线程）即回到只读。
+PERMISSION_PATH = BASE / "permission.json"
+PERMISSION_WAIT_SECONDS = 600
+# (允许一次, 本对话都允许, 拒绝)；两套取值不通用，见 codex_thread_notify.APPROVAL_VOCABULARY
+PERMISSION_VOCABULARY = {
+    "item/commandExecution/requestApproval": ("accept", "acceptForSession", "decline"),
+    "item/fileChange/requestApproval": ("accept", "acceptForSession", "decline"),
+    "execCommandApproval": ("approved", "approved_for_session", "denied"),
+    "applyPatchApproval": ("approved", "approved_for_session", "denied"),
+}
 PID_PATH = BASE / "runner.pid"
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 BINDING_PATH = CODEX_HOME / "voice-thread-binding.json"
@@ -865,7 +879,11 @@ class Speaker:
 class AppServer:
     """codex app-server 的 JSON-RPC 客户端（stdio）。通知回调给 Runner。"""
 
-    def __init__(self, exe: str, mcp_disable: list[str], on_notification, disable_official_plugins: bool = False):
+    def __init__(self, exe: str, mcp_disable: list[str], on_notification, disable_official_plugins: bool = False,
+                 on_server_request=None):
+        # 需要用户拍板的反向请求（越过沙盒的命令/改文件）交给它；它等 App 上的决定，可能要几分钟，
+        # 所以另起任务等，不能卡住读循环。
+        self.on_server_request = on_server_request
         self.exe = exe
         self.mcp_disable = mcp_disable
         self.disable_official_plugins = disable_official_plugins
@@ -946,14 +964,29 @@ class AppServer:
             m = d.get("method", "")
             p = d.get("params") or {}
             if "id" in d:
-                # 服务端反向请求：只放行阅读器工具的审批，其余拒绝
+                # 服务端反向请求：阅读器工具的审批直接放行；越过沙盒的命令/改文件交给用户在 App 上拍板；其余拒绝
                 blob = json.dumps(p, ensure_ascii=False)
                 ok = "reader_" in blob
+                if not ok and self.on_server_request is not None and (
+                        m in PERMISSION_VOCABULARY or m == "item/permissions/requestApproval"):
+                    asyncio.create_task(self._answer_later(d["id"], m, p))
+                    continue
                 await self.on_notification("server_request", {"method": m, "approved": ok, "detail": clean(blob)[:200]})
                 await self.write({"id": d["id"], "result": {"decision": "accept" if ok else "decline"}})
                 continue
             await self.on_notification(m, p)
         await self.on_notification("app_server_exited", {})
+
+    async def _answer_later(self, request_id, method: str, params: dict):
+        try:
+            result = await self.on_server_request(method, params)
+        except Exception as e:   # noqa: BLE001
+            await self.on_notification("server_request", {"method": method, "approved": False,
+                                                          "detail": "permission handler: " + clean(e)[:160]})
+            no = PERMISSION_VOCABULARY.get(method, (None, None, "decline"))[2]
+            result = {"permissions": {}} if method == "item/permissions/requestApproval" else {"decision": no}
+        if self.proc:
+            await self.write({"id": request_id, "result": result})
 
     async def close(self):
         if self.proc:
@@ -1126,6 +1159,7 @@ class Runner:
         self.thread_id: str | None = None
         self.session_id: str | None = None
         self.session_no = 0
+        self._permission_pending: dict[str, dict] = {}   # id → 请求（含等待决定的 future）
         self.last_activity_at: float | None = None   # 最后一次"真人在用"的时刻，见 mark_activity/idle_stop_loop
         if getattr(self, "_prompt_adopted", None):
             # 出声：跟随了新默认的提示词要记一笔，写回盘上（带 promptBase 指纹）。
@@ -1638,7 +1672,8 @@ class Runner:
             exe = (self.settings.get("codexExe") or os.environ.get("APP_CODEX")
                    or ("codex.exe" if sys.platform == "win32" else "codex"))
             self.app = AppServer(exe, list(self.settings.get("mcpDisable") or []), self.on_notification,
-                                 bool(self.settings.get("disableOfficialPlugins")))
+                                 bool(self.settings.get("disableOfficialPlugins")),
+                                 on_server_request=self.ask_permission)
             await self.app.launch()
             acct = await self.app.call("account/read", {"refreshToken": False}, timeout=30)
             self.log("app_server_ready", exe=exe, account=(acct.get("account") or {}).get("type"), plan=(acct.get("account") or {}).get("planType"))
@@ -1657,14 +1692,16 @@ class Runner:
                 try:
                     self._ctx_invalidate()
                     self._resume_tried = True
-                    r = await self.app.call("thread/resume", {"threadId": want}, timeout=90)
+                    r = await self.app.call("thread/resume", {"threadId": want, **self._thread_permission(want)},
+                                            timeout=90)
                     self.thread_id = (r.get("thread") or {}).get("id") or want
                     self.log("thread_resumed", threadId=self.thread_id)
                 except Exception as e:   # noqa: BLE001
                     self.log("thread_resume_failed", threadId=want, message=clean(e))
         if self.thread_id is None:
-            start = {"cwd": str(BASE), "modelProvider": "openai", "approvalPolicy": "never", "sandbox": "read-only", "environments": [],
-                     "model": self.settings.get("backendModel") or None}
+            # 新线程一律从只读开始（「本对话都允许」只属于那一条对话）
+            start = {"cwd": str(BASE), "modelProvider": "openai", "environments": [],
+                     "model": self.settings.get("backendModel") or None, **self._thread_permission(None)}
             if self.settings.get("backendThreadInstructions"):
                 start["developerInstructions"] = self.settings["backendThreadInstructions"]
                 start["developerInstructions"] += self._inline_hot_guides()
@@ -1771,6 +1808,97 @@ class Runner:
         self.log("guide_inline", inlined=[t for t, _c, _x in picked],
                  calls=[c for _t, c, _x in picked], chars=used, skipped=skipped)
         return "".join(out)
+
+    # ---------- 权限提升（App 上确认） ----------
+    def _elevated_thread(self) -> str | None:
+        try:
+            return (json.loads(PERMISSION_PATH.read_text(encoding="utf-8")) or {}).get("elevatedThreadId") or None
+        except Exception:
+            return None
+
+    def elevated(self) -> bool:
+        return bool(self.thread_id) and self._elevated_thread() == self.thread_id
+
+    def _thread_permission(self, thread_id: str | None) -> dict:
+        full = bool(thread_id) and self._elevated_thread() == thread_id
+        return {"approvalPolicy": "on-request", "sandbox": "danger-full-access" if full else "read-only"}
+
+    def _set_elevated(self, on: bool, why: str):
+        try:
+            PERMISSION_PATH.write_text(json.dumps({"elevatedThreadId": self.thread_id if on else None,
+                                                   "at": time.time(), "why": why}), encoding="utf-8")
+        except Exception as e:
+            self.log("permission_state_write_error", message=clean(e))
+        self.log("permission_elevated" if on else "permission_revoked", threadId=self.thread_id, why=why)
+
+    def permission_state(self) -> dict:
+        pending = [{k: v for k, v in item.items() if k != "future"} for item in self._permission_pending.values()]
+        pending.sort(key=lambda item: item["createdAt"])
+        return {"ok": True, "threadId": self.thread_id, "elevated": self.elevated(), "pending": pending}
+
+    def _permission_publish(self):
+        """推给 webapp → reader-events → App 对话面板。发不出去不影响等待：App 打开面板时会 GET 一次。"""
+        if not self._history_enabled():
+            return
+        body = self.permission_state()
+        threading.Thread(target=self._permission_push, args=(body,), daemon=True).start()
+
+    def _permission_push(self, body: dict):
+        try:
+            self._history_request("/api/assistant/permission/sync", body)
+        except Exception as e:
+            self.log("permission_publish_error", message=clean(e))
+
+    async def ask_permission(self, method: str, params: dict) -> dict:
+        request_id = "p" + secrets.token_hex(6)
+        command = params.get("command")
+        if isinstance(command, list):
+            command = " ".join(str(part) for part in command)
+        kind = ("files" if method in ("item/fileChange/requestApproval", "applyPatchApproval")
+                else "permissions" if method == "item/permissions/requestApproval" else "command")
+        future = self.loop.create_future()
+        item = {"id": request_id, "kind": kind, "method": method,
+                "reason": clean(str(params.get("reason") or ""))[:600],
+                "command": clean(str(command or ""))[:1200], "cwd": str(params.get("cwd") or "")[:300],
+                "grantRoot": str(params.get("grantRoot") or "")[:300],
+                "turnId": str(params.get("turnId") or ""), "createdAt": time.time(),
+                "expiresAt": time.time() + PERMISSION_WAIT_SECONDS, "future": future}
+        self._permission_pending[request_id] = item
+        self.log("permission_requested", id=request_id, what=kind, reason=item["reason"][:200], command=item["command"][:200])
+        self._permission_publish()
+        try:
+            decision = await asyncio.wait_for(future, PERMISSION_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            decision = "timeout"
+        finally:
+            self._permission_pending.pop(request_id, None)
+            self._permission_publish()
+        self.log("permission_decided", id=request_id, decision=decision)
+        if method == "item/permissions/requestApproval":
+            if decision in ("once", "session"):
+                return {"permissions": params.get("permissions") or {}, "scope": "session" if decision == "session" else "turn"}
+            return {"permissions": {}}
+        once, session, no = PERMISSION_VOCABULARY[method]
+        return {"decision": once if decision == "once" else session if decision == "session" else no}
+
+    def decide_permission(self, request_id: str, decision: str) -> dict:
+        if decision not in ("once", "session", "deny"):
+            return {"ok": False, "msg": "decision 只能是 once / session / deny"}
+        item = self._permission_pending.get(request_id)
+        if item is None:
+            return {**self.permission_state(), "ok": False, "msg": "这条请求已经处理过或超时了"}
+        if decision == "session" and item["kind"] != "permissions":
+            # 本对话都允许：这一条放行，之后的轮次整条线程改完整权限（下一轮 turn/start 带上覆盖）。
+            # 「要某几项权限」的请求按它要的范围给到整个会话，不借机放大成完整权限。
+            self._set_elevated(True, "user-approved:" + item["kind"])
+        if not item["future"].done():
+            item["future"].set_result(decision)
+        return {"ok": True, **self.permission_state()}
+
+    async def revoke_permission(self) -> dict:
+        self._set_elevated(False, "user-revoked")
+        self._permission_publish()
+        return self.permission_state()
 
     def write_binding(self):
         try:
@@ -3780,7 +3908,10 @@ class Runner:
         await self._ctx_inject_backend(with_text=True)   # 直接少一轮工具调用：起轮前把他正看着的内容放进去
         # 侧栏记的是给人看的那句（record_text），不是发给后台的那份（可能拼了附件清单）。
         self._pending_turn_user = (record_text or text) if record_user else None
-        params = {"threadId": self.thread_id, "input": [{"type": "text", "text": text}]}
+        params = {"threadId": self.thread_id, "input": [{"type": "text", "text": text}],
+                  # 每轮都带上当前权限档：覆盖对「这一轮及之后」生效，收回/提升都在下一轮兑现
+                  "approvalPolicy": "on-request",
+                  "sandboxPolicy": {"type": "dangerFullAccess"} if self.elevated() else {"type": "readOnly"}}
         params["input"].extend({"type": "localImage", "path": path} for path in (image_paths or []))
         if additional:
             params["additionalContext"] = {k: {"kind": "application", "value": str(v)} for k, v in additional.items()}
@@ -4613,6 +4744,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/status":
                 return self._send(200, r.status())
+            if u.path == "/permission":
+                return self._send(200, r.permission_state())
             if u.path == "/transcript":
                 return self._send(200, r.transcript(int(q.get("limit", ["12"])[0]),
                                                     float(q.get("sinceSeconds", ["0"])[0])))
@@ -4672,6 +4805,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not _ntf:
                     return self._send(400, {"ok": False, "msg": "missing id"})
                 return self._send(200, {"ok": r._notify_ack(_ntf), "id": _ntf})
+            if u.path == "/permission/decide":
+                async def _decide():   # future 只能在事件循环线程里设
+                    return r.decide_permission(str(body.get("id") or ""), str(body.get("decision") or ""))
+                return self._send(200, self._run(_decide(), 20))
+            if u.path == "/permission/revoke":
+                return self._send(200, self._run(r.revoke_permission(), 20))
             if u.path == "/thread/new":
                 async def _renew():
                     if r.session_state != "idle":
