@@ -177,20 +177,10 @@ cd ~/BW/src/claude
 页宽 1376 核实；此前一版文档写反了）。模拟器每次重装都可能换号（见过 `3cd63a`、`362625`），
 认设备以页宽为准：13 寸 iPad Pro 横屏 1376，模拟器 iPad Pro 11 为 834/1210。
 
-- **本机直接出 TestFlight（2026-09-26 实测可行，用户不在 iPad 旁时用）**：Mac 上没有 `gh`、
-  也没有 API key / 发布证书，CI 的 `workflow_dispatch` 触发不了；但 Xcode 登录的账号能云端签名：
-  ```bash
-  cd ios/BWReader && xcodebuild archive -project BWReader.xcodeproj -scheme BWReader \
-    -destination generic/platform=iOS -archivePath ~/BW/xcode-derived/archive/app.xcarchive \
-    -allowProvisioningUpdates CURRENT_PROJECT_VERSION=<构建号>
-  xcodebuild -exportArchive -archivePath ~/BW/xcode-derived/archive/app.xcarchive \
-    -exportOptionsPlist ~/BW/xcode-derived/archive/ExportOptions.plist \
-    -exportPath ~/BW/xcode-derived/archive/export -allowProvisioningUpdates
-  ```
-  ExportOptions：`method=app-store-connect`、`destination=upload`、`signingStyle=automatic`、
-  `teamID=7MDVSLPV8F`、`manageAppVersionAndBuildNumber=false`。⚠ 构建号要高于 CI 用过的
-  `run_number`（最后一次 CI ≈974），本机用 `974.N` 这种带点的号，不和 CI 的整数撞；
-  下次 CI 的整数号仍然更大。第一次：1.1.85 (974.9)。
+- **出 TestFlight = 本机官方流程，云端 CI 不再用（2026-09-26 用户拍板）**：
+  `ios/BWReader/testflight_upload.sh`（Xcode 账号自动签名 + 自动取下一个构建号，archive → 直接上传）。
+  要在 Mac 桌面会话里跑。旧的 `safari-extension-ios.yml` workflow_dispatch 只是历史，别再触发。
+  第一次本机上传是 1.1.85 (974.9)，之后构建号由 Xcode 自动递增。
 
 ## 7. Windows 侧现状（已退役）
 
