@@ -725,17 +725,19 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     func registerNativeCardInk(id: String, windowRect: CGRect?, occlusion: CGRect? = nil, aspectRatio: CGFloat, geometry: String) {
+        // 与页面表面同理：按手写层（真正做命中的那一层）归一化。
+        let reference: UIView = nativePencilCanvasView ?? webView
         guard let windowRect, windowRect.width > 0, windowRect.height > 0,
-              webView.bounds.width > 0, webView.bounds.height > 0 else {
+              reference.bounds.width > 0, reference.bounds.height > 0 else {
             nativePencilInk.setCardSurface(nil, id: id)
             return
         }
-        let local = webView.convert(windowRect, from: nil)
-        let rect = CGRect(x: local.minX / webView.bounds.width, y: local.minY / webView.bounds.height,
-                          width: local.width / webView.bounds.width, height: local.height / webView.bounds.height)
-        let outer = webView.convert(occlusion ?? windowRect, from: nil)
-        let cover = CGRect(x: outer.minX / webView.bounds.width, y: outer.minY / webView.bounds.height,
-                           width: outer.width / webView.bounds.width, height: outer.height / webView.bounds.height)
+        let local = reference.convert(windowRect, from: nil)
+        let rect = CGRect(x: local.minX / reference.bounds.width, y: local.minY / reference.bounds.height,
+                          width: local.width / reference.bounds.width, height: local.height / reference.bounds.height)
+        let outer = reference.convert(occlusion ?? windowRect, from: nil)
+        let cover = CGRect(x: outer.minX / reference.bounds.width, y: outer.minY / reference.bounds.height,
+                           width: outer.width / reference.bounds.width, height: outer.height / reference.bounds.height)
         nativePencilInk.setCardSurface(NativeInkSurface(id: "card:" + id, rect: rect, exclusions: [],
             aspectRatio: aspectRatio, geometry: geometry, occlusionRect: cover), id: id)
     }
@@ -1208,23 +1210,28 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     func publishNativeInkSurfaces() {
-        guard let document = nativePDFDocument,
-              webView.bounds.width > 0, webView.bounds.height > 0 else { return }
+        guard let document = nativePDFDocument else { return }
+        // ⚠ 原生正文接管后要按**手写层**的坐标归一化：手写层拿自己的 bounds 命中表面，
+        //   以前按（被隐藏、布局也不同的）网页视图归一化 → 表面和屏幕上的页对不上，
+        //   笔落下去命中不到任何表面，手写层不接、工具栏也不出（2026-09-26 查「手写笔整体不可用」）。
+        let native = nativeReadingStoreBookID == currentLocalBook?.id && nativeReadingStoreBookID != nil
+        let reference: UIView = native ? (nativePencilCanvasView ?? webView) : webView
+        guard reference.bounds.width > 0, reference.bounds.height > 0 else { return }
         var surfaces: [[String: Any]] = []
         for page in document.position.visiblePages.prefix(8) {
             guard let pageRect = document.viewRect(
                 normalized: CGRect(x: 0, y: 0, width: 1, height: 1), page: page) else { continue }
-            let local = webView.convert(document.view.convert(pageRect, to: nil), from: nil)
+            let local = reference.convert(document.view.convert(pageRect, to: nil), from: nil)
             guard local.width > 0, local.height > 0 else { continue }
             surfaces.append([
                 "id": "page:\(page)",
-                "rect": ["x": local.minX / webView.bounds.width,
-                         "y": local.minY / webView.bounds.height,
-                         "width": local.width / webView.bounds.width,
-                         "height": local.height / webView.bounds.height],
+                "rect": ["x": local.minX / reference.bounds.width,
+                         "y": local.minY / reference.bounds.height,
+                         "width": local.width / reference.bounds.width,
+                         "height": local.height / reference.bounds.height],
             ])
         }
-        if nativeReadingStoreBookID == currentLocalBook?.id, nativeReadingStoreBookID != nil {
+        if native {
             nativePencilInk.updateLayout(from: ["type":"layout", "documentToken":nativeInkDocumentToken, "surfaces":surfaces])
             return
         }
@@ -4468,7 +4475,21 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
+    /// 手写层（全屏 PKCanvasView）。可书写表面必须按**它**的坐标归一化 —— 它就是拿自己的
+    /// bounds 去命中这些表面的。
+    private weak var nativePencilCanvasView: UIView?
+
     func bindNativeVisualCaptureCanvas(_ canvas: UIView) {
+        nativePencilCanvasView = canvas
+        // 笔杆双击/捏压也挂到手写层：原生正文接管后网页视图是隐藏的，挂在它上面的
+        // UIPencilInteraction 收不到任何双击（「双击也无法切换到橡皮擦」）。两处同时收到的
+        // 同一次双击由 receiveNativePencilDoubleTap 的 0.15s 去重合并。
+        if !canvas.interactions.contains(where: { $0 is UIPencilInteraction }) {
+            let interaction = UIPencilInteraction()
+            interaction.delegate = self
+            interaction.isEnabled = true
+            canvas.addInteraction(interaction)
+        }
         localRuntimeServer?.visualCaptureBroker.bind(
             webView: webView,
             pencilCanvas: canvas
@@ -8395,6 +8416,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             return
         }
         lastNativePencilTapTimestamp = timestamp
+        postClientLog("[pencil] 双击笔杆 → 映射 \(nativePencilSettings.doubleTap) 系统偏好 \(UIPencilInteraction.preferredTapAction.rawValue)")
         let preferredAction = UIPencilInteraction.preferredTapAction
         guard let action = resolvedNativePencilAction(
             mapping: nativePencilSettings.doubleTap,

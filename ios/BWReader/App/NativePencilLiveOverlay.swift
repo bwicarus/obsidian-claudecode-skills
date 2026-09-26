@@ -53,6 +53,8 @@ final class NativePencilInkController: ObservableObject {
     @Published private(set) var documentGeneration = 0
     @Published private(set) var pendingOperationCount = 0
     @Published private(set) var paletteVisible = false
+    /// 「落笔未命中」日志的节流时刻。
+    var lastMissReport = Date.distantPast
     @Published var colorHex = "#ff3b30"
     @Published var width: CGFloat = 4
     @Published private(set) var paletteAnchor: CGPoint?
@@ -516,7 +518,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         canvas.isOpaque = false
         canvas.isScrollEnabled = false
         canvas.drawingPolicy = .pencilOnly
-        canvas.captureRule = { [weak controller] point, event, bounds in
+        canvas.captureRule = { [weak controller, weak reader] point, event, bounds in
             // Pencil hover has no touch in UIEvent.allTouches. Let the hover
             // recognizer receive it; allowedTouchTypes below still limits the
             // recognizer itself to Apple Pencil.
@@ -533,7 +535,18 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 x: point.x / bounds.width,
                 y: point.y / bounds.height
             )
-            return controller.layout.surface(at: normalized) != nil
+            let hit = controller.layout.surface(at: normalized) != nil
+            // 出声：落笔没命中任何书写表面时说清楚（表面有几个、落点在哪）。以前这条路一句日志都没有，
+            // 「手写笔整体不可用」只能靠猜（2026-09-26）。10 秒最多一条。
+            if !hit, Date().timeIntervalSince(controller.lastMissReport) > 10 {
+                controller.lastMissReport = Date()
+                let first = controller.layout.surfaces.first.map { r in
+                    String(format: "首个表面(%.2f,%.2f %.2fx%.2f)", r.rect.minX, r.rect.minY, r.rect.width, r.rect.height)
+                } ?? "无表面"
+                reader?.postClientLog(String(format: "[pencil] 落笔未命中书写表面 落点(%.2f,%.2f) 表面数=%d ", normalized.x, normalized.y,
+                                             controller.layout.surfaces.count) + first)
+            }
+            return hit
         }
 
         let pencilPath = UIPanGestureRecognizer(
