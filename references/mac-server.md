@@ -141,13 +141,14 @@ cd ~/BW/src/claude
 - **命令行装真机**（2026-09-25 跑通，要在 Mac 桌面会话里；iPad `bwpad` UDID `00008132-000405AE36F0801C`，
   4 个描述文件都已含它，不需要 `-allowProvisioningUpdates`）：
 
-  ⚠ **改过 `_server_deploy/static/pdf/*.js` 必须先重生成 ReaderBundle**：xcodebuild 只是把
-  `Generated/ReaderBundle` 原样拷进包，**不会**自己重新打包。2026-09-26 连装两版，JS 改动都没进 App，
-  而编译全绿、看不出任何异常 —— 判据是客户端日志里静态路径的哈希（`/static/<hash>/pdf/…`）没变。
+  ✅ **ReaderBundle 现在由编译前步骤自动重生成**（2026-09-26，`xcode_prebuild_reader_bundle.sh`，约 3 秒；
+  CI 里自动跳过）：用户在 Xcode 里选 bwpad 按 Run、或下面的命令行，装上去的都是最新网页代码。
+  此前 xcodebuild 只把 `Generated/ReaderBundle` 原样拷进包 —— 连装两版 JS 改动都没进 App 而编译全绿。
+  判据仍是客户端日志里静态路径的哈希（`/static/<hash>/pdf/…`）。
+  ⚠ Safari 扩展资源（`Extension/Resources`）不在这一步里：改了扩展代码仍要重跑 `prepare_local_xcode.sh --dev`。
 
   ```bash
   cd ~/BW/src/claude/ios/BWReader
-  ~/BW/venv/server/bin/python package_local_reader.py --output Generated/ReaderBundle   # 改过 JS 时
   xcodebuild -project BWReader.xcodeproj -scheme BWReader -configuration Debug \
     -destination 'id=00008132-000405AE36F0801C' -derivedDataPath ~/BW/xcode-derived/device build
   xcrun devicectl device install app --device 00008132-000405AE36F0801C \
