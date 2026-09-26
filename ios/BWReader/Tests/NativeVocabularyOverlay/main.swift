@@ -12,6 +12,31 @@ for (index, item) in (fixture["cases"] as! [[String: Any]]).enumerated() {
 }
 print("Native vocabulary overlay matches token, alias, nested mastery and geometry merge oracle")
 
+// 生词句（2026-09-26）：真机走原生叠加层，句子要在原生里算。规则同服务端/网页版。
+do {
+    var chars: [O.Row] = [], spans: [(row: O.Row, lo: Int)] = [], x = 10.0, wid = 1000.0
+    func put(_ text: String, y: Double, w: Double, sp: Bool = false) {
+        for c in text { chars.append(["c": String(c), "x0": x, "y0": y, "x1": x + 6, "y1": y + 10, "w": sp ? -1 : w, "bk": 0, "sp": sp]); x += 6 }
+    }
+    func sentence(_ words: [String], marked: Set<Int>, y: Double) {
+        for (i, word) in words.enumerated() {
+            let lo = chars.count; wid += 1; put(word, y: y, w: wid)
+            if marked.contains(i) { spans.append((row: ["lemma": word, "label_slug": "new"], lo: lo)) }
+            put(i == words.count - 1 ? "." : " ", y: y, w: -1, sp: i != words.count - 1)
+        }
+        put(" ", y: y, w: -1, sp: true)
+    }
+    let twelve = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima".split(separator: " ").map(String.init)
+    sentence(twelve, marked: [0, 3, 7], y: 100)                       // 3 个生词 → 框
+    sentence(twelve.map { $0 + "s" }, marked: [1, 2], y: 100)        // 2 个 → 不框
+    x = 10; sentence(twelve.map { $0 + "x" }, marked: [0, 1, 2], y: 980)  // 页脚 → 不框
+    let got = O.localSentences(chars, spans: spans, visibleLemmas: Set(spans.compactMap { $0.row["lemma"] as? String }), pageHeight: 1000)
+    precondition(got.count == 1, "expected exactly one vocab sentence, got \(got.count)")
+    precondition(got[0]["count"] as? Int == 3 && (got[0]["text"] as? String ?? "").hasPrefix("alpha bravo"), "wrong sentence: \(got[0])")
+    precondition((got[0]["firstChar"] as? [Double])?.prefix(2) == [10, 100], "first char box wrong")
+    print("Native vocab sentences: ≥3 underlined, ≥10 words, footer excluded")
+}
+
 let store = try ReaderNativeDataStore(path: ":memory:")
 let cache = ReaderNativePageOverlayStore()
 let v = ReaderNativeVocabularyState(store: store, deviceID: "test")

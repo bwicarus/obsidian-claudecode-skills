@@ -986,7 +986,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 // id 要带页码：不同页的第 0 句不能撞成同一个。
                 return .init(id: "\(page):\(index)", index: index, page: page,
                              text: text, rects: boxes,
-                             firstChar: charBox(row["firstChar"]), lastChar: charBox(row["lastChar"]),
+                             firstChar: charBox(row["firstChar"] ?? row["first_char"]), lastChar: charBox(row["lastChar"] ?? row["last_char"]),
                              zh: row["zh"] as? String ?? "")
             }
         document.setVocabSentences(sentences, page: page)
@@ -1040,8 +1040,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         flags["translation"] = nativeTranslationBookID == currentLocalBook?.id && nativeTranslationEnabled
         let vocabularyGeneration = global.generation(collection: ReaderNativeVocabularyState.collection)
         let index = try nativeVocabularyOverlayStore.vocabulary(global)
-        let calculation = Task.detached(priority: .userInitiated) { ReaderNativeVocabularyOverlay.localMarks(chars, state: index) }
-        let marks = await withTaskCancellationHandler(operation: { await calculation.value }, onCancel: { calculation.cancel() })
+        let calculation = Task.detached(priority: .userInitiated) { ReaderNativeVocabularyOverlay.localMarkSpans(chars, state: index) }
+        let spans = await withTaskCancellationHandler(operation: { await calculation.value }, onCancel: { calculation.cancel() })
+        let marks = spans.map(\.row)
         try Task.checkCancellation()
         guard nativePDFDocument === document, nativeOverlayGeneration == generation, nativeOverlayTickets[page] == ticket else {
             throw ReaderBookUserStateWebAdapterError.contextChanged
@@ -1051,13 +1052,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             throw ReaderBookUserStateWebAdapterError.contextChanged
         }
         let cached = try? ReaderNativePageOverlayStore.cached(local, bookID: book.id, page: page, revision: revision)
+        let pageHeight = (source["pageHeight"] as? NSNumber)?.doubleValue ?? Double(document.characterPageSize(page)?.height ?? 0)
         func payload(_ enrichment: [String: Any]?, search: Bool) -> [String: Any] {
             let combined = ReaderNativeVocabularyOverlay.merge(marks, enrichment?["vocab_marks"] as? [[String: Any]] ?? [])
             let filtered = ReaderNativeVocabularyOverlay.visible(combined, state: index,
                 overrides: flags["overrides"] as? [String: Bool] ?? [:], legacyMastered: Set(flags["mastered"] as? [String] ?? []))
             return ["vocabMarks": flags["vocabulary"] as? Bool != false ? filtered : [],
                 "masteredFuri": flags["ruby"] as? Bool == true ? Array((enrichment?["mastered_furi"] as? [String] ?? []).prefix(4000)) as Any : NSNull(),
-                "vocabSentences": Array((enrichment?["vocab_sentences"] as? [[String: Any]] ?? []).prefix(64)),
+                // 服务端给了就用服务端的（带已缓存译文 zh）；本机书服务端一律拒 → 用原生本地算的。
+                "vocabSentences": Array({ () -> [[String: Any]] in
+                    let remote = enrichment?["vocab_sentences"] as? [[String: Any]] ?? []
+                    guard remote.isEmpty else { return remote }
+                    let lemmas = Set(filtered.compactMap { $0["label_slug"] as? String == "mastered" ? nil : $0["lemma"] as? String })
+                    return ReaderNativeVocabularyOverlay.localSentences(chars, spans: spans, visibleLemmas: lemmas, pageHeight: pageHeight)
+                }().prefix(64)),
                 "searchQuery": search ? flags["searchQuery"] as? String ?? "" : ""]
         }
         applyNativeVocabularyOverlay(payload(cached, search: true), page: page, document: document)
