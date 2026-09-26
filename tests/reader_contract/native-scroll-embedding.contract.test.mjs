@@ -73,7 +73,8 @@ test("清空对话常驻在顶部菜单；侧栏有本机缓存", () => {
   const composer = VIEW.slice(VIEW.indexOf("private var composer: some View"));
   assert.doesNotMatch(code(composer).slice(0, 4000), /清空当前对话/);
   assert.match(VIEW, /"clearConversation"\]\.contains\(where: model\.supports\)/);
-  assert.match(MODEL, /ReaderNativeConversationCache\.hasConversation\(rawMessages\)/);
+  // 迁出 P4：缓存由原生对话流写（publishFeed），不再经网页投影的 rawMessages
+  assert.match(MODEL, /ReaderNativeConversationCache\.hasConversation\(feedRaw\)/);
   assert.match(MODEL, /ReaderNativeConversationCache\.clear\(conversationMode\)/);
 });
 

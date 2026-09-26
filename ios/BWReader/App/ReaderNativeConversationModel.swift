@@ -441,8 +441,6 @@ final class ReaderNativeConversationModel: ObservableObject {
         return data
     }
     private var generation = UUID()
-    private var conversationStore = ReaderNativeConversationStore()
-    private var messageResyncPending = false
     private var retiredNavigationScopes = Set<String>()
     private var reportedRetiredDrop = Set<String>()
     private var pendingSelections: [(id: String, text: String)] = []
@@ -486,36 +484,7 @@ final class ReaderNativeConversationModel: ObservableObject {
             return
         }
         if nextScope == scope, nextRevision <= revision { return }
-        let rawMessages: [[String:Any]]
-        let changedMessages: Bool
-        if let batch = payload["messageDelta"] as? [String:Any] {
-            do {
-                changedMessages = try conversationStore.apply(batch,scope:nextScope)
-                rawMessages = conversationStore.messages
-                messageResyncPending = false
-            } catch {
-                self.error = error.localizedDescription
-                onDiagnostic?("对话增量未应用：\(error.localizedDescription) scope=\(nextScope.prefix(20)) "
-                    + "have=\(conversationStore.revision)@\(conversationStore.scope.prefix(20)) "
-                    + "base=\(batch["baseRevision"] ?? "?") next=\(batch["revision"] ?? "?") "
-                    + "reset=\(batch["reset"] ?? "?") contract=\(batch["contract"] ?? "?")")
-                requestMessageResync(scope:nextScope)
-                return
-            }
-        } else if let values = payload["messages"] as? [[String:Any]] {
-            rawMessages = values; changedMessages = true
-        } else if payload["messageRevision"] == nil {
-            // 迁出 P4：网页不再投影消息，快照里没有消息字段 —— 消息全部来自原生对话流。
-            rawMessages = []; changedMessages = false
-        } else {
-            guard nextScope == conversationStore.scope,
-                  (payload["messageRevision"] as? NSNumber)?.int64Value == conversationStore.revision else {
-                onDiagnostic?("对话快照与本地消息版本不一致：have=\(conversationStore.revision) "
-                    + "page=\(payload["messageRevision"] ?? "?")")
-                requestMessageResync(scope:nextScope); return
-            }
-            rawMessages = []; changedMessages = false
-        }
+        // 迁出 P4：消息全部来自原生对话流（ReaderNativeConversationFeed → applyFeed），网页快照里没有消息字段。
         if nextScope != scope {
             inlineMedia.reset()
             committedCards = [:]
@@ -536,21 +505,7 @@ final class ReaderNativeConversationModel: ObservableObject {
             followsLatest = true
             visibleMessageID = nil
         }
-        var seen = Set<String>()
-        var nextMessages = changedMessages ? rawMessages
-            .compactMap(ReaderNativeConversationMessage.init)
-            .filter { seen.insert($0.id).inserted } : messages
         let nextMode = payload["conversationMode"] as? String == "review" ? "review" : "normal"
-        if changedMessages, ReaderNativeConversationCache.hasConversation(rawMessages) {
-            cacheSuppressed.remove(nextMode)
-            rememberConversation(rawMessages, mode: nextMode)
-            showingCachedMessages = false
-        } else if changedMessages, !cacheSuppressed.contains(nextMode) {
-            // 页面还没把历史交过来（或取失败）：先给本机缓存，别让侧栏空着。
-            let cached = cachedMessages(nextMode)
-            showingCachedMessages = !cached.isEmpty
-            if !cached.isEmpty { nextMessages = cached + nextMessages.filter { $0.role != "user" && $0.role != "assistant" } }
-        }
         // Publish the revision last: observers scroll only after the entire
         // snapshot is available, never after a partially replaced message list.
         scope = nextScope
@@ -578,7 +533,6 @@ final class ReaderNativeConversationModel: ObservableObject {
         if nextCaptions != captions { captions = nextCaptions }
         feedCardInputs = payload["cardInputs"] as? [String: Any] ?? [:]
         if feedActive { publishFeed() }
-        else if changedMessages { messages = nextMessages.map { value in var next = value; next.parts = applyCommittedCards(value.parts); return next } }
         revision = nextRevision
         noteSnapshotCost(payload["payloadBytes"] as? Int ?? 0)
     }
@@ -648,16 +602,6 @@ final class ReaderNativeConversationModel: ObservableObject {
             }
         }
         return result
-    }
-
-    func requestMessageResync(scope:String) {
-        guard !messageResyncPending else { return }
-        messageResyncPending = true
-        Task { [weak self] in
-            let failure = await self?.commandHandler?(["action":"resyncMessages","scope":scope])
-            if let failure { self?.onDiagnostic?("对话重新同步失败：" + (failure.isEmpty ? "（无原因）" : failure)) }
-            self?.messageResyncPending = false
-        }
     }
 
     /// 写本机缓存。⚠ 节流：快照一秒能来好几次；内容没变或 3 秒内写过就跳过。
@@ -732,7 +676,6 @@ final class ReaderNativeConversationModel: ObservableObject {
         inlineMedia.reset()
         committedCards = [:]
         removedMedia = [:]; selectedContextIDs = []; contextRecords = nil; figureAttachments = []
-        conversationStore = ReaderNativeConversationStore(); messageResyncPending = false
         inspection = nil
         settingsPanel = nil
         readingSettingsPanel = nil

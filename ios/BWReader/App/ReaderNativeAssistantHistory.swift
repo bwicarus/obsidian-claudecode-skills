@@ -210,23 +210,6 @@ final class ReaderNativeHistoryMessages {
         return message
     }
 
-    /// 占位消息 → 原生消息（保留占位的 id，部件 id 由它派生）。
-    func resolve(_ placeholder: [String: Any]) -> [String: Any]? {
-        guard let ref = placeholder["nativeHistoryRef"] as? String, let id = placeholder["id"] as? String else { return nil }
-        let pieces = ref.split(separator: "#", maxSplits: 1).map(String.init)
-        guard pieces.count == 2, let index = Int(pieces[1]),
-              let entry = entries.last(where: { $0.token == pieces[0] }),
-              entry.messages.indices.contains(index), var message = entry.messages[index] else { return nil }
-        message["id"] = id
-        message["parts"] = (message["parts"] as? [[String: Any]] ?? []).enumerated().map { offset, part in
-            var part = part, data = part["data"] as? [String: Any] ?? [:]
-            let partID = id + "-h" + String(offset)
-            part["id"] = partID; data["nativeActionKey"] = partID; part["data"] = data
-            return part
-        }
-        return message
-    }
-
     static func build(_ item: Any, index: Int, unmigrated: inout [String: Int]) -> [String: Any]? {
         guard let record = item as? [String: Any], let role = record["role"] as? String,
               ["user", "assistant"].contains(role) else { return nil }

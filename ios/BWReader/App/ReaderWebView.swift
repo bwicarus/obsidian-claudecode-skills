@@ -489,7 +489,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     let nativePencilInk = NativePencilInkController()
     private var readerForeground = true
     private var nativeDwellTracker: ReaderNativeDwellTracker?
-    private var reportedConversationPayloadFailure: String?
     /// 迁出 P1：历史消息由原生生成，网页只放占位（见 ReaderNativeHistoryMessages）。
     let nativeHistoryMessages = ReaderNativeHistoryMessages()
     let nativeFeed = ReaderNativeConversationFeed()
@@ -497,27 +496,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeReviewAnswers = ReaderNativeReviewAnswers()
     /// 迁出 P4：上次交给网页的学习卡组（空了也要发一次，让网页停掉不再需要的卡组）。
     private var nativeWatchedCardGroups: [String] = []
-    private var reportedMissingHistoryRef = false
 
-    /// 把投影里的历史占位换成原生建好的消息。占位对应的批次已被淘汰时出声，并显示一句提示而不是空白。
-    private func resolveNativeHistory(_ body: [String: Any]) -> [String: Any] {
-        guard var batch = body["messageDelta"] as? [String: Any],
-              let upserts = batch["upserts"] as? [[String: Any]],
-              upserts.contains(where: { $0["nativeHistoryRef"] != nil }) else { return body }
-        batch["upserts"] = upserts.map { message -> [String: Any] in
-            guard message["nativeHistoryRef"] != nil else { return message }
-            if let resolved = nativeHistoryMessages.resolve(message) { return resolved }
-            if !reportedMissingHistoryRef {
-                reportedMissingHistoryRef = true
-                postClientLog("历史原生化：占位找不到对应内容 ref=\(message["nativeHistoryRef"] ?? "?")，显示提示")
-            }
-            var fallback = message
-            fallback.removeValue(forKey: "nativeHistoryRef")
-            fallback["text"] = "（这条历史需要重新载入）"
-            return fallback
-        }
-        var result = body; result["messageDelta"] = batch; return result
-    }
     private var readerWasBackgrounded = false
     /// 上一次发布出去的各域摘要串。内容没变就不重发 —— 导出要在页面里跑 JS
     /// 并算八个域的摘要，白发一次不便宜。换书时不必清：指纹里带着域摘要，
@@ -1698,6 +1677,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 guard nativeConversation.scope == scope else { return "对话已切换，请重新确认发送。" }
             }
         }
+        // 「重试 / 刷新」：对话列表归原生对话流，直接让它重读（网页在原生对话流下不再重载历史）
+        if command["action"] as? String == "refresh" { nativeFeed.reloadHistory(reason: "manual") }
         let receipt = await requestNativeConversationCommand(command)
         let ok = receipt["ok"] as? Bool == true
         // 顶栏「阅读工具」里的那些按钮点的是网页工具栏（译页/注音/生词下划线/图描述…），
@@ -4526,9 +4507,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // "showLegacy" 已删除：旧网页界面不再是一个可以被请求的目的地。
             // "openArtifact" / "action" 一并删除：它们唯一的实现是把旧网页界面
             // 端出来（reveal→setLegacy），而原生界面从来没有地方会去点它们。
-            // resyncMessages：侧栏发现对话跳序后的唯一自救口。曾漏在白名单外 → 每次重同步都被
-            // 这里拒成「阅读页尚未准备好」，一次丢包后侧栏就永远停在旧版本（2026-09-26 实机）。
-            "hideLegacy", "refresh", "snapshot", "resyncMessages", "openTOC", "openSearch",
+            "hideLegacy", "refresh", "snapshot", "openTOC", "openSearch",
             "favoritesList", "favoritesPlace", "favoritesDelete", "favoritesTrash", "favoritesRestore", "favoritesPin",
             "toggleVoice", "toggleComputerVoice", "newConversation", "openHistory", "toggleAssistant", "liveAction", "clearSelection", "inspectArtifact", "mediaResource", "settingsRead", "settingsWrite", "reviewAction", "searchRead", "searchJump",
             "tocRead", "tocJump", "navigationRead", "navigationAction", "clearConversation", "readingSettingsRead", "readingSettingsWrite", "nativePageSelection",
@@ -9029,25 +9008,10 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 nativeFeed.appendNote(text)
                 return
             }
-            do {
-                nativeConversation.receive(try nativeTurns?.conversationPayload(resolveNativeHistory(body)) ?? resolveNativeHistory(body))
-                nativeFeed.setMode(nativeConversation.conversationMode)
-                if !nativeFeed.started, nativeConversation.ready, !nativeConversation.scope.isEmpty { nativeFeed.start() }
-                reportedConversationPayloadFailure = nil
-                if !pendingNativeMediaReceipts.isEmpty { Task { @MainActor [weak self] in await self?.flushNativeMediaReceipts() } }
-            } catch {
-                // 出声（每种原因一次）：以前这里静默重同步，会话对不上时重同步本身也会再失败。
-                let reason = String(describing: type(of: error)) + ": " + error.localizedDescription
-                if reportedConversationPayloadFailure != reason {
-                    reportedConversationPayloadFailure = reason
-                    postClientLog("[对话] 轮次核对失败，请求重同步：" + reason)
-                }
-                // The source can advance while WebKit's observer batch is in
-                // flight. Refresh its handles; never publish a partial delta
-                // or reinterpret a stale turn as a new conversation.
-                if let scope = body["scope"] as? String { nativeConversation.requestMessageResync(scope:scope) }
-                return
-            }
+            nativeConversation.receive(body)
+            nativeFeed.setMode(nativeConversation.conversationMode)
+            if !nativeFeed.started, nativeConversation.ready, !nativeConversation.scope.isEmpty { nativeFeed.start() }
+            if !pendingNativeMediaReceipts.isEmpty { Task { @MainActor [weak self] in await self?.flushNativeMediaReceipts() } }
             if nativeHTMLNotesEnabled, let values = body["nativePinnedCards"] as? [String], Set(values) != nativeHTMLPinned {
                 nativeHTMLPinned = Set(values)
                 publishNativeHTMLNotes()

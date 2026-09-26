@@ -83,7 +83,7 @@
     （P2 起对话流里的学习卡缺这一份，这里一并补上。）
   - 页卡 / 浮动卡摆放（`pagePlacements` / `floatingPlacements` 仍用 `projectPart` / `liveArtifacts`）、工具栏、选区、
     设置/搜索/目录面板这些非消息部分照旧。
-- **Swift 里的死代码待清**（这里没有编译器，没敢删）：`ReaderNativeConversationStore` 的增量应用、
+- ✅ **Swift 死代码已清（2026-09-27 Mac 本机编译通过）**：`ReaderNativeConversationStore` 的增量应用、
   `ReaderNativeTurnBridge.conversationPayload`、`resolveNativeHistory` 占位解析、模型里的
   `messageDelta` / `messageRevision` 分支 —— 快照不再带这些字段后它们都不会再走到，在 Mac 上编译通过后可一并删。
 - 旧网页界面（设置里关掉「原生界面」）不注入 `__bwNativeConversationFeed`，网页照旧回放与渲染。

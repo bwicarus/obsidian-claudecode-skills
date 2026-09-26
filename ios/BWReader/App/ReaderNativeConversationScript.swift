@@ -1136,9 +1136,6 @@ enum ReaderNativeConversationScript {
             rc().assistant?.reloadHistory?.();
           } else if (action === 'snapshot') {
             // 只要一份新快照（末尾统一 schedule）；不重载对话历史。
-          } else if (action === 'resyncMessages') {
-            // 迁出 P4：快照里已没有消息增量；旧版原生仍可能请求重同步，重发一份快照即可。
-            lastSignature = '';
           } else if (action === 'nativePageSelection') {
             const value = command.value;
             if (!value || !Number.isSafeInteger(value.sequence) || value.sequence <= nativePageSelectionSequence ||

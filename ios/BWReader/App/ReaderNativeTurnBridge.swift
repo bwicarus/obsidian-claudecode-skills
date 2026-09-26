@@ -61,16 +61,6 @@ final class ReaderNativeTurnBridge: NSObject, WKScriptMessageHandlerWithReply {
     /// 网页那条序号协议一批提交后：(有变化的非回放轮次, 被移除的轮次)。
     var onWebApplied: (([String], [String]) -> Void)?
 
-    func conversationPayload(_ input: [String:Any]) throws -> [String:Any] {
-        guard var batch = input["messageDelta"] as? [String:Any], let messages = batch["upserts"] as? [[String:Any]] else { return input }
-        batch["upserts"] = try messages.map { message -> [String:Any] in
-            if let reference = message["nativeTurnRef"] as? [String:Any] {
-                guard let session, reference["session"] as? String == session else { throw CancellationError() }
-            }
-            return try store.conversationMessage(message)
-        }
-        var result = input; result["messageDelta"] = batch; return result
-    }
     func invalidate() {
         saves.values.forEach { $0.task.cancel() }; saves.removeAll()
         session = nil; sequence = 0; store = ReaderNativeTurnStore()
