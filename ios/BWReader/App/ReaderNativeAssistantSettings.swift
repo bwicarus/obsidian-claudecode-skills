@@ -22,8 +22,16 @@ final class ReaderNativeAssistantSettings {
             let data = try body.map { try JSONSerialization.data(withJSONObject:$0) } ?? Data()
             let response = try await gateway.fetchData(path:path,method:body == nil ? "GET" : "POST",body:data,surface:surface)
             try current()
-            guard (200..<300).contains(response.status), let result = try JSONSerialization.jsonObject(with:response.data) as? O,
-                  result["ok"] as? Bool == true else { throw ReaderNativePreferences.Failure(message:"设置未获服务器确认，请重新读取核对") }
+            let result = (try? JSONSerialization.jsonObject(with:response.data)) as? O
+            guard (200..<300).contains(response.status), let result, result["ok"] as? Bool == true else {
+                // 出声：哪个接口、什么状态码、服务器回了什么（2026-09-26 用户只看到「未获服务器确认」，无从判断）
+                let detail = (result?["error"] as? String) ?? (result?["code"] as? String)
+                    ?? String(decoding: response.data.prefix(120), as: UTF8.self)
+                let line = "设置接口 \(path) → HTTP \(response.status) \(detail)"
+                ReaderNativeFaultReporter.shared.note("settings", line)
+                NativeAmbientLog.note(line, level: "error")
+                throw ReaderNativePreferences.Failure(message:"设置未获服务器确认（HTTP \(response.status)，\(path)），请重新读取核对")
+            }
             return result
         }
         func fields(_ cfg: O) throws -> [O] {

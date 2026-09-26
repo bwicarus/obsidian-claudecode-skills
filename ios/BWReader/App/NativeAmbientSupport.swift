@@ -130,8 +130,10 @@ enum NativeAmbientServer {
         let code = (response as? HTTPURLResponse)?.statusCode ?? -1
         let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         guard (200..<300).contains(code) else {
-            let detail = (object?["code"] as? String) ?? String(decoding: data.prefix(160), as: UTF8.self)
-            throw Failure.http(code, detail)
+            let body = (object?["code"] as? String) ?? String(decoding: data.prefix(160), as: UTF8.self)
+            let server = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Server") ?? "?"
+            // 带上路径与 Server 头：403 是 Flask、桥还是 tailscale serve 给的，一眼能分
+            throw Failure.http(code, "\(request.url?.path ?? "?") server=\(server) \(body)")
         }
         guard let object else { throw Failure.invalidResponse }
         return object
