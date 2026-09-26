@@ -470,7 +470,8 @@ async def voice_brief() -> dict:
     适用于没有上下文注入的语音（如 ChatGPT 普通聊天的语音模式）：对话开始、或用户提到
     「这本书 / 这一页 / 这句 / 我在干嘛」时先调它，不要分几次去问。
     返回 situation（在哪、什么设备、在读哪本第几页、是否在复习、是否醒着；known=false = 不知道，不等于否）
-    与 reader（阅读器快照原文：当前书页、选区、页上卡片、复习卡等；过长会截断）。
+    与 reader（阅读器快照原文：当前书页、选区、页上卡片、复习卡等；过长会截断）；
+    开着 iPad 环境旁听时另有 ambient（身边最近发生的事的摘要，只作背景，不要主动复述）。
     要操作书本（高亮、制卡、翻页…）再用 reader_pc_tools / reader_pc_call_tool。
     回答用户时口语化、简短 —— 这是语音。"""
     situation = user_situation()
@@ -488,6 +489,10 @@ async def voice_brief() -> dict:
     }
     if failed or not text:
         brief["reader"]["why"] = text or "阅读器快照为空"
+    ambient = _get("/api/ambient/context")
+    if isinstance(ambient, dict) and ambient.get("summary"):
+        # iPad 环境旁听的滚动摘要（2026-09-26）：用户身边最近发生了什么，只作背景
+        brief["ambient"] = {"summary": str(ambient["summary"])[:1500], "updatedAt": ambient.get("updatedAt")}
     return brief
 
 

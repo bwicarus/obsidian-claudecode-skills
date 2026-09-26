@@ -451,6 +451,8 @@ private struct ReaderRootView: View {
                 ReaderNativeFaultReporter.shared.beginSession(origin: ReaderServer.origin)
                 // iOS 自己记下的崩溃/卡死/发热类诊断，送到服务器（见 ReaderMetricKitReporter）
                 ReaderMetricKitReporter.shared.start(origin: ReaderServer.origin)
+                // 环境旁听是长期开关：上次开着就接着听（已在跑时是空操作）
+                NativeAmbientListener.shared.resumeIfEnabled()
             }
             else { ReaderNativeFaultReporter.shared.endSession() }
             reader.setReaderScenePhase(phase)

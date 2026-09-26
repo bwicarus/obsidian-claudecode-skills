@@ -59,7 +59,14 @@
     <key>NSHealthUpdateUsageDescription</key>
     <string>本 App 不会向「健康」写入任何数据。这项说明仅为满足系统要求而提供；睡眠记录只被读取，用来判断你今天几点醒的。</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>用于在阅读时与 Windows 电脑上的语音助手持续通话，包括应用进入后台或锁屏期间。</string>
+    <string>用于在阅读时与服务器上的语音助手持续通话（包括应用进入后台或锁屏期间），以及你打开「环境旁听」时在本机持续转写周围的声音。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>仅在你打开「环境旁听」时使用：在 iPad 本机把周围的对话转成文字（强制本机识别，原声不离开设备），只有转写出的文字会发到你自己的服务器做判断。</string>
+    <!-- 环境旁听存下的原声 / 危险录音放在 App 的「文稿」里，打开这两项后在「文件」App 里可见 -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>

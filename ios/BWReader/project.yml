@@ -35,6 +35,10 @@ packages:
   flyingFox:
     url: https://github.com/swhitty/FlyingFox.git
     exactVersion: 0.27.1
+  # 说话人分离（环境旁听 + 通话多人时的人声隔离，2026-09-26）。模型不打进包，首次使用时从 HuggingFace 下载。
+  fluidAudio:
+    url: https://github.com/FluidInference/FluidAudio.git
+    exactVersion: 0.17.4
 
 targets:
   BWReader:
@@ -122,6 +126,8 @@ targets:
         product: cmark-gfm-extensions
       - package: swiftMath
         product: SwiftMath
+      - package: fluidAudio
+        product: FluidAudio
 
   BWReaderSafariExtension:
     type: app-extension

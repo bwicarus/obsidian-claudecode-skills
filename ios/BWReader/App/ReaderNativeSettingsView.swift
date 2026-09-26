@@ -130,10 +130,12 @@ struct ReaderNativeSettingsView: View {
                         Text("阅读 AI").tag("models")
                         Text("语音与朗读").tag("voice")
                         Text("电脑通话").tag("computer")
+                        Text("旁听与降噪").tag("ambient")
                     }.pickerStyle(.segmented)
                 }
                 if tab == "models" { modelSections }
                 else if tab == "voice" { voiceSections }
+                else if tab == "ambient" { NativeAmbientSettingsSections() }
                 else { computerSections }
             }
             .scrollContentBackground(.hidden).background(ReaderNativeTheme.canvas)

@@ -41,6 +41,38 @@ final class NativeAudioEngine {
     static let samplesPerFrame = 960
     static let maximumScheduledFrames = 20
 
+    /// 通话音频起止（2026-09-26）：环境旁听据此让出麦克风，通话结束再接着听。
+    static let callAudioDidChange = Notification.Name("space.bwicarus.reader.call-audio-did-change")
+    /// 当前有几路通话音频在跑（语音桥与语音会话各一个引擎，理论上同时只有一路）。
+    @MainActor static fileprivate(set) var activeCallAudio = 0
+
+    /// 嘈杂环境人声隔离：多人说话时只放行用户自己的声音（设置里的开关关着时原样放行）。
+    var noisyGate: NativeNoisyVoiceGate { callAudio.gate }
+    /// ⚠ 单独一个对象而不是引擎自己的字段：deinit 里的 stop() 要异步回主线程播报「通话音频结束」，
+    /// 那时不能再捕获 self。
+    private let callAudio = CallAudioAnnouncer()
+
+    private final class CallAudioAnnouncer {
+        let gate = NativeNoisyVoiceGate()
+        private var announced = false
+
+        /// 只在真正起止时各发一次（start 可能对已在跑的引擎重复调用）。只在主线程调。
+        func set(_ active: Bool) {
+            guard active != announced else { return }
+            announced = active
+            if active { gate.begin() } else { gate.end() }
+            MainActor.assumeIsolated {
+                NativeAudioEngine.activeCallAudio = max(0, NativeAudioEngine.activeCallAudio + (active ? 1 : -1))
+            }
+            NotificationCenter.default.post(name: NativeAudioEngine.callAudioDidChange, object: nil,
+                                            userInfo: ["active": active])
+        }
+    }
+
+    /// 通话麦克风的旁路（2026-09-26）：环境旁听在通话期间不暂停，改为接这里的帧继续转写与 jev 判断。
+    /// 取的是**过闸门之前**、经过系统回声消除的原始上行（AI 的声音已被消掉，周围的人声还在）。
+    static let microphoneTap = NativeMicrophoneTap()
+
     var onMicrophoneFrame: (([Int16]) -> Void)?
     var onFailure: ((Error) -> Void)?
     var onInterruption: ((Interruption) -> Void)?
@@ -160,6 +192,7 @@ final class NativeAudioEngine {
 
     func start() throws {
         try runOnControlQueue { try self.startOnControlQueue() }
+        callAudio.set(true)
     }
 
     private func runOnControlQueue(_ work: @escaping () throws -> Void) throws {
@@ -313,6 +346,9 @@ final class NativeAudioEngine {
         let wasRunning = running
         running = false
         stateLock.unlock()
+        let announcer = callAudio
+        if Thread.isMainThread { announcer.set(false) }
+        else { DispatchQueue.main.async { announcer.set(false) } }
         controlQueue.async { self.stopOnControlQueue(deactivateSession: wasRunning) }
         processingQueue.async { self.inputAccumulator.removeAll(keepingCapacity: false) }
     }
@@ -498,7 +534,8 @@ final class NativeAudioEngine {
                     ? Int16((limited * 32_768).rounded())
                     : Int16((limited * 32_767).rounded())
             }
-            onMicrophoneFrame?(output)
+            Self.microphoneTap.deliver(output)
+            onMicrophoneFrame?(noisyGate.process(output))
         }
 
         let maximumBufferedSamples = sourceFrameCount * 10
@@ -539,5 +576,20 @@ final class NativeAudioEngine {
 
     private func reportRecoveryNeeded(_ reason: String) {
         onRecoveryNeeded?(reason)
+    }
+}
+
+/// 线程安全的单订阅者旁路：主线程设置、音频处理队列投递。
+final class NativeMicrophoneTap: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (([Int16]) -> Void)?
+
+    func set(_ handler: (([Int16]) -> Void)?) {
+        lock.lock(); self.handler = handler; lock.unlock()
+    }
+
+    func deliver(_ frame: [Int16]) {
+        lock.lock(); let handler = self.handler; lock.unlock()
+        handler?(frame)
     }
 }
